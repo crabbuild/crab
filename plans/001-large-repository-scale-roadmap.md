@@ -363,6 +363,49 @@ for repeated full-profile or team-load evidence. The 1,000/10,000-push
 differentials, interruption matrix, provider matrix, concurrent clone/cache
 fanout, owner failover, and rollout gates remain open.
 
+### Current-head shared-visibility and team-load qualification
+
+The shared-object visibility admission fix is committed as `eb3ced6b`. It
+counts distinct objects in the V5 visibility dictionary rather than summing
+per-ref memberships, while retaining serialized-proof byte limits and
+per-closure ordinal validation. The corresponding bounded owner loop now
+allows a complete finite maintenance wave after one replay checkpoint, and
+the RustFS verifier fetches and compares every advertised namespace.
+
+The current-head smoke `pr96-eb3ced6b-k8s-team-smoke-20260827d` used Kubernetes
+revision `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, the release binary whose
+embedded source revision is `eb3ced6b`, and an isolated local RustFS endpoint.
+It completed with `status=ok`, 27/27 checks passed, 101 pushes completed, and
+the run-owned remote prefix was cleaned. The verifier accepted the report with
+`--allow-smoke`; the default full-profile verifier correctly rejects this
+report because its 100 replay commits are a smoke profile, not the required
+1,000-commit qualification. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Full and warm clones completed in 157,897 ms and 45,093 ms; blobless and
+  depth-1/10/100/1,000 clones completed in 16,457/6,163/14,844/115,879/
+  137,991 ms. Every advertised ref matched the source, full and incremental
+  fsck passed, and the deterministic 1,000-object sample was byte-identical.
+- The 100-client incremental fetch fanout had 0 failures, with a 29,563 ms
+  fanout duration and 3,663/7,570/9,057 ms median/p95/p99 client latency.
+  The independent 20-writer fanout accepted all 20 pushes with no unexpected
+  failures; the 20-writer same-ref race produced exactly one winner and 19
+  push-lock rejections, with no unexpected failures.
+- Generation-owner checkpoints converged after 100 replay pushes. The
+  bounded maintenance pass reduced the active serving inventory to 2 packs;
+  the checkpoint-100 owner completed in 79,069 ms after scanning/deleting 91
+  stale pack-membership rows and reading 37,179,406 bytes. The final retained
+  store snapshot contained 124 physical pack objects, which is immutable
+  history/storage retention and not the active serving inventory.
+
+This closes the previously observed shared-ref visibility false rejection and
+adds real large-team correctness evidence. It also quantifies the remaining
+read bottleneck: a full cold clone is still about 158 seconds and a 100-client
+fetch p99 is about 9 seconds on this single local RustFS host. The 1,000-push
+full profile, independent repeated run, valid growth differential, fault and
+provider matrices, owner failover, and rollout gates remain open; this smoke
+does not promote a production SLO.
+
 ### Current-head dense response-pack qualification
 
 The dense response-pack follow-up is committed as `b69ecb47`. It centralizes

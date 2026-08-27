@@ -178,32 +178,6 @@ fn charge_unique_object(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn visibility_budget_counts_shared_objects_once() {
-        let oid = ObjectId::from_hex(b"0000000000000000000000000000000000000000")
-            .expect("valid object id");
-        let mut seen = HashSet::new();
-
-        charge_unique_object(&mut seen, oid, 1).expect("first object fits");
-        charge_unique_object(&mut seen, oid, 1).expect("shared object fits once");
-
-        let other = ObjectId::from_hex(b"1111111111111111111111111111111111111111")
-            .expect("valid object id");
-        assert!(matches!(
-            charge_unique_object(&mut seen, other, 1),
-            Err(Error::LimitExceeded {
-                actual: 2,
-                maximum: 1,
-                ..
-            })
-        ));
-    }
-}
-
 fn ensure_kind(actual: Kind, pending: PendingObject) -> Result<()> {
     if pending.expected.is_none_or(|expected| expected == actual) {
         Ok(())
@@ -278,4 +252,30 @@ fn object_links(
         children,
         terminals,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_budget_counts_shared_objects_once() {
+        let oid = ObjectId::from_hex(b"0000000000000000000000000000000000000000")
+            .expect("valid object id");
+        let mut seen = HashSet::new();
+
+        charge_unique_object(&mut seen, oid, 1).expect("first object fits");
+        charge_unique_object(&mut seen, oid, 1).expect("shared object fits once");
+
+        let other = ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+            .expect("valid object id");
+        assert!(matches!(
+            charge_unique_object(&mut seen, other, 1),
+            Err(Error::LimitExceeded {
+                actual: 2,
+                maximum: 1,
+                ..
+            })
+        ));
+    }
 }
