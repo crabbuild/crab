@@ -6257,7 +6257,7 @@ async fn publish_pack_locator_inventory(
     anchor: CommittedManifestAnchor,
     current_packs: &[PackManifestEntry],
     populate_kind_metadata: bool,
-) -> Result<bool> {
+) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
     let mut pack_records = Vec::with_capacity(current_packs.len());
     for pack in current_packs {
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
@@ -6362,7 +6362,7 @@ async fn publish_pack_locator_inventory(
     if after.generation != anchor.generation
         || after.pack_index_hash != anchor.pack_index_hash.hex()
     {
-        return Ok(false);
+        return Ok((false, sweep));
     }
     writer
         .set_coverage(crab_metadata::git_object_locator::GitLocatorCoverage {
@@ -6370,7 +6370,7 @@ async fn publish_pack_locator_inventory(
             pack_index_hash: anchor.pack_index_hash,
         })
         .await?;
-    Ok(true)
+    Ok((true, sweep))
 }
 
 pub(crate) async fn publish_pack_locator_inventory_for_owner(
@@ -6379,17 +6379,20 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
     router: &StoreLayout,
     anchor: CommittedManifestAnchor,
     current_packs: &[PackManifestEntry],
-) -> Result<bool> {
+) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
     if writer.coverage()
         == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
             generation: anchor.generation,
             pack_index_hash: anchor.pack_index_hash,
         })
     {
-        return Ok(false);
+        return Ok((
+            false,
+            crab_metadata::git_object_locator::LocatorSweepStats::default(),
+        ));
     }
     let mut local_evidence = HashMap::new();
-    let updated = publish_pack_locator_inventory(
+    let (updated, sweep) = publish_pack_locator_inventory(
         writer,
         store,
         router,
@@ -6405,7 +6408,7 @@ pub(crate) async fn publish_pack_locator_inventory_for_owner(
     if updated {
         writer.publish_checkpoint().await?;
     }
-    Ok(updated)
+    Ok((updated, sweep))
 }
 
 pub(crate) async fn publish_committed_pack_locators(
@@ -24713,6 +24716,7 @@ mod tests {
             )
             .await
             .expect("publish owner locator")
+            .0
         );
         writer.close().await.expect("close owner locator writer");
 

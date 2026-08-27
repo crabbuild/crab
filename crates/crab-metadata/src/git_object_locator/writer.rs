@@ -58,7 +58,7 @@ struct ExistingObject {
 }
 
 /// Counts produced by one stale-locator sweep.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LocatorSweepStats {
     /// Object rows examined.
     pub object_rows_scanned: u64,

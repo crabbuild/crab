@@ -182,6 +182,31 @@ def verify_catalog_filter_telemetry(stages: dict[str, Any]) -> None:
     )
 
 
+def verify_locator_sweep_telemetry(stages: dict[str, Any]) -> None:
+    for name, stage in stages.items():
+        if not name.startswith("visibility_owner_"):
+            continue
+        sweeps = stage.get("locator_sweep")
+        require(
+            isinstance(sweeps, list) and sweeps,
+            f"stages.{name} is missing locator sweep telemetry",
+        )
+        for index, sweep in enumerate(sweeps):
+            field = f"stages.{name}.locator_sweep[{index}]"
+            require(isinstance(sweep, dict), f"{field} must be an object")
+            require(
+                isinstance(sweep.get("action"), str) and sweep["action"],
+                f"{field}.action is missing",
+            )
+            for counter in (
+                "object_rows_scanned",
+                "object_rows_deleted",
+                "pack_rows_scanned",
+                "pack_rows_deleted",
+            ):
+                require_nonnegative_int(sweep.get(counter), f"{field}.{counter}")
+
+
 def verify_team_load(team_load: Any, *, require_release_counts: bool = False) -> None:
     require(isinstance(team_load, dict), "team_load must be an object")
     require(team_load.get("enabled") is True, "team_load is not enabled")
@@ -530,6 +555,7 @@ def verify_report(
     if profile == "full":
         verify_full_visibility_telemetry(stages)
         verify_catalog_filter_telemetry(stages)
+        verify_locator_sweep_telemetry(stages)
         clone_telemetry = stages["full_clone_cold"].get("telemetry", {})
         for field in (
             "upload_pack_duration_ms",

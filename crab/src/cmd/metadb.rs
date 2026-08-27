@@ -380,6 +380,7 @@ struct GenerationOwnerSample {
     geometric_repack_packs: u64,
     catalog_layers: u64,
     catalog_bytes: u64,
+    locator_sweep: crab_metadata::git_object_locator::LocatorSweepStats,
     commit_graph_layers: u64,
     commit_graph_bytes: u64,
     maintenance_bytes_read: u64,
@@ -573,6 +574,7 @@ async fn generation_owner_sample(
             geometric_repack_packs: 0,
             catalog_layers: 0,
             catalog_bytes: 0,
+            locator_sweep: Default::default(),
             commit_graph_layers: 0,
             commit_graph_bytes: 0,
             maintenance_bytes_read: 0,
@@ -598,7 +600,7 @@ async fn generation_owner_sample(
     ))
     .unwrap_or(u64::MAX);
     let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
-    let (locator_advanced, catalog) =
+    let (locator_advanced, catalog, locator_sweep) =
         maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel).await?;
     // The owner is also the repair path for imports and Git-only pushes that
     // had no post-CAS MetaDb writer. Once locator coverage is current, publish
@@ -621,6 +623,7 @@ async fn generation_owner_sample(
             geometric_repack_packs,
             catalog_layers: catalog.active_layers,
             catalog_bytes: catalog.active_bytes,
+            locator_sweep,
             commit_graph_layers: 0,
             commit_graph_bytes: 0,
             maintenance_bytes_read: 0,
@@ -675,6 +678,7 @@ async fn generation_owner_sample(
             geometric_repack_packs,
             catalog_layers: catalog.active_layers,
             catalog_bytes: catalog.active_bytes,
+            locator_sweep,
             commit_graph_layers: 0,
             commit_graph_bytes: 0,
             maintenance_bytes_read: 0,
@@ -739,6 +743,7 @@ async fn generation_owner_sample(
         geometric_repack_packs,
         catalog_layers: catalog.active_layers,
         catalog_bytes: catalog.active_bytes,
+        locator_sweep,
         commit_graph_layers: graph.layers,
         commit_graph_bytes: graph.bytes,
         maintenance_bytes_read: graph.bytes_read,
@@ -773,6 +778,7 @@ async fn maintain_object_catalog(
 ) -> Result<(
     bool,
     crab_metadata::git_object_locator::GitObjectCatalogStats,
+    crab_metadata::git_object_locator::LocatorSweepStats,
 )> {
     let mut lock = acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
     let planned_object_rows = packs
@@ -808,8 +814,11 @@ async fn maintain_object_catalog(
                             pack_index_hash: anchor.pack_index_hash,
                         })
                 });
-                let advanced = if current {
-                    false
+                let (advanced, sweep) = if current {
+                    (
+                        false,
+                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                    )
                 } else if let Some(anchor) = anchor {
                     crate::git::push::publish_pack_locator_inventory_for_owner(
                         &mut writer,
@@ -820,9 +829,12 @@ async fn maintain_object_catalog(
                     )
                     .await?
                 } else {
-                    false
+                    (
+                        false,
+                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                    )
                 };
-                Ok::<_, CrabError>((advanced, writer.catalog_stats().await?))
+                Ok::<_, CrabError>((advanced, writer.catalog_stats().await?, sweep))
             },
         ),
     )
@@ -1036,6 +1048,10 @@ fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -
             catalog_bytes = sample.catalog_bytes,
             commit_graph_layers = sample.commit_graph_layers,
             commit_graph_bytes = sample.commit_graph_bytes,
+            locator_object_rows_scanned = sample.locator_sweep.object_rows_scanned,
+            locator_object_rows_deleted = sample.locator_sweep.object_rows_deleted,
+            locator_pack_rows_scanned = sample.locator_sweep.pack_rows_scanned,
+            locator_pack_rows_deleted = sample.locator_sweep.pack_rows_deleted,
             maintenance_bytes_read = sample.maintenance_bytes_read,
             maintenance_bytes_written = sample.maintenance_bytes_written,
             maintenance_reason = sample.maintenance_reason,

@@ -813,6 +813,31 @@ class LargeRepositoryQualification:
             raise QualificationError(
                 f"generation owner did not converge after 8 passes: {actions}"
             )
+        locator_sweeps: list[dict[str, Any]] = []
+        for index, snapshot in enumerate(owner_snapshots):
+            raw_sweep = snapshot.get("locator_sweep")
+            if not isinstance(raw_sweep, dict):
+                raise QualificationError(
+                    f"generation owner pass {index + 1} omitted locator sweep telemetry"
+                )
+            sweep: dict[str, Any] = {"action": str(snapshot.get("action", ""))}
+            if not sweep["action"]:
+                raise QualificationError(
+                    f"generation owner pass {index + 1} omitted maintenance action"
+                )
+            for counter in (
+                "object_rows_scanned",
+                "object_rows_deleted",
+                "pack_rows_scanned",
+                "pack_rows_deleted",
+            ):
+                value = raw_sweep.get(counter)
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise QualificationError(
+                        f"generation owner pass {index + 1} has invalid locator sweep {counter}"
+                    )
+                sweep[counter] = value
+            locator_sweeps.append(sweep)
         doctor = self.run_crab(
             self.replay_repo,
             ["doctor", "--metadb", "--json"],
@@ -855,6 +880,7 @@ class LargeRepositoryQualification:
                 int(snapshot.get("maintenance_bytes_written", 0))
                 for snapshot in owner_snapshots
             ),
+            "locator_sweep": locator_sweeps,
         }
         self.report["stages"][f"acceleration_{stage}"] = {
             "duration_ms": doctor["duration_ms"],

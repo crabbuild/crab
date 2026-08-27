@@ -408,6 +408,25 @@ class ReportVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.VerificationError, "ordinal metadata"):
             VERIFY.verify_catalog_filter_telemetry(report["stages"])
 
+    def test_full_owner_report_requires_locator_sweep_telemetry(self) -> None:
+        stages = {
+            "visibility_owner_seed": {
+                "locator_sweep": [
+                    {
+                        "action": "none",
+                        "object_rows_scanned": 0,
+                        "object_rows_deleted": 0,
+                        "pack_rows_scanned": 0,
+                        "pack_rows_deleted": 0,
+                    }
+                ]
+            }
+        }
+        VERIFY.verify_locator_sweep_telemetry(stages)
+        del stages["visibility_owner_seed"]["locator_sweep"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "locator sweep telemetry"):
+            VERIFY.verify_locator_sweep_telemetry(stages)
+
     def test_abbreviated_binary_revision_is_accepted(self) -> None:
         report = valid_report()
         report["provenance"]["crab_build"]["git_sha"] = OID[:7]

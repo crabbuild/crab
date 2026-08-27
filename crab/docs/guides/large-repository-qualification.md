@@ -122,7 +122,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `provenance` | Crab build SHA/timestamp and binary digest, harness/verifier digests, Git, AWS CLI, Python, host, platform, and RustFS versions |
 | `commands` | Exit status, duration, process-tree CPU, peak child RSS, aggregate operation telemetry, and redacted logs |
 | `pushes` | Per-commit latency, resource use, and storage/cache counters |
-| `stages` | Clone/fetch measurements, active pack inventory, and generation-bound locator/visibility health |
+| `stages` | Clone/fetch measurements, active pack inventory, generation-bound locator/visibility health, and per-owner-pass locator sweep counters |
 | `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures; `--require-team-load` makes it mandatory for a full gate |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
 | `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
@@ -142,6 +142,12 @@ per-object debug logging is disabled because its volume would distort both
 timing and storage evidence on large histories. The blobless catalog-filter
 stage must record ordinal-metadata lookup activity, proving that the optimized
 ordinal path was exercised.
+Each `visibility_owner_*` stage also records `locator_sweep` entries for every
+owner pass. `object_rows_scanned` is the number of canonical rows examined by
+that sweep, while `pack_rows_scanned` and the deletion counters describe stale
+pack cleanup. A pure repack should show bounded stale-pack work without a
+repository-sized canonical scan; an interrupted rebuild must show the explicit
+recovery pass instead of being silently reported as a ready catalog.
 Cold visibility repair downloads each unique committed pack once into the
 run-scoped temporary directory, verifies its manifest identity, and performs
 the reachability walk against that local ODB. The owner telemetry therefore
