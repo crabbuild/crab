@@ -227,7 +227,10 @@ pub fn walk_reachable_by_ref(
     walk_reachable_by_ref_with_limit(git_dir, refs, peeled_refs, None)
 }
 
-/// Walk each ref independently with a fail-closed aggregate object bound.
+/// Walk each ref independently with a fail-closed distinct-object bound.
+///
+/// The bound applies to the union of all ref closures, so branches that share
+/// history do not consume the same object budget repeatedly.
 pub fn walk_reachable_by_ref_bounded(
     git_dir: &Path,
     refs: &[(String, String)],
@@ -276,18 +279,17 @@ fn walk_reachable_by_ref_with_limit(
     }
 
     let mut closures = BTreeMap::new();
-    let mut total_objects = 0usize;
+    let mut seen_objects = maximum.map(|_| HashSet::new());
     for (name, oid) in refs {
         let mut closure = ReachableSet::new();
-        let ref_maximum = maximum.map(|maximum| maximum.saturating_sub(total_objects));
         let traversal_tip = if peeled_refs.contains_key(name) {
-            collect_annotated_tag_chain(git_dir, oid, &mut closure, ref_maximum)?
+            collect_annotated_tag_chain(git_dir, oid, &mut closure, maximum)?
                 .to_hex()
                 .to_string()
         } else {
             oid.clone()
         };
-        check_reachable_limit(&closure, ref_maximum)?;
+        check_reachable_limit(&closure, maximum)?;
         let root =
             ObjectId::from_hex(traversal_tip.as_bytes()).map_err(|source| WalkError::Git {
                 operation: format!("invalid ref object {traversal_tip}"),
@@ -307,18 +309,14 @@ fn walk_reachable_by_ref_with_limit(
             gix_object::Kind::Commit => {
                 merge_reachable(
                     &mut closure,
-                    walk_reachable_with_limit(
-                        git_dir,
-                        &[(name.clone(), traversal_tip)],
-                        ref_maximum,
-                    )?,
+                    walk_reachable_with_limit(git_dir, &[(name.clone(), traversal_tip)], maximum)?,
                 );
             }
-            gix_object::Kind::Tree => walk_tree(&odb, &root, &mut closure, ref_maximum)?,
+            gix_object::Kind::Tree => walk_tree(&odb, &root, &mut closure, maximum)?,
             gix_object::Kind::Blob => {
                 closure.blobs.insert(oid_to_bytes(&root));
                 check_blob_for_pointer(&odb, &root, &mut closure);
-                check_reachable_limit(&closure, ref_maximum)?;
+                check_reachable_limit(&closure, maximum)?;
             }
             gix_object::Kind::Tag => {
                 return Err(WalkError::Git {
@@ -327,18 +325,25 @@ fn walk_reachable_by_ref_with_limit(
                 });
             }
         }
-        total_objects = total_objects.saturating_add(closure.object_count());
-        if let Some(maximum) = maximum
-            && total_objects > maximum
-        {
-            return Err(WalkError::LimitExceeded {
-                actual: total_objects,
-                maximum,
-            });
+        if let (Some(seen_objects), Some(maximum)) = (seen_objects.as_mut(), maximum) {
+            record_reachable_objects(seen_objects, &closure);
+            if seen_objects.len() > maximum {
+                return Err(WalkError::LimitExceeded {
+                    actual: seen_objects.len(),
+                    maximum,
+                });
+            }
         }
         closures.insert(name.clone(), closure);
     }
     Ok(closures)
+}
+
+fn record_reachable_objects(seen: &mut HashSet<[u8; 20]>, closure: &ReachableSet) {
+    seen.extend(closure.commits.iter().copied());
+    seen.extend(closure.trees.iter().copied());
+    seen.extend(closure.blobs.iter().copied());
+    seen.extend(closure.tags.iter().copied());
 }
 
 fn merge_reachable(target: &mut ReachableSet, source: ReachableSet) {
@@ -730,6 +735,21 @@ mod tests {
                 maximum: 2
             }
         ));
+
+        let shared = walk_reachable_by_ref_bounded(
+            &git_dir_path,
+            &[
+                ("refs/heads/main".to_owned(), head_sha.clone()),
+                ("refs/heads/alias".to_owned(), head_sha.clone()),
+            ],
+            &BTreeMap::new(),
+            result.object_count(),
+        )
+        .expect("shared ref history should use one distinct-object budget");
+        assert_eq!(
+            shared["refs/heads/main"].object_count(),
+            shared["refs/heads/alias"].object_count()
+        );
 
         let missing_tip = "f".repeat(40);
         let per_ref = walk_reachable_by_ref_bounded(

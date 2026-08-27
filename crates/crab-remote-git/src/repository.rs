@@ -784,7 +784,7 @@ impl RemoteGitRepository {
     ///
     /// This does not read or trust an existing visibility proof. Canonical
     /// commit, tree, and tag objects are fetched once, while the resulting
-    /// per-ref closures retain the proof format's aggregate object bound.
+    /// per-ref closures share one distinct-object operation bound.
     pub async fn rebuild_visibility_index(
         &self,
         cancellation: &CancellationToken,

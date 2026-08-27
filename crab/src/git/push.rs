@@ -2733,18 +2733,15 @@ pub(crate) enum GitVisibilityPublication {
 
 fn git_visibility_capacity_exceeded<'a>(
     packs: impl IntoIterator<Item = &'a PackManifestEntry>,
-    ref_count: usize,
 ) -> Result<Option<GitVisibilityCapacity>> {
     git_visibility_capacity_exceeded_at_limit(
         packs,
-        ref_count,
         crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
     )
 }
 
 fn git_visibility_capacity_exceeded_at_limit<'a>(
     packs: impl IntoIterator<Item = &'a PackManifestEntry>,
-    ref_count: usize,
     maximum: u64,
 ) -> Result<Option<GitVisibilityCapacity>> {
     let mut seen = HashSet::new();
@@ -2753,15 +2750,11 @@ fn git_visibility_capacity_exceeded_at_limit<'a>(
         .filter(|pack| seen.insert(pack.pack_id.as_str()))
         .try_fold(0u64, |total, pack| total.checked_add(pack.object_count))
         .ok_or_else(|| CrabError::Internal("Git pack object count overflow".to_owned()))?;
-    let ref_count = u64::try_from(ref_count)
-        .map_err(|_| CrabError::Internal("Git ref count overflow".to_owned()))?;
-    // The serialized proof stores one closure per ref. This conservative bound
-    // keeps publication cost bounded without walking every closure twice.
-    let proof_objects = packed_objects
-        .checked_mul(ref_count)
-        .ok_or_else(|| CrabError::Internal("Git visibility object count overflow".to_owned()))?;
-    Ok((proof_objects > maximum).then_some(GitVisibilityCapacity {
-        observed: proof_objects,
+    // V5 stores one shared catalog dictionary and ordinal closures per ref.
+    // Bound the unique dictionary here; the serialized proof byte limit remains
+    // the protection against an unbounded number of repeated memberships.
+    Ok((packed_objects > maximum).then_some(GitVisibilityCapacity {
+        observed: packed_objects,
         maximum,
     }))
 }
@@ -6887,11 +6880,9 @@ async fn repair_git_visibility_if_current_with_options(
         }
     }
     let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
-    if let Some(capacity) = git_visibility_capacity_exceeded_at_limit(
-        packs.iter(),
-        manifest.refs.len(),
-        maximum_logical_objects,
-    )? {
+    if let Some(capacity) =
+        git_visibility_capacity_exceeded_at_limit(packs.iter(), maximum_logical_objects)?
+    {
         return Ok(Some(GitVisibilityPublication::CompletePackOnly(capacity)));
     }
 
@@ -9199,7 +9190,7 @@ impl PushPipeline {
             return Ok(None);
         }
         let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
-        git_visibility_capacity_exceeded(packs.iter(), manifest.refs.len())
+        git_visibility_capacity_exceeded(packs.iter())
     }
 
     async fn git_visibility_index_exists(
@@ -20583,7 +20574,7 @@ mod tests {
         pack.object_count =
             crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS.saturating_add(1);
 
-        let capacity = git_visibility_capacity_exceeded([&pack, &pack], 1)
+        let capacity = git_visibility_capacity_exceeded([&pack, &pack])
             .expect("count packs")
             .expect("oversized repository should use complete-pack fallback");
 
@@ -20599,16 +20590,29 @@ mod tests {
         let mut pack = pack_manifest_entry_with_tips(Vec::new());
         pack.object_count = 101;
 
-        let capacity = git_visibility_capacity_exceeded_at_limit([&pack], 1, 100)
+        let capacity = git_visibility_capacity_exceeded_at_limit([&pack], 100)
             .expect("count owner proof")
             .expect("owner limit should be enforced");
 
         assert_eq!(capacity.observed, 101);
         assert_eq!(capacity.maximum, 100);
         assert!(
-            git_visibility_capacity_exceeded_at_limit([&pack], 1, 101)
+            git_visibility_capacity_exceeded_at_limit([&pack], 101)
                 .expect("count exact owner proof")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn git_visibility_capacity_does_not_multiply_shared_refs() {
+        let mut pack = pack_manifest_entry_with_tips(Vec::new());
+        pack.object_count = 100;
+
+        assert!(
+            git_visibility_capacity_exceeded_at_limit([&pack], 100)
+                .expect("count shared-history proof")
+                .is_none(),
+            "shared ref closures use one catalog object budget"
         );
     }
 
