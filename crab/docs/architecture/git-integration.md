@@ -307,6 +307,14 @@ reinterpreted. A catalog without a complete sidecar remains valid for ordinary
 reads, while kind-only filtered planning falls back to bounded canonical
 traversal until the sidecar is rebuilt.
 
+The writer also maintains a derived `(pack_slot, oid)` membership family. It is
+used only to remove rows for stale immutable packs, so a routine repack sweep
+does not scan the complete OID catalog. The membership completion marker is
+written with the catalog stream; if it is absent on an older or interrupted
+catalog, the next repository-owned sweep rebuilds the index once and then
+returns to stale-slot-only cleanup. The canonical OID row remains authoritative
+and readers do not require the derived family.
+
 Exact coverage records the manifest generation, pack-index hash, object count,
 and catalog digest whose complete inventory was published. A digest-named
 SlateDB checkpoint pins that exact catalog while the mutable database advances.

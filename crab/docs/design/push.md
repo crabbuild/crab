@@ -793,6 +793,14 @@ remote.
    repair path.
 ```
 
+The locator also stores a derived pack-slot membership index keyed by
+`(pack_slot, oid)`. Canonical OID rows remain the source of truth; the derived
+rows are written atomically with every location update and let stale-pack
+cleanup scan only objects owned by stale slots instead of scanning the entire
+OID catalog. A legacy or interrupted catalog without the completion marker is
+rebuilt once under the existing repository owner, then uses the bounded path;
+readers never consult this maintenance index.
+
 **Source:** `crab/src/git/push.rs` (`upload_packs`, `compute_remote_objects`),
 `crab/src/git/pack.rs` (`generate_push_pack_files_with_exclusions`,
 `generate_pack_files_from_object_ids`, `install_pack_file_locally_with_timeout`)

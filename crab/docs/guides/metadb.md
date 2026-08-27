@@ -141,6 +141,13 @@ rows lack kind metadata falls back to the bounded canonical planner. Direct
 pushes continue to publish kinds for newly introduced objects when the local
 Git source is available.
 
+The locator writer also maintains a derived pack-slot membership index for
+stale-pack cleanup. It scans only memberships for slots absent from the
+current manifest, then validates and removes their canonical OID, ordinal, and
+metadata rows. If the completion marker is absent on a historical catalog, the
+owner rebuilds this derived index once; readers and the manifest never depend
+on it.
+
 When a current generation is missing its split commit graph but the immediately
 previous generation has a validated graph, the owner reads only the new commit
 closure through the pinned remote-Git operation and appends one immutable graph

@@ -123,6 +123,13 @@ correction in `cdc2335e`:
   handoff remains bound to a real target-manifest ref and still defers
   conservatively when no reusable base exists.
 
+- Locator stale-pack cleanup now uses a derived `(pack_slot, oid)` membership
+  index. Canonical OID rows remain authoritative; routine sweeps read only
+  stale-slot memberships and point-validate their canonical rows, while a
+  marker-less historical catalog performs one idempotent rebuild before
+  returning to the bounded path. Pure repacks remove old memberships as they
+  rebind OIDs, so they do not trigger a complete object-catalog scan.
+
 The next owner hardening keeps the documented one-action-per-cycle contract
 literal: a graph rebuild/compaction now prevents shallow-closure rebuilding
 from running in the same poll. Owner JSONL samples also expose a stable
@@ -167,6 +174,12 @@ This is a current-binary single-host qualification, not production SLO proof:
 the 100-client synthetic fanout, repeated isolated runs, 1,000/10,000-push
 differentials, fault/provider/failover/canary evidence, and default-on rollout
 gates remain open below.
+
+The subsequent stale-pack membership-index change is source-tested but not yet
+represented in a fresh release-binary Kubernetes report. Its live acceptance
+gate is to show that repeated owner sweeps report stale-row work without
+reading the retained OID catalog, while preserving the existing exact refs,
+fsck, and byte-equivalence checks.
 
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease

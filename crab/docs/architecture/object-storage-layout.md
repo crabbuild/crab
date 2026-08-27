@@ -158,6 +158,15 @@ The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`, or
 alternate source of truth. Commit-graph layers are trusted only through the
 descriptor hash pinned by that manifest.
 
+The opaque `git_object_catalog_db/` also contains a derived pack-slot
+membership keyspace used only by the exclusive locator writer. It maps each
+canonical OID row to its current immutable pack slot, so stale-pack cleanup is
+proportional to stale membership rows rather than the complete object catalog.
+The writer marks the index complete in the same SlateDB publication stream;
+marker-less historical catalogs receive one idempotent rebuild before normal
+incremental cleanup. Readers use the canonical OID, ordinal, and pack rows and
+do not depend on this derived keyspace.
+
 An optional feature that adds a repository-local namespace must document its
 owner, relative grammar, mutability, reachability, and cleanup policy. The
 feature owner constructs relative keys; `crab-storage::StoreLayout` supplies
