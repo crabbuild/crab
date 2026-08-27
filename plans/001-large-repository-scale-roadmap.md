@@ -565,6 +565,10 @@ The follow-up moves that work to the existing generation-owner boundary:
 - ref-journal admission publishes only an immutable digest-bound V4 visibility
   proof and uses the catalog identity/checkpoint marker for a metadata-only
   readiness check;
+- once that V4 proof exists, later admission probes only its bounded immutable
+  object with a HEAD request, avoiding another remote-pack walk while the
+  generation owner upgrades the state to V5; the regression also proves the
+  repeated admission path performs no pack reads;
 - a normal committed push no longer opens the locator catalog, publishes
   locator rows, or writes a generation receipt after the active marker;
 - the generation owner retains compaction-aware locator publication and
