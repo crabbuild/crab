@@ -19,7 +19,7 @@ set -eu
 export LC_ALL=C
 export LANG=C
 
-REPO="crabbuild/crab-release"
+REPO="crabbuild/crab-oss"
 INSTALL_DIR="${CRAB_INSTALL_DIR:-$HOME/.crab/bin}"
 VERSION="${CRAB_VERSION:-latest}"
 TMP_DIR=""

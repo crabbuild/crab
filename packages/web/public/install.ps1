@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "crabbuild/crab-release"
+$Repo = "crabbuild/crab-oss"
 $InstallDir = if ($env:CRAB_INSTALL_DIR) { $env:CRAB_INSTALL_DIR } else { "$HOME\.crab\bin" }
 $Version = if ($env:CRAB_VERSION) { $env:CRAB_VERSION } else { "latest" }
 

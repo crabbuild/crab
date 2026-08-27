@@ -15,7 +15,7 @@ use tempfile::Builder;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
 
-const RELEASE_API_URL: &str = "https://api.github.com/repos/crabbuild/crab-release/releases/latest";
+const RELEASE_API_URL: &str = "https://api.github.com/repos/crabbuild/crab-oss/releases/latest";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
 const UPDATE_SCHEMA: &str = "update";
 const UPDATE_SCHEMA_VERSION: &str = "1.0";
@@ -81,7 +81,7 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
             release_tag: None,
             status: UpdateStatus::NoRelease,
             asset: None,
-            message: "No crab release is available from crabbuild/crab-release.".to_owned(),
+            message: "No crab release is available from crabbuild/crab-oss.".to_owned(),
         };
         emit_payload(&payload, args.mode);
         return Ok(());
@@ -640,9 +640,7 @@ mod tests {
     fn release_with_assets(names: &[&str]) -> ReleaseResponse {
         ReleaseResponse {
             tag_name: "v1.2.3".to_owned(),
-            html_url: Some(
-                "https://github.com/crabbuild/crab-release/releases/tag/v1.2.3".to_owned(),
-            ),
+            html_url: Some("https://github.com/crabbuild/crab-oss/releases/tag/v1.2.3".to_owned()),
             assets: names
                 .iter()
                 .map(|name| ReleaseAsset {

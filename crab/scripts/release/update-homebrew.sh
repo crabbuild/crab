@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 TAP_REPO="${TAP_REPO:-crabbuild/homebrew-tap}"
-RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-release}"
+RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-oss}"
 FORMULA_NAME="${FORMULA_NAME:-crab}"
 DIST_DIR="${DIST_DIR:-$CRAB_DIR/dist}"
 

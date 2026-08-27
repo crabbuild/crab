@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.sh - Build crab CLI release archives and optionally publish them.
+# release.sh - Build crab CLI release archives locally.
 #
 # The release contract is six CLI artifacts:
 #   - macOS:   x86_64, aarch64
@@ -11,14 +11,9 @@
 # GitHub Actions workflow for publishing.
 #
 # Usage:
-#   ./scripts/release/release.sh --dry-run
 #   ./scripts/release/release.sh
-#   ./scripts/release/release.sh --target linux-x86_64 --dry-run
-#   ./scripts/release/release.sh --allow-partial --dry-run
-#
-# Publishing requires `gh` authenticated with access to crabbuild/crab-release.
-# Publishing also requires retained enterprise replica evidence verified through
-# `scripts/release/verify-replica-release-evidence.sh`.
+#   ./scripts/release/release.sh --target linux-x86_64
+#   ./scripts/release/release.sh --allow-partial
 
 set -euo pipefail
 export LC_ALL=C
@@ -28,18 +23,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKSPACE_DIR="$(cd "$CRAB_DIR/.." && pwd)"
 
-RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-release}"
 DIST_DIR="${DIST_DIR:-$CRAB_DIR/dist}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$WORKSPACE_DIR/target}"
 DOCKER="${DOCKER:-docker}"
 CARGO="${CARGO:-cargo}"
-REPLICA_RELEASE_EVIDENCE_DIR="${REPLICA_RELEASE_EVIDENCE_DIR:-}"
-REPLICA_RELEASE_EVIDENCE_OUTPUT="${REPLICA_RELEASE_EVIDENCE_OUTPUT:-replica-release-evidence-verify.json}"
-REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID="${REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID:-}"
 CRAB_CLI_FEATURES_NO_FUSE="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"
 CRAB_CLI_FEATURES_WITH_FUSE="${CRAB_CLI_FEATURES_NO_FUSE},fuse"
 
-DRY_RUN=false
 ALLOW_PARTIAL=false
 LIST_TARGETS=false
 REQUESTED_TARGETS=()
@@ -59,30 +49,20 @@ usage() {
 Usage: $0 [options]
 
 Options:
-  --dry-run            Build archives and checksums without publishing.
   --target NAME        Build one target. May be repeated.
   --allow-partial      Build only targets available on this machine.
   --list-targets       Print the release target matrix.
-  --all                Accepted for compatibility; all targets are the default.
   -h, --help           Show this help.
 
 Targets:
   darwin-aarch64, darwin-x86_64, linux-aarch64, linux-x86_64,
   windows-aarch64, windows-x86_64
 
-Environment for publishing:
-  REPLICA_RELEASE_EVIDENCE_DIR              Retained live evidence directory.
-  REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID  Exact replica-live-<run>-<attempt> ID.
-  REPLICA_RELEASE_EVIDENCE_OUTPUT           Verification JSON output path.
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
         --target)
             [[ $# -ge 2 ]] || die "--target requires a target name"
             REQUESTED_TARGETS+=("$2")
@@ -94,9 +74,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --list-targets)
             LIST_TARGETS=true
-            shift
-            ;;
-        --all)
             shift
             ;;
         -h|--help)
@@ -186,11 +163,6 @@ fi
 HAS_CARGO_XWIN=false
 if "$CARGO" xwin --version >/dev/null 2>&1; then
     HAS_CARGO_XWIN=true
-fi
-
-HAS_GH=false
-if command -v gh >/dev/null 2>&1; then
-    HAS_GH=true
 fi
 
 can_build_index() {
@@ -559,25 +531,6 @@ build_index() {
     info "Created $(basename "$archive") ($size)"
 }
 
-verify_replica_release_evidence() {
-    if [[ -z "$REPLICA_RELEASE_EVIDENCE_DIR" ]]; then
-        die "REPLICA_RELEASE_EVIDENCE_DIR is required before publishing an enterprise replica release."
-    fi
-    if [[ -z "$REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID" ]]; then
-        die "REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID is required before publishing; use replica-live-<github-run-id>-<attempt>."
-    fi
-
-    info "Verifying retained enterprise replica evidence"
-    "$SCRIPT_DIR/verify-replica-release-evidence.sh" \
-        "$REPLICA_RELEASE_EVIDENCE_DIR" \
-        "$REPLICA_RELEASE_EVIDENCE_OUTPUT" \
-        "$REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID"
-}
-
-if [[ "$DRY_RUN" != true ]]; then
-    verify_replica_release_evidence
-fi
-
 SELECTED_TARGETS=()
 BUILD_TARGETS=()
 select_targets
@@ -589,7 +542,6 @@ mkdir -p "$DIST_DIR"
 echo ""
 printf "${BOLD}Crab %s - Release Build${RESET}\n" "$TAG"
 echo ""
-info "Release repo: $RELEASE_REPO"
 info "Targets:"
 for i in "${BUILD_TARGETS[@]}"; do
     printf "  %-18s %-30s %s\n" \
@@ -623,37 +575,5 @@ for a in "${BUILT_ARCHIVES[@]}"; do
 done
 echo ""
 
-if [[ "$DRY_RUN" == true ]]; then
-    info "Dry run complete - artifacts in $DIST_DIR"
-    cat "$DIST_DIR/SHA256SUMS.txt"
-    exit 0
-fi
-
-if [[ "$ALLOW_PARTIAL" == true ]]; then
-    die "Refusing to publish a partial release. Re-run without --allow-partial."
-fi
-
-if [[ "$HAS_GH" != true ]]; then
-    die "\`gh\` CLI not found. Install: https://cli.github.com/"
-fi
-
-if ! gh auth status >/dev/null 2>&1; then
-    die "\`gh\` is not authenticated. Run: gh auth login"
-fi
-
-info "Publishing $TAG to $RELEASE_REPO"
-if gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
-    warn "Release $TAG exists - uploading assets with --clobber."
-    gh release upload "$TAG" "${BUILT_ARCHIVES[@]}" \
-        --repo "$RELEASE_REPO" \
-        --clobber
-else
-    gh release create "$TAG" "${BUILT_ARCHIVES[@]}" \
-        --repo "$RELEASE_REPO" \
-        --title "Crab CLI ${TAG}" \
-        --generate-notes
-fi
-
-echo ""
-printf "${GREEN}${BOLD}Released crab %s${RESET}\n" "$TAG"
-printf "  https://github.com/%s/releases/tag/%s\n" "$RELEASE_REPO" "$TAG"
+info "Local build complete - artifacts in $DIST_DIR"
+cat "$DIST_DIR/SHA256SUMS.txt"

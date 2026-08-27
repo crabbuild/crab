@@ -129,23 +129,15 @@
 # Release & Homebrew:
 #   make release          Dispatch the hosted full-matrix GitHub release
 #   make release-build    Build local release archives, no upload
-#   make release-dry      Alias for release-build
-#   make release-strict   Require every locally-scripted target, no upload
-#   make release-macos-full
-#                         Build full local matrix from macOS, including slow
-#                         linux/amd64 Docker emulation on Apple Silicon
 #   make release-target TARGET=linux-x86_64
 #   make release-list     Show supported release targets
 #   make release-ci       Dispatch the hosted GitHub release workflow
 #                         CLI artifacts only by default. Set
 #                         RELEASE_REQUIRE_ENTERPRISE_EVIDENCE=1 to require
-#                         retained replica/cache-service evidence. Native NFS
-#                         release evidence is required by default. Optional:
-#                         NFS_RELEASE_VERIFY_ARGS="--max-native-read-rpcs-per-mib 32"
-#   make release-macos-publish
-#                         Build full local macOS matrix and publish
-#   make release-publish-dist
-#                         Publish existing dist/ artifacts after checksum check
+#                         retained replica/cache-service evidence,
+#                         RELEASE_REQUIRE_NFS_EVIDENCE=1 for native mount
+#                         evidence, or RELEASE_REQUIRE_CLOUD_EVIDENCE=1 for
+#                         live AWS and cross-platform protocol evidence.
 #   make release-full     Release + update Homebrew tap
 #   make homebrew         Update tap from latest GitHub release
 #   make homebrew-local   Update tap using local dist/ checksums
@@ -243,19 +235,9 @@ NFS_RELEASE_VERIFY_ARGS ?=
 NFS_RELEASE_REQUIRE_EVIDENCE ?= 1
 NFS_RELEASE_REQUIRE_EXPECTED_RUN_SUFFIX ?= 1
 NFS_RELEASE_REQUIRE_EXPECTED_GIT_COMMIT ?= 1
-RELEASE_REPO ?= crabbuild/crab-release
-RELEASE_DIST_DIR ?= dist
-RELEASE_BYPASS_EVIDENCE ?= 0
 RELEASE_REQUIRE_ENTERPRISE_EVIDENCE ?= 0
-RELEASE_REQUIRE_NFS_EVIDENCE ?= 1
-RELEASE_DIST_ARTIFACTS := \
-	crab-darwin-aarch64.tar.gz \
-	crab-darwin-x86_64.tar.gz \
-	crab-linux-aarch64.tar.gz \
-	crab-linux-x86_64.tar.gz \
-	crab-windows-aarch64.zip \
-	crab-windows-x86_64.zip \
-	SHA256SUMS.txt
+RELEASE_REQUIRE_NFS_EVIDENCE ?= 0
+RELEASE_REQUIRE_CLOUD_EVIDENCE ?= 0
 
 # Release build flags
 RELEASE_FLAGS := --release
@@ -302,7 +284,7 @@ SPLIT_CRATE_PACKAGES := \
 	-p crab-storage \
 	-p crab-workflow
 
-.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report clean install uninstall release release-build release-dry release-strict release-macos-full release-target release-list release-ci release-macos-publish release-publish-dist release-full homebrew homebrew-local homebrew-dry
+.PHONY: all build debug test clippy split-crate-clippy-check split-crate-test-check fmt check architecture-check crate-interface-check crate-behavior-check shipped-binary-version-check install-layout-check auth-helper-packaging-check release-archive-contents-check final-integration-check crab-types-admission replica-feature-matrix replica-feature-matrix-all replica-feature-matrix-locked replica-feature-matrix-all-locked replica-live-preflight replica-release-evidence replica-release-gate mount-large-rustfs-smoke mount-nfs-linux-smoke mount-nfs-macos-smoke mount-nfs-windows-smoke nfs-smoke-report-verify nfs-smoke-report-verify-dir nfs-smoke-report-compare nfs-smoke-report-compare-dir nfs-smoke-report-verify-self-test nfs-smoke-script-check nfs-release-evidence-dispatch-self-test nfs-evidence-summary-self-test nfs-feature-gate nfs-threshold-suggestions nfs-read-path-bench-report-verify nfs-read-path-bench-report-compare nfs-read-path-bench-report-self-test mount-large-macos-rustfs-smoke mount-large-macos-nfs-rustfs-smoke cache-service-release-gate cache-service-validate-manifests cache-service-rustfs-smoke cache-service-onboarding-rustfs-smoke cache-service-verify-smoke-report clean install uninstall release release-build release-target release-list release-metadata-check release-ci release-full homebrew homebrew-local homebrew-dry
 .PHONY: nfs-release-gate nfs-release-evidence-ci
 
 all: build
@@ -842,16 +824,8 @@ release-major: bump-major install
 
 release: release-ci
 
-release-build: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release/release.sh --dry-run --allow-partial
-
-release-dry: release-build
-
-release-strict: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release/release.sh --dry-run
-
-release-macos-full: replica-release-gate cache-service-release-gate nfs-release-gate
-	@./scripts/release/release.sh --dry-run
+release-build:
+	@./scripts/release/release.sh --allow-partial
 
 release-target:
 	@if [ -z "$(TARGET)" ]; then \
@@ -859,15 +833,35 @@ release-target:
 		./scripts/release/release.sh --list-targets; \
 		exit 2; \
 	fi
-	@$(MAKE) --no-print-directory replica-release-gate
-	@$(MAKE) --no-print-directory cache-service-release-gate
-	@$(MAKE) --no-print-directory nfs-release-gate
-	@./scripts/release/release.sh --dry-run --target "$(TARGET)"
+	@./scripts/release/release.sh --target "$(TARGET)"
 
 release-list:
 	@./scripts/release/release.sh --list-targets
 
-release-ci:
+release-metadata-check:
+	@set -eu; \
+	version=$$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2); \
+	for manifest in Cargo.toml ../crates/crab-auth-server/Cargo.toml ../crates/crab-cache-server/Cargo.toml; do \
+		manifest_version=$$(grep -m1 '^version' "$$manifest" | cut -d '"' -f2); \
+		if [ "$$manifest_version" != "$$version" ]; then \
+			echo "$$manifest has $$manifest_version, expected $$version" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	for package in crab crab-auth-server crab-cache-server; do \
+		lock_version=$$(awk -v package="$$package" '$$0 == "name = \"" package "\"" { found = 1; next } found && /^version = / { gsub(/^version = \"|\"$$/, ""); print; exit }' ../Cargo.lock); \
+		if [ "$$lock_version" != "$$version" ]; then \
+			echo "Cargo.lock has $$package $$lock_version, expected $$version" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	if ! grep -Eq "^## $$version - [0-9]{4}-[0-9]{2}-[0-9]{2}$$" ../CHANGELOG.md; then \
+		echo "CHANGELOG.md has no dated $$version release section" >&2; \
+		exit 1; \
+	fi; \
+	echo "release metadata is consistent for v$$version"
+
+release-ci: release-metadata-check
 	@if ! command -v gh >/dev/null 2>&1; then \
 		echo "gh CLI is required for make release-ci"; \
 		exit 127; \
@@ -891,16 +885,21 @@ release-ci:
 	echo "dispatching GitHub release workflow for $$TAG"; \
 	require_enterprise_evidence=false; \
 	require_nfs_evidence=false; \
+	require_cloud_evidence=false; \
 	if [ "$(RELEASE_REQUIRE_ENTERPRISE_EVIDENCE)" = "1" ]; then \
 		require_enterprise_evidence=true; \
 	fi; \
 	if [ "$(RELEASE_REQUIRE_NFS_EVIDENCE)" = "1" ]; then \
 		require_nfs_evidence=true; \
 	fi; \
+	if [ "$(RELEASE_REQUIRE_CLOUD_EVIDENCE)" = "1" ]; then \
+		require_cloud_evidence=true; \
+	fi; \
 		set -- \
 			-f "tag=$$TAG" \
 			-f "require_enterprise_evidence=$$require_enterprise_evidence" \
-			-f "require_nfs_evidence=$$require_nfs_evidence"; \
+			-f "require_nfs_evidence=$$require_nfs_evidence" \
+			-f "require_cloud_evidence=$$require_cloud_evidence"; \
 		if [ -n "$(REPLICA_RELEASE_EVIDENCE_RUN_ID)" ]; then \
 			set -- "$$@" -f "replica_evidence_run_id=$(REPLICA_RELEASE_EVIDENCE_RUN_ID)"; \
 		fi; \
@@ -920,80 +919,6 @@ release-ci:
 			set -- "$$@" -f "nfs_release_verify_args=$(NFS_RELEASE_VERIFY_ARGS)"; \
 		fi; \
 		gh workflow run release.yml "$$@"
-
-release-macos-publish:
-	@set -e; \
-	if [ "$(RELEASE_BYPASS_EVIDENCE)" = "1" ]; then \
-		echo "warning: RELEASE_BYPASS_EVIDENCE=1; publishing artifacts without release-grade evidence gates" >&2; \
-		$(MAKE) --no-print-directory release-macos-full \
-			REPLICA_RELEASE_REQUIRE_EVIDENCE=0 \
-			CACHE_SERVICE_RELEASE_REQUIRE_EVIDENCE=0 \
-			NFS_RELEASE_REQUIRE_EVIDENCE=0; \
-		$(MAKE) --no-print-directory release-publish-dist RELEASE_BYPASS_EVIDENCE=1; \
-	else \
-		$(MAKE) --no-print-directory replica-release-gate; \
-		$(MAKE) --no-print-directory cache-service-release-gate; \
-		$(MAKE) --no-print-directory nfs-release-gate; \
-		RELEASE_REPO="$(RELEASE_REPO)" \
-		REPLICA_RELEASE_EVIDENCE_DIR="$(REPLICA_RELEASE_EVIDENCE_DIR)" \
-		REPLICA_RELEASE_EVIDENCE_OUTPUT="$(REPLICA_RELEASE_EVIDENCE_OUTPUT)" \
-		REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID="$(REPLICA_RELEASE_EVIDENCE_EXPECTED_RUN_ID)" \
-			./scripts/release/release.sh; \
-	fi
-
-release-publish-dist:
-	@set -e; \
-	if [ "$(RELEASE_BYPASS_EVIDENCE)" = "1" ]; then \
-		echo "warning: RELEASE_BYPASS_EVIDENCE=1; publishing existing artifacts without release-grade evidence gates" >&2; \
-	else \
-		$(MAKE) --no-print-directory replica-release-gate; \
-		$(MAKE) --no-print-directory cache-service-release-gate; \
-		$(MAKE) --no-print-directory nfs-release-gate; \
-	fi
-	@if ! command -v gh >/dev/null 2>&1; then \
-		echo "gh CLI is required for make release-publish-dist"; \
-		exit 127; \
-	fi
-	@if ! gh auth status >/dev/null 2>&1; then \
-		echo "gh is not authenticated. Run: gh auth login"; \
-		exit 2; \
-	fi
-	@set -e; \
-	tag=v$$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2); \
-	dist="$(RELEASE_DIST_DIR)"; \
-	artifacts="$(RELEASE_DIST_ARTIFACTS)"; \
-	files=""; \
-	for artifact in $$artifacts; do \
-		file="$$dist/$$artifact"; \
-		if [ ! -f "$$file" ]; then \
-			echo "missing release artifact: $$file"; \
-			exit 2; \
-		fi; \
-		files="$$files $$file"; \
-	done; \
-	if command -v shasum >/dev/null 2>&1; then \
-		(cd "$$dist" && shasum -a 256 -c SHA256SUMS.txt); \
-	elif command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$dist" && sha256sum -c SHA256SUMS.txt); \
-	else \
-		echo "Neither shasum nor sha256sum is available."; \
-		exit 127; \
-	fi; \
-	if gh release view "$$tag" --repo "$(RELEASE_REPO)" >/dev/null 2>&1; then \
-		echo "uploading artifacts to existing $(RELEASE_REPO) release $$tag"; \
-		gh release upload "$$tag" $$files --repo "$(RELEASE_REPO)" --clobber; \
-	else \
-		notes_file=$$(mktemp); \
-		trap 'rm -f "$$notes_file"' EXIT; \
-		printf "Crab CLI %s release artifacts for macOS, Linux, and Windows on ARM64 and x86_64.\\n" "$$tag" > "$$notes_file"; \
-		if [ "$(RELEASE_BYPASS_EVIDENCE)" = "1" ]; then \
-			printf "\\nPublished from local %s with RELEASE_BYPASS_EVIDENCE=1.\\n" "$$dist" >> "$$notes_file"; \
-		fi; \
-		gh release create "$$tag" $$files \
-			--repo "$(RELEASE_REPO)" \
-			--title "Crab CLI $$tag" \
-			--notes-file "$$notes_file"; \
-	fi
 
 # --- Homebrew tap ---
 

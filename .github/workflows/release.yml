@@ -1,4 +1,4 @@
-name: Release — Build + Publish + Homebrew
+name: Release
 
 # Triggered by pushing a version tag (e.g. `git tag v1.0.2 && git push origin v1.0.2`)
 on:
@@ -18,7 +18,12 @@ on:
         description: "Require retained native NFS mount evidence before building CLI artifacts"
         type: boolean
         required: false
-        default: true
+        default: false
+      require_cloud_evidence:
+        description: "Require live AWS S3 and cross-platform protocol evidence before publishing"
+        type: boolean
+        required: false
+        default: false
       replica_evidence_run_id:
         description: "Run ID from the Replica Live Evidence enterprise workflow"
         required: false
@@ -50,7 +55,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_REPO: crabbuild/crab-release
+  RELEASE_REPO: ${{ github.repository }}
   TAP_REPO: crabbuild/homebrew-tap
   CARGO_TERM_COLOR: always
   REPLICA_RELEASE_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.replica_evidence_run_id || vars.CRAB_REPLICA_RELEASE_EVIDENCE_RUN_ID }}
@@ -74,26 +79,21 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
 
       - name: Validate release tag
         id: release
         shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF_NAME}"
+          tag="$REQUESTED_TAG"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tag must be stable SemVer such as v1.2.3, got '$tag'."
+            exit 1
           fi
-
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "::error::Release tag must look like v1.2.3, got '$tag'."
-              exit 1
-              ;;
-          esac
 
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' crab/Cargo.toml | head -1)"
           if [ -z "$version" ]; then
@@ -103,6 +103,41 @@ jobs:
 
           if [ "v${version}" != "$tag" ]; then
             echo "::error::Release tag $tag does not match crab/Cargo.toml version ${version}."
+            exit 1
+          fi
+
+          for manifest in crab/Cargo.toml crates/crab-auth-server/Cargo.toml crates/crab-cache-server/Cargo.toml; do
+            manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1)"
+            if [ "$manifest_version" != "$version" ]; then
+              echo "::error::$manifest has $manifest_version, expected $version."
+              exit 1
+            fi
+          done
+
+          for package in crab crab-auth-server crab-cache-server; do
+            lock_version="$(awk -v package="$package" '
+              $0 == "name = \"" package "\"" { found = 1; next }
+              found && /^version = / { gsub(/^version = \"|\"$/, ""); print; exit }
+            ' Cargo.lock)"
+            if [ "$lock_version" != "$version" ]; then
+              echo "::error::Cargo.lock has $package $lock_version, expected $version."
+              exit 1
+            fi
+          done
+
+          if ! grep -Eq "^## ${version} - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md must contain a dated ${version} release section."
+            exit 1
+          fi
+
+          if [ "$(git cat-file -t "refs/tags/$tag")" != "tag" ]; then
+            echo "::error::$tag must be an annotated tag."
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$tag is not reachable from origin/main."
             exit 1
           fi
 
@@ -485,7 +520,7 @@ jobs:
   nfs-native-evidence-gate:
     name: NFS native evidence gate
     needs: prepare
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.require_nfs_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_NFS_EVIDENCE != 'false') }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.require_nfs_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_NFS_EVIDENCE == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1240,7 +1275,7 @@ jobs:
   protocol-v2-aws-release-gate:
     name: Protocol v2 partial-clone AWS S3 release gate
     needs: [prepare, build, protocol-v2-release-gate]
-    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    if: ${{ ((github.event_name == 'workflow_dispatch' && inputs.require_cloud_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_CLOUD_EVIDENCE == 'true')) && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -1438,8 +1473,11 @@ jobs:
   publish:
     name: Publish release
     needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-rollback-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-git-compatibility-release-gate.result == 'success' && needs.protocol-v2-rollback-release-gate.result == 'success' && (needs.protocol-v2-aws-release-gate.result == 'success' || needs.protocol-v2-aws-release-gate.result == 'skipped') && (needs.protocol-v2-platform-release-gate.result == 'success' || needs.protocol-v2-platform-release-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -1514,53 +1552,63 @@ jobs:
           sha256sum crab-*.* > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
 
-      - name: Validate release repository token
+      - name: Publish GitHub release
         env:
-          GH_TOKEN: ${{ secrets.CRAB_RELEASE_GITHUB_TOKEN || secrets.TAP_GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            {
-              echo "::error::Set CRAB_RELEASE_GITHUB_TOKEN with contents:write access to ${RELEASE_REPO}."
-              echo "The workflow cannot use the source repository GITHUB_TOKEN to publish to a separate release repository."
-            } >&2
-            exit 1
-          fi
-
-          gh repo view "$RELEASE_REPO" >/dev/null
-
-      - name: Create release on crab-release repo
-        env:
-          GH_TOKEN: ${{ secrets.CRAB_RELEASE_GITHUB_TOKEN || secrets.TAP_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_SHA="${{ needs.prepare.outputs.source_sha }}"
           FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)
-          notes_file="$(mktemp)"
-          trap 'rm -f "$notes_file"' EXIT
-          {
-            echo "Crab CLI ${TAG} release artifacts for macOS, Linux, and Windows on ARM64 and x86_64."
-            echo
-            echo "Source: https://github.com/${GITHUB_REPOSITORY}/tree/${TAG}"
-            echo "Commit: ${SOURCE_SHA}"
-            echo
-            echo 'Verify an archive with:'
-            echo "\`gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}\`"
-          } > "$notes_file"
-
-          if gh release view "$TAG" --repo "$RELEASE_REPO" &>/dev/null; then
-            echo "Release $TAG exists — uploading assets (clobber)."
-            gh release upload "$TAG" "${FILES[@]}" \
-              --repo "$RELEASE_REPO" --clobber
-          else
-            gh release create "$TAG" "${FILES[@]}" \
-              --repo "$RELEASE_REPO" \
-              --title "Crab CLI ${TAG}" \
-              --notes-file "$notes_file"
+          existing="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ "$existing" = "false" ]; then
+            echo "::error::Release $TAG is already published and cannot be replaced." >&2
+            exit 1
+          fi
+          if [ "$existing" = "true" ]; then
+            echo "Removing incomplete draft from an earlier attempt."
+            gh release delete "$TAG" --repo "$RELEASE_REPO" --yes
           fi
 
-      - name: Update Homebrew tap
+          notes_file="$(mktemp)"
+          trap 'rm -f "$notes_file"' EXIT
+          awk -v version="$VERSION" '
+            $0 ~ "^## " version " - " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            echo "::error::Could not extract release notes for $VERSION from CHANGELOG.md." >&2
+            exit 1
+          fi
+          printf '\n---\n\nSource commit: `%s`\n\nVerify an archive with `%s`.\n' \
+            "$SOURCE_SHA" \
+            "gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}" \
+            >> "$notes_file"
+
+          gh release create "$TAG" "${FILES[@]}" \
+            --repo "$RELEASE_REPO" \
+            --verify-tag \
+            --fail-on-no-commits \
+            --latest \
+            --title "Crab ${TAG}" \
+            --notes-file "$notes_file"
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: [prepare, publish]
+    if: ${{ needs.prepare.result == 'success' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Update tap
         env:
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
@@ -1570,4 +1618,4 @@ jobs:
             exit 0
           fi
           TAG="${{ needs.prepare.outputs.tag }}"
-          DIST_DIR="$PWD/dist" crab/scripts/release/update-homebrew.sh --local "$TAG"
+          crab/scripts/release/update-homebrew.sh "$TAG"

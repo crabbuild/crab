@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # seed-homebrew-tap.sh — Initialize the crabbuild/homebrew-tap repo with
 # a README, then publish the current release formula. Run once after creating
-# the repo and publishing the matching crabbuild/crab-release tag.
+# the repo and publishing the matching crabbuild/crab-oss tag.
 #
 # Usage:
 #   ./scripts/release/seed-homebrew-tap.sh
