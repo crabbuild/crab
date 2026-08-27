@@ -1,6 +1,6 @@
 ---
 title: "What is Crab, and when should you use it?"
-description: "Follow one repository through tracking, commit, push, and hydration to understand exactly how Crab works."
+description: "Follow one repository through tracking, add, commit, push, and hydration to understand exactly how Crab works."
 date: "2026-05-01"
 author: "Crab Team"
 category: "product"
@@ -53,11 +53,11 @@ vision-search/
 
 The README and Python file remain ordinary Git blobs. A rule such as `crab track '*.safetensors'` sends the model through Crab. The repository still creates one commit containing all three paths.
 
-| Path | Git commits | Object storage keeps | A pointer-only clone sees |
-| --- | --- | --- | --- |
-| `README.md` | File bytes | Nothing extra | File bytes |
-| `src/train.py` | File bytes | Nothing extra | File bytes |
-| `models/encoder.safetensors` | Crab pointer | Reconstructable model data | Pointer until hydration |
+| Path                         | Git commits  | Object storage keeps       | A pointer-only clone sees |
+| ---------------------------- | ------------ | -------------------------- | ------------------------- |
+| `README.md`                  | File bytes   | Nothing extra              | File bytes                |
+| `src/train.py`               | File bytes   | Nothing extra              | File bytes                |
+| `models/encoder.safetensors` | Crab pointer | Reconstructable model data | Pointer until hydration   |
 
 Select each stage below to follow the model and source file from the working tree to one visible repository state.
 
@@ -65,35 +65,49 @@ Select each stage below to follow the model and source file from the working tre
 
 ## Crab changes the data path, not the history
 
-Source code, configuration, and documentation remain ordinary Git blobs. Files matched by Crab tracking rules pass through Crab's filter, which replaces the Git blob with a pointer to a byte-identical recipe.
+The commit still owns repository history. Crab changes when and where the large bytes move:
 
-During a push, Crab splits tracked files at content-defined boundaries, identifies chunks by their content, and uploads only data that is not already present. It publishes the data and reconstruction metadata before it makes the new branch head visible.
+<FlowSteps
+  title="One file, from working tree to verified checkout"
+  steps={[
+    "crab add chunks the tracked file, prepares xorbs, records its ordered file recipe locally, and stages its pointer in Git.",
+    "git commit records that pointer beside ordinary Git blobs. It does not upload Crab objects.",
+    "crab push uploads missing xorbs, builds shards with complete recipes and chunk locations, updates the file index, then advances the ref after the required data is durable.",
+    "crab hydrate resolves the complete recipe, reads the required xorb ranges, rebuilds the file, and verifies its hash.",
+  ]}
+/>
 
-During a clone, Git can check out the small pointers first. You can then hydrate selected files, hydrate everything, or mount the repository so content arrives when an application reads it.
-
-The pointer remains part of the commit, so a branch or tag still identifies one exact large-file version. Renaming a managed file changes the Git tree. Replacing its content changes the pointer identity. Reverting the commit restores the earlier pointer, which Crab can resolve through the same immutable data store.
-
-Because Git stores the pointer as a blob, ordinary Git operations remain useful. You can inspect history, compare pointer changes, review path selection, and merge source changes without downloading every managed byte. A tool that needs the real model, archive, or dataset hydrates that path before reading it.
+Renames, reverts, branches, and tags remain Git operations because the committed pointer names one exact file version. A pointer-only checkout can inspect that history without first downloading every managed file.
 
 ## The pointer is a contract, not a placeholder
 
-A Crab pointer is small enough for Git, but it is not an informal bucket note. It records the expected file identity and size. Crab metadata expands that identity into an ordered reconstruction recipe.
+A pointer records identity, not a mutable bucket location. Its committed shape is deliberately small:
 
-That distinction matters during recovery. A loose bucket URL can change, disappear, or point at the wrong upload. A committed pointer continues to name the expected bytes even when Crab repacks chunks or changes their physical xorb locations.
+```text
+version https://crab.dev/spec/v1
+file-hash <BLAKE3 hash of the complete file>
+size <file size in bytes>
+shard-hint <optional metadata lookup hint>
+```
 
-The pointer also gives publication a testable boundary. Before the branch can advance, Crab must prove that the pointer resolves through durable metadata to durable data. During hydration, Crab must rebuild the complete file and match the recorded identity. Both sides test the same contract.
-
-For example, suppose commit `A` names a 4 GB model. Git records the small pointer for that exact model version. Crab metadata records every chunk required to rebuild it, in order. Object storage holds the packed byte ranges. A checkout succeeds only after those layers reconstruct the expected 4 GB file and verify its identity.
+The file hash and size define the contract. The optional shard hint only speeds up metadata lookup; Crab can fall back to the file index. The resolved shard contains the ordered recipe and xorb chunk locations; xorbs contain the packed chunk data.
 
 <HydrationPlanDiagram />
 
-This is why a pointer-only checkout is useful rather than ambiguous: it already knows _which_ file belongs at the path, even before the client downloads the file's bytes.
+Before a ref becomes visible, push proves the referenced data is durable. Hydration proves the other direction by reconstructing the complete file and matching its committed hash.
 
 ## “Serverless” means the bucket is the shared service
 
-Crab does not require a Crab data server or database between the repository and object storage. Each client reads and writes the bucket directly with the credentials and policies your team controls.
+Crab clients read and write the bucket directly. There is no Crab data server or database between them and object storage.
 
-This removes a service from the architecture, but it does not remove coordination. Crab uses immutable objects, short leases, journals, and compare-and-swap ref updates so concurrent clients cannot publish a ref that points to missing data.
+| Shared state                           | Purpose                                    | Controlled by                    |
+| -------------------------------------- | ------------------------------------------ | -------------------------------- |
+| Immutable Git, xorb, and shard objects | Preserve repository data                   | Object-store policy              |
+| Leases and journals                    | Coordinate concurrent writers and recovery | Crab protocol                    |
+| Compare-and-swap refs                  | Publish one complete repository state      | Crab protocol                    |
+| Client credentials                     | Authorize each operation                   | Your identity and cloud platform |
+
+Serverless removes an always-on Crab service; it does not remove coordination or operational ownership.
 
 ## Deduplication works across versions
 
@@ -103,16 +117,24 @@ Crab finds content-defined chunks inside a file. If a new checkpoint reuses most
 
 <ChunkReuseDiagram />
 
-In the diagram, the middle region changes while the surrounding regions keep their earlier identities. Crab uploads the new region and writes a new ordered recipe; it does not upload the four unchanged regions again.
+In the diagram, only the edited region receives a new chunk identity. The second version gets a complete ordered recipe, but push uploads only chunks that are not already durable.
 
-## Crab is a strong fit when three conditions hold
+| After editing version A | Version B does                                                 |
+| ----------------------- | -------------------------------------------------------------- |
+| Unchanged chunk         | Reuse its existing content identity and xorb location          |
+| Changed chunk           | Store the new chunk in a prepared xorb, then upload it on push |
+| Complete file           | Publish a new recipe covering every chunk in order             |
+
+Savings depend on the bytes, not the filename or nominal file size. Encryption, recompression, or container rewrites may change most chunks; stable regions, append-heavy data, and copied assets often preserve more reuse.
+
+## Crab is a strong fit when these conditions hold
 
 <ConceptChecklist
   items={[
     "The repository contains models, datasets, media, archives, or other large binaries.",
     "Your team can use object storage and manage access to a bucket.",
     "You want large files in the same commits and branches as the code that uses them.",
-    "Selective hydration or chunk-level reuse would reduce transfer and local disk pressure."
+    "Selective hydration or chunk-level reuse would reduce transfer and local disk pressure.",
   ]}
 />
 
@@ -128,12 +150,12 @@ One repository does not require one checkout shape. A source developer can keep 
 
 For the `vision-search` repository, that can look like this:
 
-| Contributor or job | Local choice | Large bytes downloaded |
-| --- | --- | --- |
-| Source developer changing `train.py` | Keep model pointers | None |
-| Evaluation job using the current encoder | `crab hydrate models/encoder.safetensors` | One selected model |
-| Asset explorer with unpredictable reads | Mount the repository | Only ranges that are read |
-| Release job validating all artifacts | Hydrate a committed manifest | The declared release set |
+| Contributor or job                       | Local choice                              | Large bytes downloaded    |
+| ---------------------------------------- | ----------------------------------------- | ------------------------- |
+| Source developer changing `train.py`     | Keep model pointers                       | None                      |
+| Evaluation job using the current encoder | `crab hydrate models/encoder.safetensors` | One selected model        |
+| Asset explorer with unpredictable reads  | Mount the repository                      | Only ranges that are read |
+| Release job validating all artifacts     | Hydrate a committed manifest              | The declared release set  |
 
 These clients still share the same commits and refs. Materialization is local policy, not a separate version of history. A pointer-only checkout and a hydrated checkout agree about which file belongs at a path, even though only one has the full bytes on disk.
 
@@ -143,45 +165,52 @@ When repository content exceeds a laptop or runner, each workflow can declare th
 
 Operate Crab by separating repository identity from file materialization. Git answers which version belongs to a commit. Crab metadata answers how to reconstruct that version. Object storage supplies the immutable bytes.
 
-| Layer | Stores | Does not decide |
-| --- | --- | --- |
-| Git objects | Commits, trees, ordinary blobs, and Crab pointers | Where xorb ranges live |
-| Crab file metadata | File identities and ordered reconstruction recipes | Which branch is current |
-| Shards | Chunk locations inside xorbs | Which files your task needs |
-| Xorbs | Packed, compressed large-file chunks | Git history or path selection |
-| Ref journal | The visible branch and tag state | Working-tree hydration state |
+| Layer       | Stores                                                         | Does not decide               |
+| ----------- | -------------------------------------------------------------- | ----------------------------- |
+| Git objects | Commits, trees, ordinary blobs, and Crab pointers              | Where xorb ranges live        |
+| File index  | File-hash-to-shard lookup entries                              | The file's chunk order        |
+| Shards      | Complete ordered file recipes and chunk locations inside xorbs | Which branch is current       |
+| Xorbs       | Packed, compressed large-file chunks                           | Git history or path selection |
+| Ref journal | The visible branch and tag state                               | Working-tree hydration state  |
 
 Separate ownership narrows each failure boundary. A missing local cache entry causes an origin read, not a history change. A failed upload blocks the ref update, not an existing reader. A dehydrate operation changes local materialization, not the committed file identity.
 
-## One edit shows why the model matters
-
-Consider two 8 GB model checkpoints that share 7.5 GB of byte content. A whole-file storage path treats them as two independent objects. Crab can identify the unchanged chunks and upload only the new regions, plus the metadata for the second recipe.
-
-The exact savings depend on the file format. Encryption, recompression, or container rewrites can change nearly every byte. Append-heavy data, model checkpoints, copied assets, and files with stable internal regions tend to preserve more reuse.
-
-Clone behavior changes as well. A contributor who edits source code can clone the Git history and keep model pointers. A training job can hydrate one model family. An analysis tool with unpredictable reads can use a mount.
-
 ## Crab does not replace every repository service
 
-Crab owns Git transport and the managed large-file data path. It does not become a code-review website, identity provider, secrets manager, or cloud-policy engine. Teams still choose how they review commits, issue short-lived credentials, audit bucket access, and protect release refs.
+Crab owns a narrow part of the repository stack:
 
-The serverless claim is therefore narrow and useful: no Crab data server sits between the client and object storage. Removing that service reduces one availability and scaling boundary. It also makes bucket policy, client installation, and provider observability part of repository operations.
+| Crab owns                                              | Your existing platform still owns                             |
+| ------------------------------------------------------ | ------------------------------------------------------------- |
+| Git remote transport                                   | Pull requests, review, and issue tracking                     |
+| Chunking, deduplication, and file reconstruction       | User identity and short-lived credential issuance             |
+| Durable publication of Git and managed large-file data | Bucket policy, audit logs, lifecycle rules, and cost controls |
+| Pointer-aware checkout, hydration, and mount behavior  | Release approval and protected-branch policy                  |
 
-State that boundary during adoption. A team that expects Crab to replace every forge feature will evaluate the wrong system. A team that needs Git-compatible storage for large files can evaluate the exact path Crab owns.
+Evaluate Crab as Git-compatible storage for large files, not as a replacement for a forge, identity provider, secrets manager, or cloud-policy engine.
 
 ## Evaluate the operating contract before adoption
 
-Run a small pilot with representative files and workflows. Measure new bytes uploaded after a realistic edit, clone metadata size, hydration transfer, and object-store request counts.
+Use representative files and real workflows; a synthetic empty repository will not expose transfer, request, or access-policy costs.
 
-Confirm these operational requirements during the pilot:
+<FlowSteps
+  title="A useful adoption pilot"
+  steps={[
+    "Add, commit, and push a representative repository from one machine.",
+    "Make a realistic binary edit and record new bytes, object requests, and push time.",
+    "Clone on a clean machine, then exercise pointer-only, selective hydration, and any mount workflow you expect to use.",
+    "Compare reconstructed file hashes and rehearse credential expiry, recovery, retention, and garbage-collection ownership.",
+  ]}
+/>
 
-- **Credentials**: every client can obtain scoped access to the repository prefix
-- **Recovery**: the team understands ref history, retained roots, and garbage-collection policy
-- **Local capacity**: developers know when to hydrate, dehydrate, or mount content
-- **Automation**: continuous integration jobs install Crab and request only their required files
-- **Ownership**: someone owns bucket lifecycle, retention, access, and cost review
+| Decision signal       | Evidence to capture                                   |
+| --------------------- | ----------------------------------------------------- |
+| Deduplication value   | New bytes uploaded after a representative edit        |
+| Checkout efficiency   | Git metadata size and bytes hydrated per role         |
+| Storage behavior      | Object-store requests, latency, retention, and cost   |
+| Access model          | Scoped credentials work for developers and automation |
+| Reconstruction safety | A fresh clone reproduces representative file hashes   |
 
-The pilot should end with a fresh clone and cryptographic comparison of representative files. Upload statistics alone do not prove that another machine can reconstruct the published state.
+Adopt only when both the data-path measurements and the operating ownership fit the team.
 
 ## The working loop stays close to Git
 
