@@ -782,6 +782,15 @@ remote.
    matching visibility proof are published after the manifest CAS;
    publication failure is repairable acceleration damage and does not roll
    back committed refs.
+
+   For a new destination ref, visibility evidence is emitted as a delta from
+   its first-parent tip. The catalog handoff accepts that delta only when the
+   parent is an exact visible ref tip, then copies the validated base ref's
+   ordinal closure and applies only the changed ordinals. Adding a branch to
+   a large repository therefore does not require walking or serializing its
+   full history. If no visible base can be proven, Crab retains the
+   conservative bounded deferral and the owner must complete the normal
+   repair path.
 ```
 
 **Source:** `crab/src/git/push.rs` (`upload_packs`, `compute_remote_objects`),

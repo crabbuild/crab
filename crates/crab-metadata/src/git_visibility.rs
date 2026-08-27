@@ -34,7 +34,10 @@ pub const GIT_VISIBILITY_EDIT_VERSION: u32 = 1;
 pub struct GitVisibilityEdit {
     /// Schema version of this object.
     pub version: u32,
-    /// Ref tip expected before the update, if the ref already exists.
+    /// Ref tip used as the prior closure, if one exists.
+    ///
+    /// For a new destination ref this may be the tip of an existing visible
+    /// ref whose closure can be reused by catalog-bound compaction.
     pub old_oid: Option<String>,
     /// Ref tip made visible by the update.
     pub new_oid: String,
@@ -687,6 +690,7 @@ impl GitCatalogVisibilityIndex {
         edit: &GitVisibilityEdit,
         from_ordinal: Option<u32>,
         to_ordinal: u32,
+        base_ref: Option<&str>,
         mut added: Vec<u32>,
         mut removed: Vec<u32>,
     ) -> Result<()> {
@@ -712,11 +716,18 @@ impl GitCatalogVisibilityIndex {
             ));
         }
 
-        let prior = self
-            .refs
-            .get(&name)
-            .map(GitVisibilityClosure::positions)
-            .unwrap_or_default();
+        let prior = match base_ref {
+            Some(base_ref) => self
+                .refs
+                .get(base_ref)
+                .map(GitVisibilityClosure::positions)
+                .ok_or_else(|| corrupt("visibility base ref is absent from its prior proof"))?,
+            None => self
+                .refs
+                .get(&name)
+                .map(GitVisibilityClosure::positions)
+                .unwrap_or_default(),
+        };
         if edit.old_oid.is_none() && self.refs.contains_key(&name) {
             return Err(corrupt(
                 "visibility add targets a ref already present in its prior catalog",
@@ -1279,7 +1290,23 @@ impl GitVisibilityIndex {
 
     #[cfg(any(feature = "storage", test))]
     fn apply_edit(&mut self, name: String, edit: &GitVisibilityEdit) -> Result<()> {
-        let prior = self.objects_for_ref(&name);
+        self.apply_edit_with_base(name, edit, None)
+    }
+
+    #[cfg(any(feature = "storage", test))]
+    fn apply_edit_with_base(
+        &mut self,
+        name: String,
+        edit: &GitVisibilityEdit,
+        base_ref: Option<&str>,
+    ) -> Result<()> {
+        let prior = match base_ref {
+            Some(base_ref) => Some(
+                self.objects_for_ref(base_ref)
+                    .ok_or_else(|| corrupt("visibility base ref is absent from its prior proof"))?,
+            ),
+            None => self.objects_for_ref(&name),
+        };
         let closure = edit.apply(prior.as_deref())?;
         let mut positions = Vec::with_capacity(closure.len());
         for oid in closure {
@@ -1689,7 +1716,9 @@ mod storage {
     struct ResolvedGitVisibilityPendingEdit {
         ref_name: String,
         old_oid: Option<[u8; 20]>,
+        source_oid: Option<[u8; 20]>,
         new_oid: Option<[u8; 20]>,
+        base_ref_name: Option<String>,
         evidence: Option<GitVisibilityEdit>,
     }
 
@@ -3500,9 +3529,6 @@ mod storage {
                     .as_deref()
                     .map(super::decode_oid)
                     .transpose()?;
-                if let Some(oid) = old_oid {
-                    required.insert(oid, ());
-                }
                 if let Some(new_oid) = new_oid {
                     required.insert(new_oid, ());
                     let Some(evidence_hash) = pending_edit.visibility_evidence_hash.as_deref()
@@ -3512,17 +3538,45 @@ mod storage {
                         ));
                     };
                     let evidence = read_edit(store, router, evidence_hash).await?;
-                    if evidence.old_oid != pending_edit.old_oid
-                        || evidence.new_oid
-                            != pending_edit.new_oid.as_deref().ok_or_else(|| {
-                                super::corrupt(
-                                    "catalog visibility pending update is missing its new ref tip",
-                                )
-                            })?
+                    if evidence.new_oid
+                        != pending_edit.new_oid.as_deref().ok_or_else(|| {
+                            super::corrupt(
+                                "catalog visibility pending update is missing its new ref tip",
+                            )
+                        })?
                     {
                         return Err(super::corrupt(
                             "catalog visibility evidence does not match its pending ref edit",
                         ));
+                    }
+                    let base_ref_name = match (&pending_edit.old_oid, &evidence.old_oid) {
+                        (expected, actual) if expected == actual => None,
+                        (None, Some(base_oid)) => {
+                            // New-ref evidence may be a delta from an existing
+                            // visible ref. An unbound local-only base stays on
+                            // the owner's full repair path.
+                            manifest
+                                .refs
+                                .iter()
+                                .find(|(_, tip)| *tip == base_oid)
+                                .map(|(name, _)| name.clone())
+                        }
+                        _ => {
+                            return Err(super::corrupt(
+                                "catalog visibility evidence does not match its pending ref edit",
+                            ));
+                        }
+                    };
+                    let source_oid = evidence
+                        .old_oid
+                        .as_deref()
+                        .map(super::decode_oid)
+                        .transpose()?;
+                    if let Some(oid) = source_oid {
+                        required.insert(oid, ());
+                    }
+                    if evidence.old_oid != pending_edit.old_oid && base_ref_name.is_none() {
+                        return Ok(None);
                     }
                     for oid in evidence.added.iter().chain(evidence.removed.iter()) {
                         required.insert(super::decode_oid(oid)?, ());
@@ -3530,7 +3584,9 @@ mod storage {
                     resolved.push(ResolvedGitVisibilityPendingEdit {
                         ref_name: pending_edit.ref_name,
                         old_oid,
+                        source_oid,
                         new_oid: Some(new_oid),
+                        base_ref_name,
                         evidence: Some(evidence),
                     });
                 } else {
@@ -3542,7 +3598,9 @@ mod storage {
                     resolved.push(ResolvedGitVisibilityPendingEdit {
                         ref_name: pending_edit.ref_name,
                         old_oid,
+                        source_oid: old_oid,
                         new_oid: None,
+                        base_ref_name: None,
                         evidence: None,
                     });
                 }
@@ -3587,11 +3645,11 @@ mod storage {
                     index.remove_ref(&edit.ref_name);
                     continue;
                 };
-                let old_ordinal = edit
-                    .old_oid
+                let source_ordinal = edit
+                    .source_oid
                     .map(|oid| {
                         ordinals.get(&oid).copied().ok_or_else(|| {
-                            super::corrupt("catalog visibility old ref tip is absent")
+                            super::corrupt("catalog visibility source ref tip is absent")
                         })
                     })
                     .transpose()?;
@@ -3621,11 +3679,17 @@ mod storage {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
+                if let Some(base_ref_name) = edit.base_ref_name.as_deref()
+                    && !index.contains_ref(base_ref_name)
+                {
+                    return Ok(None);
+                }
                 index.apply_ordinal_edit(
                     edit.ref_name,
                     &evidence,
-                    old_ordinal,
+                    source_ordinal,
                     new_ordinal,
+                    edit.base_ref_name.as_deref(),
                     added,
                     removed,
                 )?;
@@ -3743,7 +3807,7 @@ mod storage {
                         return Ok(None);
                     };
                     let evidence = read_edit(store, router, evidence_hash).await?;
-                    if evidence.old_oid != edit.old_oid || evidence.new_oid != *new_oid {
+                    if evidence.new_oid != *new_oid {
                         return Err(crate::error::MetadataError::CorruptObject {
                             path: router
                                 .git_visibility_edit_path(evidence_hash)
@@ -3753,7 +3817,41 @@ mod storage {
                                 .to_owned(),
                         });
                     }
-                    index.apply_edit(edit.ref_name.clone(), &evidence)?;
+                    let base_ref = match (&edit.old_oid, &evidence.old_oid) {
+                        (expected, actual) if expected == actual => None,
+                        (None, Some(base_oid)) => {
+                            // New-ref evidence may be a delta from an existing
+                            // visible ref. An unbound local-only base stays on
+                            // the owner's full repair path.
+                            let Some(base_ref) = base
+                                .refs
+                                .iter()
+                                .find(|(_, tip)| *tip == base_oid)
+                                .map(|(name, _)| name.as_str())
+                            else {
+                                return Ok(None);
+                            };
+                            Some(base_ref)
+                        }
+                        _ => {
+                            return Err(crate::error::MetadataError::CorruptObject {
+                                path: router
+                                    .git_visibility_edit_path(evidence_hash)
+                                    .as_ref()
+                                    .to_owned(),
+                                reason: "visibility edit does not match its ref journal edit"
+                                    .to_owned(),
+                            });
+                        }
+                    };
+                    match base_ref {
+                        Some(base_ref) => index.apply_edit_with_base(
+                            edit.ref_name.clone(),
+                            &evidence,
+                            Some(base_ref),
+                        )?,
+                        None => index.apply_edit(edit.ref_name.clone(), &evidence)?,
+                    }
                 }
             }
         }
@@ -3998,6 +4096,43 @@ mod tests {
     }
 
     #[test]
+    fn new_ref_delta_can_reuse_an_existing_base_closure() {
+        let base_oid = "a".repeat(40);
+        let new_oid = "c".repeat(40);
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "b".repeat(64),
+            "d".repeat(64),
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec![base_oid.clone(), "b".repeat(40)],
+            )]),
+        )
+        .expect("valid base visibility index");
+        let edit = GitVisibilityEdit::from_delta_objects(
+            Some(base_oid),
+            new_oid.clone(),
+            vec![new_oid.clone()],
+            Vec::new(),
+        );
+
+        index
+            .apply_edit_with_base(
+                "refs/heads/feature".to_owned(),
+                &edit,
+                Some("refs/heads/main"),
+            )
+            .expect("base closure delta applies");
+
+        assert_eq!(
+            index
+                .objects_for_ref("refs/heads/feature")
+                .expect("feature closure"),
+            vec!["a".repeat(40), "b".repeat(40), "c".repeat(40)]
+        );
+    }
+
+    #[test]
     fn ref_edit_normalizes_exact_delta_objects() {
         let edit = GitVisibilityEdit::from_delta_objects(
             Some("1".repeat(40)),
@@ -4204,11 +4339,54 @@ mod tests {
                     &edit,
                     None,
                     1,
+                    None,
                     vec![1],
                     vec![0]
                 )
                 .is_err()
         );
+    }
+
+    #[cfg(feature = "remote-index")]
+    #[test]
+    fn catalog_new_ref_delta_reuses_existing_base_closure() {
+        let base_oid = "1".repeat(40);
+        let new_oid = "2".repeat(40);
+        let mut index = GitCatalogVisibilityIndex::from_parts(
+            4,
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            2,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                GitVisibilityClosure::from_positions(vec![0], 2).expect("valid catalog closure"),
+            )]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("valid catalog visibility index");
+        let edit = GitVisibilityEdit::from_delta_objects(
+            Some(base_oid),
+            new_oid,
+            vec!["2".repeat(40)],
+            Vec::new(),
+        );
+
+        index
+            .apply_ordinal_edit(
+                "refs/heads/feature".to_owned(),
+                &edit,
+                Some(0),
+                1,
+                Some("refs/heads/main"),
+                vec![1],
+                Vec::new(),
+            )
+            .expect("base closure delta applies");
+
+        assert!(index.contains_ordinal_in_ref("refs/heads/feature", 0));
+        assert!(index.contains_ordinal_in_ref("refs/heads/feature", 1));
     }
 
     #[cfg(feature = "remote-index")]
@@ -4238,6 +4416,7 @@ mod tests {
                     &edit,
                     None,
                     1,
+                    None,
                     vec![1],
                     Vec::new(),
                 )
@@ -5425,6 +5604,86 @@ mod tests {
                 decode_oid(&"4".repeat(40)).unwrap(),
             ])
         );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn new_ref_journal_delta_reuses_the_base_visibility_closure() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        use crate::ref_journal::RefJournalEdit;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let base_oid = "1".repeat(40);
+        let new_oid = "3".repeat(40);
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.generation = 4;
+        base.pack_index_hash = "a".repeat(64);
+        base.refs
+            .insert("refs/heads/main".to_owned(), base_oid.clone());
+        base.seal_git_validation();
+        let base_index = GitVisibilityIndex::new(
+            base.generation,
+            &base.pack_index_hash,
+            &base.git_validation_digest,
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec![base_oid.clone(), "2".repeat(40)],
+            )]),
+        )
+        .expect("valid base visibility index");
+        upload_if_absent(&store, &router, &base_index)
+            .await
+            .expect("upload base visibility index");
+
+        let evidence = GitVisibilityEdit::from_delta_objects(
+            Some(base_oid.clone()),
+            new_oid.clone(),
+            vec![new_oid.clone()],
+            Vec::new(),
+        );
+        let evidence_hash = upload_edit(&store, &router, &evidence)
+            .await
+            .expect("upload new-ref visibility evidence");
+        let edits = [RefJournalEdit {
+            ref_name: "refs/heads/feature".to_owned(),
+            old_oid: None,
+            new_oid: Some(new_oid.clone()),
+            peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: Some(evidence_hash),
+        }];
+        let final_refs = BTreeMap::from([
+            ("refs/heads/feature".to_owned(), new_oid.clone()),
+            ("refs/heads/main".to_owned(), base_oid),
+        ]);
+        let mut target = base.clone();
+        target.generation = 5;
+        target.pack_index_hash = "b".repeat(64);
+        target.refs.clone_from(&final_refs);
+        target.seal_git_validation();
+
+        let compacted = compact_journal_edits(
+            &store,
+            &router,
+            &base,
+            &edits,
+            target.generation,
+            &target.pack_index_hash,
+            &target.git_validation_digest,
+            &final_refs,
+        )
+        .await
+        .expect("compact new-ref visibility evidence")
+        .expect("base-anchored evidence should avoid a full rebuild");
+
+        assert!(compacted.contains_hex_in_ref("refs/heads/main", &"1".repeat(40)));
+        assert!(compacted.contains_hex_in_ref("refs/heads/feature", &new_oid));
+        assert!(compacted.contains_hex_in_ref("refs/heads/feature", &"2".repeat(40)));
     }
 
     #[cfg(feature = "storage")]

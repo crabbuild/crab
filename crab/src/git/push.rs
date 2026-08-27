@@ -17554,10 +17554,14 @@ fn visibility_edit_for_ref(
             .map_err(|_| {
                 CrabError::Internal("Git visibility limit does not fit usize".to_owned())
             })?;
-    let Some(added) = enumerate_visibility_difference(git_dir, new_oid, old_oid, maximum)? else {
-        return Ok(None);
+    let base_oid = match old_oid {
+        Some(old_oid) => Some(old_oid.to_owned()),
+        None => visibility_base_oid(git_dir, new_oid)?,
     };
-    let Some(old_oid) = old_oid else {
+    let Some(base_oid) = base_oid else {
+        let Some(added) = enumerate_visibility_difference(git_dir, new_oid, None, maximum)? else {
+            return Ok(None);
+        };
         return Ok(Some(
             crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
                 None,
@@ -17566,9 +17570,13 @@ fn visibility_edit_for_ref(
             ),
         ));
     };
+    let Some(added) = enumerate_visibility_difference(git_dir, new_oid, Some(&base_oid), maximum)?
+    else {
+        return Ok(None);
+    };
     let Some(removed) = enumerate_visibility_difference(
         git_dir,
-        old_oid,
+        &base_oid,
         Some(new_oid),
         maximum.saturating_sub(added.len()),
     )?
@@ -17577,12 +17585,45 @@ fn visibility_edit_for_ref(
     };
     Ok(Some(
         crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
-            Some(old_oid.to_owned()),
+            Some(base_oid),
             new_oid.to_owned(),
             added,
             removed,
         ),
     ))
+}
+
+fn visibility_base_oid(git_dir: &Path, new_oid: &str) -> Result<Option<String>> {
+    // A new destination ref has no expected-old tip. A first-parent delta is
+    // cheap to produce even for a detached client; the remote compactor binds
+    // it only when that parent is an exact visible ref tip.
+    let object_type = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["cat-file", "-t"])
+        .arg(new_oid)
+        .output()
+        .map_err(CrabError::Io)?;
+    if !object_type.status.success() || object_type.stdout.as_slice() != b"commit\n" {
+        return Ok(None);
+    }
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["rev-list", "--parents", "-n", "1"])
+        .arg(new_oid)
+        .output()
+        .map_err(CrabError::Io)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let parents = String::from_utf8(output.stdout)
+        .map_err(|error| CrabError::Internal(format!("Git parent output is not UTF-8: {error}")))?
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(parents.into_iter().next())
 }
 
 fn enumerate_visibility_difference(
@@ -20537,6 +20578,18 @@ mod tests {
                 .expect("missing shallow-boundary object defers")
                 .is_none()
         );
+
+        run_git(&["branch", "visibility-base", &new_oid]);
+        std::fs::write(repo.path().join("tracked.txt"), "third\n").expect("write third file");
+        run_git(&["commit", "-am", "third"]);
+        let anchored_oid = run_git(&["rev-parse", "HEAD"]);
+        let anchored = visibility_edit_for_ref(&git_dir, None, &anchored_oid)
+            .expect("build anchored visibility edit")
+            .expect("anchored visibility delta fits");
+        assert_eq!(anchored.old_oid, Some(new_oid.clone()),);
+        assert!(!anchored.replaces);
+        assert!(anchored.added.contains(&anchored_oid));
+        assert!(anchored.removed.is_empty());
 
         run_git(&["tag", "-a", "release", "-m", "release", &new_oid]);
         let tag_oid = run_git(&["rev-parse", "refs/tags/release"]);
