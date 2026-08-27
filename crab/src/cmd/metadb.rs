@@ -4145,9 +4145,15 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_ok(),
-            "stale owner snapshot must not plan missing packs"
+        let (advanced, stats, sweep) = result.expect("stale owner snapshot must be skipped");
+        assert!(!advanced);
+        assert_eq!(
+            stats,
+            crab_metadata::git_object_locator::GitObjectCatalogStats::default()
+        );
+        assert_eq!(
+            sweep,
+            crab_metadata::git_object_locator::LocatorSweepStats::default()
         );
     }
 
