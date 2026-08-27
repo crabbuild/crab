@@ -321,6 +321,38 @@ OID catalog; the exact refs, fsck, and byte-equivalence checks still pass.
 Repeated isolated runs and the full interruption/maintenance matrix remain
 required.
 
+### Current-head incremental reader-repair qualification
+
+The reader-repair hardening is committed as `d85d7d15`. It addresses a
+large-repository failure found by replaying a real commit against the existing
+Kubernetes-sized Crab/RustFS remote `e2e-large-repository/crabbuild-team-load-pack-index-1d93e8a0`.
+The remote contained the Kubernetes `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`
+tip and a 1,643,211-object locator/catalog. A same-tree child commit was
+created with `git commit-tree` and pushed as a one-object incremental update,
+so the test isolated post-push metadata work from pack growth.
+
+- Before the fix, the first fetch from the old tip spent 90,137 ms in
+  reader-side locator publication. A one-object repair crossed the locator's
+  compaction threshold, started a repository-sized SlateDB compactor, and then
+  failed because the target catalog-bound visibility proof was still pending.
+  The generic protocol session itself was not the bottleneck: a no-op fetch
+  closed in about 0.56 seconds.
+- `d85d7d15` gives reader repair a no-compaction locator writer and applies the
+  existing target-digest-bound catalog handoff before the large-catalog
+  materialization limit. Owner publication retains the compaction-aware path,
+  so geometric locator maintenance remains on the repository generation owner.
+- After the fix, the same fetch advanced from
+  `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3` to
+  `7658d5ad745afa0e28b3a5dff20cae886e77d197` in about 2.9 seconds, published
+  the 744,837-byte catalog proof, and passed `git fsck --full`; the new commit
+  was readable by `git cat-file`. The trace showed the pending catalog handoff
+  completing before protocol-v2 admission and no locator compaction wait.
+
+This is a targeted current-binary regression qualification, not a substitute
+for repeated full-profile or team-load evidence. The 1,000/10,000-push
+differentials, interruption matrix, provider matrix, concurrent clone/cache
+fanout, owner failover, and rollout gates remain open.
+
 ### Current-head dense response-pack qualification
 
 The dense response-pack follow-up is committed as `b69ecb47`. It centralizes
