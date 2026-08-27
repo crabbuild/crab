@@ -38,8 +38,8 @@ const productNavItems = [
 const topLevelLinks = [
   { name: "Docs", href: "/docs" },
   { name: "Library", href: "/library" },
-  { name: "Blog", href: "/blog" },
   { name: "Use Cases", href: "/use-cases" },
+  { name: "Blog", href: "/blog" },
   { name: "Pricing", href: "/pricing" },
 ]
 
