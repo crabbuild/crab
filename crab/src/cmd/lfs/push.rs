@@ -47,20 +47,8 @@ pub fn run_lfs_push(options: LfsPushOptions) -> Result<()> {
     let resolved = resolve_push_args(&options)?;
 
     if !resolved.object_ids.is_empty() {
-        let pointers: Vec<LfsPointer> = resolved
-            .object_ids
-            .iter()
-            .map(|oid_hex| {
-                parse_oid_hex(oid_hex).map(|oid| LfsPointer {
-                    oid,
-                    size: 0,
-                    extensions: Vec::new(),
-                })
-            })
-            .collect::<Result<_>>()?;
-
         if options.dry_run {
-            eprintln!("push: would upload {} object(s)", pointers.len());
+            eprintln!("push: would upload {} object(s)", resolved.object_ids.len());
             for oid_hex in &resolved.object_ids {
                 eprintln!("  {}", &oid_hex[..oid_hex.len().min(10)]);
             }
@@ -69,6 +57,7 @@ pub fn run_lfs_push(options: LfsPushOptions) -> Result<()> {
 
         let ctx =
             resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
+        let pointers = object_id_pointers(&ctx.local_lfs_dir, &resolved.object_ids)?;
         return super::block_on_runtime(async {
             let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
             resolver.upload_missing(&pointers).await?;
@@ -111,6 +100,35 @@ pub fn run_lfs_push(options: LfsPushOptions) -> Result<()> {
         eprintln!("push: done");
         Ok(())
     })
+}
+
+fn object_id_pointers(lfs_dir: &Path, object_ids: &[String]) -> Result<Vec<LfsPointer>> {
+    object_ids
+        .iter()
+        .map(|oid_hex| {
+            let oid = parse_oid_hex(oid_hex)?;
+            let path = crate::lfs::cache::object_path(lfs_dir, &oid);
+            let metadata = std::fs::metadata(&path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    CrabError::LfsObjectMissing {
+                        oid: oid_hex.clone(),
+                    }
+                } else {
+                    CrabError::Io(error)
+                }
+            })?;
+            if !metadata.is_file() {
+                return Err(CrabError::LfsObjectMissing {
+                    oid: oid_hex.clone(),
+                });
+            }
+            Ok(LfsPointer {
+                oid,
+                size: metadata.len(),
+                extensions: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn resolve_push_args(options: &LfsPushOptions) -> Result<ResolvedPushArgs> {
@@ -964,6 +982,32 @@ mod tests {
 
         assert_eq!(resolved.remote.as_deref(), Some("origin"));
         assert_eq!(resolved.object_ids, vec![oid(1), oid(2)]);
+    }
+
+    #[test]
+    fn object_id_pointers_read_cached_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"object-id upload";
+        let oid: [u8; 32] = sha2::Sha256::digest(content).into();
+        let path = crate::lfs::cache::object_path(dir.path(), &oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+
+        let pointers = object_id_pointers(dir.path(), &[hex_encode(&oid)]).unwrap();
+
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(pointers[0].oid, oid);
+        assert_eq!(pointers[0].size, content.len() as u64);
+    }
+
+    #[test]
+    fn object_id_pointers_reject_missing_cached_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let oid = oid(1);
+
+        let error = object_id_pointers(dir.path(), &[oid.clone()]).unwrap_err();
+
+        assert!(matches!(error, CrabError::LfsObjectMissing { oid: found } if found == oid));
     }
 
     #[test]

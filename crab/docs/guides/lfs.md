@@ -311,6 +311,10 @@ crab lfs push [OPTIONS] [REMOTE] [REF...]
 | `--stdin` | Read refs or object IDs from stdin |
 | `--dry-run`, `-d` | Report what would be pushed without uploading |
 
+With `--object-id`, Crab reads the object size from the standard local LFS
+cache before uploading and reports a missing cached object without contacting
+the remote.
+
 ---
 
 ## crab lfs pre-push
@@ -672,6 +676,9 @@ These are invoked by git's filter driver, not typically by users directly.
 `lfs.fetchexclude`. When a path does not pass the include/exclude filters, the
 pointer is copied to stdout unchanged instead of reading the local cache or
 downloading from the remote store.
+The clean filter only writes the verified object to the local LFS cache;
+remote publication is performed by `crab lfs pre-push` or `crab lfs push`, so
+`git add` remains usable without remote access.
 
 ---
 

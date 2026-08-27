@@ -274,7 +274,7 @@ Working Tree File (e.g. weights.bin, 500 MB)
     ├── filter=lfs path:
     │   ┌─────────────────────────────────────────────────┐
     │   │  SHA-256 hash content (in spawn_blocking)       │
-    │   │  Stage raw bytes → LfsObjectStore               │
+    │   │  Stage raw bytes → local LFS cache              │
     │   │  Emit LFS pointer (~120 bytes) → Git ODB        │
     │   └─────────────────────────────────────────────────┘
     │

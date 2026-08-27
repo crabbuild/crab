@@ -17,8 +17,8 @@ use crab_git::pointer_detect::{PointerKind, classify};
 /// Run `crab lfs clean`: read file content from stdin, produce an LFS
 /// pointer on stdout.
 ///
-/// The original content is staged in the local LFS cache and uploaded
-/// to the remote store if a remote is configured.
+/// The original content is staged in the local LFS cache. Remote publication
+/// is owned by the pre-push path, matching Git LFS's clean-filter contract.
 pub fn run_lfs_clean(path: Option<&str>) -> Result<()> {
     let file_name = path.unwrap_or("<unknown file>");
     let extensions = configured_extensions_sorted()?;
@@ -39,25 +39,8 @@ pub fn run_lfs_clean(path: Option<&str>) -> Result<()> {
 
     let oid = *staged.oid();
     let size = staged.size();
-    let local_path = staged.install(&lfs_dir)?;
+    staged.install(&lfs_dir)?;
     let oid_hex = hex_encode(&oid);
-
-    // Upload to remote store if configured.
-    if let Ok(ctx) = super::store_setup::resolve_lfs_remote_sync() {
-        let upload_path = local_path.clone();
-        if let Err(e) = super::block_on_runtime(async move {
-            ctx.store
-                .put_stream(&oid, &upload_path)
-                .await
-                .map_err(CrabError::from)
-        }) {
-            tracing::debug!(
-                oid = %oid_hex,
-                error = %e,
-                "clean: failed to upload to remote (will be pushed later)",
-            );
-        }
-    }
 
     let pointer = crab_git::lfs_pointer::LfsPointer {
         oid,

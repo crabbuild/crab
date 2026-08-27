@@ -652,10 +652,6 @@ fn run_filter_loop<R: BufRead, W: Write>(
     if let Some(root) = resolve_current_worktree_root() {
         session.set_repo_root(root);
     }
-    if let Some(ref store) = lfs_store {
-        session.set_lfs_store(Arc::clone(store));
-    }
-
     loop {
         // Check for cancellation between operations.
         ctx.check_cancelled()?;
