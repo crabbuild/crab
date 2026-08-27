@@ -131,8 +131,8 @@ export default async function LibraryGuidePage({
   return (
     <MarketingLayout>
       <StructuredData data={structuredData} />
-      <article className="border-b border-border">
-        <section className="mx-auto max-w-6xl px-4 pt-24 pb-10 sm:px-6 lg:px-8 lg:pt-28">
+      <article className="relative border-b border-border min-[1400px]:[&_.wide-article-visual]:max-w-[54rem] min-[1400px]:[&_.wide-article-visual]:-translate-x-1/2">
+        <section className="mx-auto max-w-3xl px-4 pt-4 pb-10 sm:px-6 lg:px-8 lg:pt-8">
           <nav className="mb-8">
             <Link
               href="/library"
@@ -143,63 +143,68 @@ export default async function LibraryGuidePage({
             </Link>
           </nav>
 
-          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
-            <header>
-              <div className="flex flex-wrap items-center gap-2">
-                <Link href={getPathFilterHref(currentPost.path)}>
-                  <Badge variant="secondary" className="gap-1">
-                    <PathIcon size={12} />
-                    {learningPath.label} {currentPost.pathOrder}
-                  </Badge>
-                </Link>
-                <Link
-                  href={`/library?category=${encodeURIComponent(currentPost.category)}`}
-                >
-                  <Badge variant="outline" className="gap-1">
-                    <CategoryIcon size={12} />
-                    {currentPost.category}
-                  </Badge>
-                </Link>
-                <Badge variant="outline">{currentPost.level}</Badge>
-                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                  <Clock size={12} />
-                  {currentPost.readingTimeMinutes} min read
-                </span>
+          <header>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link href={getPathFilterHref(currentPost.path)}>
+                <Badge variant="secondary" className="gap-1">
+                  <PathIcon size={12} />
+                  {learningPath.label} {currentPost.pathOrder}
+                </Badge>
+              </Link>
+              <Link
+                href={`/library?category=${encodeURIComponent(currentPost.category)}`}
+              >
+                <Badge variant="outline" className="gap-1">
+                  <CategoryIcon size={12} />
+                  {currentPost.category}
+                </Badge>
+              </Link>
+              <Badge variant="outline">{currentPost.level}</Badge>
+              <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                <Clock size={12} />
+                {currentPost.readingTimeMinutes} min read
+              </span>
+            </div>
+
+            <h1 className="mt-5 max-w-4xl text-4xl font-bold tracking-tight sm:text-5xl">
+              {currentPost.title}
+            </h1>
+
+            <p className="mt-5 max-w-3xl text-lg leading-8 text-muted-foreground">
+              {currentPost.description}
+            </p>
+
+            <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+              <time dateTime={currentPost.date}>
+                {formatBlogDate(currentPost.date)}
+              </time>
+              <span aria-hidden="true">·</span>
+              <span>{currentPost.author.name}</span>
+            </div>
+
+            {currentPost.tags.length > 0 && (
+              <div className="mt-5 flex flex-wrap items-center gap-1.5">
+                <Tag size={14} className="text-muted-foreground" />
+                {currentPost.tags.map((tag) => (
+                  <Link
+                    key={tag}
+                    href={`/library?tag=${encodeURIComponent(tag)}`}
+                    className="rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+                  >
+                    {tag}
+                  </Link>
+                ))}
               </div>
+            )}
+          </header>
+        </section>
 
-              <h1 className="mt-5 max-w-4xl text-4xl font-bold tracking-tight sm:text-5xl">
-                {currentPost.title}
-              </h1>
-
-              <p className="mt-5 max-w-3xl text-lg leading-8 text-muted-foreground">
-                {currentPost.description}
-              </p>
-
-              <div className="mt-6 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                <time dateTime={currentPost.date}>
-                  {formatBlogDate(currentPost.date)}
-                </time>
-                <span aria-hidden="true">·</span>
-                <span>{currentPost.author.name}</span>
-              </div>
-
-              {currentPost.tags.length > 0 && (
-                <div className="mt-5 flex flex-wrap items-center gap-1.5">
-                  <Tag size={14} className="text-muted-foreground" />
-                  {currentPost.tags.map((tag) => (
-                    <Link
-                      key={tag}
-                      href={`/library?tag=${encodeURIComponent(tag)}`}
-                      className="rounded-full border border-border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-                    >
-                      {tag}
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </header>
-
-            <aside className="rounded-lg border border-border bg-card p-4 shadow-sm">
+        <div className="px-4 min-[1400px]:contents sm:px-6">
+          <aside
+            aria-label="Guide overview and navigation"
+            className="mx-auto w-full max-w-xl pb-10 min-[1400px]:absolute min-[1400px]:top-40 min-[1400px]:right-0 min-[1400px]:bottom-16 min-[1400px]:w-56 min-[1400px]:max-w-none min-[1400px]:pb-0 min-[1480px]:right-2 min-[1480px]:w-72"
+          >
+            <section className="rounded-lg border border-border bg-card p-4 shadow-sm">
               <div className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
                 What you will understand
               </div>
@@ -239,11 +244,16 @@ export default async function LibraryGuidePage({
                   </ul>
                 </div>
               )}
-            </aside>
-          </div>
-        </section>
+            </section>
 
-        <section className="mx-auto grid max-w-6xl gap-10 px-4 pb-16 has-[.wide-article-visual]:max-w-7xl sm:px-6 lg:grid-cols-[minmax(0,44rem)_18rem] lg:px-8 lg:has-[.wide-article-visual]:grid-cols-[minmax(0,1fr)_18rem]">
+            <div className="sticky top-24 mt-6 hidden space-y-6 min-[1400px]:block">
+              <LearningRail posts={pathPosts} currentPost={currentPost} />
+              <ConceptPanel post={currentPost} />
+            </div>
+          </aside>
+        </div>
+
+        <section className="mx-auto max-w-3xl min-w-0 px-4 pb-16 sm:px-6 lg:px-8">
           <div className="min-w-0">
             <div className="prose-neutral dark:prose-invert mx-auto prose max-w-[44rem] prose-headings:scroll-mt-24 prose-img:rounded-lg">
               <MDX components={getMDXComponents({})} />
@@ -255,13 +265,6 @@ export default async function LibraryGuidePage({
               />
             </div>
           </div>
-
-          <aside className="hidden lg:block">
-            <div className="sticky top-24 space-y-6">
-              <LearningRail posts={pathPosts} currentPost={currentPost} />
-              <ConceptPanel post={currentPost} />
-            </div>
-          </aside>
         </section>
       </article>
 
