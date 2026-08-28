@@ -96,6 +96,12 @@ LocalCache
 Mutable paths such as refs, `HEAD`, config, locks, and manifests go directly
 to origin. They are never cached by the service.
 
+Git fetch pack bodies and companion indexes use the same immutable route, but
+the client streams them directly to the temporary pack file. This keeps a
+large-clone cache hit off the Rust heap and enforces the manifest's pack-size
+commitment before Git installs the result. A cache miss or cache-service error
+falls back to the origin stream without changing the correctness boundary.
+
 Range reads ask the cache service first when service caching is enabled. The
 server serves warm ranges directly from cache. On a cold range miss, the server
 fetches and caches the full immutable object from origin, then returns the

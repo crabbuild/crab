@@ -890,6 +890,16 @@ async fn download_and_install<S: PackStore>(
         "downloaded pack to temporary file"
     );
 
+    if downloaded_bytes != pack_info.size {
+        return Err(CrabError::CorruptObject {
+            path: temp_path.display().to_string(),
+            reason: format!(
+                "downloaded pack has {downloaded_bytes} bytes, manifest advertises {}",
+                pack_info.size
+            ),
+        });
+    }
+
     let _install_permit = install_semaphore
         .acquire()
         .await
@@ -1451,6 +1461,34 @@ mod tests {
 
         let on_disk = std::fs::read(&expected).unwrap();
         assert_eq!(on_disk, &pack_data[..]);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_download_size_mismatch_before_installation() {
+        let tmp = temp_git_dir();
+        let pack_dir = tmp.path().join("objects/pack");
+        let pack_data = real_git_pack();
+        let store = TestPackStore::new(vec![("size-mismatch".to_owned(), pack_data.clone())]);
+        let pack_info = PackInfo {
+            pack_id: "size-mismatch".to_owned(),
+            size: pack_data.len() as u64 + 1,
+        };
+        let final_path = pack_dir.join(pack_filename(&pack_info.pack_id));
+
+        let error = download_and_install(
+            &pack_info,
+            &store,
+            &pack_dir,
+            &final_path,
+            &Semaphore::new(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
+        assert!(error.to_string().contains("manifest advertises"));
+        assert!(!final_path.exists());
+        assert_eq!(std::fs::read_dir(&pack_dir).unwrap().count(), 0);
     }
 
     #[tokio::test]

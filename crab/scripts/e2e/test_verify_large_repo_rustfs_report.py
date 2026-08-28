@@ -334,6 +334,34 @@ def valid_team_load() -> dict[str, Any]:
     }
 
 
+def valid_cache_service() -> dict[str, Any]:
+    return {
+        "configured": True,
+        "required": True,
+        "url": "http://127.0.0.1:19002",
+        "health_status": 200,
+        "capabilities_status": 200,
+        "capabilities_schema": "crab-cache-service.capabilities.v1",
+        "route_schema": "crab-cache-service.routes.v3",
+        "stats": {
+            "status": 200,
+            "error": None,
+            "pack": {
+                "cache_hits": 1,
+                "cache_misses": 1,
+                "origin_fetches": 1,
+                "origin_head_requests": 1,
+                "bytes_served_from_cache": 10,
+                "bytes_served_from_origin": 10,
+                "bytes_served_total": 20,
+                "push_warming_writes": 1,
+                "push_warming_bytes": 10,
+                "read_requests": 3,
+            },
+        },
+    }
+
+
 class ReportVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -353,6 +381,40 @@ class ReportVerificationTests(unittest.TestCase):
 
     def test_release_team_load_contract_requires_all_scenarios(self) -> None:
         VERIFY.verify_team_load(valid_team_load(), require_release_counts=True)
+
+    def test_required_cache_service_contract(self) -> None:
+        report = valid_report()
+        report["cache_service"] = valid_cache_service()
+        report["checks"].extend(
+            {
+                "name": name,
+                "ok": True,
+            }
+            for name in (
+                "cache-service-configured",
+                "cache-service-healthy",
+                "cache-service-capabilities",
+                "cache-service-admin-stats",
+                "cache-service-pack-traffic",
+            )
+        )
+        result = VERIFY.verify_report(
+            self.write("report.json", report),
+            allow_smoke=True,
+            require_cache_service=True,
+        )
+        self.assertEqual(result.replay_count, 3)
+
+    def test_required_cache_service_contract_rejects_missing_pack_traffic(self) -> None:
+        report = valid_report()
+        report["cache_service"] = valid_cache_service()
+        report["cache_service"]["stats"]["pack"]["read_requests"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "no Git pack read traffic"):
+            VERIFY.verify_report(
+                self.write("report.json", report),
+                allow_smoke=True,
+                require_cache_service=True,
+            )
 
     def test_team_load_missing_latency_field_is_rejected(self) -> None:
         report = valid_team_load()

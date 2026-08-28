@@ -2061,6 +2061,7 @@ dependencies = [
  "crab-xet",
  "crc32fast",
  "filetime",
+ "futures-util",
  "globset",
  "reqwest 0.12.28",
  "rusqlite",

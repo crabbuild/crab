@@ -28,6 +28,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +49,18 @@ MAX_GENERATION_OWNER_PASSES = 16
 REMOTE_ROOT = "e2e-large-repository"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
-SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+SECRET_KEYS = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CRAB_CACHE_PSK",
+    "CRAB_CACHE_TOKEN",
+}
+CACHE_SERVICE_URL_ENV = "CRAB_CACHE_SERVICE_URL"
+CACHE_SERVICE_PSK_ENV = "CRAB_CACHE_PSK"
+CACHE_SERVICE_TOKEN_ENV = "CRAB_CACHE_TOKEN"
+CACHE_SERVICE_CAPABILITIES_SCHEMA = "crab-cache-service.capabilities.v1"
+CACHE_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
 SCRIPT_DIR = Path(__file__).resolve().parent
 CRAB_DIR = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
@@ -130,6 +143,7 @@ class LargeRepositoryQualification:
         self.crab_bin = resolve_executable(args.crab_bin, "Crab binary")
         self.git_bin = resolve_executable(args.git_bin, "Git binary")
         self.aws_bin = resolve_executable(args.aws_bin, "AWS CLI")
+        self.cache_service_url = os.environ.get(CACHE_SERVICE_URL_ENV, "").strip()
         self.remote_prefix = f"{REMOTE_ROOT}/{self.run_id}"
         self.remote_url = f"crab://{args.bucket}/{self.remote_prefix}"
         self.command_index = 0
@@ -152,6 +166,16 @@ class LargeRepositoryQualification:
                 "bucket": args.bucket,
                 "prefix": self.remote_prefix,
                 "endpoint_url": args.endpoint_url,
+            },
+            "cache_service": {
+                "configured": bool(self.cache_service_url),
+                "required": args.require_cache_service,
+                "url": self.cache_service_url or None,
+                "health_status": None,
+                "capabilities_status": None,
+                "capabilities_schema": None,
+                "route_schema": None,
+                "stats": None,
             },
             "provenance": {},
             "commands": [],
@@ -213,6 +237,8 @@ class LargeRepositoryQualification:
                 self.args.access_key,
                 self.args.secret_key,
                 self.args.session_token,
+                self.env.get(CACHE_SERVICE_PSK_ENV),
+                self.env.get(CACHE_SERVICE_TOKEN_ENV),
             )
             if value and value != "crab"
         )
@@ -709,6 +735,7 @@ class LargeRepositoryQualification:
             )
         elif head["exit_code"] != 0:
             raise QualificationError(f"required bucket does not exist: {self.args.bucket}")
+        self.probe_cache_service()
         existing = self.list_remote_objects(limit=1)
         self.check(
             "isolated-remote-prefix",
@@ -720,6 +747,170 @@ class LargeRepositoryQualification:
             "endpoint_url": self.args.endpoint_url,
             "version": self.args.object_store_version,
         }
+        self.write_report()
+
+    def cache_service_request(
+        self, path: str, *, authenticated: bool
+    ) -> tuple[int, bytes, str | None]:
+        if not self.cache_service_url:
+            return 0, b"", "cache service URL is not configured"
+
+        headers: dict[str, str] = {}
+        if authenticated:
+            psk = self.env.get(CACHE_SERVICE_PSK_ENV)
+            token = self.env.get(CACHE_SERVICE_TOKEN_ENV)
+            if psk:
+                headers["X-Cache-PSK"] = psk
+            elif token:
+                headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            f"{self.cache_service_url.rstrip('/')}{path}",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=min(30, self.args.timeout)
+            ) as response:
+                return int(response.status), response.read(), None
+        except urllib.error.HTTPError as error:
+            return error.code, error.read(), f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            return 0, b"", str(error)
+
+    def probe_cache_service(self) -> None:
+        service = self.report["cache_service"]
+        if not self.cache_service_url:
+            detail = {"configured": False}
+            if self.args.require_cache_service:
+                self.check("cache-service-configured", False, detail)
+            self.write_report()
+            return
+
+        health_status, _health_body, health_error = self.cache_service_request(
+            "/v1/health", authenticated=False
+        )
+        capabilities_status, capabilities_body, capabilities_error = (
+            self.cache_service_request("/v1/capabilities", authenticated=True)
+        )
+        try:
+            capabilities = json.loads(capabilities_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            capabilities = {}
+        routes = capabilities.get("routes", {}) if isinstance(capabilities, dict) else {}
+        immutable_routes = routes.get("immutable", []) if isinstance(routes, dict) else []
+        route_patterns = {
+            item.get("pattern")
+            for item in immutable_routes
+            if isinstance(item, dict) and isinstance(item.get("pattern"), str)
+        }
+        required_routes = {
+            "{repo}/packs/pack-{id}.pack",
+            "{repo}/packs/pack-{id}.idx",
+        }
+        capabilities_ok = (
+            capabilities_status == 200
+            and isinstance(capabilities, dict)
+            and capabilities.get("schema") == CACHE_SERVICE_CAPABILITIES_SCHEMA
+            and isinstance(routes, dict)
+            and routes.get("schema") == CACHE_ROUTE_SCHEMA
+            and routes.get("transport_prefix") == "/v1/"
+            and required_routes.issubset(route_patterns)
+        )
+        service.update(
+            {
+                "configured": True,
+                "health_status": health_status,
+                "capabilities_status": capabilities_status,
+                "capabilities_schema": (
+                    capabilities.get("schema")
+                    if isinstance(capabilities, dict)
+                    else None
+                ),
+                "route_schema": routes.get("schema") if isinstance(routes, dict) else None,
+            }
+        )
+        if self.args.require_cache_service:
+            self.check(
+                "cache-service-configured",
+                True,
+                {"url": self.cache_service_url},
+            )
+            self.check(
+                "cache-service-healthy",
+                health_status == 200,
+                {"status": health_status, "error": health_error},
+            )
+            self.check(
+                "cache-service-capabilities",
+                capabilities_ok,
+                {
+                    "status": capabilities_status,
+                    "schema": service["capabilities_schema"],
+                    "route_schema": service["route_schema"],
+                    "error": capabilities_error,
+                },
+            )
+        self.write_report()
+
+    def collect_cache_service_stats(self) -> None:
+        if not self.cache_service_url:
+            return
+        status, body, error = self.cache_service_request(
+            "/v1/admin/stats", authenticated=True
+        )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        traffic = payload.get("traffic", {}) if isinstance(payload, dict) else {}
+        by_object_type = (
+            traffic.get("by_object_type", {}) if isinstance(traffic, dict) else {}
+        )
+        pack = by_object_type.get("pack", {}) if isinstance(by_object_type, dict) else {}
+        fields = (
+            "cache_hits",
+            "cache_misses",
+            "origin_fetches",
+            "origin_head_requests",
+            "bytes_served_from_cache",
+            "bytes_served_from_origin",
+            "bytes_served_total",
+            "push_warming_writes",
+            "push_warming_bytes",
+        )
+
+        def counter(source: Any, field: str) -> int:
+            value = source.get(field) if isinstance(source, dict) else None
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+        pack_stats = {field: counter(pack, field) for field in fields}
+        pack_stats["read_requests"] = sum(
+            pack_stats[field]
+            for field in (
+                "cache_hits",
+                "cache_misses",
+                "origin_head_requests",
+            )
+        )
+        service = self.report["cache_service"]
+        service["stats"] = {
+            "status": status,
+            "error": error,
+            "pack": pack_stats,
+        }
+        if self.args.require_cache_service:
+            stats_ok = status == 200 and isinstance(payload, dict) and isinstance(traffic, dict)
+            self.check(
+                "cache-service-admin-stats",
+                stats_ok,
+                {"status": status, "error": error},
+            )
+            self.check(
+                "cache-service-pack-traffic",
+                stats_ok and pack_stats["read_requests"] > 0,
+                {"pack": pack_stats},
+            )
         self.write_report()
 
     def list_remote_objects(self, limit: int | None = None) -> list[dict[str, Any]]:
@@ -1832,6 +2023,7 @@ class LargeRepositoryQualification:
             self.verify_source_unchanged()
             if self.args.team_load:
                 self.run_team_load(source_head)
+            self.collect_cache_service_stats()
             self.store_snapshot("final")
             self.summarize_metrics()
             self.cleanup_remote()
@@ -1911,6 +2103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-interval", type=float, default=0.20)
     parser.add_argument("--start-rustfs", action="store_true")
     parser.add_argument("--require-existing-bucket", action="store_true")
+    parser.add_argument("--require-cache-service", action="store_true")
     parser.add_argument("--cleanup-remote", action="store_true")
     parser.add_argument("--retain-worktrees", action="store_true")
     args = parser.parse_args()

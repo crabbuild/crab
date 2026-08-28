@@ -17,7 +17,13 @@ SCHEMA = "crab.large-repository-rustfs"
 VERSION = "1.2"
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+SECRET_KEYS = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CRAB_CACHE_PSK",
+    "CRAB_CACHE_TOKEN",
+}
 BASE_REQUIRED_CHECKS = {
     "workspace-volume",
     "source-is-git-repository",
@@ -347,11 +353,55 @@ def verify_team_results(
     require(ordinals == list(range(1, expected_count + 1)), f"{field} ordinals are not contiguous")
 
 
+def verify_cache_service(cache_service: Any) -> None:
+    require(isinstance(cache_service, dict), "cache_service must be an object")
+    require(cache_service.get("configured") is True, "cache service is not configured")
+    require(cache_service.get("required") is True, "cache service was not required")
+    require(
+        isinstance(cache_service.get("url"), str) and cache_service["url"],
+        "cache_service.url is missing",
+    )
+    require(cache_service.get("health_status") == 200, "cache service health check failed")
+    require(
+        cache_service.get("capabilities_status") == 200,
+        "cache service capabilities check failed",
+    )
+    require(
+        cache_service.get("capabilities_schema") == "crab-cache-service.capabilities.v1",
+        "cache service capabilities schema is invalid",
+    )
+    require(
+        cache_service.get("route_schema") == "crab-cache-service.routes.v3",
+        "cache service route schema is invalid",
+    )
+
+    stats = cache_service.get("stats")
+    require(isinstance(stats, dict), "cache_service.stats is missing")
+    require(stats.get("status") == 200, "cache service admin stats check failed")
+    pack = stats.get("pack")
+    require(isinstance(pack, dict), "cache_service.stats.pack is missing")
+    for field in (
+        "cache_hits",
+        "cache_misses",
+        "origin_fetches",
+        "origin_head_requests",
+        "bytes_served_from_cache",
+        "bytes_served_from_origin",
+        "bytes_served_total",
+        "push_warming_writes",
+        "push_warming_bytes",
+        "read_requests",
+    ):
+        require_nonnegative_int(pack.get(field), f"cache_service.stats.pack.{field}")
+    require(pack["read_requests"] > 0, "cache service recorded no Git pack read traffic")
+
+
 def verify_report(
     path: Path,
     *,
     allow_smoke: bool = False,
     require_team_load: bool = False,
+    require_cache_service: bool = False,
 ) -> Verification:
     report = load_report(path)
     require(report.get("schema") == SCHEMA, f"unsupported schema: {report.get('schema')!r}")
@@ -424,6 +474,9 @@ def verify_report(
             f"invalid provenance.{field}",
         )
 
+    if require_cache_service:
+        verify_cache_service(report.get("cache_service"))
+
     commands = report.get("commands")
     require(isinstance(commands, list) and commands, "commands must be a non-empty array")
     for index, command in enumerate(commands):
@@ -460,6 +513,16 @@ def verify_report(
         for checkpoint in {"seed", 1, 10, 100, replay_count}
         if checkpoint == "seed" or checkpoint <= replay_count
     )
+    if require_cache_service:
+        required_checks.update(
+            {
+                "cache-service-configured",
+                "cache-service-healthy",
+                "cache-service-capabilities",
+                "cache-service-admin-stats",
+                "cache-service-pack-traffic",
+            }
+        )
     cleanup = report.get("cleanup")
     require(isinstance(cleanup, dict), "cleanup must be an object")
     require(
@@ -691,17 +754,20 @@ def compare_reports(
     maximum_drift: float,
     allow_smoke: bool,
     require_team_load: bool = False,
+    require_cache_service: bool = False,
 ) -> dict[str, Any]:
     require(math.isfinite(maximum_drift) and maximum_drift >= 0, "maximum drift must be non-negative")
     baseline = verify_report(
         baseline_path,
         allow_smoke=allow_smoke,
         require_team_load=require_team_load,
+        require_cache_service=require_cache_service,
     )
     candidate = verify_report(
         candidate_path,
         allow_smoke=allow_smoke,
         require_team_load=require_team_load,
+        require_cache_service=require_cache_service,
     )
     require(baseline.profile == candidate.profile, "report profiles differ")
     require(baseline.source_revision == candidate.source_revision, "source revisions differ")
@@ -766,6 +832,7 @@ def parse_args() -> argparse.Namespace:
     verify.add_argument("report", type=Path)
     verify.add_argument("--allow-smoke", action="store_true")
     verify.add_argument("--require-team-load", action="store_true")
+    verify.add_argument("--require-cache-service", action="store_true")
     verify.add_argument("--output", type=Path)
 
     compare = subparsers.add_parser("compare", help="verify and compare two reports")
@@ -774,6 +841,7 @@ def parse_args() -> argparse.Namespace:
     compare.add_argument("--maximum-drift", type=float, default=0.20)
     compare.add_argument("--allow-smoke", action="store_true")
     compare.add_argument("--require-team-load", action="store_true")
+    compare.add_argument("--require-cache-service", action="store_true")
     compare.add_argument("--output", type=Path)
 
     args = parser.parse_args()
@@ -790,6 +858,7 @@ def main() -> int:
                 maximum_drift=args.maximum_drift,
                 allow_smoke=args.allow_smoke,
                 require_team_load=args.require_team_load,
+                require_cache_service=args.require_cache_service,
             )
             write_output(payload, args.output)
             if payload["status"] != "ok":
@@ -800,6 +869,7 @@ def main() -> int:
                 args.report,
                 allow_smoke=getattr(args, "allow_smoke", False),
                 require_team_load=getattr(args, "require_team_load", False),
+                require_cache_service=getattr(args, "require_cache_service", False),
             )
             payload = {
                 "schema": "crab.large-repository-rustfs-verification",

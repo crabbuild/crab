@@ -24,6 +24,86 @@ struct DedupQueryRequest {
     chunk_hashes: Vec<String>,
 }
 
+/// A cache-service response that can be consumed without buffering its body.
+pub struct CacheObjectStream {
+    response: reqwest::Response,
+    content_length: Option<u64>,
+    url: String,
+}
+
+impl CacheObjectStream {
+    /// Return the response's advertised full-object length, when present.
+    #[must_use]
+    pub fn content_length(&self) -> Option<u64> {
+        self.content_length
+    }
+
+    /// Convert the response body into a bounded-memory stream of cache errors.
+    pub fn into_stream(self) -> impl futures_util::Stream<Item = Result<Bytes>> + Send + 'static {
+        use futures_util::StreamExt as _;
+
+        let expected = self.content_length;
+        let url = self.url;
+        let stream = self.response.bytes_stream().boxed();
+        futures_util::stream::unfold(
+            (stream, expected, 0_u64, url, false),
+            |(mut stream, expected, received, url, done)| async move {
+                if done {
+                    return None;
+                }
+
+                match stream.next().await {
+                    Some(Ok(chunk)) => {
+                        let next = match received.checked_add(chunk.len() as u64) {
+                            Some(next) => next,
+                            None => {
+                                return Some((
+                                    Err(CacheError::Service {
+                                        reason: format!(
+                                            "cache service response length overflow: {url}"
+                                        ),
+                                    }),
+                                    (stream, expected, received, url, true),
+                                ));
+                            }
+                        };
+                        if expected.is_some_and(|expected| next > expected) {
+                            return Some((
+                                Err(CacheError::Service {
+                                    reason: format!(
+                                        "cache service response exceeded Content-Length: {url}"
+                                    ),
+                                }),
+                                (stream, expected, received, url, true),
+                            ));
+                        }
+                        Some((Ok(chunk), (stream, expected, next, url, false)))
+                    }
+                    Some(Err(error)) => Some((
+                        Err(map_reqwest_error(&url, error)),
+                        (stream, expected, received, url, true),
+                    )),
+                    None => {
+                        if let Some(expected) = expected
+                            && expected != received
+                        {
+                            return Some((
+                                Err(CacheError::Service {
+                                    reason: format!(
+                                        "cache service response ended at {received} bytes, expected {expected}: {url}"
+                                    ),
+                                }),
+                                (stream, Some(expected), received, url, true),
+                            ));
+                        }
+                        None
+                    }
+                }
+            },
+        )
+    }
+}
+
 /// HTTP client for the crab cache service.
 #[derive(Clone, Debug)]
 pub struct CacheClient {
@@ -116,6 +196,119 @@ impl CacheClient {
 
         check_get_status(&url, &resp)?;
         resp.bytes().await.map_err(|e| map_reqwest_error(&url, e))
+    }
+
+    /// GET an immutable object without collecting its response body.
+    ///
+    /// A `404 Not Found` is a cache miss and returns `Ok(None)`. The caller
+    /// owns the returned stream and therefore controls backpressure and when
+    /// the HTTP response is dropped.
+    pub async fn get_stream(&self, path: &str) -> Result<Option<CacheObjectStream>> {
+        let url = format!("{}/v1/{}", self.base_url, path);
+        let req = self.client.get(&url);
+        let resp = self
+            .apply_auth(req)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(&url, e))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check_get_status(&url, &resp)?;
+        let content_length = resp.content_length();
+        Ok(Some(CacheObjectStream {
+            response: resp,
+            content_length,
+            url,
+        }))
+    }
+
+    /// Stream an immutable object to a local file without collecting its body.
+    ///
+    /// A `404 Not Found` is a cache miss and returns `Ok(None)`. Other
+    /// service failures remain errors so callers can record the failed cache
+    /// leg before falling back to the authoritative origin. The destination
+    /// is removed when the response is malformed, exceeds `max_bytes`, or
+    /// cannot be written completely.
+    #[cfg(feature = "remote-client")]
+    pub async fn download_to_path_bounded(
+        &self,
+        path: &str,
+        dest: &Path,
+        max_bytes: u64,
+    ) -> Result<Option<u64>> {
+        let url = format!("{}/v1/{}", self.base_url, path);
+        let _ = tokio::fs::remove_file(dest).await;
+        let req = self.client.get(&url);
+        let mut resp = self
+            .apply_auth(req)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(&url, e))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check_get_status(&url, &resp)?;
+        let expected_content_length = resp.content_length();
+        if expected_content_length.is_some_and(|size| size > max_bytes) {
+            return Err(CacheError::CorruptObject {
+                path: path.to_owned(),
+                reason: format!(
+                    "cache service object exceeds bounded download limit of {max_bytes} bytes"
+                ),
+            });
+        }
+
+        let result = async {
+            use tokio::io::AsyncWriteExt;
+
+            let mut file = tokio::fs::File::create(dest).await?;
+            let mut written = 0u64;
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| map_reqwest_error(&url, e))?
+            {
+                let next = written
+                    .checked_add(chunk.len() as u64)
+                    .ok_or_else(|| CacheError::CorruptObject {
+                        path: path.to_owned(),
+                        reason: "cache service response length overflow".to_owned(),
+                    })?;
+                if next > max_bytes {
+                    return Err(CacheError::CorruptObject {
+                        path: path.to_owned(),
+                        reason: format!(
+                            "cache service response exceeded bounded download limit of {max_bytes} bytes"
+                        ),
+                    });
+                }
+                file.write_all(&chunk).await?;
+                written = next;
+            }
+            file.flush().await?;
+            if expected_content_length.is_some_and(|expected| expected != written) {
+                return Err(CacheError::CorruptObject {
+                    path: path.to_owned(),
+                    reason: "cache service response length does not match Content-Length".to_owned(),
+                });
+            }
+            Ok(Some(written))
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(dest).await;
+        }
+        result
+    }
+
+    /// Stream an immutable object to a local file without buffering it.
+    #[cfg(feature = "remote-client")]
+    pub async fn download_to_path(&self, path: &str, dest: &Path) -> Result<Option<u64>> {
+        self.download_to_path_bounded(path, dest, u64::MAX).await
     }
 
     /// GET an immutable object while bounding response-body consumption.
@@ -897,6 +1090,81 @@ mod tests {
         let data = client.get("xorbs/test").await.unwrap();
 
         assert_eq!(data, Bytes::from_static(b"full object"));
+        let _ = shutdown.send(());
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn download_to_path_streams_full_object_without_buffering() {
+        let (addr, shutdown) = start_range_server(StatusCode::OK, None, b"pack body").await;
+        let client = CacheClient::new(
+            &format!("http://{addr}"),
+            &CacheServiceAuth::None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let dest = tempdir.path().join("pack.pack");
+
+        let written = client
+            .download_to_path("repo/packs/pack-test.pack", &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(written, Some(9));
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"pack body");
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn get_stream_rejects_truncated_body() {
+        use futures_util::StreamExt as _;
+
+        let (addr, shutdown) = start_range_server(StatusCode::OK, None, b"short").await;
+        let client = CacheClient::new(
+            &format!("http://{addr}"),
+            &CacheServiceAuth::None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut response = client
+            .get_stream("repo/packs/pack-test.pack")
+            .await
+            .unwrap()
+            .unwrap();
+        response.content_length = Some(12);
+        let chunks: Vec<_> = response.into_stream().collect().await;
+
+        assert!(chunks.iter().any(|chunk| chunk.is_err()));
+        let _ = shutdown.send(());
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn bounded_download_removes_partial_file_when_body_exceeds_limit() {
+        let (addr, shutdown) = start_range_server(StatusCode::OK, None, b"too large").await;
+        let client = CacheClient::new(
+            &format!("http://{addr}"),
+            &CacheServiceAuth::None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let dest = tempdir.path().join("pack.pack");
+
+        let error = client
+            .download_to_path_bounded("repo/packs/pack-test.pack", &dest, 3)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("bounded download limit"));
+        assert!(!dest.exists());
         let _ = shutdown.send(());
     }
 

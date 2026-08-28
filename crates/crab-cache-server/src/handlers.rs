@@ -59,6 +59,7 @@ struct CachedFetch {
 
 enum CachedFetchBody {
     Bytes(Bytes),
+    OpenFile { file: std::fs::File, size: u64 },
     CachedFile { path: PathBuf, size: u64 },
 }
 
@@ -66,6 +67,7 @@ impl CachedFetchBody {
     fn len_u64(&self) -> u64 {
         match self {
             Self::Bytes(data) => data.len() as u64,
+            Self::OpenFile { size, .. } => *size,
             Self::CachedFile { size, .. } => *size,
         }
     }
@@ -344,21 +346,44 @@ pub async fn read_object(
     }
 
     if cached_object_valid_for_read(&state, &cache_key, &hash) {
-        // Cache hit — return cached bytes directly.
-        match state.cache_store.get(&cache_key) {
-            Ok(Some(data)) => {
-                state.metrics.record_cache_hit(object_type);
-                state
-                    .metrics
-                    .record_bytes_served(object_type, data.len() as u64, true);
-                debug!(hash = %hash, size = data.len(), "cache hit");
-                return build_ok_response(data, &hash, CACHE_HIT);
+        if matches!(
+            object_type,
+            ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+        ) {
+            // Keep large immutable cache hits file-backed so a pack does not
+            // consume one response-sized allocation on the cache server.
+            match state.cache_store.get_file(&cache_key) {
+                Ok(Some(cached)) => {
+                    state.metrics.record_cache_hit(object_type);
+                    state
+                        .metrics
+                        .record_bytes_served(object_type, cached.size, true);
+                    debug!(hash = %hash, size = cached.size, "cache hit");
+                    return build_file_response(cached.file, cached.size, &hash, CACHE_HIT);
+                }
+                Ok(None) => {
+                    debug!(hash = %hash, "cache miss, fetching from origin");
+                }
+                Err(e) => {
+                    warn!(hash = %hash, error = %e, "cache store read error, falling through to origin");
+                }
             }
-            Ok(None) => {
-                debug!(hash = %hash, "cache miss, fetching from origin");
-            }
-            Err(e) => {
-                warn!(hash = %hash, error = %e, "cache store read error, falling through to origin");
+        } else {
+            match state.cache_store.get(&cache_key) {
+                Ok(Some(data)) => {
+                    state.metrics.record_cache_hit(object_type);
+                    state
+                        .metrics
+                        .record_bytes_served(object_type, data.len() as u64, true);
+                    debug!(hash = %hash, size = data.len(), "cache hit");
+                    return build_ok_response(data, &hash, CACHE_HIT);
+                }
+                Ok(None) => {
+                    debug!(hash = %hash, "cache miss, fetching from origin");
+                }
+                Err(e) => {
+                    warn!(hash = %hash, error = %e, "cache store read error, falling through to origin");
+                }
             }
         }
     } else {
@@ -1557,21 +1582,47 @@ async fn fetch_and_cache_data_locked(
     joined_existing_fill: bool,
 ) -> std::result::Result<CachedFetch, Response> {
     if cached_object_valid_for_read(state, key, expected_hash) {
-        match state.cache_store.get(key) {
-            Ok(Some(data)) => {
-                if joined_existing_fill {
-                    state.metrics.record_coalesced_miss(key.object_type);
+        if matches!(
+            key.object_type,
+            ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+        ) {
+            match state.cache_store.get_file(key) {
+                Ok(Some(cached)) => {
+                    if joined_existing_fill {
+                        state.metrics.record_coalesced_miss(key.object_type);
+                    }
+                    state.metrics.record_cache_hit(key.object_type);
+                    debug!(hash = %expected_hash, size = cached.size, "cache filled while waiting on miss lock");
+                    return Ok(CachedFetch {
+                        body: CachedFetchBody::OpenFile {
+                            file: cached.file,
+                            size: cached.size,
+                        },
+                        cache_status: CACHE_HIT,
+                    });
                 }
-                state.metrics.record_cache_hit(key.object_type);
-                debug!(hash = %expected_hash, size = data.len(), "cache filled while waiting on miss lock");
-                return Ok(CachedFetch {
-                    body: CachedFetchBody::Bytes(data),
-                    cache_status: CACHE_HIT,
-                });
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(hash = %expected_hash, error = %e, "cache store recheck failed, fetching from origin");
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(hash = %expected_hash, error = %e, "cache store recheck failed, fetching from origin");
+        } else {
+            match state.cache_store.get(key) {
+                Ok(Some(data)) => {
+                    if joined_existing_fill {
+                        state.metrics.record_coalesced_miss(key.object_type);
+                    }
+                    state.metrics.record_cache_hit(key.object_type);
+                    debug!(hash = %expected_hash, size = data.len(), "cache filled while waiting on miss lock");
+                    return Ok(CachedFetch {
+                        body: CachedFetchBody::Bytes(data),
+                        cache_status: CACHE_HIT,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(hash = %expected_hash, error = %e, "cache store recheck failed, fetching from origin");
+                }
             }
         }
     }
@@ -1669,6 +1720,26 @@ async fn commit_origin_fill_or_read_temp(
             if key.object_type == ObjectType::Shard {
                 ingest_committed_shard(state, key).await;
             }
+            if matches!(
+                key.object_type,
+                ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+            ) {
+                return match state.cache_store.get_file(key) {
+                    Ok(Some(cached)) => Ok(CachedFetchBody::OpenFile {
+                        file: cached.file,
+                        size: cached.size,
+                    }),
+                    Ok(None) => Err(CacheServiceError::InternalError(
+                        format!(
+                            "committed cache object disappeared before it could be streamed: {}",
+                            key.hash
+                        )
+                        .into(),
+                    )
+                    .into_response()),
+                    Err(error) => Err(error.into_response()),
+                };
+            }
             Ok(CachedFetchBody::CachedFile {
                 path: state.cache_store.object_path(key),
                 size,
@@ -1764,9 +1835,27 @@ fn build_ok_response(data: Bytes, hash: &str, cache_status: &str) -> Response {
         .into_response()
 }
 
+fn build_file_response(file: std::fs::File, size: u64, hash: &str, cache_status: &str) -> Response {
+    let body = Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file)));
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_LENGTH, size.to_string()),
+            (header::ETAG, format!("\"{hash}\"")),
+            (header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL.to_string()),
+            (CACHE_STATUS_HEADER, cache_status.to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn build_ok_fetch_response(fetched: CachedFetch, hash: &str) -> Response {
     match fetched.body {
         CachedFetchBody::Bytes(data) => build_ok_response(data, hash, fetched.cache_status),
+        CachedFetchBody::OpenFile { file, size } => {
+            build_file_response(file, size, hash, fetched.cache_status)
+        }
         CachedFetchBody::CachedFile { path, size } => {
             let file = match tokio::fs::File::open(&path).await {
                 Ok(file) => file,
@@ -1831,10 +1920,51 @@ async fn slice_cached_fetch_body(
             let total_size = data.len() as u64;
             Ok(slice_body_range(data, range).map(|(data, range)| (data, range, total_size)))
         }
+        CachedFetchBody::OpenFile { file, size } => {
+            let file = file.try_clone().map_err(|e| {
+                CacheServiceError::InternalError(
+                    format!("failed to clone cached range file: {e}").into(),
+                )
+                .into_response()
+            })?;
+            read_open_file_range(tokio::fs::File::from_std(file), *size, range).await
+        }
         CachedFetchBody::CachedFile { path, size } => {
             read_cached_file_range(path, *size, range).await
         }
     }
+}
+
+async fn read_open_file_range(
+    mut file: tokio::fs::File,
+    total_size: u64,
+    range: &std::ops::Range<u64>,
+) -> std::result::Result<Option<(Bytes, std::ops::Range<u64>, u64)>, Response> {
+    if range.start >= total_size {
+        return Ok(None);
+    }
+    let end = range.end.min(total_size);
+    if range.start >= end {
+        return Ok(None);
+    }
+
+    let len = usize::try_from(end - range.start).map_err(|_| {
+        CacheServiceError::BadRequest {
+            reason: "requested range is too large to serve".to_string(),
+        }
+        .into_response()
+    })?;
+    file.seek(SeekFrom::Start(range.start)).await.map_err(|e| {
+        CacheServiceError::InternalError(format!("failed to seek cached range file: {e}").into())
+            .into_response()
+    })?;
+    let mut data = vec![0u8; len];
+    file.read_exact(&mut data).await.map_err(|e| {
+        CacheServiceError::InternalError(format!("failed to read cached range file: {e}").into())
+            .into_response()
+    })?;
+
+    Ok(Some((Bytes::from(data), range.start..end, total_size)))
 }
 
 async fn read_cached_file_range(
@@ -2527,6 +2657,41 @@ mod tests {
         assert_eq!(slice, fixture.bytes.slice(5..fixture.bytes.len()));
         assert_eq!(returned_range, 5..fixture.bytes.len() as u64);
         assert_eq!(total_size, fixture.bytes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn fetch_and_cache_data_keeps_pack_origin_fill_file_backed() {
+        let body = Bytes::from_static(b"pack origin fill remains file backed");
+        let object_path = "org/repo/packs/pack-pack-fill.pack";
+        let origin = Arc::new(InMemory::new());
+        origin
+            .put(&ObjectPath::from(object_path), body.clone().into())
+            .await
+            .unwrap();
+        let TestDedupState { state, _tempdir } = test_dedup_state_with_origin(origin);
+        let key = ServerObjectKey {
+            bucket: String::new(),
+            repo_path: "org/repo".to_string(),
+            object_type: ObjectType::Pack,
+            hash: "pack-fill".to_string(),
+        };
+
+        let fetched = fetch_and_cache_data(&state, &key, object_path, "pack-fill", Instant::now())
+            .await
+            .unwrap();
+        let CachedFetchBody::OpenFile { file, size } = fetched.body else {
+            panic!("cold pack fill should return an open cache file");
+        };
+        assert_eq!(size, body.len() as u64);
+        let fetched_body = CachedFetchBody::OpenFile { file, size };
+
+        let (slice, returned_range, total_size) = slice_cached_fetch_body(&fetched_body, &(5..500))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slice, body.slice(5..body.len()));
+        assert_eq!(returned_range, 5..body.len() as u64);
+        assert_eq!(total_size, body.len() as u64);
     }
 
     #[tokio::test]

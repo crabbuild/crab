@@ -802,10 +802,26 @@ async fn run_remote_helper_with_context(
                     &cancel,
                 )
                 .await;
+                // Bind the cache facade to the selected primary or replica.
+                // Reusing the primary facade after replica routing would read
+                // a different repository view than the pinned layout.
+                let stateless_store = match crab_cache_store::CachingStore::new(
+                    read_store.clone(),
+                    &cache.config().cache,
+                ) {
+                    Ok(cache) => cache.cache_aware_storage(),
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to build selected-read cache facade, using selected store directly"
+                        );
+                        read_store.as_storage().clone()
+                    }
+                };
                 crate::git::upload_pack_wire::serve(
                     &mut reader,
                     &mut writer,
-                    read_store.as_storage(),
+                    &stateless_store,
                     read_router.repo_prefix(),
                     &hidden_ref_patterns,
                     &fetch_policy,
@@ -2203,7 +2219,24 @@ impl RemoteFetchStore {
         dest: &std::path::Path,
     ) -> Result<u64> {
         let path = self.router.pack_path(pack_id);
-        self.store.download_to_path(&path, dest).await
+        let expected_size = self
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == pack_id)
+            .map(|pack| pack.size)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: "pack is absent from the pinned manifest inventory".to_owned(),
+            })?;
+        if let Some(caching_store) = &self.caching_store {
+            return caching_store
+                .download_to_path_bounded(&path, dest, expected_size)
+                .await
+                .map_err(Into::into);
+        }
+        self.store
+            .download_to_path_bounded(&path, dest, expected_size)
+            .await
     }
 }
 
@@ -2227,7 +2260,14 @@ impl PackStore for RemoteFetchStore {
     async fn validate_pack_index(&self, pack_id: &str) -> Result<Option<String>> {
         let path = self.router.pack_index_path(pack_id);
         let temp = tempfile::NamedTempFile::new()?;
-        self.store.download_to_path(&path, temp.path()).await?;
+        if let Some(caching_store) = &self.caching_store {
+            caching_store
+                .download_to_path(&path, temp.path())
+                .await
+                .map_err(CrabError::from)?;
+        } else {
+            self.store.download_to_path(&path, temp.path()).await?;
+        }
         let display_path = path.to_string();
         let checksum = tokio::task::spawn_blocking(move || {
             crab_git::pack::verify_pack_index_file(temp.path())
