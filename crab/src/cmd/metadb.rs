@@ -591,14 +591,9 @@ async fn generation_owner_sample(
     };
     let active_packs = u64::try_from(packs.len()).unwrap_or(u64::MAX);
     let active_pack_bytes = packs.iter().map(|pack| pack.size).sum();
-    let geometric_repack_packs = u64::try_from(crab_git::repack::geometric_repack_cut(
-        &packs
-            .iter()
-            .map(|pack| pack.object_count)
-            .collect::<Vec<_>>(),
-        2,
-    ))
-    .unwrap_or(u64::MAX);
+    let geometric_repack_packs =
+        u64::try_from(crate::cmd::repack::generation_owner_repack_count(&packs))
+            .unwrap_or(u64::MAX);
     let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
     let (locator_advanced, catalog, locator_sweep) =
         maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel).await?;

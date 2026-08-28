@@ -159,6 +159,14 @@ path, while automatic owner work cannot monopolize one repository's
 maintenance lease. The bounded selector has unit coverage; sustained
 10,000-push owner convergence and interruption evidence remain open.
 
+The background owner now adds an incremental pack-tier accumulation gate. A
+single undersized pack is retained while lower-tier siblings accumulate; once
+their verified compressed bytes are comparable to the next tier, only that
+suffix is promoted and the largest stable pack remains untouched. This avoids
+rewriting a repository-sized pack on every small push while preserving the
+explicit full geometric policy for operator-invoked `crab repack`; sustained
+10,000-push convergence and interruption evidence remain open.
+
 The regular post-CAS locator publication now uses the same uncovered-pack
 budget (`88deb4e0`). Its snapshot is taken while holding the repository locator
 lock, so stable historical packs do not make an ordinary small push start a

@@ -302,19 +302,33 @@ async fn run_repack_locked(
             .checked_add(pack.size)
             .ok_or_else(|| CrabError::Internal("pack inventory byte total overflow".to_owned()))
     })?;
-    packs.sort_unstable_by(|left, right| {
-        right
-            .object_count
-            .cmp(&left.object_count)
-            .then_with(|| left.pack_id.cmp(&right.pack_id))
-    });
-    let geometric_count = crab_git::repack::geometric_repack_cut(
-        &packs
-            .iter()
-            .map(|pack| pack.object_count)
-            .collect::<Vec<_>>(),
-        2,
-    );
+    if budget.is_some() {
+        packs.sort_unstable_by(|left, right| {
+            right
+                .size
+                .cmp(&left.size)
+                .then_with(|| right.object_count.cmp(&left.object_count))
+                .then_with(|| left.pack_id.cmp(&right.pack_id))
+        });
+    } else {
+        packs.sort_unstable_by(|left, right| {
+            right
+                .object_count
+                .cmp(&left.object_count)
+                .then_with(|| left.pack_id.cmp(&right.pack_id))
+        });
+    }
+    let geometric_count = if budget.is_some() {
+        generation_owner_repack_count(&packs)
+    } else {
+        crab_git::repack::geometric_repack_cut(
+            &packs
+                .iter()
+                .map(|pack| pack.object_count)
+                .collect::<Vec<_>>(),
+            2,
+        )
+    };
     let selection = match select_repack_packs(&packs, geometric_count, budget, start.elapsed())? {
         Ok(selection) => selection,
         Err(deferral) => {
@@ -631,6 +645,13 @@ async fn run_repack_locked(
         ),
         bounded: selection.bounded,
     })
+}
+
+pub(crate) fn generation_owner_repack_count(packs: &[PackManifestEntry]) -> usize {
+    crab_git::repack::incremental_repack_cut(
+        &packs.iter().map(|pack| pack.size).collect::<Vec<_>>(),
+        2,
+    )
 }
 
 fn outcome(
@@ -1285,6 +1306,20 @@ mod tests {
             .expect_err("selection should be deferred");
         assert_eq!(deferral.resource, "elapsed_ms");
         assert_eq!(deferral.maximum, 1_000);
+    }
+
+    #[test]
+    fn generation_owner_repack_waits_for_small_pack_accumulation() {
+        let packs = vec![
+            budget_pack(900, 900),
+            budget_pack(700, 700),
+            budget_pack(9, 9),
+        ];
+        assert_eq!(generation_owner_repack_count(&packs), 0);
+
+        let mut accumulated = packs;
+        accumulated.push(budget_pack(9, 8));
+        assert_eq!(generation_owner_repack_count(&accumulated), 2);
     }
 
     #[test]

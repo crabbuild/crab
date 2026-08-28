@@ -157,6 +157,40 @@ pub fn geometric_repack_cut(object_counts: &[u64], factor: u64) -> usize {
     counts.len()
 }
 
+/// Return the smallest suffix worth coalescing during background maintenance.
+///
+/// `weights` are sorted internally in descending order, normally using
+/// verified compressed pack bytes. The smallest tier is promoted only after it
+/// has accumulated enough weight to be comparable with its next tier, and the
+/// largest pack is left untouched whenever a lower-tier promotion is possible.
+/// A two-pack inventory is returned as one final consolidation step.
+#[must_use]
+pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
+    if factor < 2 || weights.len() < 2 {
+        return 0;
+    }
+    let mut weights = weights.to_vec();
+    weights.sort_unstable_by(|left, right| right.cmp(left));
+
+    let mut selected_count = 1;
+    let mut selected_weight = weights[weights.len() - 1];
+    for candidate_index in (1..weights.len().saturating_sub(1)).rev() {
+        let candidate_weight = weights[candidate_index];
+        if selected_weight.saturating_mul(factor) <= candidate_weight {
+            break;
+        }
+        selected_count += 1;
+        selected_weight = selected_weight.saturating_add(candidate_weight);
+    }
+    if selected_count > 1 {
+        selected_count
+    } else if weights.len() == 2 {
+        2
+    } else {
+        0
+    }
+}
+
 /// Consolidates source packs using Git's geometric pack policy.
 pub fn repack_repository_geometric(
     sources: &[RepackSource],
@@ -719,6 +753,18 @@ mod tests {
     #[test]
     fn geometric_cut_rolls_every_pack_when_no_stable_prefix_exists() {
         assert_eq!(geometric_repack_cut(&[100, 60, 1], 2), 3);
+    }
+
+    #[test]
+    fn incremental_cut_waits_for_a_lower_pack_tier_before_rewriting_large_packs() {
+        assert_eq!(incremental_repack_cut(&[900, 700, 9], 2), 0);
+        assert_eq!(incremental_repack_cut(&[900, 700, 9, 9], 2), 2);
+        assert_eq!(incremental_repack_cut(&[900, 700], 2), 2);
+    }
+
+    #[test]
+    fn incremental_cut_keeps_the_largest_pack_out_of_lower_tier_promotions() {
+        assert_eq!(incremental_repack_cut(&[900, 700, 600, 400], 2), 3);
     }
 
     #[test]
