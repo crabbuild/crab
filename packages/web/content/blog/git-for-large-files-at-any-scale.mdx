@@ -264,13 +264,20 @@ The grace window protects concurrent or interrupted writers. Repository scope pr
 
 Crab is not the answer to every large object.
 
-| Approach          | Strong fit                                  | Trade-off                                               |
-| ----------------- | ------------------------------------------- | ------------------------------------------------------- |
-| Ordinary Git      | source + small files                        | binary versions inflate packs and clones                |
-| Git LFS           | familiar pointer workflow                   | whole-file storage + separate service path              |
-| Artifact registry | published build outputs                     | not a branch-history or worktree model                  |
-| Dataset system    | lineage, metrics, domain catalog            | code and data may live in separate histories            |
-| Crab              | mixed repositories + related large versions | adds a CLI, pointer contract, and repository operations |
+| Approach          | Strong fit                                           | Trade-off                                    |
+| ----------------- | ---------------------------------------------------- | -------------------------------------------- |
+| Ordinary Git      | source + small files                                 | binary versions inflate packs and clones     |
+| Hosted Git LFS    | familiar pointer workflow                            | whole-file storage + separate service path   |
+| Artifact registry | published build outputs                              | not a branch-history or worktree model       |
+| Dataset system    | lineage, metrics, domain catalog                     | code and data may live in separate histories |
+| Crab              | mixed repos + related versions + LFS compatibility  | requires Crab clients + object-store access  |
+
+<TakeawayBox title="Git LFS, without an LFS server">
+  Crab natively supports standard Git LFS pointers and commands. Its local
+  transfer agent reads and writes whole-file LFS objects directly to your S3,
+  GCS, Azure, or S3-compatible object store—without an LFS server or HTTP
+  gateway. LFS paths and chunked Crab paths can coexist in one repository.
+</TakeawayBox>
 
 Use ordinary Git when it already works. Crab leaves unmatched paths alone.
 
