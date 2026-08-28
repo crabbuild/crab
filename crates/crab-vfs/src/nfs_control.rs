@@ -1157,6 +1157,29 @@ async fn refresh_runtime(state: &NfsControlState) -> Result<NfsControlUpdate> {
     .map_err(|error| CrabError::Internal(format!("NFS refresh task failed: {error}")))?
 }
 
+pub(crate) fn spawn_auto_refresh(
+    state: NfsControlState,
+    interval: Duration,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(interval) => {}
+            }
+            match refresh_runtime(&state).await {
+                Ok(update) => debug!(
+                    generation = update.generation,
+                    head_oid = %update.head_oid,
+                    "NFS mount auto-refresh completed"
+                ),
+                Err(error) => warn!(error = %error, "NFS mount auto-refresh failed"),
+            }
+        }
+    })
+}
+
 async fn switch_runtime(state: &NfsControlState, new_ref: String) -> Result<NfsControlUpdate> {
     let runtime = state
         .runtime

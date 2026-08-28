@@ -10,6 +10,7 @@ on:
       - "crab/Cargo.toml"
       - "crab/Makefile"
       - "crab/scripts/release/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/run-mount-large-rustfs-smoke.sh"
       - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
       - "crab/scripts/nfs-evidence-summary.py"
       - "crab/scripts/nfs-read-path-bench-report.py"
@@ -20,6 +21,7 @@ on:
       - "crab/src/cmd/mount.rs"
       - "crab/src/vfs/**"
       - "crab/tests/prop_coordinator.rs"
+      - "crates/crab-vfs/**"
   pull_request:
     paths:
       - ".github/workflows/nfs-mount.yml"
@@ -28,6 +30,7 @@ on:
       - "crab/Cargo.toml"
       - "crab/Makefile"
       - "crab/scripts/release/dispatch-nfs-release-evidence.sh"
+      - "crab/scripts/docker/run-mount-large-rustfs-smoke.sh"
       - "crab/scripts/docker/run-mount-nfs-linux-smoke.sh"
       - "crab/scripts/nfs-evidence-summary.py"
       - "crab/scripts/nfs-read-path-bench-report.py"
@@ -38,6 +41,7 @@ on:
       - "crab/src/cmd/mount.rs"
       - "crab/src/vfs/**"
       - "crab/tests/prop_coordinator.rs"
+      - "crates/crab-vfs/**"
   workflow_dispatch:
     inputs:
       nfs_smoke_baseline_run_id:
@@ -141,6 +145,34 @@ jobs:
         with:
           name: nfs-smoke-linux-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.CRAB_NFS_SMOKE_ROOT }}/${{ env.CRAB_NFS_SMOKE_RUN_ID }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  linux-rustfs-xet-smoke:
+    name: Linux NFS RustFS/Xet E2E
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: feature-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CRAB_MOUNT_SMOKE_ROOT: ${{ github.workspace }}/.ci/crab-nfs-rustfs
+      CRAB_MOUNT_SMOKE_RUN_ID: mount-large-nfs-linux-${{ github.run_id }}-${{ github.run_attempt }}
+      CRAB_MOUNT_SMOKE_BUCKET: crabbuild
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Linux NFS RustFS/Xet E2E
+        working-directory: crab
+        run: make mount-large-rustfs-smoke
+
+      - name: Upload Linux NFS RustFS/Xet evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-rustfs-xet-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CRAB_MOUNT_SMOKE_ROOT }}/${{ env.CRAB_MOUNT_SMOKE_RUN_ID }}
           if-no-files-found: warn
           retention-days: 14
 

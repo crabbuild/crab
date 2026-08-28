@@ -659,6 +659,8 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
                         .cache_dir
                         .join("nfs-exclusive-verifiers.json"),
                     read_only: opts.read_only,
+                    auto_refresh_interval: (!opts.read_only && !opts.no_refresh)
+                        .then_some(Duration::from_secs(30)),
                     control_endpoint_override: None,
                 };
                 nfs_mount::install_signal_handler(opts.cancel.clone());

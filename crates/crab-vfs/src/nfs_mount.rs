@@ -38,6 +38,9 @@ pub struct NfsMountConfig {
     pub exclusive_verifiers_path: PathBuf,
     /// Whether to expose a read-only NFS export.
     pub read_only: bool,
+    /// Poll interval for interactive remote refreshes. Daemon-managed mounts
+    /// leave this unset because the daemon owns their refresh task.
+    pub auto_refresh_interval: Option<Duration>,
     /// Explicit control endpoint. When absent, derive it from the mountpoint
     /// or the helper-provided environment override.
     pub control_endpoint_override: Option<String>,
@@ -144,6 +147,7 @@ pub struct NfsMountedSession {
     protocol_stats: Arc<NfsProtocolStats>,
     control_endpoint: Option<String>,
     read_only: bool,
+    auto_refresh_interval: Option<Duration>,
     runtime: Option<Arc<Mutex<NfsMountRuntime>>>,
     lifecycle: NfsMountLifecycleStatus,
 }
@@ -240,6 +244,7 @@ pub async fn mount(
         protocol_stats,
         control_endpoint,
         read_only: config.read_only,
+        auto_refresh_interval: config.auto_refresh_interval,
         runtime: runtime.map(|runtime| Arc::new(Mutex::new(runtime))),
         lifecycle,
     })
@@ -250,11 +255,15 @@ pub async fn run_until_cancelled(
     mut session: NfsMountedSession,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let control_state = session.control_state();
     let control_handle = nfs_control::spawn_server(
         session.control_endpoint.clone(),
-        session.control_state(),
+        control_state.clone(),
         cancel.clone(),
     );
+    let refresh_handle = session
+        .auto_refresh_interval
+        .map(|interval| nfs_control::spawn_auto_refresh(control_state, interval, cancel.clone()));
     let mut server_error = None;
     loop {
         tokio::select! {
@@ -299,6 +308,10 @@ pub async fn run_until_cancelled(
     }
 
     let shutdown_start = Instant::now();
+    cancel.cancel();
+    if let Some(handle) = refresh_handle {
+        handle.abort();
+    }
     if let Some(handle) = control_handle {
         handle.abort();
     }
@@ -458,6 +471,7 @@ pub fn preflight_for_mountpoint(mountpoint: &Path) -> NfsPreflightReport {
         git_dir: String::new(),
         exclusive_verifiers_path: PathBuf::new(),
         read_only: true,
+        auto_refresh_interval: None,
         control_endpoint_override: None,
     };
     preflight_for_config(&config)
@@ -1113,6 +1127,7 @@ mod tests {
             git_dir: ".git".to_owned(),
             exclusive_verifiers_path: tmp.path().join("verifiers.json"),
             read_only: false,
+            auto_refresh_interval: None,
             control_endpoint_override: None,
         };
 
@@ -1137,6 +1152,7 @@ mod tests {
             git_dir: ".git".to_owned(),
             exclusive_verifiers_path: tmp.path().join("verifiers.json"),
             read_only: false,
+            auto_refresh_interval: None,
             control_endpoint_override: None,
         };
 

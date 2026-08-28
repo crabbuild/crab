@@ -1063,6 +1063,7 @@ impl DaemonService {
                             .repo_dir
                             .join("nfs-exclusive-verifiers.json"),
                         read_only: config.read_only,
+                        auto_refresh_interval: None,
                         control_endpoint_override: control_endpoint.clone(),
                     };
                     crate::nfs_mount::preflight_for_config(&mount_config).ensure_ready()?;

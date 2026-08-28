@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# Run an end-to-end Crab mount smoke against Docker RustFS.
+# Run an end-to-end native Linux NFS mount smoke against Docker RustFS.
 #
 # The smoke builds Crab inside a Linux container, starts a local RustFS S3
 # endpoint, seeds a Crab repo with a large tracked file, verifies read-only
-# mount behavior, verifies writable overlay writeback for large files, pushes
-# the overlay commit, then performs a fresh eager clone and byte-for-byte checks.
+# native NFS mount behavior, verifies concurrent writable overlay writeback for
+# large files, pushes the overlay commit, then performs a fresh eager clone and
+# byte-for-byte checks.
 
 set -euo pipefail
 
@@ -89,7 +90,6 @@ printf "rustfs=ready\n"
 "$DOCKER" run --rm -i \
     --name "$RUNNER" \
     --network "$NET" \
-    --device /dev/fuse \
     --cap-add SYS_ADMIN \
     --security-opt apparmor:unconfined \
     -v "$REPO_ROOT:/src" \
@@ -107,10 +107,9 @@ printf "rustfs=ready\n"
     -e AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
     -e VIRTUAL_HOSTED_STYLE_REQUEST=false \
     -e CARGO_HOME=/cargo \
+    -e CARGO_INCREMENTAL=0 \
+    -e CARGO_PROFILE_DEV_DEBUG=0 \
     -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc \
-    -e CARGO_PROFILE_RELEASE_LTO=false \
-    -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
-    -e CARGO_PROFILE_RELEASE_DEBUG=0 \
     "$RUST_IMAGE" bash -s -- "$RUN_ID" "$BUCKET" "$SEED_MIB" "$NEW_MIB" <<'INNER'
 set -euo pipefail
 
@@ -120,7 +119,7 @@ SEED_MIB="$3"
 NEW_MIB="$4"
 
 export HOME=/e2e/home
-export PATH="$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
+export PATH="/src/target/debug:$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
 export CRAB_CACHE_DIR=/e2e/crab-cache
 export GIT_TERMINAL_PROMPT=0
 
@@ -162,16 +161,16 @@ cleanup_mounts() {
         crab unmount --mountpoint /e2e/run/mnt-rw-refresh >/e2e/logs/unmount-rw-refresh.log 2>&1
         crab unmount --mountpoint /e2e/run/mnt-rw >/e2e/logs/unmount-rw.log 2>&1
     fi
-    fusermount3 -u /e2e/run/mnt-ro >/dev/null 2>&1
-    fusermount3 -u /e2e/run/mnt-rw-refresh >/dev/null 2>&1
-    fusermount3 -u /e2e/run/mnt-rw >/dev/null 2>&1
+    umount /e2e/run/mnt-ro >/dev/null 2>&1
+    umount /e2e/run/mnt-rw-refresh >/dev/null 2>&1
+    umount /e2e/run/mnt-rw >/dev/null 2>&1
 }
 trap cleanup_mounts EXIT
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update >/e2e/logs/apt-update.log
 apt-get install -y --no-install-recommends \
-    fuse3 libfuse3-dev pkg-config make git ca-certificates python3 procps \
+    nfs-common util-linux pkg-config git ca-certificates python3 procps \
     >/e2e/logs/apt-install.log
 
 git config --global --add safe.directory /src
@@ -179,10 +178,13 @@ git config --global user.name "Crab Mount E2E"
 git config --global user.email "mount-e2e@example.invalid"
 
 cd /src/crab
-make install >/e2e/logs/make-install.log 2>&1
+cargo build -p crab --bin crab --no-default-features --features nfs \
+    >/e2e/logs/cargo-build-nfs.log 2>&1
+ln -sf crab /src/target/debug/crab-nfs-mount
+ln -sf crab /src/target/debug/git-remote-crab
 crab --version | tee /e2e/crab-version.txt
-sed -n '/name = "fuser"/,/dependencies =/s/version = "\(.*\)"/dependency=fuser-\1/p' \
-    /src/Cargo.lock | head -n1 | tee /e2e/fuser-version.txt
+crab-nfs-mount --version | tee /e2e/crab-nfs-mount-version.txt
+command -v mount.nfs >/e2e/mount-nfs-path.txt
 crab mount --help >/e2e/logs/mount-help.txt
 SCENARIO_START_MS="$(now_ms)"
 
@@ -240,14 +242,17 @@ echo "seed_push=ok"
 
 RO=/e2e/run/mnt-ro
 mkdir -p "$RO"
+crab mount doctor --backend nfs --mountpoint "$RO" --json >/e2e/mount-doctor.json
 phase_start_ms="$(now_ms)"
-crab mount --repo "$REMOTE_URL" --mountpoint "$RO" --ref main --read-only --no-refresh \
+crab mount --repo "$REMOTE_URL" --mountpoint "$RO" --ref main --backend nfs --read-only --no-refresh \
     >/e2e/logs/mount-ro.log 2>&1
 for _ in $(seq 1 60); do
     [[ -e "$RO/models/model.bin" ]] && break
     sleep 1
 done
 [[ -e "$RO/models/model.bin" ]]
+mountpoint -q "$RO"
+grep -F "127.0.0.1:/crab $RO nfs" /proc/mounts >/e2e/mount-ro-native.txt
 record_duration_since ro_mount_ready_ms "$phase_start_ms"
 phase_start_ms="$(now_ms)"
 sha256sum "$RO/models/model.bin" | awk '{print $1}' > /e2e/ro-model.sha256
@@ -332,13 +337,15 @@ echo "read_only_mount=ok"
 RWR=/e2e/run/mnt-rw-refresh
 mkdir -p "$RWR"
 phase_start_ms="$(now_ms)"
-crab mount --repo "$REMOTE_URL" --mountpoint "$RWR" --ref main \
+crab mount --repo "$REMOTE_URL" --mountpoint "$RWR" --ref main --backend nfs \
     >/e2e/logs/mount-rw-refresh.log 2>&1
 for _ in $(seq 1 60); do
     [[ -e "$RWR/models/ro-refresh.bin" ]] && break
     sleep 1
 done
 [[ -e "$RWR/models/ro-refresh.bin" ]]
+mountpoint -q "$RWR"
+grep -F "127.0.0.1:/crab $RWR nfs" /proc/mounts >/e2e/mount-rw-refresh-native.txt
 record_duration_since rw_refresh_mount_ready_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
@@ -389,13 +396,15 @@ echo "read_write_auto_refresh=ok"
 RW=/e2e/run/mnt-rw
 mkdir -p "$RW"
 phase_start_ms="$(now_ms)"
-crab mount --repo "$REMOTE_URL" --mountpoint "$RW" --ref main --no-refresh \
+crab mount --repo "$REMOTE_URL" --mountpoint "$RW" --ref main --backend nfs --no-refresh \
     >/e2e/logs/mount-rw.log 2>&1
 for _ in $(seq 1 60); do
     [[ -e "$RW/models/model.bin" ]] && break
     sleep 1
 done
 [[ -e "$RW/models/model.bin" ]]
+mountpoint -q "$RW"
+grep -F "127.0.0.1:/crab $RW nfs" /proc/mounts >/e2e/mount-rw-native.txt
 record_duration_since rw_mount_ready_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
@@ -434,6 +443,54 @@ cmp /e2e/seed-model.sha256 /e2e/reset-model.sha256
 cmp /e2e/delete-me.sha256 /e2e/reset-delete-me.sha256
 [[ ! -e "$RW/models/reset-new.bin" ]]
 record_duration_since reset_ms "$phase_start_ms"
+
+phase_start_ms="$(now_ms)"
+python3 <<'PY'
+import concurrent.futures
+import hashlib
+import json
+import os
+import pathlib
+import threading
+import time
+
+root = pathlib.Path("/e2e/run/mnt-rw/generated")
+root.mkdir()
+barrier = threading.Barrier(4)
+
+
+def writer(index):
+    path = root / f"worker-{index}.bin"
+    block = hashlib.sha256(f"linux-nfs-writer-{index}".encode()).digest() * 8192
+    digest = hashlib.sha256()
+    barrier.wait()
+    started_ns = time.monotonic_ns()
+    with path.open("wb") as handle:
+        for _ in range(16):
+            handle.write(block)
+            digest.update(block)
+        handle.flush()
+        os.fsync(handle.fileno())
+    finished_ns = time.monotonic_ns()
+    return {
+        "path": path.relative_to(root.parent).as_posix(),
+        "bytes": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+        "started_ns": started_ns,
+        "finished_ns": finished_ns,
+    }
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    results = list(pool.map(writer, range(4)))
+
+if max(item["started_ns"] for item in results) >= min(item["finished_ns"] for item in results):
+    raise SystemExit("independent Linux NFS writers did not overlap")
+pathlib.Path("/e2e/concurrent-writers.json").write_text(
+    json.dumps({"writers": results}, indent=2, sort_keys=True) + "\n"
+)
+PY
+record_duration_since concurrent_writers_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
 cp /e2e/run/seed/models/model.bin /e2e/run/expected-model.bin
@@ -584,6 +641,9 @@ if [[ -d "$MOUNT_CACHE/.git" ]]; then
 fi
 [[ -f "$MOUNT_GIT_DIR/HEAD" ]]
 git --git-dir "$MOUNT_GIT_DIR" rev-parse refs/heads/main > /e2e/local-ref-before-push-failure.txt
+# Keep the lazy base's compact Git blobs local so the broken origin is first
+# used by `git push`, after Crab has recorded the candidate commit for retry.
+git --git-dir "$MOUNT_GIT_DIR" archive refs/heads/main >/dev/null
 git --git-dir "$MOUNT_GIT_DIR" config remote.origin.url /e2e/run/missing-origin.git
 if crab mount commit --mountpoint "$RW" --message "mount large writeback should retry" --push --json \
     > /e2e/rw-commit-push-failure.json 2>/e2e/logs/rw-commit-push-failure.err; then
@@ -661,6 +721,27 @@ grep -q "directory rename content" "$CLONE/dir-after/nested/note.txt"
 [[ ! -e "$CLONE/dir-before/nested/note.txt" ]]
 [[ ! -e "$CLONE/archive/base-move.bin" ]]
 [[ ! -e "$CLONE/models/delete-me.bin" ]]
+python3 - "$CLONE" <<'PY'
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+evidence = json.loads(pathlib.Path("/e2e/concurrent-writers.json").read_text())
+for writer in evidence["writers"]:
+    path = root / writer["path"]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if path.stat().st_size != writer["bytes"] or digest != writer["sha256"]:
+        raise SystemExit(f"fresh clone mismatch for {writer['path']}")
+    pointer = subprocess.check_output(
+        ["git", "-C", str(root), "show", f"HEAD:{writer['path']}"],
+        text=True,
+    )
+    if "version https://crab.dev/spec/v1" not in pointer or len(pointer) >= 1000:
+        raise SystemExit(f"fresh clone did not retain a compact pointer for {writer['path']}")
+PY
 
 cd "$CLONE"
 git show HEAD:models/model.bin > /e2e/clone-model-pointer.txt
@@ -727,6 +808,7 @@ def read_timings(path):
 summary = {
     "run_id": run_id,
     "remote_url": remote_url,
+    "backend": "nfs",
     "seed_mib": int(seed_mib),
     "new_large_mib": int(new_mib),
     "sparse_extend_mib": 48,
@@ -751,6 +833,7 @@ summary = {
     "renamed_dir_note": pathlib.Path("/e2e/clone-renamed-dir-note.txt").read_text().strip(),
     "symlink_mode": pathlib.Path("/e2e/clone-model-link-mode.txt").read_text().strip(),
     "symlink_target": pathlib.Path("/e2e/run/clone/models/model-link.bin").readlink().as_posix(),
+    "concurrent_writers": json.loads(pathlib.Path("/e2e/concurrent-writers.json").read_text()),
 }
 pathlib.Path("/e2e/summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 print(json.dumps(summary, sort_keys=True))
