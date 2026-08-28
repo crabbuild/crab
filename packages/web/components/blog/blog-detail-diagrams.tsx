@@ -1,3 +1,5 @@
+import Image from "next/image"
+
 import { DiagramFrame } from "@/components/blog/blog-diagrams"
 
 const REUSED = {
@@ -13,6 +15,24 @@ const CHANGED = {
 const VERSION_A = ["header", "weights 1", "weights 2", "optimizer", "footer"]
 const VERSION_B = ["header", "weights 1", "new weights", "optimizer", "footer"]
 const CHECKPOINTS = ["v1", "v2", "v3", "v4"]
+
+export function PushPublicationBoundaryDiagram() {
+  return (
+    <DiagramFrame
+      title="Immutable first. Visible last."
+      caption="Git packs and large-file objects become durable before the expected-old ref transaction makes the complete new tip visible."
+    >
+      <Image
+        src="/diagram/git-interpreted/push-publication.svg"
+        width={1200}
+        height={780}
+        alt="Crab push flow: prepare and verify immutable Git and large-file objects, then atomically commit the ref journal"
+        className="h-auto w-full min-w-[48rem] rounded-lg"
+        unoptimized
+      />
+    </DiagramFrame>
+  )
+}
 
 export function BinaryHistoryGrowthDiagram() {
   const heading = {

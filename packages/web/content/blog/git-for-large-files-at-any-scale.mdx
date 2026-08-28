@@ -142,13 +142,7 @@ Three decisions remain independent:
 
 A branch must never point to a missing chunk. Crab therefore prepares every immutable dependency before it changes the destination ref.
 
-```text
-local preparation             durable origin                 visible history
-
-discover → pack → upload → verify closure  ║  expected-old ref transaction
-                                            ║
-          safe to retry or collect          ║  main moves exactly once
-```
+<PushPublicationBoundaryDiagram />
 
 <GitArchitecturePlayer story="push" />
 
