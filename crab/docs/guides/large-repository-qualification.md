@@ -150,6 +150,9 @@ per-object debug logging is disabled because its volume would distort both
 timing and storage evidence on large histories. The blobless catalog-filter
 stage must record ordinal-metadata lookup activity, proving that the optimized
 ordinal path was exercised.
+Cache hit/miss parsing is case-insensitive because generated-pack cache events
+are emitted from a Rust debug enum (`Hit`/`Miss`) while object-cache events use
+lowercase strings. This keeps warm-fanout measurements faithful to the logs.
 Each `visibility_owner_*` stage also records `locator_sweep` entries for every
 owner pass. `object_rows_scanned` is the number of canonical rows examined by
 that sweep, while `pack_rows_scanned` and the deletion counters describe stale
@@ -157,11 +160,11 @@ pack cleanup. A pure repack should show bounded stale-pack work without a
 repository-sized canonical scan; an interrupted rebuild must show the explicit
 recovery pass instead of being silently reported as a ready catalog.
 Cold visibility repair downloads each unique committed pack once into the
-run-scoped temporary directory, verifies its manifest identity, and performs
-the reachability walk against that local ODB. The owner telemetry therefore
-reports pack-count storage requests and compressed pack bytes; the run volume
-must have room for the committed pack set plus one transient pack copy while
-Git builds its local index.
+run-scoped temporary directory using four bounded workers, verifies its
+manifest identity, and performs the reachability walk against that local ODB.
+The owner telemetry therefore reports pack-count storage requests and
+compressed pack bytes; the run volume must have room for the committed pack
+set plus transient pack copies while Git builds its local index.
 
 The GitHub workflow runs only the report contract tests on ordinary pull
 requests. The Kubernetes full and team-load job is restricted to a dedicated

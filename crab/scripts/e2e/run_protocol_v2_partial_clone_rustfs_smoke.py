@@ -808,9 +808,10 @@ class ProtocolV2PartialCloneSmoke:
                         requests += 1
                     bytes_read += int(fields.get("storage_bytes", 0))
                     by_kind[kind] = by_kind.get(kind, 0) + 1
-                if fields.get("cache_event") == "hit":
+                cache_event = str(fields.get("cache_event", "")).casefold()
+                if cache_event == "hit":
                     cache_hits += 1
-                elif fields.get("cache_event") == "miss":
+                elif cache_event == "miss":
                     cache_misses += 1
         return {
             "requests": requests,

@@ -21,6 +21,26 @@ VERIFY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = VERIFY
 SPEC.loader.exec_module(VERIFY)
 
+QUALIFICATION_SCRIPT = Path(__file__).resolve().parent / "run_large_repo_rustfs.py"
+QUALIFICATION_SPEC = importlib.util.spec_from_file_location(
+    "run_large_repo_rustfs", QUALIFICATION_SCRIPT
+)
+if QUALIFICATION_SPEC is None or QUALIFICATION_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {QUALIFICATION_SCRIPT}")
+QUALIFICATION = importlib.util.module_from_spec(QUALIFICATION_SPEC)
+sys.modules[QUALIFICATION_SPEC.name] = QUALIFICATION
+QUALIFICATION_SPEC.loader.exec_module(QUALIFICATION)
+
+PROTOCOL_SCRIPT = Path(__file__).resolve().parent / "run_protocol_v2_partial_clone_rustfs_smoke.py"
+PROTOCOL_SPEC = importlib.util.spec_from_file_location(
+    "run_protocol_v2_partial_clone_rustfs_smoke", PROTOCOL_SCRIPT
+)
+if PROTOCOL_SPEC is None or PROTOCOL_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {PROTOCOL_SCRIPT}")
+PROTOCOL = importlib.util.module_from_spec(PROTOCOL_SPEC)
+sys.modules[PROTOCOL_SPEC.name] = PROTOCOL
+PROTOCOL_SPEC.loader.exec_module(PROTOCOL)
+
 
 OID = "a" * 40
 BASE = "b" * 40
@@ -375,6 +395,44 @@ class ReportVerificationTests(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(report), encoding="utf-8")
         return path
+
+    def test_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
+        path = self.root / "stderr.log"
+        path.write_text(
+            "\n".join(
+                json.dumps({"fields": {"cache_event": event}})
+                for event in ("Hit", "Miss", "hit", "miss")
+            ),
+            encoding="utf-8",
+        )
+        qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+            QUALIFICATION.LargeRepositoryQualification
+        )
+
+        parsed = qualification.telemetry_from_log(path)
+
+        self.assertEqual(parsed["cache_hits"], 2)
+        self.assertEqual(parsed["cache_misses"], 2)
+
+    def test_protocol_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
+        logs = self.root / "logs"
+        logs.mkdir()
+        (logs / "client.stderr.log").write_text(
+            "\n".join(
+                json.dumps({"fields": {"cache_event": event}})
+                for event in ("Hit", "Miss", "hit", "miss")
+            ),
+            encoding="utf-8",
+        )
+        smoke = PROTOCOL.ProtocolV2PartialCloneSmoke.__new__(
+            PROTOCOL.ProtocolV2PartialCloneSmoke
+        )
+        smoke.logs = logs
+
+        parsed = smoke.storage_telemetry()
+
+        self.assertEqual(parsed["cache_hits"], 2)
+        self.assertEqual(parsed["cache_misses"], 2)
 
     def test_valid_smoke_report_is_accepted_explicitly(self) -> None:
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)

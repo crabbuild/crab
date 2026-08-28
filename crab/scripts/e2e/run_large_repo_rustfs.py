@@ -395,7 +395,7 @@ class LargeRepositoryQualification:
                 telemetry["storage_bytes"] += int(fields.get("storage_bytes", 0))
                 if request in telemetry:
                     telemetry[request] += 1
-            cache_event = fields.get("cache_event")
+            cache_event = str(fields.get("cache_event", "")).casefold()
             if cache_event == "hit":
                 telemetry["cache_hits"] += 1
             elif cache_event == "miss":

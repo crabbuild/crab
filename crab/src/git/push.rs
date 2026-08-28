@@ -17345,6 +17345,27 @@ struct MaterializedRemoteGitPacks {
     fetched_bytes: u64,
 }
 
+const REMOTE_PACK_MATERIALIZATION_CONCURRENCY: usize = 4;
+
+async fn run_bounded_pack_materialization<F, Fut>(
+    packs: Vec<PackManifestEntry>,
+    concurrency: usize,
+    cancel: &CancellationToken,
+    materialize: F,
+) -> Result<Vec<u64>>
+where
+    F: Fn(PackManifestEntry) -> Fut,
+    Fut: Future<Output = Result<u64>>,
+{
+    check_cancelled(cancel)?;
+    let results = futures_util::stream::iter(packs.into_iter().map(materialize))
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+    check_cancelled(cancel)?;
+    Ok(results)
+}
+
 async fn materialize_remote_git_packs(
     store: &crab_storage::Store,
     router: &crab_storage::StoreLayout<crab_storage::Store>,
@@ -17353,17 +17374,19 @@ async fn materialize_remote_git_packs(
     maximum_requests: usize,
     cancel: &CancellationToken,
 ) -> Result<MaterializedRemoteGitPacks> {
-    let unique_pack_count = packs
+    let mut seen_pack_ids = HashSet::with_capacity(packs.len());
+    let unique_packs = packs
         .iter()
-        .map(|pack| pack.pack_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
+        .filter(|pack| seen_pack_ids.insert(pack.pack_id.clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unique_pack_count = unique_packs.len();
     if unique_pack_count > maximum_requests {
         return Err(CrabError::Internal(format!(
             "remote Git pack materialization requires {unique_pack_count} requests, budget is {maximum_requests}"
         )));
     }
-    let planned_bytes = packs.iter().try_fold(0_u64, |total, pack| {
+    let planned_bytes = unique_packs.iter().try_fold(0_u64, |total, pack| {
         total.checked_add(pack.size).ok_or_else(|| {
             CrabError::Internal("remote Git pack materialization byte count overflow".to_owned())
         })
@@ -17376,88 +17399,109 @@ async fn materialize_remote_git_packs(
     let git_dir = tempfile::tempdir()?;
     let pack_dir = git_dir.path().join("objects/pack");
     tokio::fs::create_dir_all(&pack_dir).await?;
-    let mut materialized = HashSet::new();
-    let mut fetched_bytes = 0_u64;
+    let git_dir_path = git_dir.path().to_owned();
+    let pack_dir_for_tasks = pack_dir.clone();
+    let store = store.clone();
+    let router = router.clone();
+    let cancel_for_tasks = cancel.clone();
+    let downloaded = run_bounded_pack_materialization(
+        unique_packs,
+        REMOTE_PACK_MATERIALIZATION_CONCURRENCY,
+        cancel,
+        move |pack| {
+            let store = store.clone();
+            let router = router.clone();
+            let cancel = cancel_for_tasks.clone();
+            let git_dir = git_dir_path.clone();
+            let pack_dir = pack_dir_for_tasks.clone();
+            async move {
+                check_cancelled(&cancel)?;
+                let remote_path = router.pack_path(&pack.pack_id);
+                let download = tempfile::Builder::new()
+                    .prefix(".crab-visibility-pack-")
+                    .suffix(".pack")
+                    .tempfile_in(&git_dir)?
+                    .into_temp_path();
+                let downloaded = tokio::select! {
+                    result = store.download_to_path_bounded(
+                        &remote_path,
+                        download.as_ref(),
+                        pack.size,
+                    ) => result?,
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                };
+                if downloaded != pack.size {
+                    return Err(CrabError::CorruptObject {
+                        path: remote_path.to_string(),
+                        reason: format!(
+                            "visibility repair downloaded {downloaded} bytes, expected {}",
+                            pack.size
+                        ),
+                    });
+                }
 
-    for pack in packs {
-        check_cancelled(cancel)?;
-        if !materialized.insert(pack.pack_id.clone()) {
-            continue;
-        }
-        let download = tempfile::Builder::new()
-            .prefix(".crab-visibility-pack-")
-            .suffix(".pack")
-            .tempfile_in(git_dir.path())?
-            .into_temp_path();
-        let downloaded = store
-            .download_to_path(&router.pack_path(&pack.pack_id), download.as_ref())
-            .await?;
-        if downloaded != pack.size {
-            return Err(CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).to_string(),
-                reason: format!(
-                    "visibility repair downloaded {downloaded} bytes, expected {}",
-                    pack.size
-                ),
-            });
-        }
-        fetched_bytes = fetched_bytes.saturating_add(downloaded);
+                let download_for_hash = download.to_path_buf();
+                let (actual_hash, actual_size) =
+                    tokio::task::spawn_blocking(move || hash_file_blake3(&download_for_hash))
+                        .await
+                        .map_err(|error| {
+                            CrabError::Internal(format!(
+                                "visibility pack hash join failed: {error}"
+                            ))
+                        })??;
+                if actual_size != pack.size
+                    || blake3::Hash::from(actual_hash).to_hex().as_str() != pack.pack_id
+                {
+                    return Err(CrabError::CorruptObject {
+                        path: remote_path.to_string(),
+                        reason: "visibility repair pack content hash does not match the manifest"
+                            .to_owned(),
+                    });
+                }
 
-        let download_for_hash = download.to_path_buf();
-        let (actual_hash, actual_size) =
-            tokio::task::spawn_blocking(move || hash_file_blake3(&download_for_hash))
-                .await
-                .map_err(|error| {
-                    CrabError::Internal(format!("visibility pack hash join failed: {error}"))
-                })??;
-        if actual_size != pack.size
-            || blake3::Hash::from(actual_hash).to_hex().as_str() != pack.pack_id
-        {
-            return Err(CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).to_string(),
-                reason: "visibility repair pack content hash does not match the manifest"
-                    .to_owned(),
-            });
-        }
-
-        let installed = crate::git::pack::install_pack_file_locally(
-            &pack_dir,
-            download.as_ref(),
-            &pack.pack_id,
-            pack.size,
-            false,
-        )
-        .await?;
-        check_cancelled(cancel)?;
-        let index = crab_git::pack_locator::PackLocationIter::open(
-            &installed.idx_path,
-            &installed.rev_path,
-            pack.size,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
-        if index.object_count() != pack.object_count {
-            return Err(CrabError::CorruptObject {
-                path: installed.idx_path.display().to_string(),
-                reason: format!(
-                    "visibility repair index contains {} objects, expected {}",
-                    index.object_count(),
-                    pack.object_count
-                ),
-            });
-        }
-        if index.pack_checksum().to_string() != installed.git_sha1 {
-            return Err(CrabError::CorruptObject {
-                path: installed.idx_path.display().to_string(),
-                reason: "visibility repair index checksum disagrees with the pack trailer"
-                    .to_owned(),
-            });
-        }
-    }
-
-    check_cancelled(cancel)?;
+                let installed = crate::git::pack::install_pack_file_locally(
+                    &pack_dir,
+                    download.as_ref(),
+                    &pack.pack_id,
+                    pack.size,
+                    false,
+                )
+                .await?;
+                check_cancelled(&cancel)?;
+                let index = crab_git::pack_locator::PackLocationIter::open(
+                    &installed.idx_path,
+                    &installed.rev_path,
+                    pack.size,
+                )
+                .map_err(crab_git::pack::PackError::from)?;
+                if index.object_count() != pack.object_count {
+                    return Err(CrabError::CorruptObject {
+                        path: installed.idx_path.display().to_string(),
+                        reason: format!(
+                            "visibility repair index contains {} objects, expected {}",
+                            index.object_count(),
+                            pack.object_count
+                        ),
+                    });
+                }
+                if index.pack_checksum().to_string() != installed.git_sha1 {
+                    return Err(CrabError::CorruptObject {
+                        path: installed.idx_path.display().to_string(),
+                        reason: "visibility repair index checksum disagrees with the pack trailer"
+                            .to_owned(),
+                    });
+                }
+                Ok(downloaded)
+            }
+        },
+    )
+    .await?;
+    let fetched_bytes = downloaded
+        .into_iter()
+        .fold(0_u64, |total, bytes| total.saturating_add(bytes));
     Ok(MaterializedRemoteGitPacks {
         git_dir,
-        pack_count: u64::try_from(materialized.len()).unwrap_or(u64::MAX),
+        pack_count: u64::try_from(unique_pack_count).unwrap_or(u64::MAX),
         fetched_bytes,
     })
 }
@@ -20630,6 +20674,103 @@ mod tests {
                 .is_none(),
             "shared ref closures use one catalog object budget"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_pack_materialization_limits_concurrent_work() {
+        let packs = (0..12)
+            .map(|index| PackManifestEntry {
+                pack_id: index.to_string(),
+                size: 1,
+                content_hash: index.to_string(),
+                ref_tips: Vec::new(),
+                object_count: 1,
+            })
+            .collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+
+        let results = run_bounded_pack_materialization(packs, 3, &cancel, {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            move |pack| {
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                async move {
+                    let in_flight = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(in_flight, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<u64, CrabError>(pack.size)
+                }
+            }
+        })
+        .await
+        .expect("bounded materialization should complete");
+
+        assert_eq!(results.len(), 12);
+        assert_eq!(results.into_iter().sum::<u64>(), 12);
+        assert_eq!(maximum.load(Ordering::SeqCst), 3);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_pack_materialization_installs_multiple_verified_packs() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "parallel-pack-materialization".to_owned());
+        let mut fixtures = Vec::new();
+        let mut packs = Vec::new();
+        let mut expected_bytes = 0_u64;
+
+        for index in 0..4 {
+            let (fixture, pack_path, idx_path, _rev_path, _git_sha1, _oid, pack_size) =
+                locator_pack_fixture_for(format!("parallel pack fixture {index}\n").as_bytes());
+            let pack_bytes = std::fs::read(&pack_path).expect("read parallel pack fixture");
+            let pack_id = blake3::hash(&pack_bytes).to_hex().to_string();
+            let index = gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1)
+                .expect("open parallel pack fixture index");
+            let pack = PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: pack_size,
+                content_hash: pack_id.clone(),
+                ref_tips: Vec::new(),
+                object_count: u64::from(index.num_objects()),
+            };
+            store
+                .put(&router.pack_path(&pack_id), Bytes::from(pack_bytes))
+                .await
+                .expect("upload parallel pack fixture");
+            expected_bytes = expected_bytes.saturating_add(pack_size);
+            fixtures.push(fixture);
+            packs.push(pack);
+        }
+
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let materialized = materialize_remote_git_packs(
+            store.as_storage(),
+            &storage_router,
+            &packs,
+            expected_bytes,
+            packs.len(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("materialize parallel pack fixtures");
+
+        assert_eq!(materialized.pack_count, 4);
+        assert_eq!(materialized.fetched_bytes, expected_bytes);
+        assert!(packs.iter().all(|pack| {
+            materialized
+                .git_dir
+                .path()
+                .join(format!("objects/pack/pack-{}.pack", pack.pack_id))
+                .is_file()
+        }));
+        drop(fixtures);
     }
 
     #[test]

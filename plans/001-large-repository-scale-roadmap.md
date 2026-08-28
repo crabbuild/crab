@@ -604,6 +604,14 @@ authoritative limits. The focused downloader regression and remote-Git suite
 pass, but a new large-repository run is still required to quantify the
 wall-time change on a provider with multiple large source packs.
 
+The owner-side cold repair path now uses the same fixed four-way ceiling while
+materializing committed packs for visibility, commit-graph, and shallow-closure
+rebuilds. Each worker uses the manifest size as a streaming upper bound, checks
+cancellation, verifies the BLAKE3 identity, and validates the installed Git
+index before the temporary ODB is used. The aggregate request/byte budgets and
+the single generation-owner lock remain unchanged; a multi-pack qualification
+run is still required before claiming an owner wall-time SLO improvement.
+
 ### Current-head locator startup fanout qualification
 
 Commit `b8c51985` adds two bounded startup paths for the Git object locator.
