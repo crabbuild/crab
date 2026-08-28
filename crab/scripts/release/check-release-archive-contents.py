@@ -216,6 +216,9 @@ def check_release_workflow(root: Path) -> list[str]:
         errors.append(f"release.yml: {error}")
     else:
         for needle in (
+            'if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then',
+            "export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=cc",
+            "export CC_aarch64_unknown_linux_gnu=cc",
             'no_fuse_features="simd-accel,tier,replication-s3-control-plane,replication-gcs-control-plane,replication-azure-control-plane,coordinator-dynamodb,coordinator-spanner,coordinator-cosmosdb,watch,nfs,gix-pathmatch"',
             "--no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch",
             '--no-default-features --features "$no_fuse_features"',
