@@ -25,6 +25,7 @@
 - **Foundation PR**: https://github.com/crabbuild/crab-oss/pull/59
 - **Implementation PR**: https://github.com/crabbuild/crab-oss/pull/75 (merged)
 - **Large-repository follow-up**: https://github.com/crabbuild/crab-oss/pull/87
+- **Pack/repack follow-up**: https://github.com/crabbuild/crab-oss/pull/96
 
 ### 2026-08-25 execution update
 
@@ -527,6 +528,71 @@ This closes the diagnosed large-catalog locator lookup amplification and
 provides same-host full-profile repeatability evidence for the PR. The
 10,000-push growth, interruption/GC, provider, concurrency, owner-failover,
 retention, and rollout SLO gates remain open.
+
+### Current-head pack-source repack qualification
+
+The pack-source hardening is committed as `f79fa1b9`, `fd468679`,
+`022919d2`, and `e01fdf56`. Repack download now streams only the pack body
+whose size is committed by the pinned manifest. The local Git worker rebuilds
+the derived `.idx` and `.rev` once, verifies all selected source pack bodies
+and indexes with one batched `git verify-pack` invocation, and then performs
+the existing exact-object-set validation. Remote source indexes and
+reverse indexes are no longer fetched merely to start a repack, and the
+source body is no longer hashed once during download and again before
+installation.
+
+The worker deliberately does not use `git index-pack --fsck-objects` on each
+partial suffix. A selected suffix can contain valid delta or attribute links
+to stable packs outside the operation, so per-source object fsck would reject
+valid repositories. Pack-local body/index validation is followed by exact
+object-set comparison and the post-commit full/incremental Git fsck checks.
+The body-only regression proves a missing remote `.idx` is not a repack input
+requirement; the full qualification below proves the selected suffix behavior
+with real cross-pack links.
+
+Focused proof for the exact current source passes:
+
+- `cargo test -p crab-git --lib pack --locked`: 31 passed;
+- `cargo test -p crab-git --lib repack --locked`: 9 passed;
+- `cargo test -p crab --lib cmd::repack::tests --locked`: 10 passed;
+- release build with the binary provenance bound to `e01fdf56`; and
+- `git diff --check`.
+
+The exact-head full qualification `e01fdf56-k8s-1000-20260828` used the
+Kubernetes revision `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local
+RustFS, 1,000 first-parent replay pushes, and the release binary whose
+embedded source revision is `e01fdf56`. The standalone verifier returned
+`status=ok`, `profile=full`, and 23/23 checks passed. Advertised refs, full
+and incremental clone tips, full and incremental fsck, a deterministic
+1,000-object byte-equivalence sample, source immutability, and run-scoped
+cleanup all passed. The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Active serving packs were 1/2/2/92/2 at seed and replay checkpoints
+  1/10/100/1,000. The final snapshot retained 1,003 immutable physical pack
+  objects for manifest-history recovery while serving converged to two packs;
+  this remains subject to the separate retention and grace-aware GC gates.
+- The generation-1,000 owner converged in 471,124 ms across ten passes,
+  reduced 992 selected packs to two, swept 991 stale pack-membership rows,
+  read 138,240,647 maintenance bytes, and peaked at 1,027,833,856 bytes of
+  child RSS. The repack pass itself closed in about 265 seconds. This proves
+  bounded source selection, cross-pack correctness, and active-pack
+  consolidation, but it is not a measured wall-time improvement over the
+  `0bcd2f41` baseline (443,329 ms owner / about 245 seconds repack); pack
+  generation remains the dominant maintenance bottleneck.
+- Full/warm clones completed in 160,360/58,845 ms; blobless and
+  depth-1/10/100/1,000 clones completed in 25,745/15,583/21,957/137,555/
+  161,303 ms; incremental fetches at 1/10/100/1,000 completed in
+  1,826/2,258/3,395/6,835 ms. The default comparison against
+  `0bcd2f41-k8s-1000-20260828` was valid and stayed within the 20% drift
+  limit: clone/fetch/push medians changed by 2.97%/0.22%/0.44%.
+
+This closes the redundant remote-index dependency and its cross-pack
+validation regression on a real large repository. It does not claim a
+repack-latency SLO win: the next performance slice should benchmark parallel
+local index generation or pack-objects scheduling without weakening the
+post-commit fsck boundary. The 10,000-push growth, interruption/GC, provider,
+concurrency, owner-failover, retention, and rollout SLO gates remain open.
 
 ### Current-head shared-visibility and team-load qualification
 
@@ -1771,11 +1837,11 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86` | The earlier full run ended with 2 active packs; the current smoke retained 103 immutable physical pack objects after 100 replays and measured cold/warm full clones at 173,603/61,513 ms, blobless at 88,798 ms, and depth-1/10/100/1,000 at 18,442/23,523/145,678/184,035 ms. Cache publication now avoids a duplicate full-artifact hash scan on cold misses; response-pack egress, fanout, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0` | The current smoke owner totals at seed/1/10/100 were 83.8/77.8/224.8/244.7 s. Post-repack catalog passes scanned/deleted 10/10 and 91/91 stale pack rows with 14.4/37.2 MB maintenance reads; both owner and regular post-CAS publication now use the uncovered-pack budget, while the pre-repack O(N) advance and 1,000-push latency, memory, and interruption budgets remain open |
-| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | The current 100-replay smoke passes incremental and depth-1/10/100/1,000 correctness with clone generation at 10.0/11.7/101.0/116.9 s; the full 1,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825` | `7ff92545`; `c57ee1f4`; `ad2554fa` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. Repository GC now includes grace-aware generated response-pack cache retention and force cleanup; stale locator cleanup avoids retained-catalog scans and marker-less migration is idempotent. Interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0` | Current single-client correctness and the 100-replay owner-budget smoke pass. The scheduler lock now retains its inode across handoffs with 11 focused tests passing, and regular post-CAS locator budgeting is source-tested/release-built; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56` | The current full run ends with 2 active packs and the e01 pack-source qualification retains 1,003 immutable physical history objects while serving converges to 2. Response-pack egress, fanout, retention, and provider SLOs remain open |
+| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56` | The e01 owner reduced 992 selected packs to 2 and swept 991 stale membership rows, but took 471.1 s across ten passes; source-index elimination is correctness/IO hardening, not a measured repack wall-time win. The 10,000-push latency, memory, and interruption budgets remain open |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; grace-aware retention, interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56` | Current single-client correctness and the e01 1,000-replay pack-source qualification pass. The scheduler lock and regular post-CAS locator budgeting remain source-tested/release-built; full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, and canary gates remain pending |
 
 ### Current branch verification evidence
 
