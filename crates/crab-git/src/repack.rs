@@ -2,13 +2,14 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use crate::pack::{PackError, install_pack_file_from_path};
+use crate::pack::{PackError, install_pack_file_from_path, verify_pack_file_sha1};
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
+use sha1::{Digest, Sha1};
 
 const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
 const MAX_VERIFY_PACKS_PER_COMMAND: usize = 512;
@@ -497,6 +498,156 @@ pub fn consolidate_pack_suffix_with_concurrency(
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id.clone(),
             reason: "consolidated pack does not preserve the selected object set".to_owned(),
+        });
+    }
+    Ok(GeometricRepackedRepository {
+        _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
+/// Join a complete pack inventory without inflating or recompressing entries.
+///
+/// OFS_DELTA offsets are relative to the current entry, so shifting every
+/// entry in one source pack by the same amount preserves those links. Strict
+/// indexing validates REF_DELTA links after all source bodies are joined.
+pub fn concatenate_complete_pack_inventory(
+    sources: &[RepackSource],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    if sources.len() < 2 {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: "complete-pack-concatenation".to_owned(),
+            reason: "complete-pack concatenation requires at least two source packs".to_owned(),
+        });
+    }
+
+    let workspace =
+        tempfile::tempdir().map_err(|source| io_error("create concatenation workspace", source))?;
+    let source_git = workspace.path().join("source.git");
+    initialize_bare_repository(&source_git)?;
+    let pack_dir = source_git.join("objects/pack");
+    let output_path = workspace.path().join("complete-pack-concatenated.pack");
+    let mut output = File::create(&output_path)
+        .map_err(|source| io_error("create concatenated pack", source))?;
+    let mut source_ids = BTreeSet::new();
+    let mut total_objects = 0_u64;
+    for source in sources {
+        if !source_ids.insert(source.canonical_id.as_str()) {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "duplicate source pack id".to_owned(),
+            });
+        }
+        validate_source(source)?;
+        verify_pack_file_sha1(&source.path)?;
+        let mut input = File::open(&source.path)
+            .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
+        let mut header = [0_u8; 12];
+        input
+            .read_exact(&mut header)
+            .map_err(|error| io_error(format!("read {} header", source.path.display()), error))?;
+        let version =
+            u32::from_be_bytes(header[4..8].try_into().map_err(|_| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack header has an invalid version".to_owned(),
+                },
+            })?);
+        if &header[..4] != b"PACK" || !matches!(version, 2 | 3) {
+            return Err(RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack has an unsupported header".to_owned(),
+                },
+            });
+        }
+        let object_count = u64::from(u32::from_be_bytes(header[8..12].try_into().map_err(
+            |_| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack header has an invalid object count".to_owned(),
+                },
+            },
+        )?));
+        if object_count != source.object_count {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: format!(
+                    "pack header has {object_count} objects but manifest records {}",
+                    source.object_count
+                ),
+            });
+        }
+        total_objects = total_objects.checked_add(object_count).ok_or_else(|| {
+            RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "concatenated pack object count overflows u32".to_owned(),
+            }
+        })?;
+    }
+    let total_objects_u32 =
+        u32::try_from(total_objects).map_err(|_| RepackError::SourceIntegrity {
+            pack_id: "complete-pack-concatenation".to_owned(),
+            reason: "concatenated pack object count exceeds Git's pack limit".to_owned(),
+        })?;
+    output
+        .write_all(b"PACK")
+        .and_then(|_| output.write_all(&2_u32.to_be_bytes()))
+        .and_then(|_| output.write_all(&total_objects_u32.to_be_bytes()))
+        .map_err(|source| io_error("write concatenated pack header", source))?;
+
+    let mut pack_sha1 = Sha1::new();
+    pack_sha1.update(b"PACK");
+    pack_sha1.update(2_u32.to_be_bytes());
+    pack_sha1.update(total_objects_u32.to_be_bytes());
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    for source in sources {
+        let mut input = File::open(&source.path)
+            .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
+        let source_size = source.size;
+        let body_size = source_size
+            .checked_sub(32)
+            .ok_or_else(|| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack is too short for header and checksum".to_owned(),
+                },
+            })?;
+        input
+            .seek(std::io::SeekFrom::Start(12))
+            .map_err(|error| io_error(format!("seek {} body", source.path.display()), error))?;
+        let mut remaining = body_size;
+        while remaining > 0 {
+            let read_len = remaining.min(buffer.len() as u64) as usize;
+            input
+                .read_exact(&mut buffer[..read_len])
+                .map_err(|error| io_error(format!("read {} body", source.path.display()), error))?;
+            output
+                .write_all(&buffer[..read_len])
+                .map_err(|source| io_error("write concatenated pack body", source))?;
+            pack_sha1.update(&buffer[..read_len]);
+            remaining -= read_len as u64;
+        }
+    }
+    let checksum: [u8; 20] = pack_sha1.finalize().into();
+    output
+        .write_all(&checksum)
+        .and_then(|_| output.flush())
+        .map_err(|source| io_error("finish concatenated pack", source))?;
+    drop(output);
+
+    let (pack_hash, pack_size) = hash_file(&output_path)?;
+    let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
+    let installed =
+        install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
+    let generated = verified_generated_pack(installed.pack_path)?;
+    if generated.object_count != total_objects {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: generated.pack_id,
+            reason: format!(
+                "concatenated pack contains {} objects but sources contain {total_objects}",
+                generated.object_count
+            ),
         });
     }
     Ok(GeometricRepackedRepository {
@@ -1057,6 +1208,177 @@ mod tests {
     }
 
     #[test]
+    fn concatenate_complete_pack_inventory_preserves_pack_objects() -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let repository = root.path().join("repository.git");
+        run_git(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg("--quiet")
+                .arg(&repository),
+            "initialize concatenation test repository",
+        )?;
+
+        let repository_arg = repository.to_str().ok_or_else(|| {
+            io_error(
+                "encode concatenation test repository path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let first_data = vec![b'a'; 64 * 1024];
+        let first_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            &first_data,
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let mut first_delta_data = first_data.clone();
+        first_delta_data[1_024] = b'b';
+        let first_delta_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            &first_delta_data,
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first delta concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let second_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            b"second concatenation object\n",
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode second concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+
+        let first_prefix = root.path().join("first");
+        let first_prefix_arg = first_prefix.to_str().ok_or_else(|| {
+            io_error(
+                "encode first concatenation pack path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let first_hash = String::from_utf8(git_with_stdin(
+            &[
+                "--git-dir",
+                repository_arg,
+                "pack-objects",
+                "--delta-base-offset",
+                first_prefix_arg,
+            ],
+            format!("{first_oid}\n{first_delta_oid}\n").as_bytes(),
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first concatenation pack hash",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let second_prefix = root.path().join("second");
+        let second_prefix_arg = second_prefix.to_str().ok_or_else(|| {
+            io_error(
+                "encode second concatenation pack path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let second_hash = String::from_utf8(git_with_stdin(
+            &[
+                "--git-dir",
+                repository_arg,
+                "pack-objects",
+                "--delta-base-offset",
+                second_prefix_arg,
+            ],
+            format!("{second_oid}\n").as_bytes(),
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode second concatenation pack hash",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let first = source_descriptor(root.path().join(format!("first-{first_hash}.pack")))?;
+        let first_pack_info = git_output(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(first.path.with_extension("idx")),
+            "inspect first concatenation test pack",
+        )?;
+        assert!(
+            first_pack_info
+                .lines()
+                .any(|line| line.split_whitespace().count() >= 6),
+            "first test pack should contain a delta entry"
+        );
+        let second = source_descriptor(root.path().join(format!("second-{second_hash}.pack")))?;
+
+        let concatenated = concatenate_complete_pack_inventory(&[first, second])?;
+        let generated =
+            concatenated
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "complete-pack-concatenation".to_owned(),
+                    reason: "test produced no concatenated pack".to_owned(),
+                })?;
+        assert_eq!(generated.object_count, 3);
+        let mut locations = PackLocationIter::open(
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )?;
+        let mut actual = Vec::new();
+        for location in &mut locations {
+            let location = location?;
+            actual.push(location.oid);
+        }
+        actual.sort_unstable();
+        let mut expected = vec![
+            gix_hash::ObjectId::from_hex(first_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode first test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+            gix_hash::ObjectId::from_hex(first_delta_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode first delta test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+            gix_hash::ObjectId::from_hex(second_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode second test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+        ];
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
     fn repack_git_subprocess_ignores_repository_overrides() -> Result<(), RepackError> {
         let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
         let repository = root.path().join("repository");
@@ -1072,6 +1394,29 @@ mod tests {
         assert!(repository.join(".git").is_dir());
         assert!(!root.path().join("ambient.git").exists());
         Ok(())
+    }
+
+    fn git_with_stdin(args: &[&str], input: &[u8]) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git");
+        child
+            .stdin
+            .take()
+            .expect("piped git stdin")
+            .write_all(input)
+            .expect("write git stdin");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
     }
 
     fn commit_all(repository: &Path, message: &str) -> Result<(), RepackError> {

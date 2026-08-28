@@ -506,12 +506,30 @@ impl RemoteGitRepository {
             });
         }
 
-        let repacked = tokio::task::spawn_blocking(move || {
-            crab_git::repack::consolidate_pack_suffix(&sources)
+        let concat_sources = sources.clone();
+        let concatenated = tokio::task::spawn_blocking(move || {
+            crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
         })
         .await
-        .map_err(|source| Error::DecodeTask { source })?
-        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+        .map_err(|source| Error::DecodeTask { source })?;
+        let (repacked, strategy) = match concatenated {
+            Ok(repacked) => (repacked, "complete_pack_concatenation"),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    error_debug = ?error,
+                    "complete pack concatenation was not usable; falling back to Git consolidation"
+                );
+                let repack_sources = sources;
+                let repacked = tokio::task::spawn_blocking(move || {
+                    crab_git::repack::consolidate_pack_suffix(&repack_sources)
+                })
+                .await
+                .map_err(|source| Error::DecodeTask { source })?
+                .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                (repacked, "complete_pack_consolidation")
+            }
+        };
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -579,7 +597,7 @@ impl RemoteGitRepository {
         tracing::info!(
             target: "crab_remote_git::telemetry",
             telemetry_event = "pack_generation",
-            strategy = "complete_pack_consolidation",
+            strategy,
             source_pack_count,
             object_count = pack.object_count,
             response_bytes = size,
