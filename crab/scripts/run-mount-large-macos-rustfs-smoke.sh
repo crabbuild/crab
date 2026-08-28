@@ -19,6 +19,8 @@ TEST_HOME="$RUN_ROOT/home"
 BACKEND="${CRAB_MOUNT_MACOS_BACKEND:-fuse}"
 SEED_MIB="${CRAB_MOUNT_MACOS_SEED_MIB:-32}"
 NEW_MIB="${CRAB_MOUNT_MACOS_NEW_MIB:-40}"
+CONCURRENT_WRITERS="${CRAB_MOUNT_MACOS_CONCURRENT_WRITERS:-4}"
+CONCURRENT_MIB="${CRAB_MOUNT_MACOS_CONCURRENT_MIB:-16}"
 DIRECTORY_ENTRIES="${CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES:-0}"
 RUSTFS_IMAGE="${CRAB_MOUNT_MACOS_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc}"
 BUCKET="${CRAB_MOUNT_MACOS_BUCKET:-crab}"
@@ -143,9 +145,13 @@ ensure_macfuse_ready() {
 [[ "$BACKEND" == "fuse" || "$BACKEND" == "nfs" ]] || die "CRAB_MOUNT_MACOS_BACKEND must be fuse or nfs"
 [[ "$SEED_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_SEED_MIB must be an integer"
 [[ "$NEW_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_NEW_MIB must be an integer"
+[[ "$CONCURRENT_WRITERS" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be an integer"
+[[ "$CONCURRENT_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_MIB must be an integer"
 [[ "$DIRECTORY_ENTRIES" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES must be an integer"
 ((SEED_MIB >= 32)) || die "CRAB_MOUNT_MACOS_SEED_MIB must be at least 32"
 ((NEW_MIB >= 8)) || die "CRAB_MOUNT_MACOS_NEW_MIB must be at least 8"
+((CONCURRENT_WRITERS >= 2)) || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be at least 2"
+((CONCURRENT_MIB >= 1)) || die "CRAB_MOUNT_MACOS_CONCURRENT_MIB must be at least 1"
 
 if [[ -z "$EXTERNAL_ENDPOINT" ]]; then
     command -v "$DOCKER" >/dev/null 2>&1 || die "docker is required"
@@ -478,6 +484,14 @@ cmp "$RUN_ROOT/delete-me.sha256" "$RUN_ROOT/reset-delete-me.sha256"
 record_duration_since reset_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" write \
+    --models "$RW/models" \
+    --writers "$CONCURRENT_WRITERS" \
+    --mib "$CONCURRENT_MIB" \
+    --output "$RUN_ROOT/concurrent-writes.json"
+record_duration_since concurrent_overlay_write_ms "$phase_start_ms"
+
+phase_start_ms="$(now_ms)"
 cp "$RUN_ROOT/run/seed/models/model.bin" "$RUN_ROOT/run/expected-model.bin"
 mv "$RW/archive" "$RW/moved-archive"
 hash_file "$RW/moved-archive/base-move.bin" > "$RUN_ROOT/rw-base-move.sha256"
@@ -581,7 +595,8 @@ import pathlib
 
 root = pathlib.Path(os.environ["RUN_ROOT_ENV"])
 text = (root / "rw-diff.json").read_text()
-for path in [
+concurrent = json.loads((root / "concurrent-writes.json").read_text())
+expected_paths = [
     "models/model.bin",
     "models/new-large.bin",
     "models/sparse-extend.bin",
@@ -589,7 +604,9 @@ for path in [
     "models/delete-me.bin",
     "moved-archive/base-move.bin",
     "dir-after/nested/note.txt",
-]:
+]
+expected_paths.extend(f"models/{item['path']}" for item in concurrent["files"])
+for path in expected_paths:
     if path not in text:
         raise SystemExit(text)
 if "symlink" not in text:
@@ -615,6 +632,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/export-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/export-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/export-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/export-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$EXPORT/models" \
+    --label export
 [[ "$(readlink "$EXPORT/models/model-link.bin")" == "model.bin" ]]
 grep -q '^archive/base-move.bin$' "$EXPORT/.crab-overlay-deletions"
 grep -q '^models/delete-me.bin$' "$EXPORT/.crab-overlay-deletions"
@@ -702,6 +723,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/clone-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/clone-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/clone-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/clone-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models" \
+    --label clone
 [[ "$(readlink "$CLONE/models/model-link.bin")" == "model.bin" ]]
 [[ "$(stat -f "%z" "$CLONE/models/model.bin")" == "$((31 * 1024 * 1024))" ]]
 [[ "$(stat -f "%z" "$CLONE/models/sparse-extend.bin")" == "$((48 * 1024 * 1024))" ]]
@@ -739,6 +764,9 @@ grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-model-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-new-large-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-base-move-pointer.txt"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-pointers \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --repo "$CLONE"
 grep -q "^100755$" "$RUN_ROOT/clone-model-mode.txt"
 grep -q "^100755$" "$RUN_ROOT/clone-new-large-mode.txt"
 grep -q "^100755$" "$RUN_ROOT/clone-sparse-extend-mode.txt"
@@ -770,6 +798,9 @@ cmp "$CLONE/models/model.bin" "$RUN_ROOT/clone-model-pointer.txt"
 cmp "$CLONE/models/new-large.bin" "$RUN_ROOT/clone-new-large-pointer.txt"
 cmp "$CLONE/models/sparse-extend.bin" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
 cmp "$CLONE/moved-archive/base-move.bin" "$RUN_ROOT/clone-base-move-pointer.txt"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-pointers \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models"
 [[ -x "$CLONE/models/model.bin" ]]
 [[ -x "$CLONE/models/new-large.bin" ]]
 [[ -x "$CLONE/models/sparse-extend.bin" ]]
@@ -789,6 +820,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/rehydrated-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/rehydrated-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/rehydrated-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/rehydrated-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models" \
+    --label rehydrated
 [[ -x "$CLONE/models/model.bin" ]]
 [[ -x "$CLONE/models/new-large.bin" ]]
 [[ -x "$CLONE/models/sparse-extend.bin" ]]
@@ -832,6 +867,7 @@ summary = {
     "base_move_sha256": (root / "base-move.sha256").read_text().strip(),
     "deleted_large_sha256": (root / "delete-me.sha256").read_text().strip(),
     "seed_dedup": json.loads((root / "seed-dedup.json").read_text()),
+    "concurrent_writes": json.loads((root / "concurrent-writes.json").read_text()),
     "clone_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     "model_pointer_bytes": (root / "clone-model-pointer.txt").stat().st_size,
     "new_pointer_bytes": (root / "clone-new-large-pointer.txt").stat().st_size,

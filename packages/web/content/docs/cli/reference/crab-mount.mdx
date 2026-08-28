@@ -64,6 +64,12 @@ crab unmount [OPTIONS]
 Writable mounts use a local copy-on-write overlay. Changes stay local until you
 run an explicit publish command.
 
+Independent paths on one mount may be written concurrently. Same-path and
+intersecting subtree mutations are serialized, while commit, export, and reset
+wait for in-flight mutations before taking an exclusive overlay snapshot.
+Separate mounts remain independent working trees and do not share advisory
+file locks.
+
 ```bash
 crab mount diff --mountpoint /mnt/models
 crab mount export --mountpoint /mnt/models --to /tmp/models-overlay

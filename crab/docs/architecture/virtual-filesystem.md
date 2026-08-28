@@ -93,6 +93,12 @@ modifications are stored in an overlay database plus an upper directory and are
 merged with the immutable snapshot view. The overlay tracks creates, writes,
 truncates, mode changes, symlinks, unlinks, and directory renames.
 
+Mutations take a shared, cross-process publish lease. Independent paths can
+write their backing files concurrently, while the VFS engine serializes the
+same path and intersecting ancestor/subtree mutations. Publish, export, and
+reset take the exclusive lease, wait for in-flight backing-file mutations, and
+prevent a partial overlay snapshot from being observed.
+
 Overlay writes remain local until the user runs a publish operation:
 - `crab mount diff` inspects the live overlay.
 - `crab mount export` copies overlay changes to a normal directory.
