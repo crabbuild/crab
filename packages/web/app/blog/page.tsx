@@ -1,14 +1,8 @@
-import {
-  ArrowRight,
-  Clock,
-  Gauge,
-  Newspaper,
-  Users,
-} from "lucide-react"
-import Image from "next/image"
+import { ArrowRight, Clock, Gauge, Newspaper, Users } from "lucide-react"
 import Link from "next/link"
 
 import { MarketingLayout } from "@/components/marketing-layout"
+import { CurrentSubjectDiagram } from "@/components/marketing/current-subject-diagram"
 import { Badge } from "@/components/ui/badge"
 import { formatBlogDate } from "@/lib/blog-date"
 import { getBlogPosts, type BlogPostMeta } from "@/lib/blog-posts"
@@ -202,21 +196,5 @@ function MetaLine({
       />
       <span className="leading-5">{label}</span>
     </span>
-  )
-}
-
-function CurrentSubjectDiagram() {
-  return (
-    <aside className="self-start overflow-hidden rounded-2xl border border-slate-800 bg-[#07111f] p-1.5 shadow-[0_22px_70px_rgba(2,6,23,0.2)] lg:self-center">
-      <Image
-        src="/diagram/blog-cover/current-subject.svg"
-        width={560}
-        height={400}
-        alt="One Git commit connects code and a compact Crab pointer in Git history to immutable large-file data in an object store, producing one visible repository state"
-        className="h-auto w-full rounded-xl"
-        unoptimized
-        priority
-      />
-    </aside>
   )
 }
