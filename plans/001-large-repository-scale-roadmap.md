@@ -86,11 +86,22 @@ sidecar. `MAX_PACK_METADATA_BYTES` is enforced before JSON parsing in the
 shared metadata contract, before staged protected-receive reads, in the push
 and receive CAS loops, and through both origin and cache-service legacy-pack
 enrichment. An oversized enrichment hint is treated as legacy (the pack is
-kept), while publication still fails closed; this preserves fetch correctness
-without allowing an untrusted sidecar to consume repository-scale memory.
-The focused metadata, remote-helper, push, and receive suites pass. This is
-intake containment, not proof that ref-tip sidecars or all metadata layers
+kept), and writers now publish an empty hint when a ref-tip union would exceed
+the bound; an older oversized canonical hint is left untouched and likewise
+treated as legacy. This preserves fetch correctness without allowing an
+untrusted sidecar to consume repository-scale memory or block a large-team
+push. The focused metadata, remote-helper, push, and receive suites pass. This
+is intake containment, not proof that ref-tip sidecars or all metadata layers
 remain bounded under a 10,000-push/fanout qualification.
+
+`1de8e528` closes the remaining sidecar producer/consumer gap. Normal push,
+protected receive, synthesized/view packs, repack, and local recovery now use
+the bounded serializer or bounded file reader; an oversized union is published
+as an empty hint, and an existing empty or oversized hint remains legacy rather
+than being incompletely enriched. Pack-list construction and shallow filtering
+normalize empty hints to unconditional inclusion. Focused push, receive,
+recovery, metadata, manifest, and shallow tests pass. This is still a bounded
+fallback contract, not a 10,000-push or multi-provider performance result.
 
 `local-k8s-final-04655f3b-1000-20260825` used Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated external RustFS, and the
@@ -859,7 +870,8 @@ recovery fix at `be27f458`; active-marker recovery fix at `73ef4035`;
 transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
 reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 `4a8fc34e`; regular locator budgeting at `88deb4e0`; stale owner-plan guard at
-`5465031e`; small-catalog point-read policy at `62d35c14`):
+`5465031e`; small-catalog point-read policy at `62d35c14`; bounded pack-hint
+fallback at `1de8e528`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -967,6 +979,9 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - the workflow scheduler lock retains its diagnostic inode across handoffs,
   preventing an earlier holder from unlinking the pathname after a waiter has
   acquired it; the focused handoff regression is committed as `d9c93263`.
+- bounded per-pack ref-tip sidecars use a shared size contract, preserve
+  conservative legacy behavior when hints are empty/oversized, and prevent
+  repack or recovery from reintroducing an unbounded hint.
 
 ### PR #87 push-admission follow-up
 
@@ -1913,11 +1928,11 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13` | The current full run ends with 2 active packs and the e01 pack-source qualification retains 1,003 immutable physical history objects while serving converges to 2. The b8 locator startup smoke passes its 500-request regression budget. Pack sidecar intake is now bounded, but response-pack egress, fanout, retention, and provider SLOs remain open |
+| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528` | The current full run ends with 2 active packs and the e01 pack-source qualification retains 1,003 immutable physical history objects while serving converges to 2. The b8 locator startup smoke passes its 500-request regression budget. Pack sidecar intake and publication fallback are now bounded, but response-pack egress, fanout, retention, and provider SLOs remain open |
 | 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985` | The e01 owner processed an inventory of 992 packs, swept 991 stale membership rows, and left 2 active serving packs, but took 471.1 s across ten passes; source-index elimination is correctness/IO hardening, not a measured repack wall-time win. The 10,000-push latency, memory, and interruption budgets remain open |
-| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The b8 same-ref run passes protocol-v2 visibility and the locator request budget. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; pack-sidecar intake is bounded, but grace-aware retention, interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar intake pass. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
+| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The b8 same-ref run passes protocol-v2 visibility and the locator request budget. Empty pack hints now remain unconditional in shallow filtering. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; pack-sidecar intake, repack publication, and recovery restore are bounded, but grace-aware retention, interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar intake/publication pass. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
 
 ### Current branch verification evidence
 
