@@ -1555,13 +1555,16 @@ async fn execute_deletes(
 /// Production-ready parallel delete using `Arc<dyn ObjectDeleter>`.
 ///
 /// Spawns up to `concurrency` tasks at a time via a semaphore. Each task
-/// independently deletes one object. Results are aggregated via atomics.
+/// independently deletes one object. Results are aggregated via atomics. A
+/// zero concurrency request is normalized to one so malformed or externally
+/// supplied settings cannot panic while creating the semaphore or chunks.
 pub async fn execute_deletes_parallel(
     objects: &[ObjectMeta],
     cancel: &CancellationToken,
     concurrency: usize,
     deleter: Arc<dyn ObjectDeleter>,
 ) -> (Vec<String>, DeleteStats) {
+    let concurrency = concurrency.max(1);
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let packs = Arc::new(AtomicU64::new(0));
     let xorbs = Arc::new(AtomicU64::new(0));
@@ -3260,6 +3263,38 @@ mod tests {
             storage_class: None,
             transitioned_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn parallel_delete_normalizes_zero_concurrency() {
+        use std::sync::Arc;
+
+        let objects = vec![
+            make_obj("packs/aa/pack", 10, Duration::from_secs(7200)),
+            make_obj("xorbs/bb/xorb", 20, Duration::from_secs(7200)),
+            make_obj("shards/cc/shard", 30, Duration::from_secs(7200)),
+        ];
+        let deleter: Arc<dyn ObjectDeleter> = Arc::new(FailingDeleter {
+            fail_delete_for: None,
+            fail_reconcile: false,
+        });
+
+        let (mut deleted_keys, stats) =
+            execute_deletes_parallel(&objects, &CancellationToken::new(), 0, deleter).await;
+
+        deleted_keys.sort_unstable();
+        assert_eq!(
+            deleted_keys,
+            vec![
+                "packs/aa/pack".to_owned(),
+                "shards/cc/shard".to_owned(),
+                "xorbs/bb/xorb".to_owned(),
+            ]
+        );
+        assert_eq!(stats.packs, 1);
+        assert_eq!(stats.xorbs, 1);
+        assert_eq!(stats.shards, 1);
+        assert_eq!(stats.bytes, 60);
     }
 
     fn make_obj_at(key: &str, size: u64, time: SystemTime) -> ObjectMeta {
