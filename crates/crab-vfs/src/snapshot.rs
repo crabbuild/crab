@@ -319,10 +319,18 @@ impl SnapshotStore {
         self.get_state(STATE_REF_NAME)
     }
 
-    /// Update a single node's size in the given generation without a full
-    /// republish. Used by the size-backfill callback after hydrating a
-    /// small file whose tree entry had an unknown (zero) size.
-    pub fn update_node_size(&self, generation: i64, path: &str, size: u64) -> Result<()> {
+    /// Classify a fetched blob and update its node without a full republish.
+    ///
+    /// Blobless snapshots cannot distinguish ordinary blobs from Crab
+    /// pointers until Git fetches the object. This updates both logical size
+    /// and pointer metadata atomically once the promised blob is available.
+    pub fn update_node_from_blob(
+        &self,
+        generation: i64,
+        path: &str,
+        blob: &[u8],
+    ) -> Result<(u64, Option<Pointer>)> {
+        let (size, pointer) = classify_blob(path, blob)?;
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(map_sqlite_err)?;
         let existing = tx
@@ -337,13 +345,14 @@ impl SnapshotStore {
         let Some(existing) = existing else {
             debug!(
                 generation,
-                path, "update_node_size: node not found, skipping"
+                path, "update_node_from_blob: node not found, skipping"
             );
-            return Ok(());
+            return Ok((size, pointer));
         };
 
         let mut node = deserialize_base_node(&existing)?;
         node.size = size;
+        node.pointer = pointer.clone();
         let value = serialize_base_node(&node);
         tx.execute(
             "UPDATE base_nodes_v1 SET node = ?3 WHERE generation = ?1 AND path = ?2",
@@ -352,8 +361,14 @@ impl SnapshotStore {
         .map_err(map_sqlite_err)?;
         tx.commit().map_err(map_sqlite_err)?;
 
-        debug!(generation, path, size, "backfilled node size");
-        Ok(())
+        debug!(
+            generation,
+            path,
+            size,
+            pointer = pointer.is_some(),
+            "classified fetched blob"
+        );
+        Ok((size, pointer))
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -645,12 +660,7 @@ where
                 "tree entry {path} references non-blob object {oid_hex}"
             )));
         }
-        if is_pointer(data.data) {
-            let parsed = Pointer::parse(data.data)
-                .map_err(|e| CrabError::Internal(format!("invalid Crab pointer at {path}: {e}")))?;
-            size = parsed.size;
-            pointer = Some(parsed);
-        }
+        (size, pointer) = classify_blob(&path, data.data)?;
     }
 
     Ok(Some(BaseNode {
@@ -661,6 +671,15 @@ where
         pointer,
         size,
     }))
+}
+
+fn classify_blob(path: &str, blob: &[u8]) -> Result<(u64, Option<Pointer>)> {
+    if !is_pointer(blob) {
+        return Ok((blob.len() as u64, None));
+    }
+    let pointer = Pointer::parse(blob)
+        .map_err(|error| CrabError::Internal(format!("invalid Crab pointer at {path}: {error}")))?;
+    Ok((pointer.size, Some(pointer)))
 }
 
 struct SnapshotTreeVisitor<F> {
@@ -1179,10 +1198,8 @@ mod tests {
         assert_eq!(retrieved.size, 1_048_576);
     }
 
-    // --- update_node_size tests ---
-
     #[test]
-    fn update_node_size_backfills_zero_size() {
+    fn update_node_from_blob_backfills_ordinary_blob_size() {
         let (_dir, store) = temp_store();
         let node = make_file_node("readme.md", 0);
         store
@@ -1194,9 +1211,11 @@ mod tests {
         assert_eq!(before.size, 0);
 
         // Backfill with actual size.
-        store.update_node_size(1, "readme.md", 1234).unwrap();
+        let blob = vec![b'x'; 1234];
+        let result = store.update_node_from_blob(1, "readme.md", &blob).unwrap();
 
         let after = store.get_node(1, "readme.md").unwrap().unwrap();
+        assert_eq!(result, (1234, None));
         assert_eq!(after.size, 1234);
         // Other fields unchanged.
         assert_eq!(after.node_type, NodeType::File);
@@ -1205,30 +1224,58 @@ mod tests {
     }
 
     #[test]
-    fn update_node_size_missing_node_is_noop() {
+    fn update_node_from_blob_records_pointer_logical_size() {
+        let (_dir, store) = temp_store();
+        let node = make_file_node("model.bin", 0);
+        store
+            .publish_generation("aabb", "refs/heads/main", &[node])
+            .unwrap();
+        let pointer = Pointer {
+            file_hash: [7; 32],
+            size: 1_048_576,
+            shard_hint: None,
+        };
+        let blob = pointer.serialize();
+
+        let result = store.update_node_from_blob(1, "model.bin", &blob).unwrap();
+
+        let after = store.get_node(1, "model.bin").unwrap().unwrap();
+        assert_eq!(result, (pointer.size, Some(pointer.clone())));
+        assert_eq!(after.size, pointer.size);
+        assert_eq!(after.pointer, Some(pointer));
+    }
+
+    #[test]
+    fn update_node_from_blob_missing_node_returns_classification() {
         let (_dir, store) = temp_store();
         store
             .publish_generation("aabb", "refs/heads/main", &[make_file_node("a.txt", 10)])
             .unwrap();
 
         // Updating a non-existent path succeeds silently.
-        store.update_node_size(1, "nonexistent.txt", 999).unwrap();
+        let result = store
+            .update_node_from_blob(1, "nonexistent.txt", b"content")
+            .unwrap();
 
         // Original node unchanged.
+        assert_eq!(result, (7, None));
         let node = store.get_node(1, "a.txt").unwrap().unwrap();
         assert_eq!(node.size, 10);
     }
 
     #[test]
-    fn update_node_size_wrong_generation_is_noop() {
+    fn update_node_from_blob_wrong_generation_is_noop() {
         let (_dir, store) = temp_store();
         store
             .publish_generation("aabb", "refs/heads/main", &[make_file_node("a.txt", 0)])
             .unwrap();
 
         // Wrong generation — no update.
-        store.update_node_size(99, "a.txt", 500).unwrap();
+        let result = store
+            .update_node_from_blob(99, "a.txt", &vec![b'x'; 500])
+            .unwrap();
 
+        assert_eq!(result, (500, None));
         let node = store.get_node(1, "a.txt").unwrap().unwrap();
         assert_eq!(node.size, 0);
     }

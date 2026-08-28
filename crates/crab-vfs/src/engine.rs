@@ -24,7 +24,7 @@ use crate::core::error::{CrabError, Result};
 use crate::hydration::{HydrationReadStatsSnapshot, HydrationService};
 use crate::resolver::{FuseResolver, OverlayEntry, ResolvedNode};
 use crate::snapshot::{BaseNode, NodeType, SnapshotStore};
-use crab_types::pointer::{Pointer, hex_encode};
+use crab_types::pointer::{Pointer, hex_encode, is_pointer};
 
 // ---------------------------------------------------------------------------
 // OverlayWriter trait
@@ -666,20 +666,10 @@ impl VfsReadLease {
 
 #[derive(Debug)]
 enum ReadSource {
-    BasePointer {
-        path: String,
-        pointer: Pointer,
-    },
-    BaseBlob {
-        path: String,
-        oid: String,
-        known_size: Option<u64>,
-    },
+    BasePointer { path: String, pointer: Pointer },
+    BaseBlob { path: String, oid: String },
     BaseEmpty,
-    OverlayFile {
-        path: String,
-        backing: PathBuf,
-    },
+    OverlayFile { path: String, backing: PathBuf },
 }
 
 impl ReadSource {
@@ -1231,27 +1221,53 @@ impl VfsEngine {
         match self.resolver.resolve_path(path)? {
             ResolvedNode::Overlay(entry) => Ok(entry.size),
             ResolvedNode::Base(base) => {
+                let base = self.classify_unknown_base_node(path, base)?;
                 if let Some(pointer) = base.pointer {
                     return Ok(pointer.size);
                 }
                 if base.size != 0 || base.node_type != NodeType::File {
                     return Ok(base.size);
                 }
-                let Some(oid) = base.object_oid else {
-                    return Ok(0);
-                };
-                let reader = self.odb_reader.as_ref().ok_or_else(|| {
-                    CrabError::Internal(format!(
+                if base.object_oid.is_some() && self.odb_reader.is_none() {
+                    return Err(CrabError::Internal(format!(
                         "no ODB reader configured for size lookup of {path}"
-                    ))
-                })?;
-                let size = reader.read_blob(&oid)?.len() as u64;
-                if let Some(snapshot) = &self.snapshot {
-                    snapshot.update_node_size(self.resolver.generation(), path, size)?;
+                    )));
                 }
-                Ok(size)
+                Ok(base.size)
             }
         }
+    }
+
+    fn classify_unknown_base_node(&self, path: &str, mut base: BaseNode) -> Result<BaseNode> {
+        if base.node_type != NodeType::File
+            || base.size != 0
+            || base.pointer.is_some()
+            || base.object_oid.is_none()
+        {
+            return Ok(base);
+        }
+        let oid = base.object_oid.as_deref().ok_or_else(|| {
+            CrabError::Internal(format!(
+                "missing OID while classifying fetched blob at {path}"
+            ))
+        })?;
+        let Some(reader) = self.odb_reader.as_ref() else {
+            return Ok(base);
+        };
+        let blob = reader.read_blob(oid)?;
+        let (size, pointer) = if let Some(snapshot) = &self.snapshot {
+            snapshot.update_node_from_blob(self.resolver.generation(), path, &blob)?
+        } else if is_pointer(&blob) {
+            let pointer = Pointer::parse(&blob).map_err(|error| {
+                CrabError::Internal(format!("invalid Crab pointer at {path}: {error}"))
+            })?;
+            (pointer.size, Some(pointer))
+        } else {
+            (blob.len() as u64, None)
+        };
+        base.size = size;
+        base.pointer = pointer;
+        Ok(base)
     }
 
     /// Flush overlay data and metadata for protocols with explicit commit semantics.
@@ -1333,6 +1349,7 @@ impl VfsEngine {
         let overlay_version = self.overlay_view_version_for_path(&path);
         match node {
             ResolvedNode::Base(base) => {
+                let base = self.classify_unknown_base_node(&path, base)?;
                 Ok(self.open_base_read(path, generation, overlay_version, base))
             }
             ResolvedNode::Overlay(_) => {
@@ -1379,11 +1396,7 @@ impl VfsEngine {
                 object_oid: oid.clone(),
                 known_size,
             };
-            let source = ReadSource::BaseBlob {
-                path,
-                oid,
-                known_size,
-            };
+            let source = ReadSource::BaseBlob { path, oid };
             return VfsReadLease::new(key, source);
         }
 
@@ -1425,11 +1438,7 @@ impl VfsEngine {
                 }
                 result
             }
-            ReadSource::BaseBlob {
-                path,
-                oid,
-                known_size,
-            } => {
+            ReadSource::BaseBlob { path, oid } => {
                 let Some(ref reader) = self.odb_reader else {
                     return Err(CrabError::Internal(format!(
                         "no ODB reader configured for small-file read of {path}"
@@ -1443,9 +1452,6 @@ impl VfsEngine {
                     "reading small file from ODB"
                 );
                 let data = reader.read_blob_range(oid, offset, size)?;
-                if known_size.is_none() {
-                    self.on_hydrated(path, oid);
-                }
                 Ok(data)
             }
             ReadSource::BaseEmpty => Ok(Bytes::new()),
@@ -1773,43 +1779,6 @@ impl VfsEngine {
     }
 
     // -----------------------------------------------------------------------
-    // Size backfill after hydration
-    // -----------------------------------------------------------------------
-
-    /// Callback invoked after a small file is read from the ODB for the
-    /// first time. If the snapshot node's size was zero (unknown at tree
-    /// walk time), updates it with the actual blob size.
-    fn on_hydrated(&self, path: &str, oid: &str) {
-        let (Some(snapshot), Some(reader)) = (&self.snapshot, &self.odb_reader) else {
-            return;
-        };
-
-        let generation = self.resolver.generation();
-
-        // Read the full blob to get its actual size.
-        let blob_size = match reader.read_blob(oid) {
-            Ok(blob) => blob.len() as u64,
-            Err(e) => {
-                warn!(path, oid, error = %e, "size backfill: failed to read blob");
-                return;
-            }
-        };
-
-        if blob_size == 0 {
-            return;
-        }
-
-        if let Err(e) = snapshot.update_node_size(generation, path, blob_size) {
-            warn!(
-                path,
-                generation,
-                error = %e,
-                "size backfill: failed to update node size"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Speculative prefetch
     // -----------------------------------------------------------------------
 
@@ -1999,6 +1968,7 @@ impl VfsEngine {
         path: &str,
         ov: &dyn OverlayWriter,
     ) -> Result<()> {
+        let base = self.classify_unknown_base_node(path, base.clone())?;
         match base.node_type {
             NodeType::Dir => {
                 // Directories don't need content promotion.
@@ -2008,7 +1978,7 @@ impl VfsEngine {
             NodeType::File => {
                 if let Some(ref pointer) = base.pointer {
                     // Large file: stream chunks directly to disk.
-                    let source_oid = base_source_oid(base);
+                    let source_oid = base_source_oid(&base);
                     debug!(
                         path,
                         size = pointer.size,
@@ -2859,6 +2829,47 @@ mod tests {
             }
         );
         assert_eq!(lease.known_size(), Some(pointer.size));
+    }
+
+    #[test]
+    fn unknown_pointer_blob_is_classified_before_direct_read() {
+        let pointer = crab_types::pointer::Pointer {
+            file_hash: [9; 32],
+            size: 64 * 1024 * 1024,
+            shard_hint: Some([4; 32]),
+        };
+        let (odb_root, git_dir, oid) = create_git_repo_with_blob(&pointer.serialize());
+        let mut fixture = test_engine_with_nodes(vec![BaseNode {
+            path: "model.bin".to_owned(),
+            node_type: NodeType::File,
+            mode: 0o100644,
+            object_oid: Some(oid),
+            pointer: None,
+            size: 0,
+        }]);
+        let reader = OdbReader::new(&git_dir, &odb_root.path().join("blob-cache")).unwrap();
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader = Some(reader);
+
+        let lease = fixture.engine.open_read("model.bin").unwrap();
+
+        assert_eq!(
+            lease.key(),
+            &ReadSourceKey::BasePointer {
+                generation: 1,
+                overlay_version: 0,
+                file_hash: pointer.file_hash,
+                size: pointer.size,
+            }
+        );
+        let classified = fixture
+            .engine
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .get_node(1, "model.bin")
+            .unwrap()
+            .unwrap();
+        assert_eq!(classified.pointer, Some(pointer));
     }
 
     #[test]

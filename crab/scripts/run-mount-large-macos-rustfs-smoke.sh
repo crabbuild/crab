@@ -301,8 +301,15 @@ fi
 
 with_test_env "$BIN_DIR/crab" add --jobs 0 models/model.bin archive/base-move.bin models/delete-me.bin >"$RUN_ROOT/logs/crab-add-seed.log" 2>&1
 git show :models/model.bin > "$RUN_ROOT/seed-pointer.txt"
+git show :archive/base-move.bin > "$RUN_ROOT/seed-base-move-pointer.txt"
+git show :models/delete-me.bin > "$RUN_ROOT/seed-delete-me-pointer.txt"
+cmp "$RUN_ROOT/seed-pointer.txt" "$RUN_ROOT/seed-base-move-pointer.txt"
+cmp "$RUN_ROOT/seed-pointer.txt" "$RUN_ROOT/seed-delete-me-pointer.txt"
 git -c user.email=mount-e2e@example.invalid -c user.name="Crab Mount E2E" \
     commit -m "seed large model" >"$RUN_ROOT/logs/git-commit-seed.log" 2>&1
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab AWS_DEFAULT_REGION="$REGION" AWS_EC2_METADATA_DISABLED=true \
+    "$AWS" --endpoint-url "$ENDPOINT_URL" s3api list-objects-v2 \
+    --bucket "$BUCKET" --prefix ".crab/xorbs/" --output json > "$RUN_ROOT/seed-xorbs-before.json"
 phase_start_ms="$(now_ms)"
 with_test_env "$BIN_DIR/crab" push --json --upload-concurrency 0 origin HEAD:refs/heads/main \
     >"$RUN_ROOT/logs/crab-push-seed.json" 2>"$RUN_ROOT/logs/crab-push-seed.err"
@@ -310,19 +317,28 @@ record_duration_since seed_push_ms "$phase_start_ms"
 AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab AWS_DEFAULT_REGION="$REGION" AWS_EC2_METADATA_DISABLED=true \
     "$AWS" --endpoint-url "$ENDPOINT_URL" s3api list-objects-v2 \
     --bucket "$BUCKET" --prefix ".crab/xorbs/" --output json > "$RUN_ROOT/seed-xorbs.json"
-python3 - "$RUN_ROOT/seed-xorbs.json" "$SEED_MIB" "$RUN_ROOT/seed-dedup.json" <<'PY'
+python3 - "$RUN_ROOT/seed-xorbs-before.json" "$RUN_ROOT/seed-xorbs.json" "$SEED_MIB" "$RUN_ROOT/seed-dedup.json" <<'PY'
 import json
 import pathlib
 import sys
 
-objects_path = pathlib.Path(sys.argv[1])
-seed_bytes = int(sys.argv[2]) * 1024 * 1024
-output_path = pathlib.Path(sys.argv[3])
-objects = json.loads(objects_path.read_text()).get("Contents", [])
-stored_bytes = sum(int(item.get("Size", 0)) for item in objects)
+before_path = pathlib.Path(sys.argv[1])
+objects_path = pathlib.Path(sys.argv[2])
+seed_bytes = int(sys.argv[3]) * 1024 * 1024
+output_path = pathlib.Path(sys.argv[4])
+before = {
+    item["Key"]: int(item.get("Size", 0))
+    for item in json.loads(before_path.read_text()).get("Contents", [])
+}
+objects = {
+    item["Key"]: int(item.get("Size", 0))
+    for item in json.loads(objects_path.read_text()).get("Contents", [])
+}
+new_objects = {key: size for key, size in objects.items() if key not in before}
+stored_bytes = sum(new_objects.values())
 logical_bytes = seed_bytes * 3
-if not objects or stored_bytes <= 0:
-    raise SystemExit("seed push did not create xorb data")
+if not objects:
+    raise SystemExit("seed push did not leave xorb data in the bucket")
 if stored_bytes >= seed_bytes * 2:
     raise SystemExit(
         f"three identical files stored {stored_bytes} xorb bytes for {logical_bytes} logical bytes"
@@ -330,7 +346,9 @@ if stored_bytes >= seed_bytes * 2:
 payload = {
     "logical_bytes": logical_bytes,
     "stored_xorb_bytes": stored_bytes,
-    "xorb_count": len(objects),
+    "xorb_count": len(new_objects),
+    "bucket_xorb_bytes": sum(objects.values()),
+    "bucket_xorb_count": len(objects),
     "dedup_ratio": 1 - stored_bytes / logical_bytes,
 }
 output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -611,7 +629,10 @@ if [[ -d "$MOUNT_CACHE/.git" ]]; then
 fi
 [[ -f "$MOUNT_GIT_DIR/HEAD" ]]
 git --git-dir "$MOUNT_GIT_DIR" rev-parse refs/heads/main > "$RUN_ROOT/local-ref-before-push-failure.txt"
-git --git-dir "$MOUNT_GIT_DIR" config remote.origin.url "$RUN_ROOT/run/missing-origin.git"
+# Keep the fetch URL healthy for any promised base objects needed while the
+# commit is built. A broken push-only URL isolates retry behavior after the
+# local commit has actually been created.
+git --git-dir "$MOUNT_GIT_DIR" config remote.origin.pushurl "$RUN_ROOT/run/missing-origin.git"
 if with_test_env "$BIN_DIR/crab" mount commit --mountpoint "$RW" --message "mount large writeback should retry" --push --json \
     > "$RUN_ROOT/rw-commit-push-failure.json" 2>"$RUN_ROOT/logs/rw-commit-push-failure.err"; then
     die "commit unexpectedly succeeded with broken origin"
@@ -647,7 +668,7 @@ if payload.get("status") != "failed" or payload.get("pushed"):
 if not payload.get("commit_oid"):
     raise SystemExit(json.dumps(payload, sort_keys=True))
 PY
-git --git-dir "$MOUNT_GIT_DIR" config remote.origin.url "$REMOTE_URL"
+git --git-dir "$MOUNT_GIT_DIR" config --unset-all remote.origin.pushurl
 record_duration_since push_failure_retry_probe_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"

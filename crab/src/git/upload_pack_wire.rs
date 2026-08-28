@@ -34,7 +34,9 @@ use crate::core::error::{CrabError, Result};
 use crate::storage::retry::{RetryClass, retry_class};
 
 const MAX_PACKET_BYTES: usize = 65_520;
-const MAX_REQUEST_PACKETS: usize = 4_096;
+// Git batches promised-object wants for partial clones, so large trees can
+// legitimately exceed 4K lines. The byte limit remains the allocation bound.
+const MAX_REQUEST_PACKETS: usize = 65_536;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
 const LOCATOR_READ_RETRY_LIMIT: usize = 120;
@@ -638,7 +640,7 @@ fn validate_fetch_wants(
     for want in &request.wants {
         if policy.allow_any_sha_in_want
             || (policy.allow_tip_sha_in_want && advertised_tips.contains(want))
-            || (policy.allow_reachable_sha_in_want
+            || (visible_reachable_wants_allowed(request, policy)
                 && want.as_bytes().try_into().ok().is_some_and(|oid| {
                     visibility.contains_for_refs(visible_ref_names.iter().map(String::as_str), &oid)
                 }))
@@ -668,7 +670,7 @@ async fn validate_fetch_admission_catalog(
         .flat_map(|reference| [Some(reference.target), reference.peeled])
         .flatten()
         .collect::<HashSet<_>>();
-    let reachable = if policy.allow_reachable_sha_in_want {
+    let reachable = if visible_reachable_wants_allowed(request, policy) {
         let operation = repository
             .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
             .await
@@ -705,6 +707,13 @@ async fn validate_fetch_admission_catalog(
         )));
     }
     Ok(())
+}
+
+fn visible_reachable_wants_allowed(request: &FetchRequest, policy: &FetchAdmissionPolicy) -> bool {
+    // Partial-clone clients must request promised interior objects by OID.
+    // Filtered requests remain bounded by the generation-pinned visible-ref
+    // catalog, so they do not need the general raw-SHA policy opt-in.
+    policy.allow_reachable_sha_in_want || !matches!(&request.filter, UploadPackFilter::None)
 }
 
 async fn open_repository_with_visibility_requirement(
@@ -2155,6 +2164,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_request_accepts_large_promisor_want_batch() {
+        let mut bytes = packet(b"command=fetch\n");
+        bytes.extend_from_slice(b"0001");
+        for index in 0..10_000 {
+            bytes.extend_from_slice(&packet(format!("want {index:040x}\n").as_bytes()));
+        }
+        bytes.extend_from_slice(&packet(b"filter blob:none\n"));
+        bytes.extend_from_slice(&packet(b"done\n"));
+        bytes.extend_from_slice(b"0000");
+        let mut reader = BufReader::new(Cursor::new(bytes));
+        let cancellation = CancellationToken::new();
+
+        let request = read_command_request(&mut reader, &cancellation)
+            .await
+            .expect("large promisor request should stay within the byte bound")
+            .expect("request should be present");
+        assert_eq!(request.args.len(), 10_002);
+    }
+
+    #[tokio::test]
     async fn request_byte_limit_is_enforced_before_flush() {
         let mut bytes = packet(b"command=ls-refs\n");
         bytes.extend_from_slice(b"0001");
@@ -2232,6 +2261,72 @@ mod tests {
             &FetchAdmissionPolicy::default(),
         )
         .expect_err("a reachable non-tip want must be denied without opt-in");
+
+        assert!(error.to_string().contains("denied by upload-pack policy"));
+    }
+
+    #[test]
+    fn filtered_reachable_non_tip_want_is_accepted_by_default() {
+        let blob = parse_oid(&"a".repeat(40)).expect("blob oid");
+        let tip = parse_oid(&"b".repeat(40)).expect("tip oid");
+        let request = FetchRequest {
+            wants: vec![blob],
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        let visible_refs = vec!["refs/heads/main".to_owned()];
+        let visibility = GitVisibilityIndex::new(
+            1,
+            "c".repeat(64),
+            "d".repeat(64),
+            std::collections::BTreeMap::from([(
+                visible_refs[0].clone(),
+                vec![blob.to_string(), tip.to_string()],
+            )]),
+        )
+        .expect("valid visibility proof");
+
+        let result = validate_fetch_wants(
+            &HashSet::from([tip]),
+            &visibility,
+            &visible_refs,
+            &request,
+            &FetchAdmissionPolicy::default(),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn filtered_reachable_non_tip_want_outside_visible_ref_closure_is_denied() {
+        let hidden_blob = parse_oid(&"a".repeat(40)).expect("hidden blob oid");
+        let visible_blob = parse_oid(&"b".repeat(40)).expect("visible blob oid");
+        let tip = parse_oid(&"c".repeat(40)).expect("tip oid");
+        let request = FetchRequest {
+            wants: vec![hidden_blob],
+            filter: UploadPackFilter::BlobNone,
+            ..FetchRequest::default()
+        };
+        let visible_refs = vec!["refs/heads/main".to_owned()];
+        let visibility = GitVisibilityIndex::new(
+            1,
+            "d".repeat(64),
+            "e".repeat(64),
+            std::collections::BTreeMap::from([(
+                visible_refs[0].clone(),
+                vec![visible_blob.to_string(), tip.to_string()],
+            )]),
+        )
+        .expect("valid visibility proof");
+
+        let error = validate_fetch_wants(
+            &HashSet::from([tip]),
+            &visibility,
+            &visible_refs,
+            &request,
+            &FetchAdmissionPolicy::default(),
+        )
+        .expect_err("objects outside visible ref closure must remain denied");
 
         assert!(error.to_string().contains("denied by upload-pack policy"));
     }

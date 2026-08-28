@@ -4131,7 +4131,7 @@ fn git_small_blobs<'a>(
         });
     }
 
-    let mut check = Command::new("git")
+    let check = Command::new("git")
         .args([
             "cat-file",
             "--batch-check=%(objectname) %(objecttype) %(objectsize)",
@@ -4144,14 +4144,7 @@ fn git_small_blobs<'a>(
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(error::CrabError::Io)?;
-    check
-        .stdin
-        .as_mut()
-        .ok_or_else(|| error::CrabError::Internal("git cat-file stdin unavailable".to_owned()))?
-        .write_all(input.as_bytes())
-        .map_err(error::CrabError::Io)?;
-    drop(check.stdin.take());
-    let checked = check.wait_with_output().map_err(error::CrabError::Io)?;
+    let checked = command_output_with_input(check, input, "git cat-file --batch-check")?;
     if !checked.status.success() {
         return Err(error::CrabError::Internal(format!(
             "`git cat-file --batch-check` failed: {}",
@@ -4180,7 +4173,7 @@ fn git_small_blobs<'a>(
         return Ok(HashMap::new());
     }
 
-    let mut batch = Command::new("git")
+    let batch = Command::new("git")
         .args(["cat-file", "--batch"])
         .current_dir(root)
         .env_remove("GIT_DIR")
@@ -4199,14 +4192,7 @@ fn git_small_blobs<'a>(
             ),
         });
     }
-    batch
-        .stdin
-        .as_mut()
-        .ok_or_else(|| error::CrabError::Internal("git cat-file stdin unavailable".to_owned()))?
-        .write_all(batch_input.as_bytes())
-        .map_err(error::CrabError::Io)?;
-    drop(batch.stdin.take());
-    let output = batch.wait_with_output().map_err(error::CrabError::Io)?;
+    let output = command_output_with_input(batch, batch_input, "git cat-file --batch")?;
     if !output.status.success() {
         return Err(error::CrabError::Internal(format!(
             "`git cat-file --batch` failed: {}",
@@ -4267,6 +4253,28 @@ fn git_small_blobs<'a>(
         cursor = content_end + 1;
     }
     Ok(blobs)
+}
+
+fn command_output_with_input(
+    mut child: std::process::Child,
+    input: String,
+    operation: &str,
+) -> Result<std::process::Output> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| error::CrabError::Internal(format!("{operation} stdin unavailable")))?;
+    // Read output while input is written. Large Git batches can fill both OS
+    // pipes and deadlock if either side is drained only after the other.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().map_err(error::CrabError::Io)?;
+    let write_result = writer
+        .join()
+        .map_err(|_| error::CrabError::Internal(format!("{operation} stdin writer panicked")))?;
+    if output.status.success() {
+        write_result.map_err(error::CrabError::Io)?;
+    }
+    Ok(output)
 }
 
 fn is_safe_repo_relative_path(path: &Path) -> bool {
@@ -5385,6 +5393,37 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(main_only.len(), 1);
         assert_eq!(main_only[0].1.file_hash, main_pointer.file_hash);
+    }
+
+    #[test]
+    fn git_small_blobs_drains_large_input_and_output_concurrently() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let paths = (0..2_500)
+            .map(|index| {
+                let path = format!("blob-{index:04}.txt");
+                std::fs::write(root.join(&path), format!("blob {index}\n")).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let output = Command::new("git")
+            .args(["hash-object", "-w"])
+            .args(&paths)
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let oids = stdout.lines().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(oids.len(), paths.len());
+
+        let blobs = git_small_blobs(root, oids.iter().map(String::as_str)).unwrap();
+
+        assert_eq!(blobs.len(), paths.len());
+        assert!(blobs.values().any(|blob| blob == b"blob 2499\n"));
     }
 
     #[tokio::test]

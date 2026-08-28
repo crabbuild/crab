@@ -1590,7 +1590,8 @@ where
     Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
 {
     tracing::debug!(entries = entries.len(), "fetch batch");
-    if options.filter_requested || options.fetch_options.filter.is_some() {
+    let raw_object_fetch = classify_raw_object_fetch(entries)?;
+    if (options.filter_requested || options.fetch_options.filter.is_some()) && !raw_object_fetch {
         return Err(CrabError::Protocol(
             "filtered fetch requires protocol v2".to_owned(),
         ));
@@ -2181,6 +2182,14 @@ async fn fetch_packs(
     cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
+    if classify_raw_object_fetch(entries)? {
+        // Git resolves missing partial-clone objects through legacy exact-OID
+        // fetches. The catalog planner below authorizes every object against
+        // visible ref closure before generating or returning pack bytes.
+        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
+        return Ok(None);
+    }
+
     let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
     let manifest = snapshot.materialized_manifest();
 
@@ -2194,25 +2203,6 @@ async fn fetch_packs(
         config.download_concurrency,
     ));
 
-    let raw_object_count = entries
-        .iter()
-        .filter(|entry| entry.sha == entry.ref_name)
-        .count();
-    if raw_object_count > 0 {
-        if raw_object_count != entries.len() {
-            return Err(CrabError::Protocol(
-                "raw object fetches cannot be mixed with ref fetches".to_owned(),
-            ));
-        }
-    }
-
-    // Upload-pack policy gate. Raw-SHA `fetch <sha> <ref>` lines
-    // must be validated before we hand the client back any pack
-    // bytes, otherwise a client can ask for an arbitrary interior
-    // commit SHA and receive its pack data — the same
-    // information-leak vector that git's
-    // `uploadpack.allow*SHA1InWant` knobs were added to cover.
-    //
     // A rejected entry produces a per-entry `error {ref}
     // {protocol-tag} ({detail})` line on the writer (matching the
     // push response shape), but does not fail the batch. If every
@@ -2260,11 +2250,6 @@ async fn fetch_packs(
             writer.flush().await?;
             return Ok(None);
         }
-    }
-
-    if raw_object_count > 0 {
-        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
-        return Ok(None);
     }
 
     let git_dir = super::discover::discover_git_dir()?;
@@ -2393,6 +2378,19 @@ async fn fetch_packs(
         &manifest.git_validation_digest,
     )
     .await
+}
+
+fn classify_raw_object_fetch(entries: &[FetchEntry]) -> Result<bool> {
+    let raw_object_count = entries
+        .iter()
+        .filter(|entry| entry.sha == entry.ref_name)
+        .count();
+    if raw_object_count > 0 && raw_object_count != entries.len() {
+        return Err(CrabError::Protocol(
+            "raw object fetches cannot be mixed with ref fetches".to_owned(),
+        ));
+    }
+    Ok(raw_object_count > 0)
 }
 
 async fn try_fetch_exact_shallow_closure(
@@ -4855,6 +4853,60 @@ mod tests {
             matches!(result, Err(CrabError::Protocol(message)) if message == "filtered fetch requires protocol v2")
         );
         assert!(writer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_filtered_promisor_fetch_reaches_store_boundary() {
+        let options = HelperOptions {
+            filter_requested: true,
+            ..HelperOptions::default()
+        };
+        let mut cache = SessionCache::new(crate::core::config::Config::default());
+        let mut writer = Vec::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let oid = "a".repeat(40);
+        let entries = vec![FetchEntry {
+            sha: oid.clone(),
+            ref_name: oid,
+        }];
+
+        dispatch_fetch_batch_with_selector(
+            &entries,
+            &options,
+            &mut writer,
+            None,
+            "org/repo",
+            &mut cache,
+            Some("crab://bucket/org/repo"),
+            None,
+            &cancel,
+            |_, _, _| async { Err(CrabError::Internal("selector must not run".into())) },
+        )
+        .await
+        .expect("promisor fetch reaches the store boundary");
+
+        assert_eq!(writer, b"\n");
+    }
+
+    #[test]
+    fn raw_object_fetches_cannot_be_mixed_with_ref_fetches() {
+        let oid = "a".repeat(40);
+        let entries = vec![
+            FetchEntry {
+                sha: oid.clone(),
+                ref_name: oid,
+            },
+            FetchEntry {
+                sha: "b".repeat(40),
+                ref_name: "refs/heads/main".to_owned(),
+            },
+        ];
+
+        let result = classify_raw_object_fetch(&entries);
+
+        assert!(
+            matches!(result, Err(CrabError::Protocol(message)) if message == "raw object fetches cannot be mixed with ref fetches")
+        );
     }
 
     // --- option atomic parsing ---
