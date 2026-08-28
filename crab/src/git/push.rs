@@ -5872,12 +5872,35 @@ async fn download_locator_pack_evidence(
     let temp = tempfile::tempdir().map_err(CrabError::Io)?;
     let idx_path = temp.path().join("pack.idx");
     let rev_path = temp.path().join("pack.rev");
+    let index_maximum =
+        crab_git::pack_locator::max_pack_index_size(pack.object_count).ok_or_else(|| {
+            CrabError::CorruptObject {
+                path: router.pack_index_path(&pack.pack_id).as_ref().to_owned(),
+                reason: "Git pack index size overflows its bound".to_owned(),
+            }
+        })?;
+    let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+        .ok_or_else(|| CrabError::CorruptObject {
+            path: router
+                .pack_reverse_index_path(&pack.pack_id)
+                .as_ref()
+                .to_owned(),
+            reason: "Git reverse index size overflows its bound".to_owned(),
+        })?;
     store
-        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .download_to_path_bounded(
+            &router.pack_index_path(&pack.pack_id),
+            &idx_path,
+            index_maximum,
+        )
         .await?;
     check_cancelled(cancel)?;
     match store
-        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .download_to_path_bounded(
+            &router.pack_reverse_index_path(&pack.pack_id),
+            &rev_path,
+            reverse_maximum,
+        )
         .await
     {
         Ok(_) => {}
@@ -6056,7 +6079,14 @@ async fn load_pack_kind_metadata(
     rev_path: &Path,
 ) -> Result<Option<GitObjectKindMap>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let bytes = match store.get_with_etag(&path).await {
+    let maximum =
+        crab_git::pack_locator::pack_kind_metadata_size(pack.object_count).ok_or_else(|| {
+            CrabError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: "Git kind metadata size overflows its bound".to_owned(),
+            }
+        })?;
+    let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
         Err(CrabError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error),
@@ -13236,8 +13266,21 @@ impl PushPipeline {
                 None
             } else {
                 let temp = tempfile::NamedTempFile::new().map_err(CrabError::Io)?;
+                let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+                    .ok_or_else(|| CrabError::CorruptObject {
+                        path: self
+                            .router
+                            .pack_index_path(&pack.pack_id)
+                            .as_ref()
+                            .to_owned(),
+                        reason: "Git pack index size overflows its bound".to_owned(),
+                    })?;
                 store
-                    .download_to_path(&self.router.pack_index_path(&pack.pack_id), temp.path())
+                    .download_to_path_bounded(
+                        &self.router.pack_index_path(&pack.pack_id),
+                        temp.path(),
+                        index_maximum,
+                    )
                     .await?;
                 Some(temp)
             };

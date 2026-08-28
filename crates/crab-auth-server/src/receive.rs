@@ -455,7 +455,7 @@ pub async fn read_verified_staged_object(
     object: &StagedWrite,
 ) -> Result<bytes::Bytes> {
     let path = ObjectPath::from(object.staged_key.clone());
-    let (bytes, _) = store.get_with_etag(&path).await?;
+    let (bytes, _) = store.get_with_etag_bounded(&path, object.size).await?;
     validate_staged_object_bytes(object, &bytes)?;
     Ok(bytes)
 }
@@ -1273,11 +1273,23 @@ async fn download_service_locator_evidence_with_legacy_repair(
     let temp = tempfile::tempdir()?;
     let idx_path = temp.path().join("pack.idx");
     let rev_path = temp.path().join("pack.rev");
+    let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+        .ok_or_else(|| invalid("committed Git pack index size overflows its bound"))?;
+    let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+        .ok_or_else(|| invalid("committed Git reverse index size overflows its bound"))?;
     store
-        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .download_to_path_bounded(
+            &router.pack_index_path(&pack.pack_id),
+            &idx_path,
+            index_maximum,
+        )
         .await?;
     match store
-        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .download_to_path_bounded(
+            &router.pack_reverse_index_path(&pack.pack_id),
+            &rev_path,
+            reverse_maximum,
+        )
         .await
     {
         Ok(_) => {}
@@ -1336,7 +1348,9 @@ async fn load_service_pack_kind_metadata(
     rev_path: &Path,
 ) -> Result<Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let bytes = match store.get_with_etag(&path).await {
+    let maximum = crab_git::pack_locator::pack_kind_metadata_size(pack.object_count)
+        .ok_or_else(|| invalid("Git kind metadata size overflows its bound"))?;
+    let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
         Err(StorageError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -3595,7 +3609,7 @@ mod tests {
         store
             .put(
                 &ObjectPath::from(object.staged_key.clone()),
-                Bytes::from_static(b"tampered"),
+                Bytes::from_static(b"bad!"),
             )
             .await?;
 
@@ -3611,6 +3625,24 @@ mod tests {
             .await
             .expect_err("canonical object must not be written after promotion failure");
         assert!(matches!(canonical_err, StorageError::NotFound { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_verified_staged_object_rejects_an_oversized_provider_body() -> Result<()> {
+        let store = store();
+        let object = staged_object_for_bytes(
+            "org/repo/packs/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack"
+                .to_owned(),
+            b"pack",
+        );
+        put_staged(&store, &object, Bytes::from_static(b"oversized")).await?;
+
+        let error = read_verified_staged_object(&store, &object)
+            .await
+            .expect_err("staged reads must stop at their declared size");
+        assert!(matches!(error, AuthServerError::CorruptObject { .. }));
+        assert!(error.to_string().contains("bounded read"));
         Ok(())
     }
 

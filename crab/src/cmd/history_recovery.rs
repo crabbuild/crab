@@ -807,8 +807,25 @@ async fn verify_history(
             router.pack_path(&pack.pack_id).as_ref().to_owned(),
             downloaded,
         )?;
+        let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: router.pack_index_path(&pack.pack_id).as_ref().to_owned(),
+                reason: "Git pack index size overflows its bound".to_owned(),
+            })?;
+        let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: router
+                    .pack_reverse_index_path(&pack.pack_id)
+                    .as_ref()
+                    .to_owned(),
+                reason: "Git reverse index size overflows its bound".to_owned(),
+            })?;
         let index_size = store
-            .download_to_path(&router.pack_index_path(&pack.pack_id), &index_path)
+            .download_to_path_bounded(
+                &router.pack_index_path(&pack.pack_id),
+                &index_path,
+                index_maximum,
+            )
             .await?;
         record_object(
             &mut objects,
@@ -817,7 +834,7 @@ async fn verify_history(
         )?;
         let remote_reverse_index = router.pack_reverse_index_path(&pack.pack_id);
         match store
-            .download_to_path(&remote_reverse_index, &reverse_index_path)
+            .download_to_path_bounded(&remote_reverse_index, &reverse_index_path, reverse_maximum)
             .await
         {
             Ok(reverse_index_size) => record_object(
