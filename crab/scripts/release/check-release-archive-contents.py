@@ -246,6 +246,29 @@ def check_release_workflow(root: Path) -> list[str]:
             if needle not in verify_step:
                 errors.append(f"release.yml Verify archive layout: expected {needle!r}")
 
+    try:
+        smoke_step = workflow_step_run(text, "Run workflow smoke against release candidate")
+    except ValueError as error:
+        errors.append(f"release.yml: {error}")
+    else:
+        for needle in (
+            'release_sha="$(git rev-parse HEAD)"',
+            'if [ "$release_sha" != "${{ needs.prepare.outputs.source_sha }}" ]; then',
+            'GITHUB_SHA="$release_sha" python3 crab/scripts/e2e/run_dvc_workflow_smoke.py',
+        ):
+            if needle not in smoke_step:
+                errors.append(f"release.yml workflow smoke: expected {needle!r}")
+        if "--source-sha" in smoke_step:
+            errors.append("release.yml workflow smoke: tag-era script must receive its source SHA through the process environment")
+
+    try:
+        evidence_step = workflow_step_run(text, "Verify exact-commit workflow evidence")
+    except ValueError as error:
+        errors.append(f"release.yml: {error}")
+    else:
+        if '--source-sha "${{ needs.prepare.outputs.source_sha }}"' not in evidence_step:
+            errors.append("release.yml evidence verifier must check the prepared source SHA")
+
     if 'crab/scripts/release/update-homebrew.sh "$TAG"' not in text:
         errors.append("release.yml: Homebrew publishing must use crab/scripts/release/update-homebrew.sh")
 
@@ -278,7 +301,6 @@ def check_release_workflow(root: Path) -> list[str]:
         "--fail-on-no-commits",
         '--notes-file "$notes_file"',
         "cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked",
-        '--source-sha "${{ needs.prepare.outputs.source_sha }}"',
         'if ! aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null 2>&1; then',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api create-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
@@ -363,15 +385,6 @@ def check_homebrew_script(
 
 def checks(root: Path) -> list[TextCheck]:
     return [
-        TextCheck(
-            "workflow smoke accepts an explicit release source SHA",
-            root / "crab" / "scripts" / "e2e" / "run_dvc_workflow_smoke.py",
-            contains=(
-                'source_sha=args.source_sha',
-                'parser.add_argument("--source-sha", default=os.environ.get("GITHUB_SHA", "unknown"))',
-            ),
-            excludes=(),
-        ),
         TextCheck(
             "version bump keeps all shipped product manifests aligned",
             root / "crab" / "scripts" / "release" / "bump-version.sh",
