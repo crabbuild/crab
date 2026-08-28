@@ -373,9 +373,7 @@ pub fn consolidate_pack_suffix(
             &source.path,
             &source.canonical_id,
             source.size,
-            // Validate object bodies while the index is built. Broken links
-            // can span source packs and are checked after all packs land.
-            true,
+            false,
         )?;
         let mut locations =
             PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
@@ -403,6 +401,19 @@ pub fn consolidate_pack_suffix(
             source_oids.push(oid);
         }
     }
+    // A source pack may refer to an object in a later source pack. Install
+    // the complete set before fsck so valid cross-pack links are visible.
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", source_git.display()))
+            .arg("fsck")
+            .arg("--strict")
+            .arg("--full")
+            .arg("--no-reflogs")
+            .arg("--no-dangling")
+            .arg("--no-progress"),
+        "validate consolidated source packs",
+    )?;
     source_oids.sort_unstable();
     source_oids.dedup();
 
