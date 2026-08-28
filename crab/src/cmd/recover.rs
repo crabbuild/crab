@@ -2355,12 +2355,26 @@ fn verified_pack_metadata(
     if let Some(metadata_path) = pack_metadata_candidate_path(pack_path)
         && metadata_path.is_file()
     {
-        let bytes = std::fs::read(&metadata_path).map_err(CrabError::Io)?;
-        let metadata: crab_metadata::pack_metadata::PackMetadata =
-            serde_json::from_slice(&bytes).map_err(|e| CrabError::Configuration {
-                key: "recover apply --restore-packs".to_owned(),
-                origin: format!("invalid pack metadata {}: {e}", metadata_path.display()),
-            })?;
+        let Some(bytes) = read_bounded_file(
+            &metadata_path,
+            crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        )?
+        else {
+            tracing::warn!(
+                path = %metadata_path.display(),
+                maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                "oversized recovery pack metadata is restored as a legacy hint"
+            );
+            return empty_pack_metadata(expected_id, object_count);
+        };
+        let metadata = crab_metadata::pack_metadata::parse_pack_metadata(
+            &bytes,
+            &metadata_path.display().to_string(),
+        )
+        .map_err(|error| CrabError::Configuration {
+            key: "recover apply --restore-packs".to_owned(),
+            origin: format!("invalid pack metadata {}: {error}", metadata_path.display()),
+        })?;
         if metadata.pack_id != expected_id {
             return Err(CrabError::Configuration {
                 key: "recover apply --restore-packs".to_owned(),
@@ -2376,10 +2390,38 @@ fn verified_pack_metadata(
     }
 
     let metadata = pack_metadata_from_plan_item(item, object_count)?;
-    let bytes = serde_json::to_vec(&metadata).map_err(|e| {
-        CrabError::Internal(format!("failed to serialize recovery PackMetadata: {e}"))
-    })?;
+    match crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)? {
+        Some(bytes) => Ok(Bytes::from(bytes)),
+        None => empty_pack_metadata(expected_id, object_count),
+    }
+}
+
+fn empty_pack_metadata(pack_id: &str, object_count: u64) -> Result<Bytes> {
+    let metadata = crab_metadata::pack_metadata::PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips: Vec::new(),
+        object_count,
+    };
+    let bytes = crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)?
+        .ok_or_else(|| {
+            CrabError::Internal("empty recovery pack metadata exceeded its size bound".to_owned())
+        })?;
     Ok(Bytes::from(bytes))
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
+    let file = File::open(path).map_err(CrabError::Io)?;
+    if file.metadata().map_err(CrabError::Io)?.len() > max_bytes {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(CrabError::Io)?;
+    if u64::try_from(bytes.len()).is_ok_and(|size| size > max_bytes) {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 fn validate_pack_metadata_object_count(
@@ -2433,20 +2475,28 @@ fn pack_metadata_from_plan_item(
     };
     let ref_tips = metadata
         .get("ref_tips")
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|tip| {
-                    let trimmed = tip.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_owned())
-                    }
-                })
-                .collect()
+        .and_then(|value| {
+            if u64::try_from(value.len())
+                .is_ok_and(|size| size <= crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            {
+                Some(
+                    value
+                        .split(',')
+                        .filter_map(|tip| {
+                            let trimmed = tip.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_owned())
+                            }
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            }
         })
-        .unwrap_or_else(Vec::new);
+        .unwrap_or_default();
     Ok(crab_metadata::pack_metadata::PackMetadata {
         pack_id: expected_id,
         ref_tips,
@@ -3757,6 +3807,37 @@ mod tests {
         assert_eq!(metadata.pack_id, pack_id);
         assert_eq!(metadata.object_count, 1);
         assert!(metadata.ref_tips.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn verified_pack_metadata_discards_oversized_sidecar() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let pack_id = "a".repeat(64);
+        let pack_path = dir.path().join(format!("pack-{pack_id}.pack"));
+        let metadata_path = pack_path.with_extension("meta");
+        let oversized =
+            vec![b' '; usize::try_from(crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1)?];
+        std::fs::write(&metadata_path, oversized)?;
+        let item = RecoverPlanItem {
+            item_kind: RecoverItemKind::Pack,
+            path: format!("pack:{pack_id}"),
+            file_hash: format!("b3:{pack_id}"),
+            size: 1,
+            state: RecoverItemState::Repairable,
+            candidate: None,
+            metadata: None,
+            action: "restore_pack_object".to_owned(),
+        };
+
+        let bytes = verified_pack_metadata(&item, &pack_path, 7)?;
+        let metadata = crab_metadata::pack_metadata::parse_pack_metadata(
+            &bytes,
+            metadata_path.to_string_lossy().as_ref(),
+        )?;
+        assert_eq!(metadata.pack_id, pack_id);
+        assert!(metadata.ref_tips.is_empty());
+        assert_eq!(metadata.object_count, 7);
         Ok(())
     }
 

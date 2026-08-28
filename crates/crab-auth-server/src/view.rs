@@ -605,13 +605,29 @@ async fn upload_view_git_pack(
     store.put(&pack_path, Bytes::from(pack_bytes)).await?;
 
     let ref_tips: Vec<String> = refs.values().cloned().collect();
-    let metadata = PackMetadata {
+    let mut metadata = PackMetadata {
         pack_id: pack_id.clone(),
         ref_tips: ref_tips.clone(),
         object_count,
     };
-    let meta_json = serde_json::to_vec(&metadata)
-        .map_err(|e| AuthServerError::Internal(format!("pack metadata serialize: {e}")))?;
+    let meta_json =
+        match crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)? {
+            Some(bytes) => bytes,
+            None => {
+                tracing::warn!(
+                    pack_id = %pack_id,
+                    maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                    "view pack metadata ref-tip hint exceeded its bound; publishing an empty hint"
+                );
+                metadata.ref_tips.clear();
+                crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)?
+                    .ok_or_else(|| {
+                        AuthServerError::Internal(
+                            "empty view pack metadata hint exceeded its size bound".to_owned(),
+                        )
+                    })?
+            }
+        };
     let meta_path = router.pack_metadata_path(&pack_id);
     store.put(&meta_path, Bytes::from(meta_json)).await?;
 
@@ -619,7 +635,7 @@ async fn upload_view_git_pack(
         pack_id: pack_id.clone(),
         size: pack_size,
         content_hash: pack_id,
-        ref_tips,
+        ref_tips: metadata.ref_tips,
         object_count,
     };
     crab_metadata::pack_origin::record_verified_pack_origin(store, router.repo_prefix(), &entry)

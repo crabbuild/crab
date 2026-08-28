@@ -7,15 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::manifests::PackManifestEntry;
 use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
 
 /// Maximum size of a per-pack ref-tip sidecar read into memory.
 ///
 /// The sidecar is an optional fetch-filtering hint. Readers that encounter a
-/// larger object can safely treat it as legacy metadata, while publication
-/// paths reject it before allocating an unbounded JSON body.
+/// larger object can safely treat it as legacy metadata, while writers replace
+/// an oversized ref-tip list with an empty hint before publishing.
 pub const MAX_PACK_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Per-pack annotation recording which ref tip commits are reachable
@@ -31,6 +31,22 @@ pub struct PackMetadata {
     pub ref_tips: Vec<String>,
     /// Object count in the pack.
     pub object_count: u64,
+}
+
+/// Serializes a pack metadata sidecar when it fits the bounded sidecar format.
+///
+/// Returns `Ok(None)` when the ref-tip hint would exceed
+/// [`MAX_PACK_METADATA_BYTES`]. Callers can safely publish an empty hint in
+/// that case; fetch then retains the pack instead of relying on incomplete
+/// filtering metadata.
+pub fn serialize_pack_metadata_bounded(metadata: &PackMetadata) -> Result<Option<Vec<u8>>> {
+    let bytes = serde_json::to_vec(metadata).map_err(|error| {
+        MetadataError::Internal(format!("pack metadata serialization failed: {error}"))
+    })?;
+    if u64::try_from(bytes.len()).is_ok_and(|size| size > MAX_PACK_METADATA_BYTES) {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 /// Parses a pack metadata sidecar from JSON bytes.
@@ -194,6 +210,21 @@ mod tests {
         let error = parse_pack_metadata(&bytes, "packs/pack-a.meta").unwrap_err();
 
         assert!(error.to_string().contains("bounded reads support"));
+    }
+
+    #[test]
+    fn serialize_pack_metadata_returns_none_when_ref_tip_hint_is_oversized() {
+        let metadata = PackMetadata {
+            pack_id: "a".repeat(64),
+            ref_tips: (0..200_000).map(|tip| format!("{tip:040x}")).collect(),
+            object_count: 200_000,
+        };
+
+        assert!(
+            serialize_pack_metadata_bounded(&metadata)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

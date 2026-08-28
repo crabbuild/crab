@@ -439,7 +439,7 @@ async fn run_repack_locked(
         return Ok(result);
     }
 
-    let repacked = repacked_repository
+    let mut repacked = repacked_repository
         .packs()
         .iter()
         .map(|generated| {
@@ -465,11 +465,11 @@ async fn run_repack_locked(
         )
         .await?;
     }
-    for pack in &repacked {
+    for pack in &mut repacked {
         if !pack.generated.is_new {
             ensure_remote_reverse_index(store, router, pack.generated, cancel).await?;
         }
-        crate::git::push::upsert_pack_metadata(
+        let metadata = crate::git::push::upsert_pack_metadata(
             store,
             &router.pack_metadata_path(&pack.entry.pack_id),
             &pack.entry.pack_id,
@@ -478,6 +478,7 @@ async fn run_repack_locked(
             config.max_cas_retries,
         )
         .await?;
+        pack.entry.ref_tips = metadata.ref_tips;
     }
     let replacement_entries = stable_packs
         .into_iter()

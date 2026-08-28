@@ -17,7 +17,9 @@ use crab_metadata::{
     manifests::{
         Manifest, PackManifestEntry, parse_pack_segment_entries, validate_manifest_payload,
     },
-    pack_metadata::{parse_pack_metadata, validate_pack_metadata_for_entry},
+    pack_metadata::{
+        parse_pack_metadata, serialize_pack_metadata_bounded, validate_pack_metadata_for_entry,
+    },
     receipts::{
         CommittedChunkReceipt, GenerationIndexReceipt, OriginReceipt, PushCommitReceipt,
         RECEIPT_SCHEMA_VERSION, generation_file_index_digest, generation_git_object_locator_digest,
@@ -474,6 +476,20 @@ fn is_pack_metadata_key(key: &str) -> bool {
         && key.contains("/packs/")
 }
 
+async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -> bool {
+    match store.head(path).await {
+        Ok(meta) => meta.size > crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        Err(error) => {
+            tracing::debug!(
+                path = %path,
+                error = %error,
+                "could not confirm oversized pack metadata during receive fallback"
+            );
+            false
+        }
+    }
+}
+
 async fn promote_pack_metadata_union(
     store: &Store,
     canonical: &ObjectPath,
@@ -499,16 +515,25 @@ async fn promote_pack_metadata_union(
                     ));
                 }
                 let before = existing.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
+                if before.is_empty() && !staged.ref_tips.is_empty() {
+                    // An empty hint may be a deliberate legacy fallback after
+                    // a previous union exceeded the bound. It cannot be
+                    // enriched without proving the complete ref-tip set again.
+                    return Ok(());
+                }
                 requested.extend(before.iter().cloned());
                 if requested == before {
                     return Ok(());
                 }
                 existing.ref_tips = requested.iter().cloned().collect();
-                let body = serde_json::to_vec(&existing).map_err(|error| {
-                    AuthServerError::Internal(format!(
-                        "pack metadata union serialize failed: {error}"
-                    ))
-                })?;
+                let Some(body) = serialize_pack_metadata_bounded(&existing)? else {
+                    tracing::warn!(
+                        path = %canonical,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "pack metadata ref-tip union exceeded its bound; retaining legacy hint"
+                    );
+                    return Ok(());
+                };
                 match store
                     .update(canonical, bytes::Bytes::from(body), etag)
                     .await
@@ -521,11 +546,8 @@ async fn promote_pack_metadata_union(
             Err(StorageError::NotFound { .. }) => {
                 let mut metadata = staged.clone();
                 metadata.ref_tips = requested.iter().cloned().collect();
-                let body = serde_json::to_vec(&metadata).map_err(|error| {
-                    AuthServerError::Internal(format!(
-                        "pack metadata create serialize failed: {error}"
-                    ))
-                })?;
+                let body = serialize_pack_metadata_bounded(&metadata)?
+                    .ok_or_else(|| invalid("pack metadata hint exceeded its size bound"))?;
                 match store
                     .create_strict(canonical, bytes::Bytes::from(body))
                     .await
@@ -535,7 +557,19 @@ async fn promote_pack_metadata_union(
                     Err(error) => return Err(error.into()),
                 }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if matches!(&error, StorageError::CorruptObject { .. })
+                    && existing_pack_metadata_is_oversized(store, canonical).await
+                {
+                    tracing::warn!(
+                        path = %canonical,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "existing oversized pack metadata is treated as a legacy hint"
+                    );
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
         }
     }
     Err(AuthServerError::CasConflict {
@@ -3601,6 +3635,68 @@ mod tests {
             err.to_string().contains("pack_id does not match"),
             "unexpected error: {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn promote_pack_metadata_keeps_oversized_existing_hint_legacy() -> Result<()> {
+        let store = store();
+        let pack_id = hash('a');
+        let path = repo_pack_metadata_path("org/repo", &pack_id);
+        let existing = Bytes::from(vec![
+            b' ';
+            usize::try_from(
+                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1
+            )
+            .map_err(|_| invalid(
+                "test metadata size does not fit usize"
+            ))?
+        ]);
+        store.put(&path, existing.clone()).await?;
+
+        let staged = PackMetadata {
+            pack_id,
+            ref_tips: vec![oid('2')],
+            object_count: 1,
+        };
+        let staged_bytes = serde_json::to_vec(&staged)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+
+        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
+
+        let (body, _) = store.get_with_etag(&path).await?;
+        assert_eq!(body, existing);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn promote_pack_metadata_does_not_enrich_empty_legacy_hint() -> Result<()> {
+        let store = store();
+        let pack_id = hash('a');
+        let path = repo_pack_metadata_path("org/repo", &pack_id);
+        let existing = PackMetadata {
+            pack_id: pack_id.clone(),
+            ref_tips: Vec::new(),
+            object_count: 1,
+        };
+        let existing_bytes = serde_json::to_vec(&existing)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+        store
+            .put(&path, Bytes::from(existing_bytes.clone()))
+            .await?;
+
+        let staged = PackMetadata {
+            pack_id,
+            ref_tips: vec![oid('2')],
+            object_count: 1,
+        };
+        let staged_bytes = serde_json::to_vec(&staged)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+
+        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
+
+        let (body, _) = store.get_with_etag(&path).await?;
+        assert_eq!(body, existing_bytes);
         Ok(())
     }
 

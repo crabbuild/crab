@@ -65,6 +65,10 @@ pub fn filter_packs_by_depth(
                 // Legacy pack without metadata — include unconditionally.
                 result.push(entry.pack_id.clone());
             }
+            Some(tips) if tips.is_empty() => {
+                // An empty hint cannot prove that a pack is irrelevant.
+                result.push(entry.pack_id.clone());
+            }
             Some(tips) => {
                 if tips.iter().any(|t| reachable.contains(t.as_str())) {
                     result.push(entry.pack_id.clone());
@@ -493,6 +497,23 @@ mod tests {
         let summary = make_summary(vec![]);
         let ids = filter_packs_by_depth(&pack_list, &summary, &[] as &[String], &[]);
         assert_eq!(ids, vec!["pack_a".to_string(), "pack_b".to_string()]);
+    }
+
+    #[test]
+    fn filter_packs_includes_empty_hints_unconditionally() {
+        let pack_list = PackList {
+            generation: 1,
+            entries: vec![PackEntry {
+                pack_id: "pack_a".to_owned(),
+                size: 100,
+                ref_tips: Some(Vec::new()),
+            }],
+        };
+        let summary = make_summary(vec![]);
+
+        let ids = filter_packs_by_depth(&pack_list, &summary, &[], &[] as &[String]);
+
+        assert_eq!(ids, vec!["pack_a".to_owned()]);
     }
 
     #[test]

@@ -127,28 +127,19 @@ pub(crate) async fn upsert_pack_metadata(
 ) -> Result<PackMetadata> {
     let mut requested_tips = ref_tips.into_iter().collect::<BTreeSet<_>>();
     if store.staging_write_prefix().is_some() {
-        let metadata = PackMetadata {
-            pack_id: pack_id.to_owned(),
-            ref_tips: requested_tips.into_iter().collect(),
-            object_count,
-        };
-        let body = serde_json::to_vec(&metadata).map_err(|error| {
-            CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-        })?;
+        let (metadata, body) =
+            pack_metadata_for_write(pack_id, object_count, requested_tips.into_iter().collect())?;
         store.put_exact(path, Bytes::from(body)).await?;
         return Ok(metadata);
     }
 
     // A newly generated content-addressed pack normally has no sidecar yet;
     // create-first avoids a guaranteed read on the first publication.
-    let metadata = PackMetadata {
-        pack_id: pack_id.to_owned(),
-        ref_tips: requested_tips.iter().cloned().collect(),
+    let (metadata, body) = pack_metadata_for_write(
+        pack_id,
         object_count,
-    };
-    let body = serde_json::to_vec(&metadata).map_err(|error| {
-        CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-    })?;
+        requested_tips.iter().cloned().collect(),
+    )?;
     match store.create_strict(path, Bytes::from(body)).await {
         Ok(()) => return Ok(metadata),
         Err(CrabError::CasConflict { .. }) => {}
@@ -161,11 +152,9 @@ pub(crate) async fn upsert_pack_metadata(
             .await
         {
             Ok((body, etag)) => {
-                let mut metadata: PackMetadata =
-                    serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!("invalid pack metadata JSON: {error}"),
-                    })?;
+                let mut metadata =
+                    crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+                        .map_err(CrabError::from)?;
                 if metadata.pack_id != pack_id || metadata.object_count != object_count {
                     return Err(CrabError::CorruptObject {
                         path: path.to_string(),
@@ -174,15 +163,29 @@ pub(crate) async fn upsert_pack_metadata(
                     });
                 }
                 let before = metadata.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
+                if before.is_empty() && !requested_tips.is_empty() {
+                    // An empty hint may be a deliberate legacy fallback after a
+                    // previous union exceeded the bound. It cannot be enriched
+                    // without proving the complete ref-tip set again.
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                }
                 requested_tips.extend(before.iter().cloned());
                 if requested_tips == before {
                     metadata.ref_tips = before.into_iter().collect();
                     return Ok(metadata);
                 }
                 metadata.ref_tips = requested_tips.iter().cloned().collect();
-                let next = serde_json::to_vec(&metadata).map_err(|error| {
-                    CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-                })?;
+                let Some(next) =
+                    crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)
+                        .map_err(CrabError::from)?
+                else {
+                    tracing::warn!(
+                        pack_id,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "pack metadata ref-tip union exceeded its bound; using legacy pack selection"
+                    );
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                };
                 match store.update(path, Bytes::from(next), etag).await {
                     Ok(_) => return Ok(metadata),
                     Err(CrabError::CasConflict { .. }) => continue,
@@ -190,21 +193,30 @@ pub(crate) async fn upsert_pack_metadata(
                 }
             }
             Err(CrabError::NotFound { .. }) => {
-                let metadata = PackMetadata {
-                    pack_id: pack_id.to_owned(),
-                    ref_tips: requested_tips.iter().cloned().collect(),
+                let (metadata, body) = pack_metadata_for_write(
+                    pack_id,
                     object_count,
-                };
-                let body = serde_json::to_vec(&metadata).map_err(|error| {
-                    CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-                })?;
+                    requested_tips.iter().cloned().collect(),
+                )?;
                 match store.create_strict(path, Bytes::from(body)).await {
                     Ok(()) => return Ok(metadata),
                     Err(CrabError::CasConflict { .. }) => continue,
                     Err(error) => return Err(error),
                 }
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, CrabError::CorruptObject { .. })
+                    && existing_pack_metadata_is_oversized(store, path).await
+                {
+                    tracing::warn!(
+                        pack_id,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "existing oversized pack metadata is treated as a legacy hint"
+                    );
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                }
+                return Err(error);
+            }
         }
     }
 
@@ -212,6 +224,58 @@ pub(crate) async fn upsert_pack_metadata(
         path: path.to_string(),
         expected_etag: None,
     })
+}
+
+fn pack_metadata_without_ref_tips(pack_id: &str, object_count: u64) -> PackMetadata {
+    PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips: Vec::new(),
+        object_count,
+    }
+}
+
+fn pack_metadata_for_write(
+    pack_id: &str,
+    object_count: u64,
+    ref_tips: Vec<String>,
+) -> Result<(PackMetadata, Vec<u8>)> {
+    let metadata = PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips,
+        object_count,
+    };
+    if let Some(body) = crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)
+        .map_err(CrabError::from)?
+    {
+        return Ok((metadata, body));
+    }
+
+    tracing::warn!(
+        pack_id,
+        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        "pack metadata ref-tip hint exceeded its bound; publishing an empty hint"
+    );
+    let fallback = pack_metadata_without_ref_tips(pack_id, object_count);
+    let body = crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&fallback)
+        .map_err(CrabError::from)?
+        .ok_or_else(|| {
+            CrabError::Internal("empty pack metadata hint exceeded its size bound".to_owned())
+        })?;
+    Ok((fallback, body))
+}
+
+async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -> bool {
+    match store.head(path).await {
+        Ok(meta) => meta.size > crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        Err(error) => {
+            tracing::debug!(
+                path = %path,
+                error = %error,
+                "could not confirm oversized pack metadata during legacy fallback"
+            );
+            false
+        }
+    }
 }
 
 const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
@@ -24801,6 +24865,42 @@ mod tests {
         let (body, _) = store.get_with_etag(&path).await.expect("read metadata");
         let stored: PackMetadata = serde_json::from_slice(&body).expect("parse metadata");
         assert_eq!(stored.ref_tips, second.ref_tips);
+    }
+
+    #[tokio::test]
+    async fn pack_metadata_upsert_publishes_empty_hint_when_union_is_oversized() {
+        let (store, router) = test_store_router("pack-metadata-oversized");
+        let pack_id = "a".repeat(64);
+        let path = router.pack_metadata_path(&pack_id);
+        let ref_tips = (0..200_000)
+            .map(|tip| format!("{tip:040x}"))
+            .collect::<Vec<_>>();
+
+        let metadata = upsert_pack_metadata(&store, &path, &pack_id, 7, ref_tips, 4)
+            .await
+            .expect("oversized hint should degrade to legacy selection");
+
+        assert!(metadata.ref_tips.is_empty());
+        let (body, _) = store
+            .get_with_etag_bounded(&path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+            .expect("fallback metadata should remain bounded");
+        let stored = crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+            .expect("fallback metadata should remain valid");
+        assert!(stored.ref_tips.is_empty());
+        assert_eq!(stored.object_count, 7);
+
+        let follow_up = upsert_pack_metadata(&store, &path, &pack_id, 7, vec!["b".repeat(40)], 4)
+            .await
+            .expect("legacy fallback should not be enriched incompletely");
+        assert!(follow_up.ref_tips.is_empty());
+        let (body, _) = store
+            .get_with_etag_bounded(&path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+            .expect("legacy fallback metadata should remain readable");
+        let stored = crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+            .expect("legacy fallback metadata should remain valid");
+        assert!(stored.ref_tips.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
