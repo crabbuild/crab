@@ -76,10 +76,12 @@ place.
 No-have response packs can be persisted beneath the repository's immutable
 `generated-packs/v1` namespace. Keys bind physical repository identity,
 manifest Git state, the visible authorization union, canonical request
-semantics, output policy, and ordered object selection. Complete pack bodies
-and descriptors are verified on every read. Runtime single-flight and the
-existing renewable internal-lock contract coalesce concurrent producers;
-cancelling one waiter does not cancel work still needed by another process.
+semantics, output policy, and the canonicalized object selection. The request
+key includes the generated-pack descriptor format version, so stale derived
+descriptors naturally miss after a format change. Complete pack bodies and
+descriptors are verified on every read. Runtime single-flight and the existing
+renewable internal-lock contract coalesce concurrent producers; cancelling one
+waiter does not cancel work still needed by another process.
 Catalog-exact dense filters (`blob:none` and `object:type`) can assemble a
 large selected response directly from verified packed entries, preserving
 delta payloads and materializing only bases omitted from the selection. The

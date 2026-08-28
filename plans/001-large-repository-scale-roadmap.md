@@ -479,6 +479,11 @@ authorized-object-set check. The minimum supported Git compatibility matrix
 must continue to cover this mode; a current-head Kubernetes measurement is
 required before claiming the response-pack SLO is closed.
 
+The generated response-pack cache key now includes the descriptor format
+version as part of its domain. Older derived descriptors therefore cannot
+collide with the current request namespace and force a false corruption result;
+they miss and regenerate under the current descriptor contract.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is

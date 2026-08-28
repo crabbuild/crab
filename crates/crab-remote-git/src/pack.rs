@@ -800,7 +800,8 @@ fn generated_pack_cache_key(
     thin_pack: bool,
 ) -> GeneratedPackCacheKey {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"crab.generated-pack.request.v1\0");
+    hash.update(b"crab.generated-pack.request\0");
+    hash.update(&GENERATED_PACK_CACHE_VERSION.to_be_bytes());
     identity.hash_cache_identity(&mut hash);
     hash.update(git_validation_digest.as_bytes());
     hash.update(&authorization_digest);
@@ -1895,6 +1896,31 @@ mod tests {
         let base = key(&identity, "validation-a");
         assert_ne!(base, key(&moved_identity, "validation-a"));
         assert_ne!(base, key(&identity, "validation-b"));
+    }
+
+    #[test]
+    fn generated_pack_cache_key_separates_descriptor_versions() {
+        let identity =
+            crate::RepositoryIdentity::new("memory", "org/repo", 1).expect("repository identity");
+        let objects = [ObjectId::from([1; 20])];
+        let current =
+            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], &objects, false);
+
+        let selection_digest = selected_object_digest(&objects);
+        let mut previous_hash = blake3::Hasher::new();
+        previous_hash.update(b"crab.generated-pack.request.v1\0");
+        identity.hash_cache_identity(&mut previous_hash);
+        previous_hash.update(b"validation");
+        previous_hash.update(&[2; 32]);
+        previous_hash.update(&[3; 32]);
+        previous_hash.update(&[0]);
+        previous_hash.update(&selection_digest);
+        let previous = GeneratedPackCacheKey {
+            digest: *previous_hash.finalize().as_bytes(),
+            selection_digest,
+        };
+
+        assert_ne!(current, previous);
     }
 
     #[test]

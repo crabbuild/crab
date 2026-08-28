@@ -105,6 +105,9 @@ When a full response must combine multiple verified source packs, the producer
 passes their pack basenames to Git's `--stdin-packs` mode instead of building a
 repository-sized OID list; the resulting pack is still checked against the
 exact authorized selection before publication.
+Generated response-pack descriptors bind the same format version into their
+request-key namespace, so a descriptor-format change naturally misses older
+derived entries and regenerates them without a compatibility shim.
 
 Range reads ask the cache service first when service caching is enabled. The
 server serves warm ranges directly from cache. On a cold range miss, the server
