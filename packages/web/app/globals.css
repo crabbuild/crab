@@ -503,7 +503,7 @@ details.faq-item[open] .faq-chevron {
   line-height: 0.78;
 }
 
-.feature-blog-prose h2 {
+.feature-blog-prose > h2 {
   margin-top: 4.75rem;
   padding-top: 1.25rem;
   border-top: 1px solid var(--border);
@@ -513,14 +513,14 @@ details.faq-item[open] .faq-chevron {
   text-wrap: balance;
 }
 
-.feature-blog-prose h3 {
+.feature-blog-prose > h3 {
   margin-top: 3rem;
   font-size: clamp(1.35rem, 2.7vw, 1.8rem);
   line-height: 1.2;
   letter-spacing: -0.025em;
 }
 
-.feature-blog-prose blockquote {
+.feature-blog-prose > blockquote {
   margin-block: 2.5rem;
   border-left-width: 2px;
   border-color: var(--primary);
@@ -530,7 +530,7 @@ details.faq-item[open] .faq-chevron {
   font-style: normal;
 }
 
-.feature-blog-prose table {
+.feature-blog-prose > table {
   font-size: 0.88em;
 }
 
@@ -543,7 +543,7 @@ details.faq-item[open] .faq-chevron {
     font-size: 2.8em;
   }
 
-  .feature-blog-prose h2 {
+  .feature-blog-prose > h2 {
     margin-top: 3.75rem;
   }
 }

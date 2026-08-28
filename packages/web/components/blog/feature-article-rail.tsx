@@ -75,7 +75,7 @@ export function FeatureArticleRail({
 
   return (
     <>
-      <details className="group mb-10 rounded-xl border border-border bg-card p-4 lg:hidden">
+      <details className="group mb-10 rounded-xl border border-border bg-card p-4 xl:hidden">
         <summary className="flex min-h-8 cursor-pointer list-none items-center justify-between gap-4 text-sm font-semibold [&::-webkit-details-marker]:hidden">
           <span className="flex items-center gap-2">
             <List size={15} aria-hidden="true" />
@@ -90,7 +90,7 @@ export function FeatureArticleRail({
 
       <nav
         aria-label="Article table of contents"
-        className="sticky top-24 hidden max-h-[calc(100vh-8rem)] overflow-y-auto pr-4 lg:block"
+        className="sticky top-24 hidden max-h-[calc(100vh-8rem)] overflow-y-auto pr-2 xl:block"
       >
         <div className="flex items-center justify-between gap-3 font-mono text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
           <span>In this story</span>
@@ -128,11 +128,11 @@ function TocLinks({
               href={item.url}
               aria-current={active ? "location" : undefined}
               className={cn(
-                "group flex min-h-11 items-start gap-2 rounded-md border-l-2 py-2 pr-2 text-xs leading-5 transition-colors focus-visible:ring-2 focus-visible:ring-primary focus-visible:outline-none lg:min-h-9",
+                "group flex min-h-11 items-start gap-2 rounded-lg py-2 pr-2 text-xs leading-5 transition-[background-color,box-shadow,color] focus-visible:ring-2 focus-visible:ring-primary focus-visible:outline-none xl:min-h-9",
                 item.depth > 2 ? "pl-5" : "pl-3",
                 active
-                  ? "border-primary bg-primary/5 font-medium text-foreground"
-                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+                  ? "bg-primary/[0.07] font-medium text-foreground ring-1 ring-primary/20 ring-inset"
+                  : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
               )}
             >
               <span className="min-w-0 flex-1">{item.title}</span>
