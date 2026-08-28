@@ -461,6 +461,41 @@ consolidation evidence for the PR. Independent repeatability, valid growth
 differentials, 10,000-push ancestry, interruption/GC, provider, concurrency,
 owner-failover, storage-retention, and rollout SLO gates remain open.
 
+### Current-head planned locator lookup qualification
+
+Commit `ba6311dc` seeds the locator writer's existing-ordinal lookup policy
+from the already-known uncovered object-row bound when a bounded publication
+writer opens. This makes the first large rebind eligible for one in-memory
+ordinal scan before its initial write batches, instead of accumulating the
+candidate threshold one batch at a time through exact remote lookups. The
+writer regression `publication_hint_primes_existing_ordinals_before_first_rebind`
+proves that a 4,096-object catalog takes the ordinal path before the first
+replacement object is written; the full writer test module passes 27 tests with
+one large-repository qualification stress test ignored by default.
+
+The release binary from `ba6311dc` completed the Kubernetes smoke
+`ba6311dc-k8s-100-20260828` against isolated local RustFS with 100 replayed
+first-parent commits. The standalone verifier returned `status=ok`,
+`profile=smoke`, and the same correctness fingerprint
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624` as the
+current-head full run. Cold/warm full clones completed in 155,746/60,204 ms;
+blobless and depth-1/10/100/1,000 clones completed in 22,670/16,033/21,750/
+136,761/163,695 ms; and incremental fetches at 1/10/100 commits completed in
+2,269/2,720/3,816 ms. All report stages, fsck checks, byte-equivalence
+sampling, and run-scoped cleanup passed.
+
+- The generation-100 owner converged in 275,636 ms across ten passes, with
+  2,294,431,744 bytes peak child RSS, 38,946,586 maintenance bytes read, and
+  8,996,304 bytes written. It completed the expected catalog, graph, shallow,
+  and geometric-repack actions and reduced the serving inventory while
+  deleting 94 stale locator-pack rows.
+- This single smoke run is correctness evidence for the new lookup admission
+  path, not a performance SLO closure: host-to-host variation prevents a
+  timing claim against the earlier run, and the generation-1,000 owner still
+  needs a full-profile qualification to show whether the large-catalog tail
+  improved. Independent repeatability, 10,000-push growth, interruption/GC,
+  provider, concurrency, failover, retention, and rollout gates remain open.
+
 ### Current-head shared-visibility and team-load qualification
 
 The shared-object visibility admission fix is committed as `eb3ced6b`. It
