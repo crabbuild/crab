@@ -163,7 +163,8 @@ pub fn geometric_repack_cut(object_counts: &[u64], factor: u64) -> usize {
 /// verified compressed pack bytes. The smallest tier is promoted only after it
 /// has accumulated enough weight to be comparable with its next tier, and the
 /// largest pack is left untouched whenever a lower-tier promotion is possible.
-/// A two-pack inventory is returned as one final consolidation step.
+/// Two packs are consolidated only when the smaller pack has reached the next
+/// tier; a tiny tail must not rewrite the repository-sized pack.
 #[must_use]
 pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
     if factor < 2 || weights.len() < 2 {
@@ -171,6 +172,14 @@ pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
     }
     let mut weights = weights.to_vec();
     weights.sort_unstable_by(|left, right| right.cmp(left));
+
+    if weights.len() == 2 {
+        return if weights[1].saturating_mul(factor) > weights[0] {
+            2
+        } else {
+            0
+        };
+    }
 
     let mut selected_count = 1;
     let mut selected_weight = weights[weights.len() - 1];
@@ -184,8 +193,6 @@ pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
     }
     if selected_count > 1 {
         selected_count
-    } else if weights.len() == 2 {
-        2
     } else {
         0
     }
@@ -757,6 +764,7 @@ mod tests {
 
     #[test]
     fn incremental_cut_waits_for_a_lower_pack_tier_before_rewriting_large_packs() {
+        assert_eq!(incremental_repack_cut(&[900, 9], 2), 0);
         assert_eq!(incremental_repack_cut(&[900, 700, 9], 2), 0);
         assert_eq!(incremental_repack_cut(&[900, 700, 9, 9], 2), 2);
         assert_eq!(incremental_repack_cut(&[900, 700], 2), 2);
@@ -765,6 +773,29 @@ mod tests {
     #[test]
     fn incremental_cut_keeps_the_largest_pack_out_of_lower_tier_promotions() {
         assert_eq!(incremental_repack_cut(&[900, 700, 600, 400], 2), 3);
+    }
+
+    #[test]
+    #[expect(
+        clippy::same_item_push,
+        reason = "the test models one identical tiny pack per developer push"
+    )]
+    fn incremental_cut_keeps_tiny_pushes_logarithmic() {
+        let mut packs = vec![1_000_000_u64];
+        for _ in 0..1_000 {
+            packs.push(1);
+            let cut = incremental_repack_cut(&packs, 2);
+            if cut != 0 {
+                let split = packs.len() - cut;
+                let merged = packs[split..].iter().copied().sum();
+                packs.truncate(split);
+                packs.push(merged);
+            }
+        }
+
+        assert_eq!(packs.iter().copied().sum::<u64>(), 1_001_000);
+        assert_eq!(packs.iter().copied().max(), Some(1_000_000));
+        assert!(packs.len() <= 12, "pack count grew to {}", packs.len());
     }
 
     #[test]
