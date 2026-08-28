@@ -210,15 +210,14 @@ struct FetchRequest {
     filter: UploadPackFilter,
 }
 
-/// Check whether protocol-v2 admission has a stable manifest to repair or use.
+/// Check whether protocol-v2 admission has usable generation evidence.
 pub async fn snapshot_available(
     store: &crab_storage::Store,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> bool {
-    // Filtered fetch has no useful legacy complete-pack fallback. Keep the
-    // capability probe cheap and let upload-pack admission repair derived
-    // coverage once a client actually requests a v2 session.
+    // A v2 session cannot fall back after the terminal handoff. Only advertise
+    // it when admission has current visibility evidence to use or migrate.
     let Ok(stable) = capability_snapshot_is_stable(store, prefix, cancellation).await else {
         return false;
     };
@@ -231,7 +230,7 @@ async fn capability_snapshot_is_stable(
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<bool> {
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-    let (_manifest, _) = tokio::select! {
+    let (manifest, _) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
         result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
@@ -257,7 +256,22 @@ async fn capability_snapshot_is_stable(
         );
         return Ok(false);
     }
-    Ok(true)
+    if manifest.refs.is_empty() {
+        return Ok(true);
+    }
+    match super::push::git_visibility_proof_available_for_manifest(
+        &repair_store,
+        &repair_layout,
+        &manifest,
+    )
+    .await
+    {
+        Ok(available) => Ok(available),
+        Err(error) => {
+            tracing::warn!(%error, "visibility proof probe failed during capability discovery");
+            Ok(false)
+        }
+    }
 }
 
 fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {

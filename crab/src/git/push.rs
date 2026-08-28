@@ -7111,7 +7111,7 @@ pub(crate) async fn git_visibility_index_exists_for_manifest(
     .map_err(CrabError::from)
 }
 
-async fn git_visibility_proof_available_for_manifest(
+pub(crate) async fn git_visibility_proof_available_for_manifest(
     store: &Store,
     router: &StoreLayout,
     manifest: &Manifest,
@@ -22998,12 +22998,21 @@ mod tests {
             .expect("owner should publish locator coverage before visibility repair")
         );
         let visibility_path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
+        let legacy_visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
             .await
             .expect("remove derived visibility proof");
+        store
+            .delete(&legacy_visibility_path)
+            .await
+            .expect("remove legacy visibility proof");
         assert!(matches!(
             store.head(&visibility_path).await,
+            Err(CrabError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.head(&legacy_visibility_path).await,
             Err(CrabError::NotFound { .. })
         ));
 
@@ -23025,6 +23034,15 @@ mod tests {
             "capability discovery must leave visibility repair to the active owner"
         );
         owner.release().await.expect("release generation owner");
+        assert!(
+            !crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "protocol v2 must remain withheld while the current visibility proof is missing"
+        );
 
         let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
             store.as_storage(),
