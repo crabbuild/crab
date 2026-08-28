@@ -240,8 +240,10 @@ jobs:
               sleep 1
             done
           fi
-          test -f "$cache_log" && sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" > \
-            "${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-captured.log" || true
+          if test -f "$cache_log"; then
+            sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" > \
+              "${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-captured.log"
+          fi
 
       - name: Capture RustFS logs
         if: always()
