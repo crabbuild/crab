@@ -371,6 +371,35 @@ for repeated full-profile or team-load evidence. The 1,000/10,000-push
 differentials, interruption matrix, provider matrix, concurrent clone/cache
 fanout, owner failover, and rollout gates remain open.
 
+### Current-head locator fanout and compaction qualification
+
+The locator fanout hardening is committed as ad93a23d. Reader and writer
+lookup selectors now account for active SlateDB SST fan-out: sparse requests
+keep exact OID gets, while dense requests use one bounded object-family scan
+when that is cheaper. A scan cannot read beyond the catalog's ordinal row
+bound; it falls back to exact gets if the bound is exceeded. Locator
+compaction-aware writers also use one full L0 frontier with one compaction,
+subcompaction, and fetch worker, preventing repeated short-lived publishers
+from rewriting the same history through several smaller jobs.
+
+The exact release binary ad93a23d completed the RustFS smoke
+codex-locator-scan-writer-ad93-20260827 with status=ok. The run used eight
+independent-ref agents and four same-ref agents against isolated local RustFS;
+it intentionally used --skip-fsck, so this is request-amplification evidence,
+not a full correctness gate.
+
+- Branch fan-out recorded 232 locator requests across 8 successful pushes,
+  or 29.0 per success.
+- Same-ref contention recorded 1,266 locator requests across 4 successful
+  pushes, or 316.5 per success, below the 500-request regression budget.
+  The writer log recorded bounded scan mode with 4 requested objects, 10 rows
+  scanned, 48 catalog objects, and 11 active SSTs.
+
+The policy and in-memory ordering regressions pass, and the result closes the
+observed small-catalog/SST-fanout request spike for this workload. Repeated
+isolated runs, full-profile growth, interruption, provider, failover, and
+rollout evidence remain open.
+
 ### Current-head shared-visibility and team-load qualification
 
 The shared-object visibility admission fix is committed as `eb3ced6b`. It
@@ -600,9 +629,12 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
   full OID dictionary materialization from normal helper admission;
 - catalog ordinal scan read-ahead and bounded fetch parallelism for dense
   selected-object resolution;
-- a large-batch locator scan policy that replaces tens of thousands of exact
-  OID point reads with one bounded, read-ahead scan while retaining the exact
-  lookup path for sparse or small requests.
+- a locator lookup policy that retains exact reads for sparse requests and
+  switches dense or SST-fanout-amplified waves to one bounded, read-ahead scan,
+  including small compacted catalogs when the request density justifies it.
+- locator compaction uses one full L0 frontier and one bounded worker,
+  subcompaction, and fetch task, so short-lived publishers do not repeatedly
+  compact overlapping history.
 - owner locator planning serialized under the repository publication lock,
   with uncovered-pack budgeting and a metadata-only writer for unchanged
   inventories.
