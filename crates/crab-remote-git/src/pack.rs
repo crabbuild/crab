@@ -638,10 +638,7 @@ impl RemoteGitRepository {
                 object_count: pack.object_count,
             });
         }
-        let selected_oids = object_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+        let selected_oids = object_ids.to_vec();
         let repacked = tokio::task::spawn_blocking(move || {
             crab_git::repack::repack_selected_objects(&sources, &selected_oids)
         })

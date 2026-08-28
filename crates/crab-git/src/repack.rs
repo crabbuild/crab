@@ -486,7 +486,7 @@ pub fn consolidate_pack_suffix(
 /// filtered-out object as a delta base.
 pub fn repack_selected_objects(
     sources: &[RepackSource],
-    selected_oids: &[String],
+    selected_oids: &[gix_hash::ObjectId],
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.is_empty() {
         return Err(RepackError::SelectedObjectSet {
@@ -494,11 +494,22 @@ pub fn repack_selected_objects(
             reason: "no source packs were supplied".to_owned(),
         });
     }
-    let selected = selected_oids.iter().cloned().collect::<BTreeSet<_>>();
-    if selected.is_empty() || selected.len() != selected_oids.len() {
+    let mut selected = selected_oids.to_vec();
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|oid| oid.as_bytes().len() != std::mem::size_of::<[u8; 20]>())
+    {
         return Err(RepackError::SelectedObjectSet {
             pack_id: "selected-pack".to_owned(),
-            reason: "selected object IDs must be non-empty and unique".to_owned(),
+            reason: "selected object IDs must be non-empty SHA-1 IDs".to_owned(),
+        });
+    }
+    selected.sort_unstable();
+    if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: "selected-pack".to_owned(),
+            reason: "selected object IDs must be unique".to_owned(),
         });
     }
 
@@ -564,11 +575,27 @@ pub fn repack_selected_objects(
         &generated.reverse_index_path,
         generated.pack_size,
     )?;
-    let mut generated_oids = BTreeSet::new();
+    let mut generated_oids = Vec::<[u8; 20]>::new();
     for location in &mut generated_locations {
-        generated_oids.insert(location?.oid.to_string());
+        let location = location?;
+        let oid =
+            location
+                .oid
+                .as_bytes()
+                .try_into()
+                .map_err(|_| RepackError::SelectedObjectSet {
+                    pack_id: generated.pack_id.clone(),
+                    reason: "generated pack contains a non-SHA1 object".to_owned(),
+                })?;
+        generated_oids.push(oid);
     }
-    if generated_oids != selected {
+    generated_oids.sort_unstable();
+    let selected_matches = generated_oids.len() == selected.len()
+        && generated_oids
+            .iter()
+            .zip(&selected)
+            .all(|(generated, selected)| selected.as_bytes() == generated);
+    if !selected_matches {
         return Err(RepackError::SelectedObjectSet {
             pack_id: generated.pack_id,
             reason: format!(
@@ -822,6 +849,24 @@ mod tests {
     }
 
     #[test]
+    fn selected_object_repack_rejects_duplicate_ids_before_io() {
+        let oid = gix_hash::ObjectId::from([7_u8; 20]);
+        let source = RepackSource {
+            canonical_id: "source".to_owned(),
+            path: PathBuf::new(),
+            size: 0,
+            object_count: 0,
+        };
+
+        let error = repack_selected_objects(&[source], &[oid, oid]).unwrap_err();
+        assert!(matches!(
+            error,
+            RepackError::SelectedObjectSet { reason, .. }
+                if reason == "selected object IDs must be unique"
+        ));
+    }
+
+    #[test]
     fn geometric_repack_preserves_complete_ref_object_graph() -> Result<(), RepackError> {
         let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
         let repository = root.path().join("repository");
@@ -887,7 +932,11 @@ mod tests {
         )?
         .lines()
         .take(2)
-        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).ok())
+        })
         .collect::<Vec<_>>();
         assert_eq!(selected_oids.len(), 2);
         let selected = repack_selected_objects(&sources, &selected_oids)?;
