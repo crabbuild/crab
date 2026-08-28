@@ -328,10 +328,6 @@ impl SplitCommitGraph {
             self.is_ancestor(&want, &root)
         })
     }
-
-    fn records(&self) -> impl Iterator<Item = &CommitGraphRecord> {
-        self.layers.iter().flat_map(|layer| layer.records.iter())
-    }
 }
 
 /// Append commits and return the immutable objects needed for publication.
@@ -432,22 +428,20 @@ fn update_split_commit_graph(
         "commit graph validation digest",
         "commit graph",
     )?;
-    let mut records = base
+    let base_commit_count = base
         .as_ref()
-        .map(|graph| graph.records().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mut oid_to_ordinal = records
-        .iter()
-        .enumerate()
-        .map(|(ordinal, record)| (record.oid, ordinal as u32))
-        .collect::<HashMap<_, _>>();
+        .map_or(0, |graph| graph.descriptor.commit_count);
+    let base_graph = base.as_ref();
+    let mut new_oid_to_ordinal = HashMap::new();
 
     let mut pending = BTreeMap::new();
     for input in additions {
         if input.parents.len() > MAX_PARENTS {
             return corrupt("commit graph record has too many parents");
         }
-        if oid_to_ordinal.contains_key(&input.oid) {
+        if base_graph.is_some_and(|graph| graph.contains(&input.oid))
+            || new_oid_to_ordinal.contains_key(&input.oid)
+        {
             continue;
         }
         match pending.entry(input.oid) {
@@ -461,10 +455,9 @@ fn update_split_commit_graph(
         }
     }
     if pending.values().any(|input| {
-        input
-            .parents
-            .iter()
-            .any(|parent| !oid_to_ordinal.contains_key(parent) && !pending.contains_key(parent))
+        input.parents.iter().any(|parent| {
+            !base_graph.is_some_and(|graph| graph.contains(parent)) && !pending.contains_key(parent)
+        })
     }) {
         return Ok(None);
     }
@@ -490,7 +483,8 @@ fn update_split_commit_graph(
         .iter()
         .filter_map(|(oid, degree)| (*degree == 0).then_some(*oid))
         .collect::<BTreeSet<_>>();
-    let first_new_ordinal = records.len();
+    let first_new_ordinal = base_commit_count;
+    let mut new_records = Vec::with_capacity(pending.len());
     while let Some(oid) = ready.pop_first() {
         let input = pending.get(&oid).ok_or_else(|| {
             MetadataError::Internal("commit graph ready node disappeared".to_owned())
@@ -499,28 +493,44 @@ fn update_split_commit_graph(
             .parents
             .iter()
             .map(|parent| {
-                oid_to_ordinal.get(parent).copied().ok_or_else(|| {
-                    MetadataError::Internal("commit graph parent ordinal disappeared".to_owned())
-                })
+                base_graph
+                    .and_then(|graph| graph.ordinal(parent))
+                    .or_else(|| new_oid_to_ordinal.get(parent).copied())
+                    .ok_or_else(|| {
+                        MetadataError::Internal(
+                            "commit graph parent ordinal disappeared".to_owned(),
+                        )
+                    })
             })
             .collect::<Result<Vec<_>>>()?;
         let corrected_generation = parents
             .iter()
-            .filter_map(|parent| records.get(*parent as usize))
+            .filter_map(|parent| {
+                if *parent < first_new_ordinal {
+                    base_graph.and_then(|graph| graph.record(*parent))
+                } else {
+                    new_records.get((*parent - first_new_ordinal) as usize)
+                }
+            })
             .map(|parent| parent.corrected_generation.saturating_add(1))
             .max()
             .unwrap_or(0)
             .max(non_negative_time(input.commit_time));
-        let ordinal = u32::try_from(records.len())
-            .map_err(|_| MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned()))?;
-        records.push(CommitGraphRecord {
+        let ordinal = first_new_ordinal
+            .checked_add(u32::try_from(new_records.len()).map_err(|_| {
+                MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+            })?)
+            .ok_or_else(|| {
+                MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+            })?;
+        new_records.push(CommitGraphRecord {
             oid,
             tree_oid: input.tree_oid,
             commit_time: input.commit_time,
             corrected_generation,
             parents,
         });
-        oid_to_ordinal.insert(oid, ordinal);
+        new_oid_to_ordinal.insert(oid, ordinal);
         if let Some(successors) = children.get(&oid) {
             for successor in successors {
                 let degree = indegree.get_mut(successor).ok_or_else(|| {
@@ -533,26 +543,31 @@ fn update_split_commit_graph(
             }
         }
     }
-    if records.len().saturating_sub(first_new_ordinal) != pending.len() {
+    if new_records.len() != pending.len() {
         return corrupt("commit graph additions contain a cycle");
     }
-    if roots.iter().any(|root| !oid_to_ordinal.contains_key(root)) {
+    if roots.iter().any(|root| {
+        !base_graph.is_some_and(|graph| graph.contains(root))
+            && !new_oid_to_ordinal.contains_key(root)
+    }) {
         return Ok(None);
     }
+    let new_commit_count = u32::try_from(new_records.len())
+        .map_err(|_| MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned()))?;
 
     let existing_layer_refs = base
         .as_ref()
         .map(|graph| graph.descriptor.layers.clone())
         .unwrap_or_default();
     let mut layers = base.map_or_else(Vec::new, |graph| graph.layers);
-    if first_new_ordinal < records.len() {
+    if new_commit_count > 0 {
         layers.push(CommitGraphLayer {
-            base_ordinal: first_new_ordinal as u32,
-            records: records[first_new_ordinal..].to_vec(),
+            base_ordinal: first_new_ordinal,
+            records: new_records,
         });
     }
     let mut changed_layers = Vec::new();
-    if first_new_ordinal < records.len() {
+    if new_commit_count > 0 {
         changed_layers.push(layers.len() - 1);
     }
     while compact_layers && layers.len() >= 2 {
@@ -603,13 +618,14 @@ fn update_split_commit_graph(
         generation,
         pack_index_hash,
         git_validation_digest,
-        commit_count: records.len() as u32,
+        commit_count: first_new_ordinal
+            .checked_add(new_commit_count)
+            .ok_or_else(|| {
+                MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+            })?,
         layers: layer_refs,
     };
-    let graph = SplitCommitGraph::new(descriptor.clone(), layers)?;
-    if roots.iter().any(|root| !graph.contains(root)) {
-        return Ok(None);
-    }
+    validate_descriptor(&descriptor, &layers)?;
     let descriptor_bytes = encode_commit_graph_descriptor(&descriptor)?;
     let descriptor_hash = blake3::hash(&descriptor_bytes).to_hex().to_string();
     Ok(Some(CommitGraphWrite {
