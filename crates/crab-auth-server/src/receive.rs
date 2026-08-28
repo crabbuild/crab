@@ -455,7 +455,14 @@ pub async fn read_verified_staged_object(
     object: &StagedWrite,
 ) -> Result<bytes::Bytes> {
     let path = ObjectPath::from(object.staged_key.clone());
-    let (bytes, _) = store.get_with_etag_bounded(&path, object.size).await?;
+    let maximum = if is_pack_metadata_key(&object.canonical_key) {
+        object
+            .size
+            .min(crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+    } else {
+        object.size
+    };
+    let (bytes, _) = store.get_with_etag_bounded(&path, maximum).await?;
     validate_staged_object_bytes(object, &bytes)?;
     Ok(bytes)
 }
@@ -475,7 +482,13 @@ async fn promote_pack_metadata_union(
     let staged = parse_pack_metadata(&staged_bytes, canonical.as_ref())?;
     let mut requested = staged.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
     for _ in 0..64 {
-        match store.get_with_etag(canonical).await {
+        match store
+            .get_with_etag_bounded(
+                canonical,
+                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+            )
+            .await
+        {
             Ok((body, etag)) => {
                 let mut existing = parse_pack_metadata(&body, canonical.as_ref())?;
                 if existing.pack_id != staged.pack_id

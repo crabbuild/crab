@@ -156,7 +156,10 @@ pub(crate) async fn upsert_pack_metadata(
     }
 
     for _ in 0..max_retries.max(1) {
-        match store.get_with_etag(path).await {
+        match store
+            .get_with_etag_bounded(path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+        {
             Ok((body, etag)) => {
                 let mut metadata: PackMetadata =
                     serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {

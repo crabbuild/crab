@@ -2186,13 +2186,18 @@ impl RemoteFetchStore {
 
     async fn fetch_pack_metadata(&self, pack_id: &str) -> Option<PackMetadata> {
         let path = self.router.pack_metadata_path(pack_id);
+        let max_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES;
         let body = if let Some(cs) = &self.caching_store {
-            cs.get_with_etag(&path).await.ok()?.0
+            cs.get_with_etag_bounded(&path, max_bytes).await.ok()?.0
         } else {
-            self.store.get_with_etag(&path).await.ok()?.0
+            self.store
+                .get_with_etag_bounded(&path, max_bytes)
+                .await
+                .ok()?
+                .0
         };
 
-        match serde_json::from_slice::<PackMetadata>(&body) {
+        match crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref()) {
             Ok(metadata) if metadata.pack_id == pack_id => Some(metadata),
             Ok(metadata) => {
                 tracing::debug!(
@@ -2202,10 +2207,10 @@ impl RemoteFetchStore {
                 );
                 None
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::debug!(
                     pack_id,
-                    error = %e,
+                    error = %error,
                     "pack metadata unreadable; treating pack as legacy"
                 );
                 None
@@ -3640,6 +3645,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_fetch_store_ignores_oversized_pack_metadata() {
+        let (store, router) = memory_store_with_manifest(
+            "refs/heads/main",
+            "6666666666666666666666666666666666666666",
+        )
+        .await;
+        let pack_id = "a".repeat(64);
+        store
+            .put(
+                &router.pack_metadata_path(&pack_id),
+                bytes::Bytes::from(vec![
+                    b' ';
+                    usize::try_from(
+                        crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1,
+                    )
+                    .unwrap()
+                ]),
+            )
+            .await
+            .expect("write oversized pack metadata");
+        let fetch_store = RemoteFetchStore::new(store, router, 1, Vec::new(), None, true, 1);
+
+        assert!(fetch_store.fetch_pack_metadata(&pack_id).await.is_none());
+    }
+
+    #[tokio::test]
     async fn remote_fetch_store_rejects_missing_empty_and_corrupt_pack_index() {
         let (store, router) = memory_store_with_manifest(
             "refs/heads/main",
@@ -3649,16 +3680,22 @@ mod tests {
         let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
             .await
             .expect("read manifest");
+        let pack_id = "a".repeat(64);
         let fetch_store = RemoteFetchStore::new(
             store.clone(),
             router.clone(),
             manifest.generation,
-            Vec::new(),
+            vec![PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: 1024,
+                content_hash: pack_id.clone(),
+                ref_tips: Vec::new(),
+                object_count: 1,
+            }],
             None,
             false,
             1,
         );
-        let pack_id = "a".repeat(64);
 
         let missing = fetch_store
             .validate_pack_index(&pack_id)
