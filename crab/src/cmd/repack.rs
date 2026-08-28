@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::StreamExt;
@@ -929,23 +929,17 @@ async fn download_source_packs(
         let store = store.clone();
         let cancel = cancel.clone();
         let pack_path = repo_pack_path(router.repo_prefix(), &pack.pack_id);
-        let index_path = repo_pack_index_path(router.repo_prefix(), &pack.pack_id);
         let local_pack = pack_dir.join(format!("pack-{}.pack", pack.pack_id));
-        let local_index = pack_dir.join(format!("pack-{}.idx", pack.pack_id));
-        let local_reverse_index = pack_dir.join(format!("pack-{}.rev", pack.pack_id));
         async move {
             if cancel.is_cancelled() {
                 return Err(CrabError::Cancelled);
             }
-            let (pack_size, _) = tokio::select! {
-                result = async {
-                    // The committed manifest supplies the exact body bound;
-                    // disk admission above limits aggregate temporary space.
-                    tokio::try_join!(
-                        store.download_to_path_bounded(&pack_path, &local_pack, pack.size),
-                        store.download_to_path_bounded(&index_path, &local_index, MAX_REPACK_INDEX_BYTES)
-                    )
-                } => result?,
+            // The committed manifest supplies the exact body bound; disk
+            // admission above limits aggregate temporary space. The pack
+            // index is a derived object and the repack worker rebuilds it
+            // while installing the body, avoiding a second validation path.
+            let pack_size = tokio::select! {
+                result = store.download_to_path_bounded(&pack_path, &local_pack, pack.size) => result?,
                 () = cancel.cancelled() => return Err(CrabError::Cancelled),
             };
             if pack_size != pack.size {
@@ -954,43 +948,7 @@ async fn download_source_packs(
                     reason: format!("pack has {pack_size} bytes, manifest records {}", pack.size),
                 });
             }
-            let expected_id = pack.pack_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let (hash, _) = hash_file(&local_pack)?;
-                if blake3::Hash::from_bytes(hash).to_hex().as_str() != expected_id {
-                    return Err(CrabError::CorruptObject {
-                        path: local_pack.display().to_string(),
-                        reason: "pack body hash does not match manifest pack id".to_owned(),
-                    });
-                }
-                write_pack_reverse_index(&local_index, &local_reverse_index)
-                    .map_err(crab_git::pack::PackError::from)?;
-                let locations =
-                    PackLocationIter::open(&local_index, &local_reverse_index, pack_size)
-                        .map_err(crab_git::pack::PackError::from)?;
-                if locations.object_count() != pack.object_count {
-                    return Err(CrabError::CorruptObject {
-                        path: local_index.display().to_string(),
-                        reason: format!(
-                            "index has {} objects, manifest records {}",
-                            locations.object_count(),
-                            pack.object_count
-                        ),
-                    });
-                }
-                run_git(
-                    Command::new("git")
-                        .arg("verify-pack")
-                        .arg("-v")
-                        .arg(&local_index)
-                        .stdout(Stdio::null()),
-                    "verify source pack",
-                )
-            })
-            .await
-            .map_err(|error| {
-                CrabError::Internal(format!("pack verification join failed: {error}"))
-            })?
+            Ok(())
         }
     }))
     .buffer_unordered(concurrency.max(1))
@@ -1405,6 +1363,57 @@ mod tests {
             read_current_visibility(&store, &router, &manifest)
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repack_source_download_requires_only_the_committed_pack_body() -> Result<()> {
+        let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(backend);
+        let router = StoreLayout::new(store.clone(), "org/repack-download".to_owned());
+        let source = tempfile::tempdir()?;
+        let repository = source.path().join("repository");
+        initialize_work_repository(&repository)?;
+        std::fs::write(repository.join("file.txt"), b"pack body\n")?;
+        commit_all(&repository, "pack")?;
+        let pack = snapshot_repository_pack(&repository, source.path(), "source")?;
+        let (hash, size) = hash_file(&pack.pack_path)?;
+        let pack_id = blake3::Hash::from_bytes(hash).to_hex().to_string();
+        let reverse_index = pack.index_path.with_extension("rev");
+        write_pack_reverse_index(&pack.index_path, &reverse_index)
+            .map_err(crab_git::pack::PackError::from)?;
+        let locations = PackLocationIter::open(&pack.index_path, &reverse_index, size)
+            .map_err(crab_git::pack::PackError::from)?;
+        let entry = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size,
+            content_hash: pack_id.clone(),
+            ref_tips: Vec::new(),
+            object_count: locations.object_count(),
+        };
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack.pack_path)?),
+            )
+            .await?;
+        let download_dir = source.path().join("downloads");
+        std::fs::create_dir_all(&download_dir)?;
+
+        download_source_packs(
+            &store,
+            &router,
+            &[entry],
+            &download_dir,
+            1,
+            &CancellationToken::new(),
+        )
+        .await?;
+
+        assert_eq!(
+            std::fs::read(download_dir.join(format!("pack-{pack_id}.pack")))?,
+            std::fs::read(pack.pack_path)?,
         );
         Ok(())
     }

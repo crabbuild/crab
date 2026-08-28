@@ -373,7 +373,9 @@ pub fn consolidate_pack_suffix(
             &source.path,
             &source.canonical_id,
             source.size,
-            false,
+            // Validate object bodies while the index is built. Broken links
+            // can span source packs and are checked after all packs land.
+            true,
         )?;
         let mut locations =
             PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
