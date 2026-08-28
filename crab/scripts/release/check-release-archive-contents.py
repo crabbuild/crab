@@ -201,7 +201,6 @@ def check_release_workflow(root: Path) -> list[str]:
     downstream_conditions = {
         "protocol-v2-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' }}",
         "protocol-v2-git-compatibility-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}",
-        "protocol-v2-rollback-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}",
         "protocol-v2-aws-release-gate": "if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.require_cloud_evidence)",
         "protocol-v2-platform-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-aws-release-gate.result == 'success' }}",
     }
@@ -374,6 +373,9 @@ def check_release_workflow(root: Path) -> list[str]:
         "crabbuild/crab-release",
         "--clobber",
         "GITHUB_SHA: ${{ needs.prepare.outputs.source_sha }}",
+        "protocol-v2-rollback-release-gate",
+        "--rollback-crab-bin",
+        "Build the immediately prior tagged Crab binary",
     ):
         if forbidden in text:
             errors.append(f"release.yml: unexpected {forbidden!r}")
