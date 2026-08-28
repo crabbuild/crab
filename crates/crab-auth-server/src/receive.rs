@@ -1401,7 +1401,7 @@ async fn derive_service_locator_evidence(
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source.pack");
     let downloaded = store
-        .download_to_path(&router.pack_path(&pack.pack_id), &source)
+        .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
         .await?;
     if downloaded != pack.size {
         return Err(invalid(format!(

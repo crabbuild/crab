@@ -472,7 +472,7 @@ async fn install_remote_git_packs(
         remote
             .caching_store
             .origin()
-            .download_to_path(&remote_path, &tmp_pack_path)
+            .download_to_path_bounded(&remote_path, &tmp_pack_path, pack.size)
             .await?;
 
         let install_result = crate::git::pack::install_pack_file_locally(

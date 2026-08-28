@@ -787,7 +787,7 @@ async fn verify_history(
         let index_path = packs_dir.join(format!("{}.idx", pack.pack_id));
         let reverse_index_path = packs_dir.join(format!("{}.rev", pack.pack_id));
         let downloaded = store
-            .download_to_path(&router.pack_path(&pack.pack_id), &pack_path)
+            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &pack_path, pack.size)
             .await?;
         if downloaded != pack.size {
             return Err(CrabError::CorruptObject {

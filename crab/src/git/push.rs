@@ -5928,7 +5928,7 @@ async fn download_locator_pack_evidence(
         crab_git::initialize_bare_git_dir(temp.path()).map_err(CrabError::from)?;
         let source = temp.path().join("source.pack");
         let downloaded = store
-            .download_to_path(&router.pack_path(&pack.pack_id), &source)
+            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
             .await?;
         check_cancelled(cancel)?;
         if downloaded != pack.size {

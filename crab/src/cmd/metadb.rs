@@ -2523,7 +2523,7 @@ async fn rebuild_git_object_locators(
         let temp = tempfile::tempdir()?;
         let source = temp.path().join("source.pack");
         let downloaded = match store
-            .download_to_path(&router.pack_path(&pack.pack_id), &source)
+            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
             .await
         {
             Ok(size) => size,

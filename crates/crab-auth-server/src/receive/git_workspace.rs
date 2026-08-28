@@ -787,7 +787,8 @@ impl<'a> GitReceiveWorkspace<'a> {
         for pack in read_bulk_pack_list(self.store, router, &manifest.pack_index_hash).await? {
             validate_pack_manifest_entry(&pack)?;
             let path = router.pack_path(&pack.pack_id);
-            self.install_pack_from_object(&path, git_dir).await?;
+            self.install_pack_from_object(&path, git_dir, pack.size)
+                .await?;
         }
         Ok(())
     }
@@ -805,7 +806,9 @@ impl<'a> GitReceiveWorkspace<'a> {
                 && object.canonical_key.ends_with(".pack")
             {
                 let path = ObjectPath::from(object.staged_key.clone());
-                let pack_path = self.install_pack_from_object(&path, git_dir).await?;
+                let pack_path = self
+                    .install_pack_from_object(&path, git_dir, object.size)
+                    .await?;
                 let file_name = pack_path
                     .file_name()
                     .and_then(std::ffi::OsStr::to_str)
@@ -829,6 +832,7 @@ impl<'a> GitReceiveWorkspace<'a> {
         &self,
         path: &ObjectPath,
         git_dir: &Path,
+        expected_size: u64,
     ) -> Result<std::path::PathBuf> {
         let file_name = path
             .as_ref()
@@ -837,7 +841,9 @@ impl<'a> GitReceiveWorkspace<'a> {
             .ok_or_else(|| invalid("pack path has no filename"))?;
         validate_pack_object_filename(file_name)?;
         let pack_path = git_dir.join("objects").join("pack").join(file_name);
-        self.store.download_to_path(path, &pack_path).await?;
+        self.store
+            .download_to_path_bounded(path, &pack_path, expected_size)
+            .await?;
         run_git(["index-pack", path_str(&pack_path)?], Some(git_dir))?;
         Ok(pack_path)
     }
