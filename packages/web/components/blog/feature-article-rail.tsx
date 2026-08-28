@@ -69,9 +69,10 @@ export function FeatureArticleRail({
 }: {
   items: FeatureArticleTocItem[]
 }) {
-  const { activeUrl, progress } = useReadingPosition(items)
+  const primaryItems = items.filter((item) => item.depth === 2)
+  const { activeUrl, progress } = useReadingPosition(primaryItems)
 
-  if (items.length === 0) return null
+  if (primaryItems.length === 0) return null
 
   return (
     <>
@@ -85,12 +86,12 @@ export function FeatureArticleRail({
             {progress}% READ
           </span>
         </summary>
-        <TocLinks items={items} activeUrl={activeUrl} className="mt-4" />
+        <TocLinks items={primaryItems} activeUrl={activeUrl} className="mt-4" />
       </details>
 
       <nav
         aria-label="Article table of contents"
-        className="sticky top-24 hidden max-h-[calc(100vh-8rem)] overflow-y-auto pr-2 xl:block"
+        className="sticky top-24 hidden pr-2 xl:block"
       >
         <div className="flex items-center justify-between gap-3 font-mono text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
           <span>In this story</span>
@@ -102,7 +103,7 @@ export function FeatureArticleRail({
             style={{ width: `${progress}%` }}
           />
         </div>
-        <TocLinks items={items} activeUrl={activeUrl} className="mt-4" />
+        <TocLinks items={primaryItems} activeUrl={activeUrl} className="mt-4" />
       </nav>
     </>
   )
