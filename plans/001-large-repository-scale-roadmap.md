@@ -68,6 +68,16 @@ each current binary still has only one full-profile run. Repeatability, the
 10,000-push differential, fault, provider, concurrency, and rollout gates are
 still open.
 
+The current branch adds `bdfae4f2` as an intake-containment follow-up. Format-
+derived bounds now protect every known-size pack index, reverse index, and kind
+sidecar read in owner, receive, recovery, and push-probe paths; protected
+staged-object reads also stop at their declared byte size before validating the
+content hash. The bound helpers have fixture and overflow coverage, and the
+focused locator, receive, and push suites pass. This prevents malformed or
+unexpected provider bodies from filling memory or maintenance workspaces, but
+it does not close the separate 10,000-push, provider-fault, fanout, retention,
+or rollout qualifications.
+
 `local-k8s-final-04655f3b-1000-20260825` used Kubernetes revision
 `b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated external RustFS, and the
 installed binary built from committed source `04655f3b`. The standalone
@@ -1927,6 +1937,12 @@ gates, split-crate behavior gates, strict split-crate clippy checks, metadata
 tests, and remote-Git tests. The full workspace test/clippy gates are not
 claimed green here; unrelated baseline failures/warnings outside the touched
 surfaces remain separate cleanup work.
+
+The post-`bdfae4f2` focused proof additionally passes `cargo fmt --all
+-- --check`, strict `crab-git` clippy, all 8 pack-locator tests, all 40
+protected-receive tests, and all 271 runnable Crab push tests (one unrelated
+integration test remains ignored). The full workspace and real-repository
+qualification gates remain open as recorded in the evidence table.
 
 The locator-startup follow-up (`b8c51985`) additionally passes
 `cargo fmt --all -- --check`, the metadata locator module (`54` passed, `1`
