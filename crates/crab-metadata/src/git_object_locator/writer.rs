@@ -35,6 +35,9 @@ const MAX_BATCH_LOGICAL_BYTES: usize = 2 * 1024 * 1024;
 const LOCATOR_L0_SST_BYTES: usize = 64 * 1024 * 1024;
 const LOCATOR_L0_MAX_SSTS: usize = 32;
 const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
+const LOCATOR_COMPACTION_MAX_CONCURRENT: usize = 1;
+const LOCATOR_COMPACTION_MAX_SUBCOMPACTIONS: usize = 1;
+const LOCATOR_COMPACTION_MAX_FETCH_TASKS: usize = 1;
 const LOCATOR_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
 const LOCATOR_SCAN_FETCH_TASKS: usize = 8;
 const LOCATOR_EXISTING_LOOKUP_CONCURRENCY: usize = 256;
@@ -54,6 +57,13 @@ const BULK_ORDINAL_LOOKUP_FACTOR: u64 = 64;
 // Small catalogs have fewer rows than the fixed SST/read-ahead overhead of a
 // full scan. Keep their incremental writes on bounded OID point lookups.
 const BULK_ORDINAL_LOOKUP_MIN_CATALOG_OBJECTS: u64 = 4_096;
+// A point lookup can touch one index/data block in every active SST. When a
+// publication covers enough of the catalog, one ordered scan is cheaper and
+// keeps incremental repair from multiplying object-store reads by SST fan-out.
+const EXISTING_LOOKUP_SCAN_MIN_SSTS: u64 = 4;
+const EXISTING_LOOKUP_SCAN_CATALOG_COST_DIVISOR: u64 = 2;
+const EXISTING_LOOKUP_SCAN_SMALL_CATALOG_MAX_OBJECTS: u64 = 4_096;
+const EXISTING_LOOKUP_SCAN_SMALL_CATALOG_RATIO: u64 = 4;
 const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
 
@@ -618,6 +628,18 @@ impl GitObjectLocatorWriter {
         &self,
         entries: &[GitObjectLocatorEntry],
     ) -> Result<Vec<Option<ExistingObject>>> {
+        if self.should_scan_existing_objects(entries.len()) {
+            if let Some(existing) = self.lookup_existing_objects_by_scan(entries).await? {
+                return Ok(existing);
+            }
+            debug!(
+                locator_lookup_mode = "exact_fallback",
+                requested_objects = entries.len(),
+                catalog_objects = self.metadata.next_object_ordinal,
+                active_ssts = active_sst_count(&self.db),
+                "compact Git locator scan exceeded its row bound"
+            );
+        }
         let fetched = stream::iter(entries.iter().enumerate().map(|(index, entry)| {
             let db = &self.db;
             async move {
@@ -634,18 +656,87 @@ impl GitObjectLocatorWriter {
         for (index, value) in fetched {
             existing[index] = match value {
                 None => None,
-                Some(value) => {
-                    let location = decode_object_location(&value)
-                        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
-                    Some(ExistingObject {
-                        ordinal: location.ordinal,
-                        pack_slot: location.pack_slot,
-                        metadata: location.metadata,
-                    })
-                }
+                Some(value) => Some(decode_existing_object(&value)?),
             };
         }
         Ok(existing)
+    }
+
+    fn should_scan_existing_objects(&self, requested_objects: usize) -> bool {
+        should_scan_existing_objects(
+            requested_objects,
+            self.metadata.next_object_ordinal,
+            active_sst_count(&self.db),
+        )
+    }
+
+    async fn lookup_existing_objects_by_scan(
+        &self,
+        entries: &[GitObjectLocatorEntry],
+    ) -> Result<Option<Vec<Option<ExistingObject>>>> {
+        let mut requested = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.oid, index))
+            .collect::<Vec<_>>();
+        requested.sort_unstable_by_key(|(oid, _)| *oid);
+        let Some((first_oid, _)) = requested.first() else {
+            return Ok(Some(Vec::new()));
+        };
+        let last_oid = requested
+            .last()
+            .map(|(oid, _)| oid)
+            .ok_or_else(|| MetadataError::Internal("locator scan lost its request".to_owned()))?;
+        let row_limit = usize::try_from(self.metadata.next_object_ordinal).unwrap_or(usize::MAX);
+        let options = slatedb::config::ScanOptions::default()
+            .with_read_ahead_bytes(LOCATOR_SCAN_READ_AHEAD_BYTES)
+            .with_max_fetch_tasks(LOCATOR_SCAN_FETCH_TASKS);
+        let mut rows = self
+            .db
+            .scan_prefix_with_options(
+                [OBJECT_FAMILY],
+                first_oid.as_slice()..=last_oid.as_slice(),
+                &options,
+            )
+            .await
+            .map_err(read_error)?;
+        let mut existing = vec![None; entries.len()];
+        let mut request_index = 0_usize;
+        let mut rows_scanned = 0_usize;
+        while let Some(row) = rows.next().await.map_err(read_error)? {
+            rows_scanned = rows_scanned.saturating_add(1);
+            if rows_scanned > row_limit {
+                return Ok(None);
+            }
+            let oid = decode_object_key(&row.key)
+                .ok_or_else(|| corrupt("object", "invalid compact locator object key"))?;
+            while requested
+                .get(request_index)
+                .is_some_and(|(requested_oid, _)| *requested_oid < oid)
+            {
+                request_index += 1;
+            }
+            while requested
+                .get(request_index)
+                .is_some_and(|(requested_oid, _)| *requested_oid == oid)
+            {
+                let (_, output_index) = requested[request_index];
+                existing[output_index] = Some(decode_existing_object(&row.value)?);
+                request_index += 1;
+            }
+            if request_index == requested.len() {
+                break;
+            }
+        }
+        debug!(
+            locator_lookup_mode = "scan",
+            requested_objects = entries.len(),
+            rows_scanned,
+            catalog_objects = self.metadata.next_object_ordinal,
+            active_ssts = active_sst_count(&self.db),
+            "compact Git locator existing-object scan completed"
+        );
+        Ok(Some(existing))
     }
 
     async fn prepare_ordinal_lookup(&mut self, entry_count: usize) -> Result<()> {
@@ -1369,10 +1460,21 @@ fn locator_settings(compact: bool) -> Settings {
     let compactor_options = compact.then(|| {
         let mut compactor = CompactorOptions {
             commit_compacted_interval: std::time::Duration::from_millis(500),
+            max_concurrent_compactions: LOCATOR_COMPACTION_MAX_CONCURRENT,
             ..CompactorOptions::default()
         };
+        // The locator is one unsharded keyspace. Let one compaction consume the
+        // whole bounded L0 frontier so repeated short-lived writers do not
+        // rewrite the same history through several eight-source jobs.
+        compactor.scheduler_options.insert(
+            "max_compaction_sources".to_owned(),
+            LOCATOR_L0_MAX_SSTS.to_string(),
+        );
         if let Some(worker) = &mut compactor.worker {
+            worker.max_concurrent_compactions = LOCATOR_COMPACTION_MAX_CONCURRENT;
             worker.compactions_poll_interval = std::time::Duration::from_millis(500);
+            worker.max_subcompactions = LOCATOR_COMPACTION_MAX_SUBCOMPACTIONS;
+            worker.max_fetch_tasks = LOCATOR_COMPACTION_MAX_FETCH_TASKS;
         }
         compactor
     });
@@ -1490,6 +1592,24 @@ fn corrupt(path: &str, reason: &str) -> MetadataError {
     }
 }
 
+fn active_sst_count(db: &slatedb::Db) -> u64 {
+    let manifest = db.manifest();
+    let l0 = u64::try_from(manifest.l0().len()).unwrap_or(u64::MAX);
+    manifest.compacted().iter().fold(l0, |total, run| {
+        total.saturating_add(u64::try_from(run.sst_views.len()).unwrap_or(u64::MAX))
+    })
+}
+
+fn decode_existing_object(value: &[u8]) -> Result<ExistingObject> {
+    let location = decode_object_location(value)
+        .ok_or_else(|| corrupt("object", "invalid Git catalog object location"))?;
+    Ok(ExistingObject {
+        ordinal: location.ordinal,
+        pack_slot: location.pack_slot,
+        metadata: location.metadata,
+    })
+}
+
 async fn close_after_error<T>(db: slatedb::Db, operation: MetadataError) -> Result<T> {
     match db.close().await {
         Ok(()) => Err(operation),
@@ -1499,6 +1619,23 @@ async fn close_after_error<T>(db: slatedb::Db, operation: MetadataError) -> Resu
             close,
         }),
     }
+}
+
+fn should_scan_existing_objects(
+    requested_objects: usize,
+    catalog_objects: u64,
+    active_ssts: u64,
+) -> bool {
+    let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
+    if requested == 0 || catalog_objects == 0 || active_ssts < EXISTING_LOOKUP_SCAN_MIN_SSTS {
+        return false;
+    }
+    let small_catalog = catalog_objects <= EXISTING_LOOKUP_SCAN_SMALL_CATALOG_MAX_OBJECTS
+        && requested.saturating_mul(EXISTING_LOOKUP_SCAN_SMALL_CATALOG_RATIO) >= catalog_objects;
+    small_catalog
+        || requested.saturating_mul(active_ssts)
+            >= catalog_objects.saturating_add(EXISTING_LOOKUP_SCAN_CATALOG_COST_DIVISOR - 1)
+                / EXISTING_LOOKUP_SCAN_CATALOG_COST_DIVISOR
 }
 
 fn should_load_existing_ordinals(current_objects: u64, candidate_objects: u64) -> bool {
@@ -1606,6 +1743,31 @@ mod tests {
     }
 
     #[test]
+    fn locator_compaction_uses_one_full_frontier_worker() {
+        let options = locator_settings(true)
+            .compactor_options
+            .expect("compaction settings");
+        assert_eq!(
+            options.max_concurrent_compactions,
+            LOCATOR_COMPACTION_MAX_CONCURRENT
+        );
+        assert_eq!(
+            options.scheduler_options.get("max_compaction_sources"),
+            Some(&LOCATOR_L0_MAX_SSTS.to_string())
+        );
+        let worker = options.worker.expect("embedded locator compaction worker");
+        assert_eq!(
+            worker.max_concurrent_compactions,
+            LOCATOR_COMPACTION_MAX_CONCURRENT
+        );
+        assert_eq!(
+            worker.max_subcompactions,
+            LOCATOR_COMPACTION_MAX_SUBCOMPACTIONS
+        );
+        assert_eq!(worker.max_fetch_tasks, LOCATOR_COMPACTION_MAX_FETCH_TASKS);
+    }
+
+    #[test]
     fn locator_gc_is_due_only_when_exact_coverage_crosses_a_generation_band() {
         let coverage = |generation| {
             Some(GitLocatorCoverage {
@@ -1644,6 +1806,54 @@ mod tests {
         ));
         assert!(should_load_existing_ordinals(1_000_000, 20_000));
         assert!(!should_load_existing_ordinals(1_000_000, 10_000));
+    }
+
+    #[test]
+    fn existing_object_lookup_scans_when_sst_amplification_dominates() {
+        assert!(should_scan_existing_objects(12, 52, 14));
+        assert!(should_scan_existing_objects(4, 52, 12));
+        assert!(!should_scan_existing_objects(4, 52, 4));
+        assert!(should_scan_existing_objects(
+            1_024,
+            EXISTING_LOOKUP_SCAN_SMALL_CATALOG_MAX_OBJECTS,
+            EXISTING_LOOKUP_SCAN_MIN_SSTS,
+        ));
+        assert!(!should_scan_existing_objects(12, 52, 3));
+        assert!(!should_scan_existing_objects(64, 100_000, 22));
+    }
+
+    #[tokio::test]
+    async fn existing_object_scan_preserves_request_order_and_missing_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open_for_incremental_publication(
+            Arc::clone(&store),
+            "org/repo",
+        )
+        .await
+        .expect("open writer");
+
+        for seed in 1..=4 {
+            let binding = writer.bind_packs(&[pack(seed)]).await.expect("bind pack")[0];
+            writer
+                .write_locations(binding, &[entry(seed as u8)])
+                .await
+                .expect("write object");
+        }
+        // Flush the fourth object into the fourth immutable SST without
+        // adding another catalog row. This forces the adaptive scan branch.
+        writer
+            .bind_packs(&[pack(5)])
+            .await
+            .expect("flush locator rows");
+
+        let existing = writer
+            .lookup_existing_objects(&[entry(4), entry(2), entry(5)])
+            .await
+            .expect("scan existing objects");
+        assert_eq!(existing[0].map(|object| object.ordinal), Some(3));
+        assert_eq!(existing[1].map(|object| object.ordinal), Some(1));
+        assert!(existing[2].is_none());
+        writer.close().await.expect("close writer");
     }
 
     #[tokio::test]

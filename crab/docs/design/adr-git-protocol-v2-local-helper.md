@@ -46,11 +46,11 @@ An unfiltered fresh fetch of exact visible ref targets may plan directly from
 the proof's complete per-ref closure. Negotiated, shallow, filtered, tag-expanded,
 and arbitrary-object requests retain bounded traversal. Pack generation batches
 the default operation object bound for range coalescing while preserving the
-existing aggregate byte budgets. Dense locator batches use a read-ahead range
-scan instead of one SlateDB point lookup per object. The scan is selected only
-when the request covers at least half of the pinned pack inventory and falls
-back to point lookups after two rows examined per requested object; smaller and
-sparse batches keep the exact-key path.
+existing aggregate byte budgets. Locator batches use bounded read-ahead scans
+when their request density or active SST fan-out makes one ordered pass cheaper
+than independent SlateDB point lookups. Sparse batches retain the exact-key
+path, and every scan falls back to exact gets if it would read beyond the
+pinned catalog row bound.
 
 ## Consequences
 
