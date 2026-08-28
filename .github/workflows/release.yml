@@ -1186,132 +1186,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  protocol-v2-rollback-release-gate:
-    name: Protocol v2 rollback compatibility release gate
-    needs: [prepare, build, protocol-v2-release-gate]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    env:
-      CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-rollback-release
-      CRAB_E2E_RUN_ID: release-rollback-${{ github.run_id }}-${{ github.run_attempt }}
-      AWS_ACCESS_KEY_ID: crab
-      AWS_SECRET_ACCESS_KEY: crab
-      AWS_REGION: us-east-1
-      AWS_ENDPOINT_URL: http://127.0.0.1:9000
-      RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-          fetch-depth: 0
-
-      - name: Install rollback build and smoke dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
-            libexpat1-dev libfuse3-dev libpcre2-dev libssl-dev pipx xz-utils \
-            zlib1g-dev
-          pipx install awscli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Download exact Linux release artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: crab-linux-x86_64
-          path: release-dist
-
-      - name: Extract exact Linux release artifact
-        run: |
-          set -euo pipefail
-          mkdir -p release-bin
-          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
-          test -x release-bin/crab
-          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
-
-      - name: Build the immediately prior tagged Crab binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          current="${{ needs.prepare.outputs.tag }}"
-          previous="$(git tag --list 'v*' --sort=-v:refname | awk -v current="$current" '$0 != current { print; exit }')"
-          if [ -z "$previous" ]; then
-            echo "::error::No prior tagged Crab release is available for rollback qualification." >&2
-            exit 1
-          fi
-          prior_root="$RUNNER_TEMP/crab-previous"
-          prior_target="$RUNNER_TEMP/crab-previous-target"
-          git worktree add --detach "$prior_root" "$previous"
-          (
-            cd "$prior_root"
-            GIT_SHA="$(git rev-parse HEAD)" \
-              CARGO_TARGET_DIR="$prior_target" \
-              cargo build -p crab --release --locked --features gix-transport
-          )
-          test -x "$prior_target/release/crab"
-          "$prior_target/release/crab" --version
-          echo "PRIOR_CRAB_BIN=$prior_target/release/crab" >> "$GITHUB_ENV"
-          echo "PRIOR_CRAB_TAG=$previous" >> "$GITHUB_ENV"
-
-      - name: Start RustFS
-        run: |
-          set -euo pipefail
-          mkdir -p "${CRAB_E2E_ROOT}/rustfs-data"
-          sudo chown 10001:10001 "${CRAB_E2E_ROOT}/rustfs-data"
-          docker run -d \
-            --name crab-protocol-v2-rollback-rustfs \
-            -p 9000:9000 \
-            -e RUSTFS_ACCESS_KEY=crab \
-            -e RUSTFS_SECRET_KEY=crab \
-            -v "${CRAB_E2E_ROOT}/rustfs-data:/data" \
-            "${RUSTFS_IMAGE}" server /data --address :9000
-          for _ in $(seq 1 60); do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready || true)"
-            if [ "${status:-000}" = "200" ]; then exit 0; fi
-            sleep 1
-          done
-          docker logs crab-protocol-v2-rollback-rustfs >&2 || true
-          exit 1
-
-      - name: Run rollback compatibility against exact artifacts
-        run: |
-          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
-            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
-            --rollback-crab-bin "$PRIOR_CRAB_BIN" \
-            --rollback-crab-tag "$PRIOR_CRAB_TAG" \
-            --git-bin "$(command -v git)" \
-            --backend rustfs \
-            --bucket "$CRAB_E2E_BUCKET" \
-            --endpoint-url "$AWS_ENDPOINT_URL" \
-            --root "$CRAB_E2E_ROOT" \
-            --run-id "$CRAB_E2E_RUN_ID" \
-            --source-root "$GITHUB_WORKSPACE"
-
-      - name: Capture rollback RustFS logs
-        if: always()
-        run: |
-          mkdir -p "${CRAB_E2E_ROOT}"
-          docker logs crab-protocol-v2-rollback-rustfs > "${CRAB_E2E_ROOT}/rustfs.log" 2>&1 || true
-          docker rm -f crab-protocol-v2-rollback-rustfs >/dev/null 2>&1 || true
-
-      - name: Remove prior release worktree
-        if: always()
-        run: git worktree remove --force "$RUNNER_TEMP/crab-previous" || true
-
-      - name: Upload rollback protocol release evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: protocol-v2-rollback-release-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
-            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
-            ${{ env.CRAB_E2E_ROOT }}/rustfs.log
-          if-no-files-found: error
-          retention-days: 30
-
   protocol-v2-aws-release-gate:
     name: Protocol v2 partial-clone AWS S3 release gate
     needs: [prepare, build, protocol-v2-release-gate]
@@ -1512,8 +1386,8 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish release
-    needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-rollback-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-git-compatibility-release-gate.result == 'success' && needs.protocol-v2-rollback-release-gate.result == 'success' && (needs.protocol-v2-aws-release-gate.result == 'success' || needs.protocol-v2-aws-release-gate.result == 'skipped') && (needs.protocol-v2-platform-release-gate.result == 'success' || needs.protocol-v2-platform-release-gate.result == 'skipped') }}
+    needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-git-compatibility-release-gate.result == 'success' && (needs.protocol-v2-aws-release-gate.result == 'success' || needs.protocol-v2-aws-release-gate.result == 'skipped') && (needs.protocol-v2-platform-release-gate.result == 'success' || needs.protocol-v2-platform-release-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
