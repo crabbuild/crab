@@ -414,6 +414,53 @@ passed, and the run-owned remote prefix was cleaned. The report is accepted
 by the verifier with --allow-smoke; it is evidence for the maintenance
 regression only, not the required 1,000-replay full-profile gate.
 
+### Current-head strict qualification after catalog-visibility handoff repair
+
+Run profile: `codex-8fa065f0-k8s-1000-20260828`, Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, 1,000
+first-parent replay pushes, and the release binary built from `8fa065f0`.
+The standalone verifier returned `status=ok`, `profile=full`, and
+`replay_count=1000`; all 1,001 pushes, 28/28 report stages, full/filtered/
+shallow/incremental reads, full and incremental fsck, source immutability,
+1,000-object byte-equivalence sampling, and run-scoped cleanup passed. The
+correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Pushes after the seed were bounded at 1,585 ms median, 2,932 ms p95, and
+  3,408 ms p99; the 261,066 ms maximum was the initial import. Fetches at
+  checkpoints 1/10/100/1,000 took 1,805/2,442/3,418/7,306 ms end to end.
+- The generation-1,000 owner converged in 1,227,393 ms across ten passes,
+  with 1,658,929,152 bytes peak child RSS, 138,235,644 maintenance bytes
+  read, and 31,636,299 bytes written. Its actions were
+  `ref_journal_compaction`, `catalog_advance`,
+  `catalog_visibility_handoff`, `commit_graph_incremental`,
+  `commit_graph_compaction`, `shallow_closure_rebuild`, `geometric_repack`,
+  `catalog_advance`, `catalog_visibility_handoff`, and `none`.
+- The 900-pack locator advance took 729,938 ms; the geometric repack of 991
+  packs took 244,610 ms and the follow-up catalog advance took 129,151 ms,
+  deleting 991 stale locator-pack rows. Serving inventory then converged to
+  two active packs. The long locator/object-ordinal materialization remains
+  the dominant owner bottleneck and is not an accepted large-team SLO.
+- Cold and warm full clones completed in 163,503 and 57,016 ms; blobless and
+  depth-1/10/100/1,000 clones completed in 25,612/17,359/135,988/176,986 ms.
+  Incremental fetches at 1/10/100/1,000 commits completed in 1,805/2,442/
+  3,418/7,306 ms, with the final fetch planning 38,745 logical objects.
+- The object-store snapshot retained 1,003 physical pack objects after the
+  run, while the active serving inventory was two packs. The extra objects
+  are immutable manifest-history recovery roots, so they do not enter normal
+  clone planning; history-prune and grace-aware repo GC must still be run to
+  reclaim them when the recovery policy permits. This run therefore proves
+  active-pack consolidation, not bounded long-term storage retention.
+- The report verifier now treats `catalog_visibility_handoff` as a
+  metadata-only proof transition and reserves visibility telemetry checks for
+  an actual `visibility_repair`. This keeps strict report validation aligned
+  with the owner contract without weakening the visibility-current gate.
+
+This closes the current-head 1,000-replay correctness and active-pack
+consolidation evidence for the PR. Independent repeatability, valid growth
+differentials, 10,000-push ancestry, interruption/GC, provider, concurrency,
+owner-failover, storage-retention, and rollout SLO gates remain open.
+
 ### Current-head shared-visibility and team-load qualification
 
 The shared-object visibility admission fix is committed as `eb3ced6b`. It
