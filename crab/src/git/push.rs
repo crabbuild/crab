@@ -2728,6 +2728,7 @@ pub(crate) struct GitVisibilityCapacity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitVisibilityPublication {
     Published,
+    CatalogBound,
     CompletePackOnly(GitVisibilityCapacity),
 }
 
@@ -6876,7 +6877,7 @@ async fn repair_git_visibility_if_current_with_options(
                 generation = manifest.generation,
                 "completed pending Git catalog visibility handoff"
             );
-            return Ok(Some(GitVisibilityPublication::Published));
+            return Ok(Some(GitVisibilityPublication::CatalogBound));
         }
     }
     let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
@@ -8625,7 +8626,9 @@ impl PushPipeline {
             .publish_git_visibility_index(manifest, store)
             .await
         {
-            Ok(GitVisibilityPublication::Published) => true,
+            Ok(GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound) => {
+                true
+            }
             Ok(GitVisibilityPublication::CompletePackOnly(capacity)) => {
                 warn!(
                     generation = manifest.generation,
@@ -8995,7 +8998,7 @@ impl PushPipeline {
         )
         .await?;
         match visibility {
-            GitVisibilityPublication::Published => {
+            GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound => {
                 self.publish_ref_visibility_edits(
                     store,
                     &mut edits,

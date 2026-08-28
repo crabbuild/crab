@@ -647,24 +647,24 @@ async fn generation_owner_sample(
         || after.git_validation_digest != manifest.git_validation_digest;
     let visibility = match visibility {
         Some(crate::git::push::GitVisibilityPublication::Published) => "published",
+        Some(crate::git::push::GitVisibilityPublication::CatalogBound) => "catalog_bound",
         Some(crate::git::push::GitVisibilityPublication::CompletePackOnly(_)) => {
             "complete_pack_only"
         }
         None => "superseded",
     };
     if superseded || !visibility_current {
+        let action = if superseded {
+            "superseded"
+        } else if visibility == "catalog_bound" {
+            "catalog_visibility_handoff"
+        } else {
+            "visibility_repair"
+        };
         return Ok(GenerationOwnerSample {
             generation,
-            action: if superseded {
-                "superseded"
-            } else {
-                "visibility_repair"
-            },
-            maintenance_reason: generation_owner_reason(if superseded {
-                "superseded"
-            } else {
-                "visibility_repair"
-            }),
+            action,
+            maintenance_reason: generation_owner_reason(action),
             next_eligibility_secs: if superseded { 0 } else { interval_secs },
             locator_advanced,
             visibility,
@@ -776,6 +776,7 @@ fn generation_owner_reason(action: &str) -> &'static str {
     match action {
         "ref_journal_compaction" => "active_ref_journal",
         "catalog_advance" => "catalog_coverage_stale",
+        "catalog_visibility_handoff" => "catalog_proof_handoff",
         "visibility_repair" => "visibility_missing_or_stale",
         "commit_graph_incremental" => "commit_graph_missing_incremental",
         "commit_graph_rebuild" => "commit_graph_missing",

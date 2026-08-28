@@ -465,6 +465,21 @@ class ReportVerificationTests(unittest.TestCase):
                 }
             )
 
+    def test_catalog_visibility_handoff_allows_metadata_only_proof(self) -> None:
+        VERIFY.verify_full_visibility_telemetry(
+            {
+                "visibility_owner_seed": {
+                    "actions": ["catalog_visibility_handoff", "none"],
+                    "visibility_states": ["published", "published"],
+                    "telemetry": {
+                        "visibility_duration_ms": 0,
+                        "storage_requests": 0,
+                        "storage_bytes": 0,
+                    },
+                }
+            }
+        )
+
     def test_blobless_catalog_filter_requires_ordinal_metadata_telemetry(self) -> None:
         report = valid_report()
         report["stages"]["blob_none_clone"]["telemetry"]["locator_ordinal_metadata"] = 0

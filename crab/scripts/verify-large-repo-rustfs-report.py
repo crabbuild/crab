@@ -151,6 +151,26 @@ def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
     owner_telemetry = owner_stage.get("telemetry", {})
     visibility_duration = owner_telemetry.get("visibility_duration_ms", 0)
     owner_actions = owner_stage.get("actions", [])
+    if "catalog_visibility_handoff" in owner_actions:
+        require(
+            isinstance(owner_actions, list)
+            and owner_actions
+            and owner_actions[-1] == "none",
+            "full report catalog visibility handoff did not converge",
+        )
+        visibility_states = owner_stage.get("visibility_states")
+        if visibility_states is not None:
+            require(
+                isinstance(visibility_states, list)
+                and visibility_states
+                and visibility_states[-1] == "published",
+                "full report catalog visibility handoff did not publish a proof",
+            )
+        require(
+            "visibility_repair" not in owner_actions,
+            "full report records a visibility repair beside a catalog handoff",
+        )
+        return
     if visibility_duration > 0:
         require(
             owner_telemetry.get("storage_requests", 0) > 0

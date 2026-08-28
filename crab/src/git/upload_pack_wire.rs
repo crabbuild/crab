@@ -875,7 +875,10 @@ async fn open_repository_with_visibility_requirement(
                 .await?;
             if matches!(
                 publication,
-                Some(super::push::GitVisibilityPublication::Published)
+                Some(
+                    super::push::GitVisibilityPublication::Published
+                        | super::push::GitVisibilityPublication::CatalogBound
+                )
             ) {
                 tracing::info!(
                     required_generation,
