@@ -1178,6 +1178,7 @@ fn generated_pack_descriptor_matches_request(
         && descriptor.checksum.len() == 40
         && descriptor.size >= 32
         && descriptor.selection_object_count == u64::try_from(expected_objects).unwrap_or(u64::MAX)
+        && u64::from(descriptor.object_count) >= descriptor.selection_object_count
         && u64::from(descriptor.object_count) <= max_logical_objects
 }
 
@@ -2377,6 +2378,26 @@ mod tests {
             &descriptor,
             "request",
             5,
+            10,
+        ));
+    }
+
+    #[test]
+    fn generated_pack_cache_rejects_an_artifact_smaller_than_the_selection() {
+        let descriptor = GeneratedPackDescriptor {
+            version: GENERATED_PACK_CACHE_VERSION,
+            request_hash: "request".to_owned(),
+            content_hash: "a".repeat(64),
+            checksum: "b".repeat(40),
+            size: 64,
+            object_count: 2,
+            selection_object_count: 3,
+        };
+
+        assert!(!generated_pack_descriptor_matches_request(
+            &descriptor,
+            "request",
+            3,
             10,
         ));
     }
