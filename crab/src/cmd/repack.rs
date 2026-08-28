@@ -1310,6 +1310,9 @@ mod tests {
 
     #[test]
     fn generation_owner_repack_waits_for_small_pack_accumulation() {
+        let stable = vec![budget_pack(900, 900), budget_pack(9, 9)];
+        assert_eq!(generation_owner_repack_count(&stable), 0);
+
         let packs = vec![
             budget_pack(900, 900),
             budget_pack(700, 700),
