@@ -1133,7 +1133,10 @@ async fn load_cached_pack(
     let downloaded = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(Error::Cancelled),
-        result = repository.state.store.download_to_path(&artifact_path, file.path()) => result?,
+        result = repository
+            .state
+            .store
+            .download_to_path_bounded(&artifact_path, file.path(), descriptor.size) => result?,
     };
     if downloaded != descriptor.size {
         return Err(Error::Corrupt {

@@ -1564,6 +1564,61 @@ async fn generated_pack_cache_rejects_corrupt_artifact_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn generated_pack_cache_rejects_an_oversized_artifact() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let mut object_ids = fixture_object_ids(&fixture);
+    object_ids.pop().expect("fixture has objects");
+    let key = fixture
+        .repository
+        .generated_pack_cache_key([7; 32], [10; 32], &object_ids, false);
+    fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect("publish cached pack");
+    let prefix = fixture.layout.repo_path("generated-packs/v1/artifacts");
+    let artifact = fixture
+        .backend
+        .inner
+        .list(Some(&prefix))
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .next()
+        .expect("generated artifact")
+        .expect("artifact metadata")
+        .location;
+    let mut bytes = fixture
+        .backend
+        .inner
+        .get(&artifact)
+        .await
+        .expect("read artifact")
+        .bytes()
+        .await
+        .expect("collect artifact")
+        .to_vec();
+    bytes.extend_from_slice(b"oversized");
+    fixture
+        .backend
+        .inner
+        .put(&artifact, Bytes::from(bytes).into())
+        .await
+        .expect("replace artifact");
+
+    let error = fixture
+        .repository
+        .generate_pack_cached(&object_ids, key, &CancellationToken::new())
+        .await
+        .expect_err("oversized cached pack must fail closed");
+    assert!(matches!(
+        error,
+        Error::Storage(crab_storage::StorageError::CorruptObject { .. })
+    ));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn generated_pack_cache_rejects_corrupt_request_descriptor() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let mut object_ids = fixture_object_ids(&fixture);
