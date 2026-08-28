@@ -2259,14 +2259,32 @@ impl PackStore for RemoteFetchStore {
 
     async fn validate_pack_index(&self, pack_id: &str) -> Result<Option<String>> {
         let path = self.router.pack_index_path(pack_id);
+        let object_count = self
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == pack_id)
+            .map(|pack| pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: "pack is absent from the pinned manifest inventory".to_owned(),
+            })?;
+        let maximum =
+            crab_git::pack_locator::max_pack_index_size(object_count).ok_or_else(|| {
+                CrabError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: "Git pack index size overflows its bound".to_owned(),
+                }
+            })?;
         let temp = tempfile::NamedTempFile::new()?;
         if let Some(caching_store) = &self.caching_store {
             caching_store
-                .download_to_path(&path, temp.path())
+                .download_to_path_bounded(&path, temp.path(), maximum)
                 .await
                 .map_err(CrabError::from)?;
         } else {
-            self.store.download_to_path(&path, temp.path()).await?;
+            self.store
+                .download_to_path_bounded(&path, temp.path(), maximum)
+                .await?;
         }
         let display_path = path.to_string();
         let checksum = tokio::task::spawn_blocking(move || {
