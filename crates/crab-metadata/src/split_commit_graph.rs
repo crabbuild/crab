@@ -102,44 +102,28 @@ impl SplitCommitGraph {
             .map_err(|source| {
                 MetadataError::Internal(format!("commit graph allocation: {source}"))
             })?;
-        let mut records = Vec::with_capacity(descriptor.commit_count as usize);
         for layer in &layers {
-            for record in &layer.records {
-                let ordinal = u32::try_from(records.len()).map_err(|_| {
-                    MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
-                })?;
+            for (index, record) in layer.records.iter().enumerate() {
+                let ordinal = layer
+                    .base_ordinal
+                    .checked_add(u32::try_from(index).map_err(|_| {
+                        MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+                    })?)
+                    .ok_or_else(|| {
+                        MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+                    })?;
                 if oid_to_ordinal.insert(record.oid, ordinal).is_some() {
                     return corrupt("commit graph contains duplicate commit OIDs");
                 }
-                records.push(record);
             }
         }
-        for (ordinal, record) in records.iter().enumerate() {
-            let expected = record
-                .parents
-                .iter()
-                .map(|parent| {
-                    if (*parent as usize) >= ordinal {
-                        return corrupt("commit graph parent is not earlier than its child");
-                    }
-                    Ok(records[*parent as usize]
-                        .corrected_generation
-                        .saturating_add(1))
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .max()
-                .unwrap_or(0)
-                .max(non_negative_time(record.commit_time));
-            if record.corrected_generation != expected {
-                return corrupt("commit graph corrected generation is invalid");
-            }
-        }
-        Ok(Self {
+        let graph = Self {
             descriptor,
             layers,
             oid_to_ordinal,
-        })
+        };
+        validate_graph_records(&graph)?;
+        Ok(graph)
     }
 
     #[must_use]
@@ -333,7 +317,8 @@ impl SplitCommitGraph {
 /// Append commits and return the immutable objects needed for publication.
 ///
 /// Returns `None` when the supplied roots cannot be proven complete from the
-/// base plus additions. Callers must then omit graph acceleration.
+/// base plus additions. Unchanged base layers are retained by reference, so
+/// callers only need to publish the newly appended layer.
 pub fn append_split_commit_graph(
     base: Option<SplitCommitGraph>,
     generation: u64,
@@ -400,7 +385,8 @@ pub fn rebind_split_commit_graph(
         commit_count: graph.descriptor.commit_count,
         layers: graph.descriptor.layers.clone(),
     };
-    SplitCommitGraph::new(descriptor.clone(), graph.layers.clone())?;
+    validate_descriptor(&descriptor, &graph.layers)?;
+    validate_graph_records(graph)?;
     let descriptor_bytes = encode_commit_graph_descriptor(&descriptor)?;
     Ok(CommitGraphWrite {
         descriptor_hash: blake3::hash(&descriptor_bytes).to_hex().to_string(),
@@ -899,6 +885,41 @@ fn validate_descriptor(
     Ok(())
 }
 
+fn validate_graph_records(graph: &SplitCommitGraph) -> Result<()> {
+    for layer in &graph.layers {
+        for (index, record) in layer.records.iter().enumerate() {
+            let ordinal = layer
+                .base_ordinal
+                .checked_add(u32::try_from(index).map_err(|_| {
+                    MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+                })?)
+                .ok_or_else(|| {
+                    MetadataError::Internal("commit graph exceeds u32 ordinals".to_owned())
+                })?;
+            if graph.ordinal(&record.oid) != Some(ordinal) {
+                return corrupt("commit graph contains duplicate commit OIDs");
+            }
+            let parent_generation = record.parents.iter().try_fold(0_u64, |maximum, parent| {
+                if *parent >= ordinal {
+                    return corrupt("commit graph parent is not earlier than its child");
+                }
+                graph
+                    .record(*parent)
+                    .ok_or_else(|| MetadataError::CorruptObject {
+                        path: "commit graph".to_owned(),
+                        reason: "commit graph parent ordinal is missing".to_owned(),
+                    })
+                    .map(|parent| maximum.max(parent.corrected_generation.saturating_add(1)))
+            })?;
+            let expected = parent_generation.max(non_negative_time(record.commit_time));
+            if record.corrected_generation != expected {
+                return corrupt("commit graph corrected generation is invalid");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_descriptor_shape(descriptor: &CommitGraphDescriptor, path: &str) -> Result<()> {
     if descriptor.version != LAYER_VERSION {
         return corrupt_at(path, "unsupported commit graph descriptor version");
@@ -1121,6 +1142,19 @@ mod tests {
         )
         .unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn rebind_reuses_existing_layer_objects() {
+        let (_, graph) = append(None, 1, &[oid(1)], vec![input(1, 10, &[])]);
+        let write = rebind_split_commit_graph(&graph, 2, hash(3), hash(4)).unwrap();
+        let descriptor =
+            decode_commit_graph_descriptor(&write.descriptor_bytes, "descriptor").unwrap();
+
+        assert!(write.layers.is_empty());
+        assert_eq!(descriptor.commit_count, graph.descriptor.commit_count);
+        assert_eq!(descriptor.layers, graph.descriptor.layers);
+        assert_eq!(descriptor.generation, 2);
     }
 
     #[test]
