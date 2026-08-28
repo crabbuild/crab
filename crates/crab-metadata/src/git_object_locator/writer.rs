@@ -129,7 +129,9 @@ impl GitObjectLocatorWriter {
 
     /// Open a bounded publication writer, starting compaction only under L0 pressure.
     ///
-    /// `planned_object_rows` must bound the object rows the caller may submit.
+    /// `planned_object_rows` must bound the object rows the caller may submit;
+    /// large plans also select the in-memory existing-ordinal lookup before
+    /// the first pack is written.
     pub async fn open_for_publication(
         store: Arc<dyn ObjectStore>,
         repo_prefix: &str,
@@ -138,7 +140,13 @@ impl GitObjectLocatorWriter {
         let path = git_object_locator_path(repo_prefix);
         let compact =
             locator_compaction_required(&path, Arc::clone(&store), planned_object_rows).await?;
-        Self::open_with_settings(store, repo_prefix, locator_settings(compact)).await
+        let mut writer =
+            Self::open_with_settings(store, repo_prefix, locator_settings(compact)).await?;
+        // The owner already knows the total uncovered inventory it will write.
+        // Seed the lookup policy before the first pack so a large rebind does
+        // not spend its initial batches on one remote point read per object.
+        writer.ordinal_lookup_candidates = planned_object_rows;
+        Ok(writer)
     }
 
     /// Open a bounded publication writer without starting a compactor.
@@ -1808,6 +1816,61 @@ mod tests {
         ));
         assert!(should_load_existing_ordinals(1_000_000, 20_000));
         assert!(!should_load_existing_ordinals(1_000_000, 10_000));
+    }
+
+    #[tokio::test]
+    async fn publication_hint_primes_existing_ordinals_before_first_rebind() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut initial = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open initial writer");
+        let original = GitPackLocatorRecord {
+            pack_id: hash(1),
+            committed_generation: 1,
+            pack_index_hash: hash(11),
+            object_count: 4_096,
+            pack_size: 128,
+        };
+        let binding = initial
+            .bind_packs(&[original])
+            .await
+            .expect("bind original")[0];
+        let entries = (1..=4_096).map(generation_entry).collect::<Vec<_>>();
+        initial
+            .write_locations(binding, &entries)
+            .await
+            .expect("write original catalog");
+        initial
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: original.pack_index_hash,
+            })
+            .await
+            .expect("cover original catalog");
+        initial.close().await.expect("close initial writer");
+
+        let mut writer =
+            GitObjectLocatorWriter::open_for_publication(Arc::clone(&store), "org/repo", 64)
+                .await
+                .expect("open planned publication writer");
+        let replacement = GitPackLocatorRecord {
+            pack_id: hash(2),
+            committed_generation: 2,
+            pack_index_hash: hash(12),
+            object_count: 64,
+            pack_size: 128,
+        };
+        let binding = writer
+            .bind_packs(&[replacement])
+            .await
+            .expect("bind replacement")[0];
+        writer
+            .write_locations(binding, &[generation_entry(5_000)])
+            .await
+            .expect("write first replacement object");
+
+        assert!(writer.existing_ordinals.is_some());
+        writer.close().await.expect("close planned writer");
     }
 
     #[test]
