@@ -219,11 +219,18 @@ jobs:
         env:
           CRAB_RUSTFS_IMAGE: ${{ env.WORKFLOW_RUSTFS_IMAGE }}
         run: |
+          set -euo pipefail
+
+          release_sha="$(git rev-parse HEAD)"
+          if [ "$release_sha" != "${{ needs.prepare.outputs.source_sha }}" ]; then
+            echo "::error::Checked-out release candidate $release_sha does not match prepared source ${{ needs.prepare.outputs.source_sha }}."
+            exit 1
+          fi
+
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-          python3 crab/scripts/e2e/run_dvc_workflow_smoke.py \
+          GITHUB_SHA="$release_sha" python3 crab/scripts/e2e/run_dvc_workflow_smoke.py \
             --root "${WORKFLOW_RUSTFS_ROOT}" \
             --run-id "${WORKFLOW_RUSTFS_RUN_ID}" \
-            --source-sha "${{ needs.prepare.outputs.source_sha }}" \
             --bucket "${WORKFLOW_RUSTFS_BUCKET}" \
             --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" \
             --region "${WORKFLOW_RUSTFS_REGION}" \
