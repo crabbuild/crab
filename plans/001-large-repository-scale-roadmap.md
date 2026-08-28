@@ -378,9 +378,11 @@ lookup selectors now account for active SlateDB SST fan-out: sparse requests
 keep exact OID gets, while dense requests use one bounded object-family scan
 when that is cheaper. A scan cannot read beyond the catalog's ordinal row
 bound; it falls back to exact gets if the bound is exceeded. Locator
-compaction-aware writers also use one full L0 frontier with one compaction,
-subcompaction, and fetch worker, preventing repeated short-lived publishers
-from rewriting the same history through several smaller jobs.
+compaction-aware writers also use one full L0 frontier with one compaction and
+one subcompaction, using four bounded read-ahead fetch tasks. This prevents
+repeated short-lived publishers from rewriting the same history through
+several smaller jobs without serializing a repository-sized compaction behind
+one remote block fetch at a time.
 
 The exact release binary ad93a23d completed the RustFS smoke
 codex-locator-scan-writer-ad93-20260827 with status=ok. The run used eight
@@ -632,9 +634,10 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 - a locator lookup policy that retains exact reads for sparse requests and
   switches dense or SST-fanout-amplified waves to one bounded, read-ahead scan,
   including small compacted catalogs when the request density justifies it.
-- locator compaction uses one full L0 frontier and one bounded worker,
-  subcompaction, and fetch task, so short-lived publishers do not repeatedly
-  compact overlapping history.
+- locator compaction uses one full L0 frontier and one bounded compaction and
+  subcompaction worker with four read-ahead fetch tasks, so short-lived
+  publishers do not repeatedly compact overlapping history or serialize a
+  repository-sized compaction behind one remote block fetch.
 - owner locator planning serialized under the repository publication lock,
   with uncovered-pack budgeting and a metadata-only writer for unchanged
   inventories.

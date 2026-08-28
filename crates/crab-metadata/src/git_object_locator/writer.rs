@@ -37,7 +37,7 @@ const LOCATOR_L0_MAX_SSTS: usize = 32;
 const LOCATOR_COMPACTION_TRIGGER_SSTS: usize = LOCATOR_L0_MAX_SSTS / 2;
 const LOCATOR_COMPACTION_MAX_CONCURRENT: usize = 1;
 const LOCATOR_COMPACTION_MAX_SUBCOMPACTIONS: usize = 1;
-const LOCATOR_COMPACTION_MAX_FETCH_TASKS: usize = 1;
+const LOCATOR_COMPACTION_MAX_FETCH_TASKS: usize = 4;
 const LOCATOR_SCAN_READ_AHEAD_BYTES: usize = 16 * 1024 * 1024;
 const LOCATOR_SCAN_FETCH_TASKS: usize = 8;
 const LOCATOR_EXISTING_LOOKUP_CONCURRENCY: usize = 256;
@@ -1465,7 +1465,9 @@ fn locator_settings(compact: bool) -> Settings {
         };
         // The locator is one unsharded keyspace. Let one compaction consume the
         // whole bounded L0 frontier so repeated short-lived writers do not
-        // rewrite the same history through several eight-source jobs.
+        // rewrite the same history through several eight-source jobs. Keep
+        // read-ahead fetches bounded but concurrent enough to finish before
+        // the repository maintenance lease needs another renewal.
         compactor.scheduler_options.insert(
             "max_compaction_sources".to_owned(),
             LOCATOR_L0_MAX_SSTS.to_string(),
