@@ -491,10 +491,42 @@ sampling, and run-scoped cleanup passed.
   deleting 94 stale locator-pack rows.
 - This single smoke run is correctness evidence for the new lookup admission
   path, not a performance SLO closure: host-to-host variation prevents a
-  timing claim against the earlier run, and the generation-1,000 owner still
-  needs a full-profile qualification to show whether the large-catalog tail
-  improved. Independent repeatability, 10,000-push growth, interruption/GC,
-  provider, concurrency, failover, retention, and rollout gates remain open.
+  timing claim against the earlier run. Independent repeatability, 10,000-push
+  growth, interruption/GC, provider, concurrency, failover, retention, and
+  rollout gates remain open pending the full-profile result below.
+
+The exact-head release binary from `0bcd2f41` then completed the Kubernetes
+full-profile qualification `0bcd2f41-k8s-1000-20260828` against the same
+revision and isolated RustFS endpoint. The standalone verifier returned
+`status=ok`, `profile=full`, and `replay_count=1000`; all 1,001 pushes, clone
+and fetch stages, full and incremental fsck, deterministic 1,000-object
+byte-equivalence sampling, source immutability, and run-scoped cleanup passed.
+The correctness fingerprint remained
+`7d97627cf1f4de8b87679dea53d99916df42c3152dc765399d4494c43af09624`.
+
+- Compared with `codex-8fa065f0-k8s-1000-20260828`, the same-host full-profile
+  comparison was valid and stayed within the 20% drift limit: push median
+  drift was 0.38%, clone median drift 6.36%, and fetch median drift 7.33%.
+  This closes the roadmap's core-operation repeatability differential for
+  these two full reports.
+- The generation-1,000 owner converged in 443,329 ms across ten passes, with
+  1,033,715,712 bytes peak child RSS, 138,237,647 maintenance bytes read, and
+  32,092,121 bytes written. The 900-pack catalog advance loaded 1,604,551
+  existing ordinals in 2,370 ms and closed in 5.77 s; the prior run's
+  equivalent pass took 729,938 ms. The full owner stage fell from 1,227,393
+  ms to 443,329 ms, a 64% reduction, while the geometric repack remained the
+  dominant 245 s pass and reduced 992 packs to 2 active serving packs.
+- Full/warm clones completed in 163,503/60,645 ms; blobless and depth-1/10/
+  100/1,000 clones completed in 24,481/16,109/22,871/136,248/173,643 ms; and
+  incremental fetches at 1/10/100/1,000 commits completed in 1,777/2,263/
+  3,373/6,581 ms. The report's physical snapshot still retained 1,003 pack
+  objects after the run, so active-pack consolidation is proven but
+  long-term history retention and reclamation remain separate gates.
+
+This closes the diagnosed large-catalog locator lookup amplification and
+provides same-host full-profile repeatability evidence for the PR. The
+10,000-push growth, interruption/GC, provider, concurrency, owner-failover,
+retention, and rollout SLO gates remain open.
 
 ### Current-head shared-visibility and team-load qualification
 
