@@ -15,9 +15,9 @@ so you can browse a large repository without hydrating everything first.
 server plus the operating system NFS client; `--backend=fuse` uses the FUSE
 adapter and requires fuse3 or macFUSE.
 
-This is the default coordinator-style mount workflow: the CLI starts or
-contacts a local coordinator process, and active mounts are managed by
-mountpoint. For the persistent named-repo service workflow, see
+This is the interactive mount workflow: the CLI starts the selected local
+backend helper or contacts the FUSE coordinator, and active mounts are managed
+by mountpoint. For the persistent named-repo service workflow, see
 [crab daemon](/docs/cli/reference/crab-daemon). For a comparison, see
 [Mount Modes](/docs/cli/virtual-filesystem/mount-modes).
 
@@ -27,6 +27,43 @@ mountpoint. For the persistent named-repo service workflow, see
 crab mount [OPTIONS] [COMMAND]
 crab unmount [OPTIONS]
 ```
+
+A new mount requires both a repository source and a mountpoint. Management
+subcommands address an existing mount by mountpoint.
+
+```bash
+crab mount --repo <source> --mountpoint <path> [--ref <branch>]
+crab mount <status|diff|export|commit|reset|refresh|switch> --mountpoint <path>
+```
+
+## Recommended First Mount
+
+Start read-only, keep the mountpoint outside another Git working tree, and let
+Crab select the available backend:
+
+```bash
+crab mount doctor --backend=auto --mountpoint /tmp/crab-models
+
+crab mount \
+  --repo crab://team-data/ml-models \
+  --mountpoint /tmp/crab-models \
+  --ref main \
+  --read-only
+
+crab mount status --mountpoint /tmp/crab-models --live-only
+head -c 64 /tmp/crab-models/models/encoder.safetensors >/dev/null
+crab unmount --mountpoint /tmp/crab-models
+```
+
+`crab mount doctor` checks the native client, mountpoint, loopback server,
+control endpoint, and privileges needed by the selected backend. A successful
+`status --live-only` proves that the active NFS helper or FUSE coordinator
+responded; ordinary status may fall back to persisted metadata.
+
+Do not put the mountpoint inside the source repository or another Git working
+tree. Crab rejects this by default because Git would see virtual files as
+untracked content. `--allow-nested` is an explicit override for controlled
+environments, not a normal setup step.
 
 ## Mount Options
 
@@ -42,6 +79,19 @@ crab unmount [OPTIONS]
 | `--no-refresh` | Disable automatic remote polling. |
 | `--allow-nested` | Allow mounting inside a Git or Crab working tree. |
 | `--clean-overlay` | Discard existing overlay changes before mounting. |
+
+## Choose the Backend
+
+Use `--backend=auto` unless an operational requirement selects a backend.
+
+| Backend | Use it when | Host requirement |
+| --- | --- | --- |
+| `auto` | You want the supported default. | Prefers NFS when compiled and ready; otherwise uses FUSE when available. |
+| `nfs` | You want the native OS NFS client or do not want a FUSE extension. | NFS client and local mount privileges. Windows uses a drive target such as `Z:`. |
+| `fuse` | You explicitly need the FUSE adapter. | fuse3 on Linux or approved macFUSE on macOS. |
+
+NFS is a local loopback export, not a shared network file server. The helper,
+overlay, snapshot, and cache remain on the machine running Crab.
 
 ## Management Subcommands
 
@@ -70,6 +120,11 @@ wait for in-flight mutations before taking an exclusive overlay snapshot.
 Separate mounts remain independent working trees and do not share advisory
 file locks.
 
+Pause application writers and close or flush open files before inspecting or
+publishing. The publish barrier drains mutations already in flight, but a
+process that keeps issuing writes during commit can receive filesystem errors
+while the exclusive snapshot is held.
+
 ```bash
 crab mount diff --mountpoint /mnt/models
 crab mount export --mountpoint /mnt/models --to /tmp/models-overlay
@@ -83,6 +138,102 @@ the mounted base ref has not moved, creates a Git commit, refreshes the mounted
 snapshot, and clears the overlay after a successful local commit. If `--push`
 fails, the transaction record preserves the local commit OID and leaves the
 overlay in place for recovery.
+
+The command without `--push` creates the commit locally. Run the command again
+with `--push` to publish that recorded commit when the overlay is already clean:
+
+```bash
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts"
+crab mount commit --mountpoint /mnt/models -m "Push generated artifacts" --push
+```
+
+If a combined commit and push fails, do not use `--clean-overlay` or reset the
+mount. Stop further edits, inspect status, then retry the same publish path:
+
+```bash
+crab mount status --mountpoint /mnt/models --verbose
+crab mount diff --mountpoint /mnt/models
+crab mount commit --mountpoint /mnt/models -m "Update generated artifacts" --push
+```
+
+Crab reuses a matching recorded transaction. If the overlay changed after the
+failure or the mounted base ref moved, Crab rejects the retry instead of
+silently publishing a different tree.
+
+## Safe Writable Workflow
+
+Use this sequence for applications that edit files through the mount:
+
+1. Confirm `git config user.name` and `git config user.email` are set. Mount
+   commit cannot create a Git commit without an author identity.
+2. Mount the intended branch without `--read-only`.
+3. Run the application. Independent paths may be written concurrently; the
+   application must coordinate overlapping writes to the same file.
+4. Stop writers and close their files.
+5. Review `crab mount status --verbose` and `crab mount diff`.
+6. Optionally export the overlay to a normal directory for external review.
+7. Commit locally, or add `--push` for one commit-and-push transaction.
+8. Verify the live mount is clean before unmounting.
+
+```bash
+crab mount \
+  --repo crab://team-data/ml-models \
+  --mountpoint /mnt/models \
+  --ref main
+
+# Run the writer, then stop it before publishing.
+./generate-models --output /mnt/models/generated
+
+crab mount status --mountpoint /mnt/models --verbose
+crab mount diff --mountpoint /mnt/models
+crab mount export --mountpoint /mnt/models --to /tmp/models-review
+crab mount commit \
+  --mountpoint /mnt/models \
+  -m "Regenerate model artifacts" \
+  --push
+crab mount status --mountpoint /mnt/models --live-only --verbose
+crab unmount --mountpoint /mnt/models
+```
+
+The first write to an existing Crab-backed file promotes the complete file into
+the local overlay. Budget local disk for the full promoted file, new files,
+temporary application output, and the read cache—not only for the bytes the
+application expects to change.
+
+## Read-Only and Static Snapshots
+
+Use `--read-only` for browsers, evaluation jobs, and consumers that must never
+create overlay state. Writes return `EROFS`.
+
+Use `--no-refresh` when the process must keep the initial snapshot until an
+operator explicitly refreshes or switches it. Otherwise Crab polls the remote
+and refreshes when it can safely adopt a newer snapshot.
+
+```bash
+crab mount \
+  --repo crab://team-data/releases \
+  --mountpoint /mnt/release-v2 \
+  --ref release-v2 \
+  --read-only \
+  --no-refresh
+```
+
+One repository cache has one active mount owner. To view another ref of the
+same source, use `crab mount switch` or unmount before mounting it elsewhere.
+Different repositories can be mounted at the same time.
+
+## Automation
+
+Use JSON output and live-only status in health checks:
+
+```bash
+crab mount status --mountpoint /mnt/models --live-only --json
+crab mount diff --mountpoint /mnt/models --json
+crab mount commit --mountpoint /mnt/models -m "Automated update" --push --json
+```
+
+Treat a nonzero exit as authoritative. Do not infer mount health from a
+persisted status record, mountpoint directory, or helper PID alone.
 
 DaemonService mode uses the same publish model through
 `crab daemon commit --name <name> -m <message>`.
@@ -108,4 +259,5 @@ evidence that must fail instead of using persisted fallback.
 
 For workflow guidance, see [Virtual Filesystem Mount](/docs/cli/virtual-filesystem/fuse-mount),
 [Mount Modes](/docs/cli/virtual-filesystem/mount-modes), and
-[Mount Management](/docs/cli/virtual-filesystem/mount-management).
+[Mount Management](/docs/cli/virtual-filesystem/mount-management). For the full
+operational model, see [How do you operate a Crab mount safely end to end?](/library/crab-mount-end-to-end).

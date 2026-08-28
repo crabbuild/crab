@@ -1,6 +1,6 @@
 ---
 title: "Local Mount"
-description: "Mount a local repository at another path or branch without creating a separate checkout or requiring remote reads."
+description: "Mount local Git metadata at another path or branch while hydrating Crab-backed content on demand."
 meta:
   contentType: How-to
   goal: "Use Local Mount in an existing Crab repository and verify the result."
@@ -10,8 +10,9 @@ meta:
 # Local Mount
 
 A local mount uses an existing `.git` directory on disk to present a
-repository (or a different branch of it) as a virtual filesystem. No clone, no
-network — reads are served directly from the local object database.
+repository (or a different branch of it) as a virtual filesystem. It does not
+clone Git metadata. Ordinary Git blobs are served from the local object
+database; Crab-backed pointer files can still require object-storage reads.
 
 ## Use Case
 
@@ -93,19 +94,22 @@ crab unmount --mountpoint /tmp/pr-review
 ### Mount for side-by-side comparison
 
 ```bash
-# Mount both branches
-crab mount --repo . --mountpoint /tmp/main --ref=main
-crab mount --repo . --mountpoint /tmp/feature --ref=feature-branch
+# Compare the current working tree with a read-only main snapshot
+crab mount --repo . --mountpoint /tmp/main --ref=main --read-only
 
 # Compare
-diff -r /tmp/main/src/ /tmp/feature/src/
+diff -r /tmp/main/src/ ./src/
 
 # Or use a visual diff tool
-meld /tmp/main/src/ /tmp/feature/src/
+meld /tmp/main/src/ ./src/
 
 # Clean up
-crab unmount --all
+crab unmount --mountpoint /tmp/main
 ```
+
+Crab permits one active mount per repository cache. To compare two committed
+refs without a working tree, mount one ref, export or inspect it, then use
+`crab mount switch` for the second ref.
 
 ### Mount a bare repository
 

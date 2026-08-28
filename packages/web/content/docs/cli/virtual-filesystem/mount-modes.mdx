@@ -17,10 +17,13 @@ Crab has two supported ways to run virtual filesystem mounts:
 - **DaemonService mode**: the `crab daemon` workflow. Use this when you want a
   long-running service to manage a named set of repositories.
 
-Both modes expose repositories through FUSE, fetch file content on demand, and
-use a local copy-on-write overlay for writes. The difference is ownership:
-coordinator-style mounts are mountpoint-oriented and ephemeral; DaemonService is
-repo-name-oriented and persistent.
+Both modes can expose repositories through NFS or FUSE, fetch file content on
+demand, and use a local copy-on-write overlay for writes. Coordinator-style
+`crab mount` uses automatic backend selection unless you choose one explicitly;
+DaemonService stores the configured backend with each named repository. The
+other difference is ownership: coordinator-style mounts are
+mountpoint-oriented and ephemeral; DaemonService is repo-name-oriented and
+persistent.
 
 ## Choose a mount mode
 
@@ -28,7 +31,7 @@ repo-name-oriented and persistent.
 | --- | --- |
 | Mount one repo for exploration, review, notebooks, or local development | Coordinator-style `crab mount` |
 | Mount several repos temporarily | Coordinator-style `crab mount` |
-| View another local branch without changing your working tree | Coordinator-style `crab mount --repo . --ref <branch>` |
+| View another local branch without changing your working tree | Coordinator-style `crab mount --repo . --mountpoint <path> --ref <branch>` |
 | Keep a stable fleet of repos mounted on a workstation or shared host | DaemonService mode |
 | Manage repos by name with `list`, `status`, `fetch`, `enable`, `disable`, and `remount` | DaemonService mode |
 | Integrate Crab mounts into an agent environment or service supervisor | DaemonService mode |
@@ -41,17 +44,17 @@ when the mount set itself becomes something you want to manage.
 ```mermaid
 flowchart TB
     subgraph C["Coordinator-style mounts"]
-        C1["crab mount --repo ... --mountpoint ..."] --> C2["Auto-start coordinator"]
-        C2 --> C3["Mount request over IPC"]
+        C1["crab mount --repo ... --mountpoint ..."] --> C2["Start local backend owner"]
+        C2 --> C3["FUSE coordinator or NFS helper"]
         C3 --> C4["Per-mount pipeline"]
-        C4 --> C5["FUSE mount at requested path"]
+        C4 --> C5["NFS or FUSE mount at requested path"]
     end
 
     subgraph D["DaemonService mode"]
         D1["crab daemon add-repo --name ..."] --> D2["Persistent repo registry"]
         D2 --> D3["crab daemon service loop"]
         D3 --> D4["Reconcile registered repos"]
-        D4 --> D5["FUSE mounts at mount-root/name"]
+        D4 --> D5["Configured mounts at mount-root/name"]
     end
 
     C4 --> S["Snapshot + COW overlay + hydration cache"]
@@ -67,10 +70,10 @@ you do not pass `--foreground`.
 crab mount --repo crab://bucket/ml-models --mountpoint /mnt/models
 ```
 
-The CLI validates the request, creates the mountpoint if needed, then sends the
-mount request to a local coordinator process. If the coordinator is not running,
-Crab starts it automatically. The coordinator owns active FUSE sessions, shared
-chunk cache access, hydration workers, and runtime mount state.
+The CLI validates the request and creates the mountpoint if needed. FUSE
+background mounts send the request to a shared coordinator, which Crab starts
+when needed. NFS background mounts start one local helper per mount. Both use
+the same repository cache, hydration, snapshot, and overlay contracts.
 
 ### State and Paths
 
@@ -89,13 +92,14 @@ local path can reuse local state.
 ### Lifecycle
 
 1. User runs `crab mount`.
-2. The CLI sends an IPC request to the coordinator.
-3. The coordinator runs the mount pipeline: clone or open git metadata, build a
-   snapshot, open the overlay, create the resolver, start hydration workers, and
-   mount FUSE.
+2. The CLI resolves and validates the backend and mountpoint.
+3. A FUSE coordinator, NFS helper, or foreground CLI runs the mount pipeline:
+   clone or open git metadata, build a snapshot, open the overlay, create the
+   resolver, start hydration workers, and mount the selected backend.
 4. The CLI returns after the mount is ready.
 5. `crab unmount --mountpoint <path>` removes the mount.
-6. When the last mount is removed, the coordinator shuts down.
+6. An NFS helper exits with its mount; the FUSE coordinator exits after its last
+   mount is removed.
 
 Use `--foreground` when you want the CLI process itself to own the mount:
 

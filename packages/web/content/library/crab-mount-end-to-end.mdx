@@ -1,0 +1,520 @@
+---
+title: "How do you operate a Crab mount safely end to end?"
+description: "Mount a large Xet-backed repository, understand reads and overlay writes, publish a verified commit, and recover without losing local changes."
+date: "2026-08-27"
+author: "Crab Team"
+category: "tutorial"
+tags: ["mount", "nfs", "fuse", "xet", "overlay", "concurrency", "operations"]
+excerpt: "Treat a Crab mount as a stable Git snapshot plus an explicit local write overlay, then make read, edit, review, commit, push, and recovery decisions at the right boundary."
+level: "deep-dive"
+path: "advanced-operations"
+order: 6
+concepts: ["virtual filesystem", "copy-on-write overlay", "publish barrier", "range hydration", "concurrent writers", "commit recovery"]
+prerequisites: ["How do you work with a repository larger than your disk?"]
+outcome: "Run a read-only or writable Crab mount, publish overlay changes safely, and diagnose the common failure modes without losing work."
+diagramType: "Mount read, write, and publish lifecycle"
+knowledgeCheck:
+  question: "What should an operator do immediately before publishing a busy writable mount?"
+  options:
+    - "Delete the overlay so the commit starts clean"
+    - "Pause writers, close or flush files, inspect the overlay, then commit"
+    - "Start a second mount of the same repository and push from it"
+  answer: 1
+  explanation: "The exclusive publish barrier drains in-flight mutations, but pausing writers prevents new application writes from racing the snapshot and makes the reviewed diff match the intended commit."
+meta:
+  contentType: "Tutorial"
+  goal: "Teach the complete operational workflow and safety model for Crab mounts."
+  audience: "Developers and operators using large Crab repositories through native filesystem paths."
+---
+
+A Crab mount makes a Git repository look like an ordinary directory without
+materializing every large file first. An editor can open a source file, a model
+server can seek into a checkpoint, and a pipeline can create output under a
+normal filesystem path. Crab resolves the Git snapshot and retrieves the
+required Xet-backed ranges only when an application reads them.
+
+That convenience does not turn the object store into a general-purpose shared
+filesystem. The mount is a local view with explicit Git semantics:
+
+- A **base snapshot** represents one Git commit and ref.
+- A **read cache** holds verified remote ranges used by this machine.
+- A **copy-on-write overlay** holds local filesystem mutations.
+- A **publish transaction** turns the reviewed overlay into a Git commit and,
+  optionally, pushes it to the Crab remote.
+
+Understanding those four states is the difference between using a mount as a
+predictable production interface and treating it like a magical network disk.
+
+<TakeawayBox title="A mount is a working tree with an explicit publish boundary">
+  Reads can be lazy. Writes stay local. Nothing reaches the remote branch until
+  you run a mount commit, and the commit is still governed by Git ref state.
+</TakeawayBox>
+
+## Start by choosing the operating mode
+
+Make three decisions before running a command.
+
+### Read-only or writable
+
+Use a read-only mount when the workload consumes repository state but should
+not change it. Examples include evaluation jobs, asset browsers, code review,
+and serving a released model. The kernel returns `EROFS` for write attempts, so
+an accidental application save cannot create hidden local state.
+
+Use a writable mount when an application must edit or generate repository
+paths through filesystem calls. Writes enter the local overlay. They do not
+modify the mounted base snapshot, source working tree, or remote branch.
+
+### Remote or local source
+
+A remote source such as `crab://team-data/vision-search` creates or reuses a
+blobless cached repository. Git trees and pointer blobs define the namespace;
+large payloads remain in object storage until read.
+
+A local source such as `--repo .` reuses the existing Git object database. It
+is useful for viewing another branch without checking it out. Crab-backed
+pointer files can still require object-storage access even though ordinary Git
+blobs are local.
+
+### Interactive mount or named service
+
+Use `crab mount` for an interactive, mountpoint-oriented lifecycle. Use
+DaemonService mode when a supervisor should maintain a registry of named
+repositories across a longer-running host lifecycle. Both use snapshots,
+on-demand hydration, and overlays, but their management commands and ownership
+models differ.
+
+This guide follows the interactive `crab mount` workflow. The same publish
+principles apply to `crab daemon commit`.
+
+## Preflight the machine and mountpoint
+
+Crab defaults to `--backend=auto`, which prefers NFS when the binary and host
+support it. The NFS backend starts a loopback NFSv3 server and uses the native
+operating-system NFS client. It is local to the machine; it does not export the
+repository to other hosts.
+
+FUSE remains available when installed and explicitly selected. Linux requires
+fuse3. macOS requires approved macFUSE. Windows uses the NFS client and a drive
+target rather than FUSE.
+
+Run the preflight before debugging an application:
+
+```bash
+crab mount doctor --backend=auto --mountpoint /tmp/vision-search
+```
+
+The check covers backend availability, the native client, local control
+transport, mountpoint suitability, and privileges. Fix a failed preflight at
+the host boundary rather than repeatedly starting the mount.
+
+Choose a dedicated mountpoint outside every Git working tree. If a mount sits
+inside a checkout, Git can discover the virtual namespace as untracked files,
+tools can recurse into themselves, and cleanup commands can target the wrong
+tree. Crab rejects nested mountpoints by default. `--allow-nested` exists for
+controlled integrations that have already addressed those risks.
+
+## Prove a read-only mount first
+
+Start with the smallest safe topology:
+
+```bash
+crab mount \
+  --repo crab://team-data/vision-search \
+  --mountpoint /tmp/vision-search \
+  --ref main \
+  --read-only
+```
+
+Confirm the active helper, not merely a persisted registry entry:
+
+```bash
+crab mount status \
+  --mountpoint /tmp/vision-search \
+  --live-only \
+  --json
+```
+
+Without `--live-only`, status can fall back to persisted metadata when the
+backend control endpoint is unavailable. That fallback is useful to a human
+cleaning up a stale mount. It is not proof that an application can issue a
+filesystem operation now.
+
+Read both metadata and content during qualification:
+
+```bash
+find /tmp/vision-search/models -maxdepth 1 -type f | head
+head -c 65536 \
+  /tmp/vision-search/models/encoder.safetensors \
+  >/dev/null
+```
+
+A directory listing resolves snapshot metadata. It does not download every
+file in that directory. The first content read resolves the Git blob. If the
+blob is a Crab pointer, the hydration path finds the file recipe, fetches the
+needed xorb ranges, verifies them, and returns reconstructed bytes. A later read
+can reuse verified cache data.
+
+Test the access pattern the real application uses. A sequential copy, random
+seek workload, memory map, and thousands of small opens exercise different
+parts of the stack. A single warm `cat` is not a capacity result.
+
+## Know what consumes local disk
+
+Lazy reads reduce initial materialization, but they do not eliminate local
+capacity planning. A host can hold four different forms of data:
+
+| Local state | Why it grows |
+| --- | --- |
+| Cached Git metadata | Commits, trees, pointer blobs, and fetched Git objects define the snapshot. |
+| Verified read cache | Applications populate remote file ranges as they read. |
+| Overlay backing | New files and promoted base files hold writable content. |
+| Application scratch | Temporary outputs, checkpoints, logs, and atomic-save copies live outside Crab policy. |
+
+The important surprise is promotion. The first write to an existing
+Crab-backed file creates a complete writable backing file in the overlay. A
+one-byte edit to a 40 GB checkpoint therefore needs space for the full 40 GB
+file, plus application and temporary headroom. Reads can remain range-based;
+writes need a coherent local file that normal filesystem calls can modify.
+
+Do not place an overlay on a nearly full system disk and assume Xet
+deduplication will make the local write cheap. Deduplication reduces canonical
+upload and storage after Crab classifies the resulting bytes. It does not
+replace the writable local file.
+
+## Move to a writable mount deliberately
+
+Unmount the qualification view, then start the intended branch without
+`--read-only`:
+
+```bash
+crab unmount --mountpoint /tmp/vision-search
+
+crab mount \
+  --repo crab://team-data/vision-search \
+  --mountpoint /mnt/vision-search \
+  --ref main
+```
+
+Before the application writes, confirm the Git author identity used to create
+the future commit:
+
+```bash
+git config --global user.name
+git config --global user.email
+```
+
+Set missing values according to team policy. `crab mount commit` refuses to
+invent an author identity.
+
+The base snapshot remains immutable while the mount is active. Reads consult
+the overlay first and fall back to the snapshot. Creates, writes, truncates,
+mode changes, symlinks, deletions, and directory renames are represented as
+overlay mutations.
+
+This means an application can work normally while Crab retains a reviewable
+boundary between “visible on this mount” and “part of Git history.”
+
+## Use concurrent writers within the actual contract
+
+Processes on one mount may write independent paths concurrently. Crab keeps
+metadata operations consistent while allowing independent backing files to
+make progress in parallel.
+
+Ordering becomes stricter when paths overlap:
+
+- Mutations to the same path are serialized by the VFS engine.
+- Directory operations serialize with intersecting descendants.
+- Overlapping byte-range writes to the same file still require application
+  coordination. Crab does not invent record locks or merge semantics for the
+  application.
+- Separate mounts are separate working trees and overlays. They are not a
+  distributed writer-coordination mechanism.
+
+This fits build and data pipelines that assign one output path per worker:
+
+```text
+/mnt/vision-search/generated/shard-000.bin
+/mnt/vision-search/generated/shard-001.bin
+/mnt/vision-search/generated/shard-002.bin
+/mnt/vision-search/generated/shard-003.bin
+```
+
+It does not make two uncoordinated processes safely patch the same checkpoint
+header. Use application-level file locks, atomic replacement, partitioned
+output paths, or a single writer for that case.
+
+Native NFS advisory locking coordinates processes using the same local mounted
+client. It should not be treated as a lock service shared by separate machines.
+
+## Stop writers before reviewing
+
+When the job finishes, stop every process that can write beneath the
+mountpoint. Close files or make the application flush and `fsync` them. Then
+inspect the overlay:
+
+```bash
+crab mount status --mountpoint /mnt/vision-search --verbose
+crab mount diff --mountpoint /mnt/vision-search
+```
+
+The diff reports creates, modifications, deletes, renames, modes, and an
+estimated upload size. It describes the mounted overlay, not unrelated scratch
+files elsewhere on the host.
+
+For an external scanner, reviewer, or backup step, export a normal directory:
+
+```bash
+crab mount export \
+  --mountpoint /mnt/vision-search \
+  --to /tmp/vision-search-review
+```
+
+Export takes a stable overlay view and includes deletion metadata. It does not
+publish a commit or clear the live overlay.
+
+Why stop writers if Crab has a barrier? Commit, export, and reset acquire an
+exclusive publish lease and wait for mutations already in flight. New
+filesystem writes issued while that exclusive operation runs can fail. Pausing
+writers makes the reviewed diff stable, prevents application-visible errors,
+and ensures the intended batch matches the committed batch.
+
+## Commit locally or commit and push
+
+Create a local commit when review and remote publication are separate steps:
+
+```bash
+crab mount commit \
+  --mountpoint /mnt/vision-search \
+  -m "Regenerate vision index"
+```
+
+The operation:
+
+1. Flushes and stabilizes the mounted view.
+2. Takes the exclusive overlay publish lease.
+3. Checks that the mounted base ref has not moved.
+4. Builds the Git tree in an isolated publish worktree.
+5. Streams stable Crab-tracked overlay files into Crab staging and writes
+   pointer blobs into the Git index.
+6. Creates the Git commit and refreshes the mounted snapshot.
+7. Clears the overlay after the local commit succeeds.
+
+The mount now represents the new local commit, but the remote ref has not moved.
+Publish that recorded commit with:
+
+```bash
+crab mount commit \
+  --mountpoint /mnt/vision-search \
+  -m "Push vision index" \
+  --push
+```
+
+If review and publication are one operation, include `--push` on the first
+commit:
+
+```bash
+crab mount commit \
+  --mountpoint /mnt/vision-search \
+  -m "Regenerate vision index" \
+  --push
+```
+
+Crab flushes staged xorbs and publishes the metadata required to reconstruct
+every managed file before moving the remote ref. Git history contains compact
+pointer blobs; object storage contains the Xet data and reconstruction
+metadata. Both describe one commit.
+
+## Recover from a failed push without deleting work
+
+A network, credential, or ref publication failure after commit is not a reason
+to reset the overlay. Crab records the transaction, including the local commit
+identity, and preserves recovery state.
+
+First, stop further edits and inspect:
+
+```bash
+crab mount status --mountpoint /mnt/vision-search --verbose
+crab mount diff --mountpoint /mnt/vision-search
+```
+
+Fix the external cause, then retry the same publish path:
+
+```bash
+crab mount commit \
+  --mountpoint /mnt/vision-search \
+  -m "Regenerate vision index" \
+  --push
+```
+
+When the overlay still matches the recorded transaction, Crab can finish the
+existing publication instead of creating a different commit. If files changed
+after the failure, Crab rejects that recovery path. Review the new overlay as a
+new change set rather than forcing it into the earlier transaction.
+
+Avoid these reactions:
+
+- Do not remount with `--clean-overlay`; it discards local modifications before
+  mounting.
+- Do not run `crab mount reset --overlay --yes`; that command is explicitly
+  destructive.
+- Do not edit directly inside the cached bare or blobless repository.
+- Do not push a guessed object ID outside the recorded workflow.
+
+If another writer moved the remote ref, Crab rejects the stale base. The
+overlay remains local. Inspect the remote change, refresh or remount as directed
+by the error, reconcile the intended output, and publish a newly reviewed
+transaction.
+
+## Refresh and switch only at clear boundaries
+
+Automatic refresh lets a clean mount adopt remote progress. Use
+`--no-refresh` when a job requires the original snapshot for its entire run:
+
+```bash
+crab mount \
+  --repo crab://team-data/vision-search \
+  --mountpoint /mnt/vision-search \
+  --ref release-v2 \
+  --read-only \
+  --no-refresh
+```
+
+An operator can explicitly refresh a suitable mount:
+
+```bash
+crab mount refresh --mountpoint /mnt/vision-search
+```
+
+Switch the existing mount to another branch instead of opening a second mount
+of the same repository cache:
+
+```bash
+crab mount switch \
+  --mountpoint /mnt/vision-search \
+  --ref experiment-v3
+```
+
+One active owner per repository cache avoids two local snapshots and overlays
+competing for the same cached checkout. Different repository sources can be
+mounted concurrently and share higher-level host resources where supported.
+
+Do not switch or refresh casually while a workload expects a fixed data set.
+Treat the mounted commit identity as an input to the job, just as you would
+treat a checked-out Git commit.
+
+## Reset only when loss is intentional
+
+To discard every overlay change, Crab requires both an operation selector and
+confirmation:
+
+```bash
+crab mount reset \
+  --mountpoint /mnt/vision-search \
+  --overlay \
+  --yes
+```
+
+Stop writers first. Run `diff`, and export if any part of the overlay might be
+needed later. Reset takes the exclusive barrier, removes the local mutations,
+and restores the mounted base view. It does not create a compensating commit.
+
+`--clean-overlay` performs a similar discard before a new mount starts. Use it
+only when the operator has already established that retained overlay state is
+unwanted.
+
+## Monitor the live service, not filesystem appearance
+
+A mountpoint directory can exist after a helper exits. A registry record can
+describe the last known state. Neither proves the backend currently handles
+requests.
+
+Use live JSON status for health checks:
+
+```bash
+crab mount status \
+  --mountpoint /mnt/vision-search \
+  --live-only \
+  --json
+```
+
+Use regular status for human diagnostics when the live endpoint might be gone.
+Use `crab mount list --json` to inventory active registrations, not as a
+substitute for a per-mount live probe.
+
+Unmount through Crab so the helper, native client mount, registry, and control
+state can shut down in order:
+
+```bash
+crab unmount --mountpoint /mnt/vision-search
+```
+
+If unmount reports a busy filesystem, close shells and processes whose current
+directory or open file is under the mountpoint, then retry. Do not delete the
+mountpoint or cache while it is active.
+
+## Qualify the real workload before calling it production-ready
+
+Correctness and performance depend on more than one large sequential copy. A
+useful qualification matrix includes:
+
+| Dimension | Evidence to collect |
+| --- | --- |
+| Cold reads | Range and full-file hashes after an empty cache. |
+| Warm reads | Cache hit behavior and repeated-read latency. |
+| Namespace scale | Large directory enumeration and metadata-heavy tools. |
+| Independent writers | Overlap intervals, aggregate throughput, and final hashes. |
+| Publish barrier | Writers drain before diff, export, commit, and reset snapshots. |
+| Git representation | Managed files are pointers in Git, not accidental full blobs. |
+| Fresh consumer | A new clone reconstructs byte-identical files. |
+| Failure recovery | A forced push failure preserves state and succeeds on retry. |
+| Capacity | Peak cache, overlay, temporary, and application disk usage. |
+| Operations | Restart, unmount, stale-state cleanup, and monitoring behavior. |
+
+Also test host-specific NFS or FUSE policy, credentials, real object-store
+latency, network interruption, crash recovery, and a soak long enough to expose
+resource leaks. A benchmark on one laptop proves that topology and workload;
+it does not establish universal shared-filesystem semantics.
+
+Crab mount is strongest when the workload follows Git-shaped ownership:
+immutable base input, independent output paths, an explicit review boundary,
+and a deliberate commit. It is not intended to replace a multi-host database,
+distributed lock manager, or arbitrarily concurrent in-place editor for one
+large file.
+
+## Use this operator checklist
+
+Before mount:
+
+- Choose read-only unless writes are required.
+- Select the exact ref and decide whether refresh is allowed.
+- Use a dedicated mountpoint outside Git working trees.
+- Run `crab mount doctor` on the intended backend and mountpoint.
+- Budget cache, overlay, promotion, and application scratch space.
+- Confirm Git author identity before a writable run.
+
+Before publish:
+
+- Stop application writers and close or flush their files.
+- Check live status.
+- Review the verbose status and overlay diff.
+- Export when external review or recovery evidence is required.
+- Decide whether to commit locally or commit with `--push`.
+
+After publish:
+
+- Confirm the command succeeded and record its commit identity.
+- Verify live status and that the intended overlay is clean.
+- On failure, preserve state and retry the recorded transaction after fixing
+  the cause.
+- Unmount through Crab after readers and writers exit.
+
+<TakeawayBox title="Keep the boundaries explicit">
+  The snapshot answers what commit you are reading. The cache answers what this
+  machine has fetched. The overlay answers what changed locally. Mount commit
+  is the only step that turns those reviewed local changes into Git history.
+</TakeawayBox>
+
+For exact syntax, backend options, and machine-readable commands, use the
+[`crab mount` reference](/docs/cli/reference/crab-mount). For choosing between
+mounting and selective hydration, continue with [How do you work with a repository larger than your disk?](/library/lazy-checkout-fuse).
