@@ -361,6 +361,7 @@ class LargeRepositoryQualification:
             "upload_pack_duration_ms": 0,
             "visibility_plan_ms": 0,
             "pack_generation_ms": 0,
+            "source_download_ms": 0,
             "locator_scan": 0,
             "locator_full_scan": 0,
             "locator_exact_fallback": 0,
@@ -419,6 +420,9 @@ class LargeRepositoryQualification:
             if fields.get("telemetry_event") == "pack_generation":
                 telemetry["pack_generation_ms"] += int(
                     fields.get("pack_generation_ms", 0)
+                )
+                telemetry["source_download_ms"] += int(
+                    fields.get("source_download_ms", 0)
                 )
         return telemetry
 

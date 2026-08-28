@@ -2,11 +2,15 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crab_metadata::git_object_locator::GitPackInventoryEntry;
 use flate2::{Compression, write::ZlibEncoder};
+use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use gix_hash::ObjectId;
 use gix_pack::data::entry::Header;
 use sha1::{Digest, Sha1};
@@ -32,6 +36,7 @@ const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(60);
 const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(250);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
+const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
 
 /// Immutable key for one authorization- and generation-bound response pack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -488,23 +493,10 @@ impl RemoteGitRepository {
         let workspace = tempfile::tempdir().map_err(io_error)?;
         let download_dir = workspace.path().join("source-packs");
         std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-        let mut sources = Vec::with_capacity(inventory.len());
-        for pack in inventory {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let path = download_dir.join(format!("pack-{}.pack", pack.pack_id));
-            std::fs::File::create(&path).map_err(io_error)?;
-            operation
-                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
-                .await?;
-            sources.push(crab_git::repack::RepackSource {
-                canonical_id: pack.pack_id.to_string(),
-                path,
-                size: pack.pack_size,
-                object_count: pack.object_count,
-            });
-        }
+        let source_download_started = Instant::now();
+        let sources =
+            download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
+        let source_download_ms = source_download_started.elapsed().as_millis() as u64;
 
         let concat_sources = sources.clone();
         let concatenated = tokio::task::spawn_blocking(move || {
@@ -600,6 +592,7 @@ impl RemoteGitRepository {
             strategy,
             source_pack_count,
             object_count = pack.object_count,
+            source_download_ms,
             response_bytes = size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
             "remote Git response pack consolidated from complete pack inventory"
@@ -639,23 +632,10 @@ impl RemoteGitRepository {
         let workspace = tempfile::tempdir().map_err(io_error)?;
         let download_dir = workspace.path().join("source-packs");
         std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-        let mut sources = Vec::with_capacity(inventory.len());
-        for pack in inventory {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let path = download_dir.join(format!("pack-{}.pack", pack.pack_id));
-            std::fs::File::create(&path).map_err(io_error)?;
-            operation
-                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
-                .await?;
-            sources.push(crab_git::repack::RepackSource {
-                canonical_id: pack.pack_id.to_string(),
-                path,
-                size: pack.pack_size,
-                object_count: pack.object_count,
-            });
-        }
+        let source_download_started = Instant::now();
+        let sources =
+            download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
+        let source_download_ms = source_download_started.elapsed().as_millis() as u64;
         let selected_oids = object_ids.to_vec();
         let repacked = tokio::task::spawn_blocking(move || {
             crab_git::repack::repack_selected_objects(&sources, &selected_oids)
@@ -707,6 +687,7 @@ impl RemoteGitRepository {
             source_pack_count,
             object_count = pack.object_count,
             source_bytes = inventory_bytes,
+            source_download_ms,
             response_bytes = size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
             "remote Git response pack repacked from selected objects"
@@ -804,6 +785,65 @@ impl RemoteGitRepository {
             .await?;
         Ok(generated.as_ref().clone())
     }
+}
+
+async fn download_repack_sources(
+    operation: &crate::OperationContext,
+    inventory: Vec<GitPackInventoryEntry>,
+    download_dir: &Path,
+    cancellation: &CancellationToken,
+) -> Result<Vec<crab_git::repack::RepackSource>> {
+    download_repack_sources_with(
+        inventory,
+        download_dir.to_owned(),
+        cancellation,
+        SOURCE_PACK_DOWNLOAD_CONCURRENCY,
+        |pack, path| async move {
+            operation
+                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
+                .await
+        },
+    )
+    .await
+}
+
+async fn download_repack_sources_with<F, Fut>(
+    inventory: Vec<GitPackInventoryEntry>,
+    download_dir: PathBuf,
+    cancellation: &CancellationToken,
+    max_concurrency: usize,
+    download: F,
+) -> Result<Vec<crab_git::repack::RepackSource>>
+where
+    F: Fn(GitPackInventoryEntry, PathBuf) -> Fut + Sync,
+    Fut: Future<Output = Result<()>> + Send,
+{
+    let concurrency = inventory.len().min(max_concurrency.max(1)).max(1);
+    let mut sources = stream::iter(inventory.into_iter().enumerate().map(|(index, pack)| {
+        let path = download_dir.join(format!("pack-{index}-{}.pack", pack.pack_id));
+        let download = &download;
+        async move {
+            if cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            std::fs::File::create(&path).map_err(io_error)?;
+            download(pack, path.clone()).await?;
+            Ok::<_, Error>((
+                index,
+                crab_git::repack::RepackSource {
+                    canonical_id: pack.pack_id.to_string(),
+                    path,
+                    size: pack.pack_size,
+                    object_count: pack.object_count,
+                },
+            ))
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .try_collect::<Vec<_>>()
+    .await?;
+    sources.sort_unstable_by_key(|(index, _)| *index);
+    Ok(sources.into_iter().map(|(_, source)| source).collect())
 }
 
 fn generated_pack_cache_key(
@@ -1887,8 +1927,11 @@ fn io_error(error: io::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use bytes::Bytes;
+    use crab_xet::hash::MerkleHash;
 
     #[test]
     fn generated_pack_key_binds_repository_identity_and_manifest_digest() {
@@ -1989,6 +2032,58 @@ mod tests {
         assert!(!RemoteGitRepository::selected_pack_repack_candidate(
             200_000, 100_000, 100_001,
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_pack_downloads_are_bounded_and_restore_inventory_order() {
+        let workspace = tempfile::tempdir().expect("source download workspace");
+        let inventory = (0..8)
+            .map(|index| GitPackInventoryEntry {
+                pack_id: MerkleHash::from_hex(&format!("{:064x}", index + 1))
+                    .expect("pack identity"),
+                object_count: index + 1,
+                pack_size: 1,
+            })
+            .collect::<Vec<_>>();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let cancellation = CancellationToken::new();
+        let sources = download_repack_sources_with(
+            inventory,
+            workspace.path().to_owned(),
+            &cancellation,
+            3,
+            {
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                move |pack, path| {
+                    let active = Arc::clone(&active);
+                    let maximum = Arc::clone(&maximum);
+                    async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        tokio::fs::write(&path, pack.pack_id.as_bytes())
+                            .await
+                            .map_err(io_error)?;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await
+        .expect("bounded source downloads");
+
+        assert_eq!(maximum.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.object_count)
+                .collect::<Vec<_>>(),
+            (1..=8).collect::<Vec<_>>()
+        );
+        assert!(sources.iter().all(|source| source.path.is_file()));
     }
 
     fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {

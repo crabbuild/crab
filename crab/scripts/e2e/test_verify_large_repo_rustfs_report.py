@@ -53,6 +53,7 @@ def telemetry() -> dict[str, int]:
         "upload_pack_duration_ms": 1,
         "visibility_plan_ms": 1,
         "pack_generation_ms": 1,
+        "source_download_ms": 1,
         "locator_scan": 0,
         "locator_full_scan": 0,
         "locator_exact_fallback": 0,

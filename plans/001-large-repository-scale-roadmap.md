@@ -595,6 +595,15 @@ local index generation or pack-objects scheduling without weakening the
 post-commit fsck boundary. The 10,000-push growth, interruption/GC, provider,
 concurrency, owner-failover, retention, and rollout SLO gates remain open.
 
+The current follow-up also bounds response-pack source acquisition to four
+concurrent manifest-pack streams, reuses that downloader for both complete and
+dense selected producers, restores manifest order before assembly, and records
+`source_download_ms` separately from total pack-generation time. The existing
+operation byte/request budgets and process-wide origin semaphore remain the
+authoritative limits. The focused downloader regression and remote-Git suite
+pass, but a new large-repository run is still required to quantify the
+wall-time change on a provider with multiple large source packs.
+
 ### Current-head locator startup fanout qualification
 
 Commit `b8c51985` adds two bounded startup paths for the Git object locator.

@@ -135,6 +135,8 @@ def verify_telemetry(value: Any, field: str) -> None:
         "locator_ordinal_metadata_scan",
     ):
         require_nonnegative_int(value.get(name), f"{field}.{name}")
+    if "source_download_ms" in value:
+        require_nonnegative_int(value["source_download_ms"], f"{field}.source_download_ms")
 
 
 def verify_stage(name: str, stage: Any) -> None:

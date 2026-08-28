@@ -144,7 +144,8 @@ fields. It records repository-wide generation-receipt and maintenance health
 without treating unrelated file-index repair as a Git acceleration failure.
 
 Remote-operation telemetry is emitted once per bounded operation. It records
-only numeric counts and durations, plus bounded counts for locator lookup modes;
+only numeric counts and durations, including the source-pack download portion
+of response-pack generation, plus bounded counts for locator lookup modes;
 per-object debug logging is disabled because its volume would distort both
 timing and storage evidence on large histories. The blobless catalog-filter
 stage must record ordinal-metadata lookup activity, proving that the optimized
