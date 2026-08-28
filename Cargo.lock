@@ -2377,6 +2377,7 @@ dependencies = [
  "crab-types",
  "crab-xet",
  "dashmap",
+ "fs4",
  "fuser",
  "gix-hash",
  "gix-object",

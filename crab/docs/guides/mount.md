@@ -310,6 +310,11 @@ crab mount reset --mountpoint /mnt/models --overlay --yes
 checks that the mounted base ref has not moved, creates a Git commit, refreshes
 the mounted snapshot, and clears the overlay after a successful local commit.
 
+Processes using one mount may write independent paths concurrently. Mutations
+to the same path or intersecting directory subtree are serialized. Commit,
+export, and reset drain in-flight mutations before taking a stable overlay
+snapshot.
+
 For large crab-tracked files, commit streams overlay file content directly into
 Crab staging when `.gitattributes` is stable, then writes pointer files into the
 Git index. If `.gitattributes` changed in the overlay, commit first materializes
@@ -357,6 +362,8 @@ crab unmount --all
   client-side/no-remote-lock-manager options because Crab serves one local
   loopback export per mount and does not run an NLM service. Advisory locks
   coordinate processes on the same mounted client, not separate clients.
+  Separate mounts have independent overlays, and overlapping byte-range writes
+  to one file require application coordination.
 
 - **FUSE is optional.** `--backend=fuse` requires macFUSE on macOS or fuse3 on
   Linux. Windows FUSE is not supported.
@@ -422,9 +429,12 @@ make mount-large-macos-nfs-rustfs-smoke
 ```
 
 This starts an isolated RustFS backend, verifies chunk dedup for identical
-large files, range and whole-file reads, writable large-file commit/push and a
-fresh byte-identical clone, and enumerates a 10,000-entry directory through the
-native NFS client. Evidence is retained under the configured
+large files, range and whole-file reads, overlapping independent writer
+processes, writable large-file commit/push and a fresh byte-identical clone,
+and enumerates a 10,000-entry directory through the native NFS client. The
+concurrent writer count and bytes per writer are configurable with
+`CRAB_MOUNT_MACOS_CONCURRENT_WRITERS` and
+`CRAB_MOUNT_MACOS_CONCURRENT_MIB`. Evidence is retained under the configured
 `CRAB_MOUNT_MACOS_ROOT` run directory.
 
 **Windows:**

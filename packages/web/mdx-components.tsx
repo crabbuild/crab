@@ -43,6 +43,10 @@ import {
   MaterializationPackingDesk,
   MountedReadCutaway,
 } from "@/components/blog/lazy-checkout-visuals"
+import {
+  MountLifecycleConsole,
+  MountWriterOwnershipLab,
+} from "@/components/blog/mount-visuals"
 import { GcObjectEvidenceLab, GcRaceReplay } from "@/components/blog/gc-visuals"
 import { GcRunPermit } from "@/components/blog/gc-run-permit"
 import { CostReceiptMixer } from "@/components/blog/cost-ledger-visual"
@@ -187,6 +191,8 @@ export function getMDXComponents(components?: MDXComponents) {
     DiskBudgetWorkbench,
     MaterializationPackingDesk,
     MountedReadCutaway,
+    MountLifecycleConsole,
+    MountWriterOwnershipLab,
     GcObjectEvidenceLab,
     GcRaceReplay,
     GcRunPermit,

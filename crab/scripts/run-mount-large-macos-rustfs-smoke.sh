@@ -19,6 +19,8 @@ TEST_HOME="$RUN_ROOT/home"
 BACKEND="${CRAB_MOUNT_MACOS_BACKEND:-fuse}"
 SEED_MIB="${CRAB_MOUNT_MACOS_SEED_MIB:-32}"
 NEW_MIB="${CRAB_MOUNT_MACOS_NEW_MIB:-40}"
+CONCURRENT_WRITERS="${CRAB_MOUNT_MACOS_CONCURRENT_WRITERS:-4}"
+CONCURRENT_MIB="${CRAB_MOUNT_MACOS_CONCURRENT_MIB:-16}"
 DIRECTORY_ENTRIES="${CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES:-0}"
 RUSTFS_IMAGE="${CRAB_MOUNT_MACOS_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc}"
 BUCKET="${CRAB_MOUNT_MACOS_BUCKET:-crab}"
@@ -143,9 +145,13 @@ ensure_macfuse_ready() {
 [[ "$BACKEND" == "fuse" || "$BACKEND" == "nfs" ]] || die "CRAB_MOUNT_MACOS_BACKEND must be fuse or nfs"
 [[ "$SEED_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_SEED_MIB must be an integer"
 [[ "$NEW_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_NEW_MIB must be an integer"
+[[ "$CONCURRENT_WRITERS" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be an integer"
+[[ "$CONCURRENT_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_MIB must be an integer"
 [[ "$DIRECTORY_ENTRIES" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES must be an integer"
 ((SEED_MIB >= 32)) || die "CRAB_MOUNT_MACOS_SEED_MIB must be at least 32"
 ((NEW_MIB >= 8)) || die "CRAB_MOUNT_MACOS_NEW_MIB must be at least 8"
+((CONCURRENT_WRITERS >= 2)) || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be at least 2"
+((CONCURRENT_MIB >= 1)) || die "CRAB_MOUNT_MACOS_CONCURRENT_MIB must be at least 1"
 
 if [[ -z "$EXTERNAL_ENDPOINT" ]]; then
     command -v "$DOCKER" >/dev/null 2>&1 || die "docker is required"
@@ -301,8 +307,15 @@ fi
 
 with_test_env "$BIN_DIR/crab" add --jobs 0 models/model.bin archive/base-move.bin models/delete-me.bin >"$RUN_ROOT/logs/crab-add-seed.log" 2>&1
 git show :models/model.bin > "$RUN_ROOT/seed-pointer.txt"
+git show :archive/base-move.bin > "$RUN_ROOT/seed-base-move-pointer.txt"
+git show :models/delete-me.bin > "$RUN_ROOT/seed-delete-me-pointer.txt"
+cmp "$RUN_ROOT/seed-pointer.txt" "$RUN_ROOT/seed-base-move-pointer.txt"
+cmp "$RUN_ROOT/seed-pointer.txt" "$RUN_ROOT/seed-delete-me-pointer.txt"
 git -c user.email=mount-e2e@example.invalid -c user.name="Crab Mount E2E" \
     commit -m "seed large model" >"$RUN_ROOT/logs/git-commit-seed.log" 2>&1
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab AWS_DEFAULT_REGION="$REGION" AWS_EC2_METADATA_DISABLED=true \
+    "$AWS" --endpoint-url "$ENDPOINT_URL" s3api list-objects-v2 \
+    --bucket "$BUCKET" --prefix ".crab/xorbs/" --output json > "$RUN_ROOT/seed-xorbs-before.json"
 phase_start_ms="$(now_ms)"
 with_test_env "$BIN_DIR/crab" push --json --upload-concurrency 0 origin HEAD:refs/heads/main \
     >"$RUN_ROOT/logs/crab-push-seed.json" 2>"$RUN_ROOT/logs/crab-push-seed.err"
@@ -310,19 +323,28 @@ record_duration_since seed_push_ms "$phase_start_ms"
 AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab AWS_DEFAULT_REGION="$REGION" AWS_EC2_METADATA_DISABLED=true \
     "$AWS" --endpoint-url "$ENDPOINT_URL" s3api list-objects-v2 \
     --bucket "$BUCKET" --prefix ".crab/xorbs/" --output json > "$RUN_ROOT/seed-xorbs.json"
-python3 - "$RUN_ROOT/seed-xorbs.json" "$SEED_MIB" "$RUN_ROOT/seed-dedup.json" <<'PY'
+python3 - "$RUN_ROOT/seed-xorbs-before.json" "$RUN_ROOT/seed-xorbs.json" "$SEED_MIB" "$RUN_ROOT/seed-dedup.json" <<'PY'
 import json
 import pathlib
 import sys
 
-objects_path = pathlib.Path(sys.argv[1])
-seed_bytes = int(sys.argv[2]) * 1024 * 1024
-output_path = pathlib.Path(sys.argv[3])
-objects = json.loads(objects_path.read_text()).get("Contents", [])
-stored_bytes = sum(int(item.get("Size", 0)) for item in objects)
+before_path = pathlib.Path(sys.argv[1])
+objects_path = pathlib.Path(sys.argv[2])
+seed_bytes = int(sys.argv[3]) * 1024 * 1024
+output_path = pathlib.Path(sys.argv[4])
+before = {
+    item["Key"]: int(item.get("Size", 0))
+    for item in json.loads(before_path.read_text()).get("Contents", [])
+}
+objects = {
+    item["Key"]: int(item.get("Size", 0))
+    for item in json.loads(objects_path.read_text()).get("Contents", [])
+}
+new_objects = {key: size for key, size in objects.items() if key not in before}
+stored_bytes = sum(new_objects.values())
 logical_bytes = seed_bytes * 3
-if not objects or stored_bytes <= 0:
-    raise SystemExit("seed push did not create xorb data")
+if not objects:
+    raise SystemExit("seed push did not leave xorb data in the bucket")
 if stored_bytes >= seed_bytes * 2:
     raise SystemExit(
         f"three identical files stored {stored_bytes} xorb bytes for {logical_bytes} logical bytes"
@@ -330,7 +352,9 @@ if stored_bytes >= seed_bytes * 2:
 payload = {
     "logical_bytes": logical_bytes,
     "stored_xorb_bytes": stored_bytes,
-    "xorb_count": len(objects),
+    "xorb_count": len(new_objects),
+    "bucket_xorb_bytes": sum(objects.values()),
+    "bucket_xorb_count": len(objects),
     "dedup_ratio": 1 - stored_bytes / logical_bytes,
 }
 output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -460,6 +484,14 @@ cmp "$RUN_ROOT/delete-me.sha256" "$RUN_ROOT/reset-delete-me.sha256"
 record_duration_since reset_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" write \
+    --models "$RW/models" \
+    --writers "$CONCURRENT_WRITERS" \
+    --mib "$CONCURRENT_MIB" \
+    --output "$RUN_ROOT/concurrent-writes.json"
+record_duration_since concurrent_overlay_write_ms "$phase_start_ms"
+
+phase_start_ms="$(now_ms)"
 cp "$RUN_ROOT/run/seed/models/model.bin" "$RUN_ROOT/run/expected-model.bin"
 mv "$RW/archive" "$RW/moved-archive"
 hash_file "$RW/moved-archive/base-move.bin" > "$RUN_ROOT/rw-base-move.sha256"
@@ -563,7 +595,8 @@ import pathlib
 
 root = pathlib.Path(os.environ["RUN_ROOT_ENV"])
 text = (root / "rw-diff.json").read_text()
-for path in [
+concurrent = json.loads((root / "concurrent-writes.json").read_text())
+expected_paths = [
     "models/model.bin",
     "models/new-large.bin",
     "models/sparse-extend.bin",
@@ -571,7 +604,9 @@ for path in [
     "models/delete-me.bin",
     "moved-archive/base-move.bin",
     "dir-after/nested/note.txt",
-]:
+]
+expected_paths.extend(f"models/{item['path']}" for item in concurrent["files"])
+for path in expected_paths:
     if path not in text:
         raise SystemExit(text)
 if "symlink" not in text:
@@ -597,6 +632,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/export-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/export-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/export-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/export-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$EXPORT/models" \
+    --label export
 [[ "$(readlink "$EXPORT/models/model-link.bin")" == "model.bin" ]]
 grep -q '^archive/base-move.bin$' "$EXPORT/.crab-overlay-deletions"
 grep -q '^models/delete-me.bin$' "$EXPORT/.crab-overlay-deletions"
@@ -611,7 +650,10 @@ if [[ -d "$MOUNT_CACHE/.git" ]]; then
 fi
 [[ -f "$MOUNT_GIT_DIR/HEAD" ]]
 git --git-dir "$MOUNT_GIT_DIR" rev-parse refs/heads/main > "$RUN_ROOT/local-ref-before-push-failure.txt"
-git --git-dir "$MOUNT_GIT_DIR" config remote.origin.url "$RUN_ROOT/run/missing-origin.git"
+# Keep the fetch URL healthy for any promised base objects needed while the
+# commit is built. A broken push-only URL isolates retry behavior after the
+# local commit has actually been created.
+git --git-dir "$MOUNT_GIT_DIR" config remote.origin.pushurl "$RUN_ROOT/run/missing-origin.git"
 if with_test_env "$BIN_DIR/crab" mount commit --mountpoint "$RW" --message "mount large writeback should retry" --push --json \
     > "$RUN_ROOT/rw-commit-push-failure.json" 2>"$RUN_ROOT/logs/rw-commit-push-failure.err"; then
     die "commit unexpectedly succeeded with broken origin"
@@ -647,7 +689,7 @@ if payload.get("status") != "failed" or payload.get("pushed"):
 if not payload.get("commit_oid"):
     raise SystemExit(json.dumps(payload, sort_keys=True))
 PY
-git --git-dir "$MOUNT_GIT_DIR" config remote.origin.url "$REMOTE_URL"
+git --git-dir "$MOUNT_GIT_DIR" config --unset-all remote.origin.pushurl
 record_duration_since push_failure_retry_probe_ms "$phase_start_ms"
 
 phase_start_ms="$(now_ms)"
@@ -681,6 +723,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/clone-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/clone-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/clone-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/clone-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models" \
+    --label clone
 [[ "$(readlink "$CLONE/models/model-link.bin")" == "model.bin" ]]
 [[ "$(stat -f "%z" "$CLONE/models/model.bin")" == "$((31 * 1024 * 1024))" ]]
 [[ "$(stat -f "%z" "$CLONE/models/sparse-extend.bin")" == "$((48 * 1024 * 1024))" ]]
@@ -718,6 +764,9 @@ grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-model-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-new-large-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
 grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-base-move-pointer.txt"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-pointers \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --repo "$CLONE"
 grep -q "^100755$" "$RUN_ROOT/clone-model-mode.txt"
 grep -q "^100755$" "$RUN_ROOT/clone-new-large-mode.txt"
 grep -q "^100755$" "$RUN_ROOT/clone-sparse-extend-mode.txt"
@@ -749,6 +798,9 @@ cmp "$CLONE/models/model.bin" "$RUN_ROOT/clone-model-pointer.txt"
 cmp "$CLONE/models/new-large.bin" "$RUN_ROOT/clone-new-large-pointer.txt"
 cmp "$CLONE/models/sparse-extend.bin" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
 cmp "$CLONE/moved-archive/base-move.bin" "$RUN_ROOT/clone-base-move-pointer.txt"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-pointers \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models"
 [[ -x "$CLONE/models/model.bin" ]]
 [[ -x "$CLONE/models/new-large.bin" ]]
 [[ -x "$CLONE/models/sparse-extend.bin" ]]
@@ -768,6 +820,10 @@ cmp "$RUN_ROOT/expected-model.sha256" "$RUN_ROOT/rehydrated-model.sha256"
 cmp "$RUN_ROOT/expected-new-large.sha256" "$RUN_ROOT/rehydrated-new-large.sha256"
 cmp "$RUN_ROOT/expected-sparse-extend.sha256" "$RUN_ROOT/rehydrated-sparse-extend.sha256"
 cmp "$RUN_ROOT/base-move.sha256" "$RUN_ROOT/rehydrated-base-move.sha256"
+python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-files \
+    --manifest "$RUN_ROOT/concurrent-writes.json" \
+    --models "$CLONE/models" \
+    --label rehydrated
 [[ -x "$CLONE/models/model.bin" ]]
 [[ -x "$CLONE/models/new-large.bin" ]]
 [[ -x "$CLONE/models/sparse-extend.bin" ]]
@@ -811,6 +867,7 @@ summary = {
     "base_move_sha256": (root / "base-move.sha256").read_text().strip(),
     "deleted_large_sha256": (root / "delete-me.sha256").read_text().strip(),
     "seed_dedup": json.loads((root / "seed-dedup.json").read_text()),
+    "concurrent_writes": json.loads((root / "concurrent-writes.json").read_text()),
     "clone_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     "model_pointer_bytes": (root / "clone-model-pointer.txt").stat().st_size,
     "new_pointer_bytes": (root / "clone-new-large-pointer.txt").stat().st_size,

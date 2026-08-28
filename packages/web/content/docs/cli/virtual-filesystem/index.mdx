@@ -39,21 +39,22 @@ Use a mount when you need to:
 Mount the current repository, read one managed file, then inspect mount state:
 
 ```bash
-crab mount ./mnt
-head -c 64 ./mnt/models/weights.safetensors >/dev/null
-crab mount status
-crab unmount ./mnt
+crab mount --repo . --mountpoint /tmp/crab-view --read-only
+head -c 64 /tmp/crab-view/models/weights.safetensors >/dev/null
+crab mount status --mountpoint /tmp/crab-view --live-only
+crab unmount --mountpoint /tmp/crab-view
 ```
 
 The first read may fetch remote ranges. A repeated read can use verified cache entries when they remain available.
 
 ## Choose the next mount topic
 
-- [FUSE Mount](/docs/cli/virtual-filesystem/fuse-mount) — mount a Crab repository on macOS or Linux.
+- [Virtual Filesystem Mount](/docs/cli/virtual-filesystem/fuse-mount) — choose NFS or FUSE and mount a Crab repository.
 - [Mount Modes](/docs/cli/virtual-filesystem/mount-modes) — choose between default coordinator-style mounts and DaemonService mode.
 - [Local Mount](/docs/cli/virtual-filesystem/local-mount) — expose an existing local repository through the virtual filesystem.
 - [Mount Management](/docs/cli/virtual-filesystem/mount-management) — list, refresh, switch, and unmount active mounts.
 - [LFS Compatibility](/docs/cli/virtual-filesystem/lfs-compatibility) — work with repositories that still contain Git LFS pointers.
+- [Complete mount workflow](/library/crab-mount-end-to-end) — operate reads, concurrent writes, publishing, and recovery end to end.
 
 ## Keep mount and hydration responsibilities separate
 

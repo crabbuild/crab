@@ -297,299 +297,314 @@ pub fn commit_overlay_with_snapshot(
     };
     write_transaction(&options.cache_dir, &transaction)?;
 
-    if records.is_empty() {
-        let cleaned_ignored = if all_records.is_empty() {
-            false
-        } else {
-            store.clear()?;
-            true
-        };
-        if options.push {
-            let commit_oid = push_current_ref(options).inspect_err(|error| {
-                set_transaction_status(&mut transaction, "failed");
-                transaction.error = Some(error.to_string());
-                let _ = write_transaction(&options.cache_dir, &transaction);
-            })?;
-            transaction.commit_oid = Some(commit_oid.clone());
-            transaction.pushed = true;
-            set_transaction_status(&mut transaction, "pushed_cleaned");
+    let result = (|| {
+        if records.is_empty() {
+            let cleaned_ignored = if all_records.is_empty() {
+                false
+            } else {
+                store.clear()?;
+                true
+            };
+            if options.push {
+                let commit_oid = push_current_ref(options).inspect_err(|error| {
+                    set_transaction_status(&mut transaction, "failed");
+                    transaction.error = Some(error.to_string());
+                    let _ = write_transaction(&options.cache_dir, &transaction);
+                })?;
+                transaction.commit_oid = Some(commit_oid.clone());
+                transaction.pushed = true;
+                set_transaction_status(&mut transaction, "pushed_cleaned");
+                write_transaction(&options.cache_dir, &transaction)?;
+                return Ok(OverlayCommitResult {
+                    transaction_id,
+                    commit_oid: Some(commit_oid),
+                    pushed: true,
+                    overlay_cleaned: cleaned_ignored,
+                    diff,
+                });
+            }
+            set_transaction_status(&mut transaction, "empty");
             write_transaction(&options.cache_dir, &transaction)?;
             return Ok(OverlayCommitResult {
                 transaction_id,
-                commit_oid: Some(commit_oid),
-                pushed: true,
+                commit_oid: None,
+                pushed: false,
                 overlay_cleaned: cleaned_ignored,
                 diff,
             });
         }
-        set_transaction_status(&mut transaction, "empty");
-        write_transaction(&options.cache_dir, &transaction)?;
-        return Ok(OverlayCommitResult {
-            transaction_id,
-            commit_oid: None,
-            pushed: false,
-            overlay_cleaned: cleaned_ignored,
-            diff,
-        });
-    }
 
-    if let Some(base_oid) = transaction.base_oid.clone() {
-        let current_oid = rev_parse(&options.git_dir, &options.ref_name)?;
-        if current_oid != base_oid {
-            if let Some(result) = try_finalize_recorded_publish(
-                &options.cache_dir,
-                &paths,
-                &options.git_dir,
-                &options.ref_name,
-                &current_oid,
-                &overlay_fingerprint,
-                &diff,
-                snapshot,
-            )? {
-                set_transaction_status(&mut transaction, "recovered_existing");
-                transaction.commit_oid.clone_from(&result.commit_oid);
-                transaction.pushed = result.pushed;
+        if let Some(base_oid) = transaction.base_oid.clone() {
+            let current_oid = rev_parse(&options.git_dir, &options.ref_name)?;
+            if current_oid != base_oid {
+                if let Some(result) = try_finalize_recorded_publish(
+                    &options.cache_dir,
+                    &paths,
+                    &options.git_dir,
+                    &options.ref_name,
+                    &current_oid,
+                    &overlay_fingerprint,
+                    &diff,
+                    snapshot,
+                )? {
+                    set_transaction_status(&mut transaction, "recovered_existing");
+                    transaction.commit_oid.clone_from(&result.commit_oid);
+                    transaction.pushed = result.pushed;
+                    write_transaction(&options.cache_dir, &transaction)?;
+                    return Ok(result);
+                }
+                set_transaction_status(&mut transaction, "failed");
+                transaction.error = Some(format!(
+                    "base ref moved from {base_oid} to {current_oid}; refresh or remount before committing overlay changes"
+                ));
                 write_transaction(&options.cache_dir, &transaction)?;
-                return Ok(result);
+                return Err(CrabError::Internal(
+                    transaction.error.clone().unwrap_or_default(),
+                ));
             }
-            set_transaction_status(&mut transaction, "failed");
-            transaction.error = Some(format!(
-                "base ref moved from {base_oid} to {current_oid}; refresh or remount before committing overlay changes"
-            ));
-            write_transaction(&options.cache_dir, &transaction)?;
-            return Err(CrabError::Internal(
-                transaction.error.clone().unwrap_or_default(),
-            ));
         }
-    }
 
-    let mut worktree = PublishWorktree::create(&options.git_dir)?;
-    let base = transaction
-        .base_oid
-        .clone()
-        .unwrap_or_else(|| options.ref_name.clone());
-    run_git(
-        Command::new("git")
-            .arg("--git-dir")
-            .arg(&options.git_dir)
-            .args(["worktree", "add", "--detach", "--no-checkout"])
-            .arg(worktree.path())
-            .arg(&base),
-        "git worktree add",
-    )
-    .inspect_err(|e| {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(e.to_string());
-        let _ = write_transaction(&options.cache_dir, &transaction);
-    })?;
-    worktree.mark_registered();
-
-    run_git(
-        Command::new("git")
-            .arg("-C")
-            .arg(worktree.path())
-            .args(["read-tree", &base]),
-        "git read-tree",
-    )?;
-
-    ensure_git_commit_identity(worktree.path()).inspect_err(|e| {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(e.to_string());
-        let _ = write_transaction(&options.cache_dir, &transaction);
-    })?;
-
-    let applied_base_renames = apply_metadata_base_renames(&records, worktree.path())?;
-    materialize_git_policy_files(worktree.path())?;
-    if overlay_changes_git_attributes(&records) {
-        let attribute_records = records
-            .iter()
-            .filter(|record| is_git_attributes_path(&record.path))
-            .cloned()
-            .collect::<Vec<_>>();
-        apply_records(
-            &attribute_records,
-            worktree.path(),
-            &std::collections::HashSet::new(),
-            &applied_base_renames,
-        )?;
-        run_git_add(
-            worktree.path(),
-            &attribute_records,
-            &[],
-            &applied_base_renames,
-        )?;
-    }
-    let crab_files = crab_overlay_files(&records, worktree.path())?;
-    let skipped_crab_paths = crab_files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<std::collections::HashSet<_>>();
-
-    if let Err(err) = apply_records(
-        &records,
-        worktree.path(),
-        &skipped_crab_paths,
-        &applied_base_renames,
-    ) {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(err.to_string());
-        write_transaction(&options.cache_dir, &transaction)?;
-        return Err(err);
-    }
-
-    run_git_add(
-        worktree.path(),
-        &records,
-        &crab_files,
-        &applied_base_renames,
-    )
-    .inspect_err(|e| {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(e.to_string());
-        let _ = write_transaction(&options.cache_dir, &transaction);
-    })?;
-
-    if !crab_files.is_empty() {
-        let pointer_entries =
-            stage_crab_overlay_files(&crab_files, worktree.path(), &options.git_dir).inspect_err(
-                |e| {
-                    set_transaction_status(&mut transaction, "failed");
-                    transaction.error = Some(e.to_string());
-                    let _ = write_transaction(&options.cache_dir, &transaction);
-                },
-            )?;
-        if let Err(error) = write_pointer_entries_to_git_index(worktree.path(), &pointer_entries) {
-            if let Err(rollback_error) =
-                rollback_staged_pointer_entries(&options.git_dir, &pointer_entries)
-            {
-                tracing::warn!(
-                    error = %rollback_error,
-                    "failed to roll back mount staging after Git index publication failed"
-                );
-            }
-            set_transaction_status(&mut transaction, "failed");
-            transaction.error = Some(error.to_string());
-            write_transaction(&options.cache_dir, &transaction)?;
-            return Err(error);
-        }
-        if let Err(error) =
-            mark_staged_pointer_entries_published(&options.git_dir, &pointer_entries)
-        {
-            if let Err(rollback_error) =
-                rollback_staged_pointer_entries(&options.git_dir, &pointer_entries)
-            {
-                tracing::warn!(
-                    error = %rollback_error,
-                    "failed to roll back mount staging after batch publication failed"
-                );
-            }
-            set_transaction_status(&mut transaction, "failed");
-            transaction.error = Some(error.to_string());
-            write_transaction(&options.cache_dir, &transaction)?;
-            return Err(error);
-        }
-    }
-
-    let tree_oid = command_stdout(
-        Command::new("git")
-            .arg("-C")
-            .arg(worktree.path())
-            .arg("write-tree"),
-        "git write-tree",
-    )?;
-    let base_tree = rev_parse(&options.git_dir, &format!("{base}^{{tree}}"))?;
-    if tree_oid == base_tree {
-        let error = CrabError::Internal("overlay has no publishable Git changes".into());
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(error.to_string());
-        write_transaction(&options.cache_dir, &transaction)?;
-        return Err(error);
-    }
-    let commit_oid = command_stdout(
-        Command::new("git")
-            .arg("-C")
-            .arg(worktree.path())
-            .arg("commit-tree")
-            .arg(&tree_oid)
-            .arg("-p")
-            .arg(&base)
-            .arg("-m")
-            .arg(&options.message),
-        "git commit-tree",
-    )
-    .inspect_err(|e| {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(e.to_string());
-        let _ = write_transaction(&options.cache_dir, &transaction);
-    })?;
-    transaction.commit_oid = Some(commit_oid.clone());
-    set_transaction_status(&mut transaction, "created");
-    write_transaction(&options.cache_dir, &transaction)?;
-
-    if options.push {
-        let refspec = format!("{commit_oid}:{}", options.ref_name);
+        let mut worktree = PublishWorktree::create(&options.git_dir)?;
+        let base = transaction
+            .base_oid
+            .clone()
+            .unwrap_or_else(|| options.ref_name.clone());
         run_git(
             Command::new("git")
-                .arg("-C")
+                .arg("--git-dir")
+                .arg(&options.git_dir)
+                .args(["worktree", "add", "--detach", "--no-checkout"])
                 .arg(worktree.path())
-                .args(["push", "origin", &refspec]),
-            "git push",
+                .arg(&base),
+            "git worktree add",
         )
         .inspect_err(|e| {
             set_transaction_status(&mut transaction, "failed");
             transaction.error = Some(e.to_string());
             let _ = write_transaction(&options.cache_dir, &transaction);
         })?;
-        set_transaction_status(&mut transaction, "pushed");
-        transaction.pushed = true;
-        write_transaction(&options.cache_dir, &transaction)?;
-    }
+        worktree.mark_registered();
 
-    update_published_ref(
-        &options.git_dir,
-        &options.ref_name,
-        &commit_oid,
-        transaction.base_oid.as_deref(),
-        transaction.pushed,
-    )
-    .inspect_err(|e| {
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(worktree.path())
+                .args(["read-tree", &base]),
+            "git read-tree",
+        )?;
+
+        ensure_git_commit_identity(worktree.path()).inspect_err(|e| {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(e.to_string());
+            let _ = write_transaction(&options.cache_dir, &transaction);
+        })?;
+
+        let applied_base_renames = apply_metadata_base_renames(&records, worktree.path())?;
+        materialize_git_policy_files(worktree.path())?;
+        if overlay_changes_git_attributes(&records) {
+            let attribute_records = records
+                .iter()
+                .filter(|record| is_git_attributes_path(&record.path))
+                .cloned()
+                .collect::<Vec<_>>();
+            apply_records(
+                &attribute_records,
+                worktree.path(),
+                &std::collections::HashSet::new(),
+                &applied_base_renames,
+            )?;
+            run_git_add(
+                worktree.path(),
+                &attribute_records,
+                &[],
+                &applied_base_renames,
+            )?;
+        }
+        let crab_files = crab_overlay_files(&records, worktree.path())?;
+        let skipped_crab_paths = crab_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        if let Err(err) = apply_records(
+            &records,
+            worktree.path(),
+            &skipped_crab_paths,
+            &applied_base_renames,
+        ) {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(err.to_string());
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Err(err);
+        }
+
+        run_git_add(
+            worktree.path(),
+            &records,
+            &crab_files,
+            &applied_base_renames,
+        )
+        .inspect_err(|e| {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(e.to_string());
+            let _ = write_transaction(&options.cache_dir, &transaction);
+        })?;
+
+        if !crab_files.is_empty() {
+            let pointer_entries =
+                stage_crab_overlay_files(&crab_files, worktree.path(), &options.git_dir)
+                    .inspect_err(|e| {
+                        set_transaction_status(&mut transaction, "failed");
+                        transaction.error = Some(e.to_string());
+                        let _ = write_transaction(&options.cache_dir, &transaction);
+                    })?;
+            if let Err(error) =
+                write_pointer_entries_to_git_index(worktree.path(), &pointer_entries)
+            {
+                if let Err(rollback_error) =
+                    rollback_staged_pointer_entries(&options.git_dir, &pointer_entries)
+                {
+                    tracing::warn!(
+                        error = %rollback_error,
+                        "failed to roll back mount staging after Git index publication failed"
+                    );
+                }
+                set_transaction_status(&mut transaction, "failed");
+                transaction.error = Some(error.to_string());
+                write_transaction(&options.cache_dir, &transaction)?;
+                return Err(error);
+            }
+            if let Err(error) =
+                mark_staged_pointer_entries_published(&options.git_dir, &pointer_entries)
+            {
+                if let Err(rollback_error) =
+                    rollback_staged_pointer_entries(&options.git_dir, &pointer_entries)
+                {
+                    tracing::warn!(
+                        error = %rollback_error,
+                        "failed to roll back mount staging after batch publication failed"
+                    );
+                }
+                set_transaction_status(&mut transaction, "failed");
+                transaction.error = Some(error.to_string());
+                write_transaction(&options.cache_dir, &transaction)?;
+                return Err(error);
+            }
+        }
+
+        let tree_oid = command_stdout(
+            Command::new("git")
+                .arg("-C")
+                .arg(worktree.path())
+                .arg("write-tree"),
+            "git write-tree",
+        )?;
+        let base_tree = rev_parse(&options.git_dir, &format!("{base}^{{tree}}"))?;
+        if tree_oid == base_tree {
+            let error = CrabError::Internal("overlay has no publishable Git changes".into());
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(error.to_string());
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Err(error);
+        }
+        let commit_oid = command_stdout(
+            Command::new("git")
+                .arg("-C")
+                .arg(worktree.path())
+                .arg("commit-tree")
+                .arg(&tree_oid)
+                .arg("-p")
+                .arg(&base)
+                .arg("-m")
+                .arg(&options.message),
+            "git commit-tree",
+        )
+        .inspect_err(|e| {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(e.to_string());
+            let _ = write_transaction(&options.cache_dir, &transaction);
+        })?;
+        transaction.commit_oid = Some(commit_oid.clone());
+        set_transaction_status(&mut transaction, "created");
+        write_transaction(&options.cache_dir, &transaction)?;
+
+        if options.push {
+            let refspec = format!("{commit_oid}:{}", options.ref_name);
+            run_git(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(worktree.path())
+                    .args(["push", "origin", &refspec]),
+                "git push",
+            )
+            .inspect_err(|e| {
+                set_transaction_status(&mut transaction, "failed");
+                transaction.error = Some(e.to_string());
+                let _ = write_transaction(&options.cache_dir, &transaction);
+            })?;
+            set_transaction_status(&mut transaction, "pushed");
+            transaction.pushed = true;
+            write_transaction(&options.cache_dir, &transaction)?;
+        }
+
+        update_published_ref(
+            &options.git_dir,
+            &options.ref_name,
+            &commit_oid,
+            transaction.base_oid.as_deref(),
+            transaction.pushed,
+        )
+        .inspect_err(|e| {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(e.to_string());
+            let _ = write_transaction(&options.cache_dir, &transaction);
+        })?;
+
+        if !transaction.pushed {
+            set_transaction_status(&mut transaction, "committed");
+            write_transaction(&options.cache_dir, &transaction)?;
+        }
+
+        if let Err(err) = finalize_committed_overlay(
+            &paths,
+            &options.git_dir,
+            &commit_oid,
+            &options.ref_name,
+            snapshot,
+        ) {
+            set_transaction_status(&mut transaction, "failed");
+            transaction.error = Some(err.to_string());
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Err(err);
+        }
+        let final_status = if transaction.pushed {
+            "pushed_cleaned"
+        } else {
+            "committed_cleaned"
+        };
+        set_transaction_status(&mut transaction, final_status);
+        write_transaction(&options.cache_dir, &transaction)?;
+
+        Ok(OverlayCommitResult {
+            transaction_id,
+            commit_oid: Some(commit_oid),
+            pushed: transaction.pushed,
+            overlay_cleaned: true,
+            diff,
+        })
+    })();
+    if let Err(error) = &result {
         set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(e.to_string());
-        let _ = write_transaction(&options.cache_dir, &transaction);
-    })?;
-
-    if !transaction.pushed {
-        set_transaction_status(&mut transaction, "committed");
-        write_transaction(&options.cache_dir, &transaction)?;
+        transaction.error = Some(error.to_string());
+        if let Err(write_error) = write_transaction(&options.cache_dir, &transaction) {
+            tracing::warn!(
+                error = %write_error,
+                transaction_id = %transaction.id,
+                "failed to record publish transaction failure"
+            );
+        }
     }
-
-    if let Err(err) = finalize_committed_overlay(
-        &paths,
-        &options.git_dir,
-        &commit_oid,
-        &options.ref_name,
-        snapshot,
-    ) {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(err.to_string());
-        write_transaction(&options.cache_dir, &transaction)?;
-        return Err(err);
-    }
-    let final_status = if transaction.pushed {
-        "pushed_cleaned"
-    } else {
-        "committed_cleaned"
-    };
-    set_transaction_status(&mut transaction, final_status);
-    write_transaction(&options.cache_dir, &transaction)?;
-
-    Ok(OverlayCommitResult {
-        transaction_id,
-        commit_oid: Some(commit_oid),
-        pushed: transaction.pushed,
-        overlay_cleaned: true,
-        diff,
-    })
+    result
 }
 
 fn push_current_ref(options: &OverlayCommitOptions) -> Result<String> {
@@ -2481,6 +2496,39 @@ mod tests {
             git_stdout(&retry_remote, ["show", "refs/heads/main:new.txt"]),
             "overlay content"
         );
+    }
+
+    #[test]
+    fn commit_overlay_records_precommit_failure_and_preserves_overlay() {
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let snapshot = SnapshotStore::open_or_create(&cache_dir.join("snapshot.sqlite")).unwrap();
+        snapshot
+            .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
+            .unwrap();
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        store.create_file("new.txt", 0o100644).unwrap();
+        store.write_file("new.txt", 0, b"overlay content").unwrap();
+
+        let error = commit_overlay(&OverlayCommitOptions {
+            cache_dir: cache_dir.clone(),
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/missing".to_owned(),
+            message: "publish overlay".to_owned(),
+            push: false,
+        })
+        .unwrap_err();
+
+        let transactions = read_publish_transactions(&cache_dir).unwrap();
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].status, "failed");
+        assert_eq!(
+            transactions[0].error.as_deref(),
+            Some(error.to_string().as_str())
+        );
+        assert!(transactions[0].commit_oid.is_none());
+        assert_eq!(inspect_overlay(&paths).unwrap().changes.len(), 1);
     }
 
     #[test]

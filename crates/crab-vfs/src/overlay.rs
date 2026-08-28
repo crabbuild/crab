@@ -8,10 +8,12 @@
 //! The store implements both [`OverlayLookup`] (read side, used by the
 //! resolver) and [`OverlayWriter`] (write side, used by the engine).
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt as LockFileExt;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use tracing::{debug, trace, warn};
 
@@ -42,11 +44,11 @@ const MIGRATIONS: &[&str] = &[
 
 /// SQLite-backed copy-on-write overlay store.
 ///
-/// Thread safety: `rusqlite::Connection` is `!Send`, so we wrap it in a
-/// `Mutex` to allow shared access from multiple FUSE threads.
+/// Thread safety: SQLite metadata access is serialized, while independent
+/// backing-file mutations share a publish lease and may run concurrently.
 pub struct OverlayStore {
     db: Mutex<Connection>,
-    freeze_lock: Mutex<()>,
+    publish_lock: RwLock<()>,
     upper_dir: PathBuf,
 }
 
@@ -86,7 +88,7 @@ impl OverlayStore {
 
         let store = Self {
             db: Mutex::new(conn),
-            freeze_lock: Mutex::new(()),
+            publish_lock: RwLock::new(()),
             upper_dir: upper_dir.to_path_buf(),
         };
 
@@ -334,32 +336,18 @@ impl OverlayStore {
         Ok(records)
     }
 
-    /// Return whether writes are currently frozen for this overlay.
-    pub fn is_frozen(&self) -> bool {
-        self.freeze_marker_path().exists()
-    }
-
     /// Freeze writes to this overlay until the returned guard is dropped.
+    ///
+    /// The exclusive lease spans processes and waits for mutations that
+    /// already hold shared leases to finish.
     pub fn freeze_writes(&self) -> Result<OverlayFreezeGuard<'_>> {
-        let guard = self.freeze_lock.lock().map_err(|_| lock_poisoned())?;
-        let marker = self.freeze_marker_path();
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
-            Ok(_) => Ok(OverlayFreezeGuard {
-                marker,
-                _guard: guard,
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CrabError::Forbidden {
-                path: "overlay is already frozen by another publish operation".into(),
-            }),
-            Err(e) => Err(CrabError::Io(e)),
-        }
+        let guard = self.publish_lock.write().map_err(|_| lock_poisoned())?;
+        let lock_file = self.open_publish_lock()?;
+        LockFileExt::lock_exclusive(&lock_file).map_err(CrabError::Io)?;
+        Ok(OverlayFreezeGuard {
+            _lock_file: lock_file,
+            _guard: guard,
+        })
     }
 
     /// Reconcile the overlay against a new base snapshot.
@@ -484,37 +472,47 @@ impl OverlayStore {
         self.upper_dir.join(clean_path(path))
     }
 
-    fn freeze_marker_path(&self) -> PathBuf {
+    fn publish_lock_path(&self) -> PathBuf {
         self.upper_dir.parent().map_or_else(
-            || self.upper_dir.join("publish.freeze"),
-            |parent| parent.join("publish.freeze"),
+            || self.upper_dir.join("publish.lock"),
+            |parent| parent.join("publish.lock"),
         )
     }
 
-    fn ensure_not_frozen(&self) -> Result<()> {
-        if self.is_frozen() {
-            return Err(CrabError::Forbidden {
-                path: "overlay writes are frozen during publish".into(),
-            });
+    fn open_publish_lock(&self) -> Result<File> {
+        let path = self.publish_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        Ok(())
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(CrabError::Io)
     }
 
     fn begin_write(&self) -> Result<OverlayWriteGuard<'_>> {
-        let guard = match self.freeze_lock.try_lock() {
+        let guard = match self.publish_lock.try_read() {
             Ok(guard) => guard,
-            Err(std::sync::TryLockError::WouldBlock) if self.is_frozen() => {
+            Err(std::sync::TryLockError::WouldBlock) => {
                 return Err(CrabError::Forbidden {
                     path: "overlay writes are frozen during publish".into(),
                 });
             }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                self.freeze_lock.lock().map_err(|_| lock_poisoned())?
-            }
             Err(std::sync::TryLockError::Poisoned(_)) => return Err(lock_poisoned()),
         };
-        self.ensure_not_frozen()?;
-        Ok(OverlayWriteGuard { _guard: guard })
+        let lock_file = self.open_publish_lock()?;
+        if !LockFileExt::try_lock_shared(&lock_file).map_err(CrabError::Io)? {
+            return Err(CrabError::Forbidden {
+                path: "overlay writes are frozen during publish".into(),
+            });
+        }
+        Ok(OverlayWriteGuard {
+            _lock_file: lock_file,
+            _guard: guard,
+        })
     }
 
     /// Current time in nanoseconds since epoch.
@@ -758,19 +756,13 @@ fn raw_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawEntry> {
 }
 
 struct OverlayWriteGuard<'a> {
-    _guard: std::sync::MutexGuard<'a, ()>,
+    _lock_file: File,
+    _guard: std::sync::RwLockReadGuard<'a, ()>,
 }
 
-/// Removes the overlay write-freeze marker when dropped.
 pub struct OverlayFreezeGuard<'a> {
-    marker: PathBuf,
-    _guard: std::sync::MutexGuard<'a, ()>,
-}
-
-impl Drop for OverlayFreezeGuard<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.marker);
-    }
+    _lock_file: File,
+    _guard: std::sync::RwLockWriteGuard<'a, ()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +839,6 @@ impl OverlayWriter for OverlayStore {
         std::fs::write(&backing, [])?;
         set_path_permissions(&backing, mode)?;
 
-        self.ensure_not_frozen()?;
         let now = Self::now_ns();
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         Self::upsert_entry(
@@ -885,7 +876,6 @@ impl OverlayWriter for OverlayStore {
         // symlinks are stored as blob content containing the target path).
         std::fs::write(&backing, target.as_bytes())?;
 
-        self.ensure_not_frozen()?;
         let now = Self::now_ns();
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         Self::upsert_entry(
@@ -964,7 +954,6 @@ impl OverlayWriter for OverlayStore {
         // first to guard against a concurrent delete or modify race between
         // Phase 1 and now.
         {
-            self.ensure_not_frozen()?;
             let db = self.db.lock().map_err(|_| lock_poisoned())?;
             let current = Self::query_entry(&db, &path)?;
             match current {
@@ -1022,7 +1011,6 @@ impl OverlayWriter for OverlayStore {
         let now = Self::now_ns();
         let oid = source_oid.unwrap_or("");
 
-        self.ensure_not_frozen()?;
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         Self::upsert_entry(
             &db,
@@ -1059,7 +1047,6 @@ impl OverlayWriter for OverlayStore {
             let _ = std::fs::remove_file(&backing);
         }
 
-        self.ensure_not_frozen()?;
         let now = Self::now_ns();
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         if let Some(row) = Self::query_rename_row(&db, &path)?
@@ -1304,7 +1291,6 @@ impl OverlayWriter for OverlayStore {
         let backing = self.backing_path(&path);
         std::fs::create_dir_all(&backing)?;
 
-        self.ensure_not_frozen()?;
         let now = Self::now_ns();
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         Self::upsert_entry(
@@ -1343,7 +1329,6 @@ impl OverlayWriter for OverlayStore {
             })?;
         }
 
-        self.ensure_not_frozen()?;
         let now = Self::now_ns();
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         if let Some(row) = Self::query_rename_row(&db, &path)?
@@ -1435,7 +1420,6 @@ impl OverlayWriter for OverlayStore {
         let oid = source_oid.unwrap_or("");
         set_path_permissions(&backing, mode)?;
 
-        self.ensure_not_frozen()?;
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         Self::upsert_entry(
             &db,
@@ -1730,33 +1714,67 @@ mod tests {
     }
 
     #[test]
-    fn freeze_waits_for_in_flight_overlay_mutation() {
+    fn independent_overlay_mutations_share_the_publish_lease() {
         let (_dir, store) = temp_store();
         let store = std::sync::Arc::new(store);
-        let freezer_store = std::sync::Arc::clone(&store);
+        let second_store = std::sync::Arc::clone(&store);
+        let first = store.begin_write().unwrap();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let second = std::thread::spawn(move || {
+            let guard = second_store.begin_write().unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        second.join().unwrap();
+        drop(first);
+    }
+
+    #[test]
+    fn freeze_waits_for_in_flight_mutations_across_store_handles() {
+        let (dir, store) = temp_store();
+        let store = std::sync::Arc::new(store);
+        let freezer_store = std::sync::Arc::new(
+            OverlayStore::open(&dir.path().join("overlay.db"), &dir.path().join("upper")).unwrap(),
+        );
         let write_guard = store.begin_write().unwrap();
         let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
         let (frozen_tx, frozen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
 
         let freezer = std::thread::spawn(move || {
             attempted_tx.send(()).unwrap();
             let freeze = freezer_store.freeze_writes().unwrap();
-            frozen_tx.send(freezer_store.is_frozen()).unwrap();
+            frozen_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
             drop(freeze);
         });
 
         attempted_rx.recv().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(frozen_rx.try_recv().is_err());
-
-        drop(write_guard);
         assert!(
             frozen_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .unwrap()
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
         );
+
+        drop(write_guard);
+        frozen_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(matches!(
+            store.begin_write(),
+            Err(CrabError::Forbidden { .. })
+        ));
+        release_tx.send(()).unwrap();
         freezer.join().unwrap();
-        assert!(!store.is_frozen());
+        store.begin_write().unwrap();
     }
 
     #[test]

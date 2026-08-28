@@ -30,6 +30,7 @@ crab-types = { workspace = true }
 crab-xet = { workspace = true }
 dashmap = "6"
 fuser = { version = "0.17", optional = true }
+fs4 = "0.13"
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
 gix-odb = { workspace = true, features = ["sha1"] }
