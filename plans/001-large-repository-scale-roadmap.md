@@ -68,14 +68,14 @@ each current binary still has only one full-profile run. Repeatability, the
 10,000-push differential, fault, provider, concurrency, and rollout gates are
 still open.
 
-The current branch adds `bdfae4f2` and `c5797d8f` as intake-containment
-follow-ups. Format-
-derived bounds now protect every known-size pack index, reverse index, and kind
-sidecar read in owner, receive, recovery, and push-probe paths; protected
-staged-object reads also stop at their declared byte size before validating the
-content hash. Generated-pack cache descriptors also reject a self-contained
-artifact whose object count is smaller than the requested selection. The bound
-helpers and cache invariant have fixture coverage, and the focused locator,
+The current branch adds `bdfae4f2`, `c5797d8f`, and `c78cae0a` as intake-
+containment follow-ups. Format-derived bounds now protect every known-size
+pack index, reverse index, and kind sidecar read in owner, receive, recovery,
+and push-probe paths; protected staged-object reads also stop at their declared
+byte size before validating the content hash. Generated-pack cache descriptors
+also reject a self-contained artifact whose object count is smaller than the
+requested selection. The bound helpers and cache invariant have fixture
+coverage, and the focused locator,
 receive, push, and remote-Git cache tests pass. This prevents malformed or
 unexpected provider bodies from filling memory or maintenance workspaces, but
 it does not close the separate 10,000-push, provider-fault, fanout, retention,
@@ -1941,10 +1941,12 @@ tests, and remote-Git tests. The full workspace test/clippy gates are not
 claimed green here; unrelated baseline failures/warnings outside the touched
 surfaces remain separate cleanup work.
 
-The post-`c5797d8f` focused proof additionally passes `cargo fmt --all
+The post-`c78cae0a` focused proof additionally passes `cargo fmt --all
 -- --check`, strict `crab-git` clippy, all 8 pack-locator tests, all 40
 protected-receive tests, all 271 runnable Crab push tests (one unrelated
 integration test remains ignored), and the generated-pack cache unit tests.
+The remote-helper transcript suite also passes all 42 tests with the bounded
+pack-index probe path.
 The full workspace and real-repository qualification gates remain open as
 recorded in the evidence table.
 
