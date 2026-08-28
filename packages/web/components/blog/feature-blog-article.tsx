@@ -102,7 +102,7 @@ export function FeatureBlogArticle({
             </div>
           </div>
 
-          <aside className="hidden min-w-0 justify-self-end xl:sticky xl:top-24 xl:block xl:self-start">
+          <aside className="hidden min-w-0 justify-self-end xl:sticky xl:top-24 xl:right-0 xl:col-start-3 xl:row-start-1 xl:block xl:self-start">
             <div className="w-56 space-y-5">
               <div className="border-t-2 border-primary pt-4">
                 <div className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-[0.16em] text-primary uppercase">
