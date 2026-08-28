@@ -962,7 +962,7 @@ jobs:
   protocol-v2-release-gate:
     name: Protocol v2 partial-clone release gate
     needs: [prepare, build]
-    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -1054,7 +1054,7 @@ jobs:
   protocol-v2-git-compatibility-release-gate:
     name: Protocol v2 packaged Git compatibility (${{ matrix.label }})
     needs: [prepare, build, protocol-v2-release-gate]
-    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -1189,7 +1189,7 @@ jobs:
   protocol-v2-rollback-release-gate:
     name: Protocol v2 rollback compatibility release gate
     needs: [prepare, build, protocol-v2-release-gate]
-    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -1315,7 +1315,7 @@ jobs:
   protocol-v2-aws-release-gate:
     name: Protocol v2 partial-clone AWS S3 release gate
     needs: [prepare, build, protocol-v2-release-gate]
-    if: ${{ ((github.event_name == 'workflow_dispatch' && inputs.require_cloud_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_CLOUD_EVIDENCE == 'true')) && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
+    if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.require_cloud_evidence) || (github.event_name != 'workflow_dispatch' && vars.CRAB_RELEASE_REQUIRE_CLOUD_EVIDENCE == 'true')) && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -1391,7 +1391,7 @@ jobs:
   protocol-v2-platform-release-gate:
     name: Protocol v2 platform gate (${{ matrix.platform }})
     needs: [prepare, build, protocol-v2-release-gate, protocol-v2-aws-release-gate]
-    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-aws-release-gate.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-aws-release-gate.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:

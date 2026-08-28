@@ -72,6 +72,17 @@ def workflow_step_run(text: str, step_name: str) -> str:
     return text[body_start:next_step]
 
 
+def workflow_job(text: str, job_name: str) -> str:
+    marker = f"  {job_name}:\n"
+    start = text.find(marker)
+    if start == -1:
+        raise ValueError(f"missing workflow job {job_name}")
+    next_job = re.search(r"^  [a-zA-Z0-9_-]+:\n", text[start + len(marker) :], re.MULTILINE)
+    if next_job is None:
+        return text[start:]
+    return text[start : start + len(marker) + next_job.start()]
+
+
 def heredoc_block(text: str, marker: str, terminator: str) -> str:
     lines = text.splitlines()
     start_index = next((index for index, line in enumerate(lines) if marker in line), None)
@@ -186,6 +197,22 @@ def check_release_workflow(root: Path) -> list[str]:
     path = root / ".github" / "workflows" / "release.yml"
     text = read_text(path)
     errors: list[str] = []
+
+    downstream_conditions = {
+        "protocol-v2-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' }}",
+        "protocol-v2-git-compatibility-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}",
+        "protocol-v2-rollback-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}",
+        "protocol-v2-aws-release-gate": "if: ${{ always() && ((github.event_name == 'workflow_dispatch' && inputs.require_cloud_evidence)",
+        "protocol-v2-platform-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-aws-release-gate.result == 'success' }}",
+    }
+    for job_name, condition in downstream_conditions.items():
+        try:
+            job = workflow_job(text, job_name)
+        except ValueError as error:
+            errors.append(f"release.yml: {error}")
+        else:
+            if condition not in job:
+                errors.append(f"release.yml {job_name}: expected {condition!r}")
 
     try:
         package_step = workflow_step_run(text, "Package archive")
