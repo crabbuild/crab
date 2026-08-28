@@ -1,12 +1,11 @@
 import {
   ArrowRight,
   Clock,
-  Cloud,
-  GitCommit,
   Gauge,
   Newspaper,
   Users,
 } from "lucide-react"
+import Image from "next/image"
 import Link from "next/link"
 
 import { MarketingLayout } from "@/components/marketing-layout"
@@ -30,7 +29,7 @@ export default function BlogDashboardPage() {
   return (
     <MarketingLayout>
       <section className="border-b border-border bg-background text-foreground">
-        <div className="mx-auto grid max-w-6xl gap-8 px-6 pt-20 pb-14 lg:grid-cols-[minmax(0,1fr)_23rem] lg:pt-24 lg:pb-16">
+        <div className="mx-auto grid max-w-6xl gap-8 px-6 pt-20 pb-14 lg:grid-cols-[minmax(0,1fr)_25rem] lg:items-center lg:pt-24 lg:pb-16">
           <div>
             <Badge variant="outline" className="gap-1 bg-background">
               <Newspaper className="size-3" aria-hidden="true" />
@@ -208,67 +207,16 @@ function MetaLine({
 
 function CurrentSubjectDiagram() {
   return (
-    <aside className="self-start rounded-xl border border-border bg-card p-5 shadow-sm">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[9px] font-black tracking-[0.17em]">
-          CURRENT SUBJECT
-        </span>
-        <span
-          className="size-2 rounded-full bg-emerald-500"
-          aria-hidden="true"
-        />
-      </div>
-      <div className="mt-4">
-        <div className="flex items-center gap-2 rounded-md bg-muted px-3 py-2 font-mono text-[10px] font-black text-foreground">
-          <span
-            className="size-1.5 rounded-full bg-primary"
-            aria-hidden="true"
-          />
-          ONE COMMIT
-        </div>
-        <div className="mx-auto h-5 w-px bg-border" aria-hidden="true" />
-        <div className="grid grid-cols-2 gap-3">
-          <DiagramLane
-            icon={GitCommit}
-            label="Git history"
-            value="code + pointer"
-            colorClassName="text-blue-600 dark:text-blue-400"
-          />
-          <DiagramLane
-            icon={Cloud}
-            label="Object store"
-            value="large bytes"
-            colorClassName="text-orange-600 dark:text-orange-400"
-          />
-        </div>
-        <p className="m-0 mt-4 border-t border-border pt-3 text-center text-xs font-bold text-emerald-700 dark:text-emerald-300">
-          One visible repository state
-        </p>
-      </div>
+    <aside className="self-start overflow-hidden rounded-2xl border border-slate-800 bg-[#07111f] p-1.5 shadow-[0_22px_70px_rgba(2,6,23,0.2)] lg:self-center">
+      <Image
+        src="/diagram/blog-cover/current-subject.svg"
+        width={560}
+        height={400}
+        alt="One Git commit connects code and a compact Crab pointer in Git history to immutable large-file data in an object store, producing one visible repository state"
+        className="h-auto w-full rounded-xl"
+        unoptimized
+        priority
+      />
     </aside>
-  )
-}
-
-function DiagramLane({
-  icon: Icon,
-  label,
-  value,
-  colorClassName,
-}: {
-  icon: typeof GitCommit
-  label: string
-  value: string
-  colorClassName: string
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-muted/20 p-3">
-      <Icon className={`size-4 ${colorClassName}`} aria-hidden="true" />
-      <p className="m-0 mt-3 text-[10px] font-black tracking-wide uppercase">
-        {label}
-      </p>
-      <p className="m-0 mt-1 text-[10px] leading-4 text-muted-foreground">
-        {value}
-      </p>
-    </div>
   )
 }
