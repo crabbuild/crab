@@ -12,7 +12,7 @@ order: 6
 concepts: ["virtual filesystem", "copy-on-write overlay", "publish barrier", "range hydration", "concurrent writers", "commit recovery"]
 prerequisites: ["How do you work with a repository larger than your disk?"]
 outcome: "Run a read-only or writable Crab mount, publish overlay changes safely, and diagnose the common failure modes without losing work."
-diagramType: "Mount read, write, and publish lifecycle"
+diagramType: "Interactive mount state and writer ownership labs"
 knowledgeCheck:
   question: "What should an operator do immediately before publishing a busy writable mount?"
   options:
@@ -49,6 +49,12 @@ predictable production interface and treating it like a magical network disk.
   Reads can be lazy. Writes stay local. Nothing reaches the remote branch until
   you run a mount commit, and the commit is still governed by Git ref state.
 </TakeawayBox>
+
+Use the console below as a map for the rest of the guide. Switch between a cold
+read, the first write, a successful publication, and a recoverable failure to
+see which state changes at each boundary.
+
+<MountLifecycleConsole />
 
 ## Start by choosing the operating mode
 
@@ -155,6 +161,12 @@ blob is a Crab pointer, the hydration path finds the file recipe, fetches the
 needed xorb ranges, verifies them, and returns reconstructed bytes. A later read
 can reuse verified cache data.
 
+The cutaway below follows a single request across the mounted namespace. Change
+the operation to compare metadata-only work, cold and warm reads, and a write
+that crosses into the overlay.
+
+<MountedReadCutaway />
+
 Test the access pattern the real application uses. A sequential copy, random
 seek workload, memory map, and thousands of small opens exercise different
 parts of the stack. A single warm `cat` is not a capacity result.
@@ -181,6 +193,12 @@ Do not place an overlay on a nearly full system disk and assume Xet
 deduplication will make the local write cheap. Deduplication reduces canonical
 upload and storage after Crab classifies the resulting bytes. It does not
 replace the writable local file.
+
+Use the capacity workbench to model how the read cache and writable overlay
+compete for local disk. The promotion scenario is the important production
+case: remote deduplication does not shrink the local writable copy.
+
+<DiskBudgetWorkbench />
 
 ## Move to a writable mount deliberately
 
@@ -246,6 +264,12 @@ output paths, or a single writer for that case.
 
 Native NFS advisory locking coordinates processes using the same local mounted
 client. It should not be treated as a lock service shared by separate machines.
+
+The ownership lab makes that boundary concrete. Compare independent output
+files, byte ranges inside one file, and separate mounts publishing the same
+remote ref.
+
+<MountWriterOwnershipLab />
 
 ## Stop writers before reviewing
 
@@ -518,3 +542,6 @@ After publish:
 For exact syntax, backend options, and machine-readable commands, use the
 [`crab mount` reference](/docs/cli/reference/crab-mount). For choosing between
 mounting and selective hydration, continue with [How do you work with a repository larger than your disk?](/library/lazy-checkout-fuse).
+
+The knowledge check below closes the guide at the most important operational
+boundary: turning a busy writable overlay into a stable, reviewable commit.
