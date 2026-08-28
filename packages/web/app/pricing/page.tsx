@@ -1,5 +1,12 @@
 import { Fragment } from "react"
-import { Download, Check, Minus, ArrowRight, MailIcon } from "lucide-react"
+import {
+  ArrowRight,
+  Bell,
+  Check,
+  Download,
+  GitBranch,
+  Minus,
+} from "lucide-react"
 
 import { MarketingLayout } from "@/components/marketing-layout"
 import { CTASection } from "@/components/marketing/cta-section"
@@ -23,7 +30,7 @@ import { createPageMetadata } from "@/lib/metadata"
 export const metadata = createPageMetadata({
   title: "Pricing",
   description:
-    "Crab is free for developers. Enterprise teams get SSO, managed caching, audit logs, and priority support starting at $39/seat/month.",
+    "Crab is free for developers. Enterprise auth, managed caching, audit logs, and priority support are coming soon.",
   path: "/pricing",
 })
 
@@ -36,24 +43,28 @@ interface TierFeature {
 
 interface Tier {
   name: string
-  badge?: string
+  status: string
   price: string
   priceSuffix?: string
   description: string
   cta: { label: string; href: string }
   features: TierFeature[]
-  highlighted?: boolean
+  available: boolean
 }
 
 const tiers: Tier[] = [
   {
     name: "Developer",
-    badge: "Free Forever",
+    status: "Available now",
     price: "$0",
-    priceSuffix: "/ month",
+    priceSuffix: "forever",
     description:
-      "Full-featured CLI. You pay only your cloud provider's storage costs.",
-    cta: { label: "Get Started", href: "/docs/cli/getting-started/installation" },
+      "The complete open-source CLI. You only pay your cloud provider for storage and requests.",
+    cta: {
+      label: "Get Started",
+      href: "/docs/cli/getting-started/installation",
+    },
+    available: true,
     features: [
       { text: "Unlimited repos & file size", included: true },
       { text: "All cloud providers (S3, GCS, Azure)", included: true },
@@ -68,17 +79,25 @@ const tiers: Tier[] = [
   },
   {
     name: "Enterprise",
-    badge: "For Teams",
-    price: "$39",
-    priceSuffix: "/ seat / month",
+    status: "Coming soon",
+    price: "Coming Soon",
     description:
-      "Everything in Developer plus auth, caching, coordination, and dedicated support for production teams.",
-    cta: { label: "Contact Us", href: "https://docs.google.com/forms/d/e/1FAIpQLScK1w9hzDAZwOaMl7YxJY4tq-izcP0O7tfSncqac1VBzcv3Cw/viewform?usp=dialog" },
-    highlighted: true,
+      "Managed auth, caching, coordination, and production support for teams. Join the waitlist for launch updates.",
+    cta: {
+      label: "Join the Waitlist",
+      href: "https://docs.google.com/forms/d/e/1FAIpQLScK1w9hzDAZwOaMl7YxJY4tq-izcP0O7tfSncqac1VBzcv3Cw/viewform?usp=dialog",
+    },
+    available: false,
     features: [
       { text: "Everything in Developer", included: true },
-      { text: "SSO via OIDC, SAML, Azure Entra, GCP Federation", included: true },
-      { text: "Credential vending (short-lived scoped tokens)", included: true },
+      {
+        text: "SSO via OIDC, SAML, Azure Entra, GCP Federation",
+        included: true,
+      },
+      {
+        text: "Credential vending (short-lived scoped tokens)",
+        included: true,
+      },
       { text: "Repo-level RBAC & access policies", included: true },
       { text: "Managed chunk cache (10–50× faster hydrate)", included: true },
       { text: "Regional cache nodes", included: true },
@@ -139,37 +158,37 @@ const faqItems: FAQItem[] = [
   {
     question: "Is the CLI really free? What's the catch?",
     answer:
-      "No catch. The Crab CLI is open-source and free forever. You pay only your cloud provider's standard storage and request costs — the same rates you'd pay using S3/GCS/Azure directly. We monetize through the Enterprise tier which adds managed services (auth, caching, coordination) and support SLAs that teams need at scale.",
+      "No catch. The Crab CLI is open-source and free forever. You pay only your cloud provider's standard storage and request costs — the same rates you'd pay using S3, GCS, or Azure directly. Enterprise managed services are coming soon.",
   },
   {
-    question: "What does the Enterprise tier actually host?",
+    question: "When will Enterprise be available?",
     answer:
-      "Enterprise adds a managed control plane: an auth service for SSO/credential vending, a distributed chunk cache for faster hydrates, coordination services for safe concurrent pushes, and an audit log. Your data still lives in your own cloud bucket — we never store your files. The control plane handles identity, caching, and coordination only.",
+      "Enterprise is coming soon. Join the waitlist to hear when early access opens and to receive launch and pricing updates.",
   },
   {
-    question: "Can I try Enterprise features before committing?",
+    question: "What is planned for Enterprise?",
     answer:
-      "Yes. We offer a 14-day free trial for teams of up to 20 seats. No credit card required to start. Fill out our contact form to get set up.",
+      "The planned Enterprise control plane adds SSO and credential vending, a distributed chunk cache, coordination services for concurrent pushes, audit logs, and priority support. Your repository data will remain in your own cloud bucket.",
   },
   {
-    question: "How does per-seat pricing work?",
+    question: "How will Enterprise be priced?",
     answer:
-      "A seat is any user who authenticates through the Enterprise auth service. CI/CD service accounts count as one seat regardless of how many pipelines use them. Annual billing is $33/seat/month (15% discount). Volume discounts available for 50+ seats.",
+      "Final Enterprise packaging and pricing have not been announced. Join the waitlist and we'll share the details before launch.",
   },
   {
     question: "What are data transfer (egress) costs?",
     answer:
-      "Cloud providers charge for data leaving their network. When you pull (hydrate) files, you pay egress fees — typically $0.09/GB for AWS S3. Crab's chunk-level deduplication minimizes egress by only downloading changed chunks. Enterprise customers with the managed cache service see significantly reduced egress since repeated pulls are served from cache.",
+      "Cloud providers charge for data leaving their network. When you pull (hydrate) files, you pay egress fees — typically $0.09/GB for AWS S3. Crab's chunk-level deduplication minimizes egress by only downloading changed chunks. The planned Enterprise cache will also reduce repeated downloads from origin storage.",
   },
   {
     question: "Do I still pay cloud storage costs on Enterprise?",
     answer:
-      "Yes. The Enterprise fee covers the managed services (auth, cache, coordination, support). Cloud storage costs remain pass-through — your data lives in your bucket and you pay your provider directly. The cost calculator below estimates those cloud costs.",
+      "Yes. Cloud storage costs remain separate because your data stays in your bucket and you pay your provider directly. Enterprise pricing will cover the managed services around that storage. The calculator below estimates the cloud portion of your costs.",
   },
   {
-    question: "What if I need something between Developer and Enterprise?",
+    question: "Can my team use Crab today?",
     answer:
-      "We're considering a Team tier with SSO + cache at a lower price point. If that interests you, reach out via our contact form and we'll keep you in the loop.",
+      "Yes. Teams can use the free CLI today with their existing cloud IAM and bucket policies. Enterprise will add managed identity, caching, coordination, and support when it launches.",
   },
 ]
 
@@ -253,9 +272,15 @@ function StorageReferenceTable({
 
 /* ─── Feature cell renderer ─── */
 
-function FeatureCell({ value }: { value: string | boolean }) {
+function FeatureCell({
+  value,
+  includedLabel = "Included",
+}: {
+  value: string | boolean
+  includedLabel?: string
+}) {
   if (value === true) {
-    return <Check className="size-5 text-primary" aria-label="Included" />
+    return <Check className="size-5 text-primary" aria-label={includedLabel} />
   }
   if (value === false) {
     return (
@@ -274,72 +299,144 @@ export default function PricingPage() {
   return (
     <MarketingLayout>
       {/* Hero */}
-      <section className="mx-auto max-w-5xl px-6 pt-32 pb-12 text-center">
-        <Reveal>
-          <Badge variant="outline" className="mb-4">
-            Simple, transparent pricing
-          </Badge>
-          <h1 className="text-heading-hero font-bold tracking-tight text-foreground">
-            Free for Developers.
-            <br />
-            Built for Enterprise.
-          </h1>
-          <p className="mx-auto mt-4 max-w-2xl text-lg text-muted-foreground">
-            The CLI is free — no SaaS fee, no per-seat charge.
-            Enterprise teams get managed auth, caching, and coordination
-            services with priority support.
-          </p>
-        </Reveal>
+      <section className="border-b border-border/70 bg-linear-to-b from-primary/10 via-background to-background">
+        <div className="mx-auto max-w-6xl px-6 pt-32 pb-20 text-center md:pt-40 md:pb-24">
+          <Reveal>
+            <Badge variant="outline" className="mb-5 bg-background/80">
+              Simple, transparent pricing
+            </Badge>
+            <h1 className="text-heading-hero font-bold tracking-tight text-foreground">
+              One free CLI.
+              <br />
+              Enterprise is on the way.
+            </h1>
+            <p className="mx-auto mt-5 max-w-2xl text-lg leading-relaxed text-muted-foreground">
+              Crab is free forever. Bring your own cloud bucket and pay your
+              provider directly. Managed services for teams are coming soon.
+            </p>
+
+            <div className="mx-auto mt-10 max-w-2xl rounded-(--card-radius) border border-border bg-card/90 p-5 text-left shadow-card backdrop-blur sm:p-6">
+              <div className="grid grid-cols-[1fr_48px_1fr] items-center gap-3 sm:grid-cols-[1fr_88px_1fr] sm:gap-5">
+                <div className="flex items-center gap-3">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm">
+                    <Check className="size-4" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <p className="font-mono text-[0.625rem] tracking-[0.18em] text-primary uppercase">
+                      Available now
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-foreground">
+                      Developer
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center" aria-hidden="true">
+                  <span className="h-px flex-1 border-t border-dashed border-primary/50" />
+                  <GitBranch className="mx-2 size-4 text-primary" />
+                  <span className="h-px flex-1 border-t border-dashed border-primary/50" />
+                </div>
+                <div className="flex items-center justify-end gap-3">
+                  <div className="text-right">
+                    <p className="font-mono text-[0.625rem] tracking-[0.18em] text-muted-foreground uppercase">
+                      Coming soon
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-foreground">
+                      Enterprise
+                    </p>
+                  </div>
+                  <span className="size-9 shrink-0 rounded-full border-2 border-dashed border-primary/50 bg-primary/5" />
+                </div>
+              </div>
+            </div>
+          </Reveal>
+        </div>
       </section>
 
       {/* Pricing Tier Cards */}
-      <section className="mx-auto max-w-5xl px-6 py-12">
+      <section className="mx-auto max-w-6xl px-6 py-(--section-padding)">
         <Reveal>
-          <div className="grid gap-8 md:grid-cols-2">
+          <div className="mb-10 max-w-2xl">
+            <p className="font-mono text-xs font-semibold tracking-[0.16em] text-primary uppercase">
+              Plans
+            </p>
+            <h2 className="mt-3 text-heading-lg font-bold tracking-tight text-foreground">
+              Start today. Scale when you need to.
+            </h2>
+            <p className="mt-3 text-muted-foreground">
+              The Developer plan is the full Crab CLI, not a limited trial.
+              Enterprise adds the managed layer teams need at scale.
+            </p>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
             {tiers.map((tier) => (
               <div
                 key={tier.name}
-                className={`relative flex flex-col rounded-(--card-radius) border p-(--card-padding) transition-shadow duration-(--duration-fast) ${
-                  tier.highlighted
-                    ? "border-primary bg-primary/5 shadow-md"
-                    : "border-border bg-card shadow-sm"
+                className={`relative flex flex-col overflow-hidden rounded-(--card-radius) border p-6 transition-all duration-(--duration-fast) sm:p-8 ${
+                  tier.available
+                    ? "border-primary/50 bg-card shadow-md"
+                    : "border-dashed border-border bg-muted/30 shadow-sm"
                 }`}
               >
-                {tier.badge && (
-                  <Badge
-                    variant={tier.highlighted ? "default" : "secondary"}
-                    className="mb-4 w-fit"
-                  >
-                    {tier.badge}
-                  </Badge>
+                {tier.available && (
+                  <div className="absolute inset-x-0 top-0 h-1 bg-primary" />
                 )}
-                <h2 className="text-2xl font-bold text-foreground">
-                  {tier.name}
-                </h2>
-                <div className="mt-3 flex items-baseline gap-1">
-                  <span className="text-4xl font-bold tracking-tight text-foreground">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="font-mono text-[0.625rem] font-semibold tracking-[0.18em] text-muted-foreground uppercase">
+                      {tier.name === "Developer" ? "Open source" : "For teams"}
+                    </p>
+                    <h3 className="mt-2 text-2xl font-bold text-foreground">
+                      {tier.name}
+                    </h3>
+                  </div>
+                  <Badge
+                    variant={tier.available ? "default" : "outline"}
+                    className={
+                      tier.available ? "" : "border-dashed bg-background"
+                    }
+                  >
+                    {tier.status}
+                  </Badge>
+                </div>
+                <div className="mt-6 flex min-h-12 items-baseline gap-2">
+                  <span
+                    className={
+                      tier.available
+                        ? "text-5xl font-bold tracking-tight text-foreground"
+                        : "text-3xl font-bold tracking-tight text-foreground"
+                    }
+                  >
                     {tier.price}
                   </span>
                   {tier.priceSuffix && (
-                    <span className="text-sm text-muted-foreground">
+                    <span className="text-sm font-medium text-muted-foreground">
                       {tier.priceSuffix}
                     </span>
                   )}
                 </div>
-                <p className="mt-3 text-sm text-muted-foreground">
+                <p className="mt-4 max-w-lg text-sm leading-relaxed text-muted-foreground">
                   {tier.description}
                 </p>
 
                 <Button
-                  variant={tier.highlighted ? "default" : "outline"}
-                  className="mt-6 w-full"
+                  variant={tier.available ? "default" : "outline"}
+                  size="lg"
+                  className="mt-7 w-full"
                   render={<a href={tier.cta.href} />}
                 >
                   {tier.cta.label}
-                  <ArrowRight className="ml-2 size-4" />
+                  {tier.available ? (
+                    <ArrowRight className="ml-1 size-4" />
+                  ) : (
+                    <Bell className="ml-1 size-4" />
+                  )}
                 </Button>
 
-                <ul className="mt-6 flex-1 space-y-3 border-t border-border pt-6">
+                <p className="mt-8 border-t border-border pt-6 font-mono text-[0.625rem] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
+                  {tier.available ? "Included today" : "Planned for launch"}
+                </p>
+                <ul className="mt-4 flex-1 space-y-3">
                   {tier.features.map((f) => (
                     <li key={f.text} className="flex items-start gap-3 text-sm">
                       {f.included ? (
@@ -360,10 +457,10 @@ export default function PricingPage() {
                   ))}
                 </ul>
 
-                {tier.name === "Enterprise" && (
-                  <p className="mt-4 text-xs text-muted-foreground">
-                    Annual billing: $33/seat/month. Volume discounts for 50+
-                    seats.
+                {!tier.available && (
+                  <p className="mt-5 rounded-md border border-dashed border-border bg-background px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                    Launch timing and final pricing will be shared with waitlist
+                    members first.
                   </p>
                 )}
               </div>
@@ -373,13 +470,14 @@ export default function PricingPage() {
       </section>
 
       {/* Detailed Feature Comparison Table */}
-      <section className="mx-auto max-w-5xl px-6 py-(--section-padding)">
-        <Reveal>
+      <section className="border-y border-border/70 bg-muted/30">
+        <Reveal className="mx-auto max-w-6xl px-6 py-(--section-padding)">
           <h2 className="mb-2 text-heading-lg font-bold tracking-tight text-foreground">
-            Full Feature Comparison
+            Compare what ships today with what&apos;s next
           </h2>
           <p className="mb-8 text-muted-foreground">
-            Everything included in each tier, broken down by category.
+            Enterprise capabilities below are planned and will become available
+            when the plan launches.
           </p>
           <ResponsiveTableWrapper>
             <Table>
@@ -397,50 +495,54 @@ export default function PricingPage() {
                   <TableHead className="text-center">
                     <div className="flex flex-col items-center gap-1">
                       <span className="font-semibold">Enterprise</span>
-                      <span className="text-xs font-normal text-muted-foreground">
-                        $39/seat/mo
-                      </span>
+                      <Badge
+                        variant="outline"
+                        className="border-dashed bg-background"
+                      >
+                        Coming soon
+                      </Badge>
                     </div>
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {featureComparison.map((row, idx) => {
-                    const showCategory =
-                      idx === 0 ||
-                      row.category !== featureComparison[idx - 1]?.category
-                    return (
-                      <Fragment key={row.feature}>
-                        {showCategory && (
-                          <TableRow className="bg-muted/70">
-                            <TableCell
-                              colSpan={3}
-                              className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-                            >
-                              {row.category}
-                            </TableCell>
-                          </TableRow>
-                        )}
-                        <TableRow
-                          className={idx % 2 === 0 ? "" : "bg-muted/30"}
-                        >
-                          <TableCell className="font-medium">
-                            {row.feature}
-                          </TableCell>
-                          <TableCell className="text-center">
-                            <span className="flex items-center justify-center">
-                              <FeatureCell value={row.developer} />
-                            </span>
-                          </TableCell>
-                          <TableCell className="text-center">
-                            <span className="flex items-center justify-center">
-                              <FeatureCell value={row.enterprise} />
-                            </span>
+                  const showCategory =
+                    idx === 0 ||
+                    row.category !== featureComparison[idx - 1]?.category
+                  return (
+                    <Fragment key={row.feature}>
+                      {showCategory && (
+                        <TableRow className="bg-muted/70">
+                          <TableCell
+                            colSpan={3}
+                            className="text-xs font-semibold tracking-wide text-muted-foreground uppercase"
+                          >
+                            {row.category}
                           </TableCell>
                         </TableRow>
-                      </Fragment>
-                    )
-                  })}
+                      )}
+                      <TableRow className={idx % 2 === 0 ? "" : "bg-muted/30"}>
+                        <TableCell className="font-medium">
+                          {row.feature}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <span className="flex items-center justify-center">
+                            <FeatureCell value={row.developer} />
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <span className="flex items-center justify-center">
+                            <FeatureCell
+                              value={row.enterprise}
+                              includedLabel="Planned for Enterprise"
+                            />
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    </Fragment>
+                  )
+                })}
               </TableBody>
             </Table>
           </ResponsiveTableWrapper>
@@ -448,14 +550,14 @@ export default function PricingPage() {
       </section>
 
       {/* Cost Calculator */}
-      <section className="mx-auto max-w-5xl px-6 py-(--section-padding)">
+      <section className="mx-auto max-w-6xl px-6 py-(--section-padding)">
         <Reveal>
           <h2 className="mb-2 text-heading-lg font-bold tracking-tight text-foreground">
             Cloud Storage Cost Calculator
           </h2>
           <p className="mb-8 text-muted-foreground">
-            Both tiers pay cloud storage costs directly to your provider.
-            Estimate your monthly spend below.
+            Cloud storage is billed by your provider, separately from Crab.
+            Estimate that monthly spend below.
           </p>
           <CostCalculator />
         </Reveal>
@@ -469,13 +571,14 @@ export default function PricingPage() {
       </section>
 
       {/* FAQ */}
-      <section className="mx-auto max-w-5xl px-6 py-(--section-padding)">
+      <section className="mx-auto max-w-6xl px-6 py-(--section-padding)">
         <Reveal>
           <h2 className="mb-2 text-heading-lg font-bold tracking-tight text-foreground">
             Frequently Asked Questions
           </h2>
           <p className="mb-8 text-muted-foreground">
-            Common questions about Crab pricing and the Enterprise tier.
+            What is free today, what your cloud provider charges, and what to
+            expect from Enterprise.
           </p>
           <div className="space-y-3">
             {faqItems.map((item) => (
@@ -502,14 +605,14 @@ export default function PricingPage() {
       </section>
 
       {/* Cloud Storage Reference Tables */}
-      <section className="mx-auto max-w-5xl px-6 py-(--section-padding)">
+      <section className="mx-auto max-w-6xl px-6 py-(--section-padding)">
         <Reveal>
           <h2 className="mb-2 text-heading-lg font-bold tracking-tight text-foreground">
             Cloud Storage Reference Pricing
           </h2>
           <p className="mb-8 text-muted-foreground">
-            Current rates from major cloud providers. These apply to both tiers
-            — the recommended class for most Crab workloads is highlighted.
+            Current rates from major cloud providers. The recommended class for
+            most Crab workloads is highlighted.
           </p>
 
           <StorageReferenceTable
@@ -536,17 +639,17 @@ export default function PricingPage() {
       </section>
 
       <CTASection
-        headline="Ready to get started?"
-        description="Start free with the CLI today, or talk to us about Enterprise for your team."
+        headline="Start free. Stay in the loop."
+        description="Install the complete CLI today, or join the Enterprise waitlist for launch updates."
         primaryCTA={{
           label: "Download CLI",
           href: "/docs/cli/getting-started/installation",
           icon: Download,
         }}
         secondaryCTA={{
-          label: "Contact Us",
+          label: "Join the Waitlist",
           href: "https://docs.google.com/forms/d/e/1FAIpQLScK1w9hzDAZwOaMl7YxJY4tq-izcP0O7tfSncqac1VBzcv3Cw/viewform?usp=dialog",
-          icon: MailIcon,
+          icon: Bell,
         }}
         variant="accent"
       />
