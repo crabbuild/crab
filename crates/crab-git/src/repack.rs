@@ -306,8 +306,10 @@ pub fn repack_repository_geometric(
 ///
 /// This is the object-store maintenance primitive: callers select the
 /// geometric roll-up suffix and leave stable large packs remote. Installed Git
-/// packs are self-contained, so enumerating and repacking their indexed OIDs
-/// preserves the selected object universe without downloading untouched packs.
+/// packs are self-contained, so Git can consume their verified pack basenames
+/// directly without downloading or serializing an additional OID list. The
+/// generated pack is still compared with the source object universe before it
+/// leaves this function.
 pub fn consolidate_pack_suffix(
     sources: &[RepackSource],
 ) -> Result<GeometricRepackedRepository, RepackError> {
@@ -349,22 +351,24 @@ pub fn consolidate_pack_suffix(
         }
     }
 
-    let object_list = workspace.path().join("selected-objects.txt");
-    let mut input = File::create(&object_list)
-        .map_err(|source| io_error(format!("create {}", object_list.display()), source))?;
-    for oid in &source_oids {
-        writeln!(input, "{oid}")
-            .map_err(|source| io_error(format!("write {}", object_list.display()), source))?;
+    let pack_list = workspace.path().join("selected-packs.txt");
+    let mut input = File::create(&pack_list)
+        .map_err(|source| io_error(format!("create {}", pack_list.display()), source))?;
+    for source in sources {
+        let pack_name = format!("pack-{}.pack", source.canonical_id);
+        writeln!(input, "{pack_name}")
+            .map_err(|source| io_error(format!("write {}", pack_list.display()), source))?;
     }
     drop(input);
-    let stdin = File::open(&object_list)
-        .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
+    let stdin = File::open(&pack_list)
+        .map_err(|source| io_error(format!("open {}", pack_list.display()), source))?;
     let output_prefix = pack_dir.join("pack-crab-rollup");
     run_git(
         Command::new("git")
             .arg(format!("--git-dir={}", source_git.display()))
             .arg("pack-objects")
             .arg("--quiet")
+            .arg("--stdin-packs")
             .arg("--reuse-delta")
             .arg("--reuse-object")
             .arg("--delta-base-offset")

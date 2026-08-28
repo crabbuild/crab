@@ -471,6 +471,14 @@ artifacts continue to use independent full-file verification. This removes a
 second full disk pass from sparse/dense response assembly without weakening
 the response-size, cancellation, or downstream Git integrity boundaries.
 
+The complete-response consolidation follow-up now feeds Git's verified source
+pack basenames through `pack-objects --stdin-packs`. This removes the
+repository-sized temporary OID-list serialization from the cold full-clone
+producer while retaining source-pack validation and the caller's exact
+authorized-object-set check. The minimum supported Git compatibility matrix
+must continue to cover this mode; a current-head Kubernetes measurement is
+required before claiming the response-pack SLO is closed.
+
 The upload-pack admission boundary is now explicit: capability discovery reads
 the manifest, active ref-journal marker presence, and generation-owner lease
 without mutating derived state. It withholds protocol-v2 while an active marker is

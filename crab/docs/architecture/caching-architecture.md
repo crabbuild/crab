@@ -101,6 +101,10 @@ the client streams them directly to the temporary pack file. This keeps a
 large-clone cache hit off the Rust heap and enforces the manifest's pack-size
 commitment before Git installs the result. A cache miss or cache-service error
 falls back to the origin stream without changing the correctness boundary.
+When a full response must combine multiple verified source packs, the producer
+passes their pack basenames to Git's `--stdin-packs` mode instead of building a
+repository-sized OID list; the resulting pack is still checked against the
+exact authorized selection before publication.
 
 Range reads ask the cache service first when service caching is enabled. The
 server serves warm ranges directly from cache. On a cold range miss, the server
