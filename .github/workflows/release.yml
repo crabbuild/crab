@@ -218,12 +218,12 @@ jobs:
       - name: Run workflow smoke against release candidate
         env:
           CRAB_RUSTFS_IMAGE: ${{ env.WORKFLOW_RUSTFS_IMAGE }}
-          GITHUB_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
           python3 crab/scripts/e2e/run_dvc_workflow_smoke.py \
             --root "${WORKFLOW_RUSTFS_ROOT}" \
             --run-id "${WORKFLOW_RUSTFS_RUN_ID}" \
+            --source-sha "${{ needs.prepare.outputs.source_sha }}" \
             --bucket "${WORKFLOW_RUSTFS_BUCKET}" \
             --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" \
             --region "${WORKFLOW_RUSTFS_REGION}" \
