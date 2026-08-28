@@ -373,7 +373,8 @@ fanout, owner failover, and rollout gates remain open.
 
 ### Current-head locator fanout and compaction qualification
 
-The locator fanout hardening is committed as ad93a23d. Reader and writer
+The locator fanout hardening is committed as ad93a23d, with the follow-up
+compaction throughput correction in dd881d75. Reader and writer
 lookup selectors now account for active SlateDB SST fan-out: sparse requests
 keep exact OID gets, while dense requests use one bounded object-family scan
 when that is cheaper. A scan cannot read beyond the catalog's ordinal row
@@ -401,6 +402,17 @@ The policy and in-memory ordering regressions pass, and the result closes the
 observed small-catalog/SST-fanout request spike for this workload. Repeated
 isolated runs, full-profile growth, interruption, provider, failover, and
 rollout evidence remain open.
+
+The release binary dd881d75 completed the isolated RustFS Kubernetes smoke
+codex-dd881d75-k8s-100-20260827 with 101 successful pushes, including the
+generation-100 maintenance checkpoint. The previously failing single-fetch
+configuration stopped at that checkpoint with a throttled error after 340.5
+seconds; four bounded read-ahead fetch tasks completed the generation-100
+compaction pass in 145.0 seconds and the complete owner stage in 301.9
+seconds. Cold, warm, blobless, depth-1/10/100/1000 clones and full fsck all
+passed, and the run-owned remote prefix was cleaned. The report is accepted
+by the verifier with --allow-smoke; it is evidence for the maintenance
+regression only, not the required 1,000-replay full-profile gate.
 
 ### Current-head shared-visibility and team-load qualification
 
