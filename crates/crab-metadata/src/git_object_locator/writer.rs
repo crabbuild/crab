@@ -13,14 +13,14 @@ use slatedb::config::{
 use tracing::{debug, warn};
 
 use super::format::{
-    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
-    PACK_OBJECT_FAMILY, PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE,
+    LocatorMetadata, METADATA_KEY, OBJECT_FAMILY, ORDINAL_METADATA_FAMILY, PACK_BINDINGS_KEY,
+    PACK_FAMILY, PACK_OBJECT_FAMILY, PACK_OBJECT_INDEX_MARKER_KEY, PACK_OBJECT_INDEX_MARKER_VALUE,
     PACK_OBJECT_INDEX_REBUILDING_VALUE, PACK_OBJECT_VALUE_LEN, StoredObjectLocation, coverage,
-    decode_metadata, decode_object_key, decode_object_location, decode_pack_key,
-    decode_pack_object_key, decode_pack_object_ordinal, decode_pack_record, encode_metadata,
-    encode_object_location, encode_object_metadata, encode_pack_object_ordinal, encode_pack_record,
-    object_key, ordinal_key, ordinal_metadata_key, pack_key, pack_object_key, pack_object_prefix,
-    validate_location_for_pack,
+    decode_metadata, decode_object_key, decode_object_location, decode_pack_bindings,
+    decode_pack_key, decode_pack_object_key, decode_pack_object_ordinal, decode_pack_record,
+    encode_metadata, encode_object_location, encode_object_metadata, encode_pack_bindings,
+    encode_pack_object_ordinal, encode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
+    pack_key, pack_object_key, pack_object_prefix, validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectCatalogStats, GitObjectLocatorEntry,
@@ -244,7 +244,7 @@ impl GitObjectLocatorWriter {
             metadata
         };
 
-        let bindings = match load_bindings(&db).await {
+        let bindings = match load_bindings(&db, metadata).await {
             Ok(bindings) => bindings,
             Err(error) => return Err((db, error)),
         };
@@ -445,6 +445,7 @@ impl GitObjectLocatorWriter {
             identity: self.metadata.identity,
         };
         let mut batch = metadata_batch(new_metadata);
+        batch.delete(PACK_BINDINGS_KEY);
         for binding in &additions {
             let key = pack_key(binding.pack_slot).ok_or_else(|| {
                 MetadataError::Internal("Git locator allocated pack slot zero".to_owned())
@@ -891,6 +892,7 @@ impl GitObjectLocatorWriter {
         self.metadata.identity = None;
         self.catalog_dirty = true;
         let mut reset = metadata_batch(self.metadata);
+        reset.delete(PACK_BINDINGS_KEY);
         reset.put(
             PACK_OBJECT_INDEX_MARKER_KEY,
             PACK_OBJECT_INDEX_REBUILDING_VALUE,
@@ -995,6 +997,7 @@ impl GitObjectLocatorWriter {
             );
         }
         if !stale_slots.is_empty() {
+            deletes.delete(PACK_BINDINGS_KEY);
             write_batch(&self.db, deletes, "sweep compact locator packs").await?;
             self.writes_durable = false;
             self.catalog_dirty = true;
@@ -1190,12 +1193,14 @@ impl GitObjectLocatorWriter {
             next_object_ordinal: self.metadata.next_object_ordinal,
             identity: Some(identity),
         };
-        write_batch(
-            &self.db,
-            metadata_batch(metadata),
-            "write compact locator coverage",
-        )
-        .await?;
+        let mut publication = metadata_batch(metadata);
+        let bindings = self.bindings.iter().map(|(slot, record)| (*slot, *record));
+        let bindings = bindings.collect::<Vec<_>>();
+        publication.put(
+            PACK_BINDINGS_KEY,
+            encode_pack_bindings(identity, metadata.next_pack_slot, &bindings),
+        );
+        write_batch(&self.db, publication, "write compact locator coverage").await?;
         self.writes_durable = false;
         // Object rows and their coverage marker share the same active
         // memtable, so one flush makes the marker impossible to observe
@@ -1557,7 +1562,22 @@ async fn database_is_empty(db: &slatedb::Db) -> Result<bool> {
         .map_err(read_error)
 }
 
-async fn load_bindings(db: &slatedb::Db) -> Result<HashMap<u64, GitPackLocatorRecord>> {
+async fn load_bindings(
+    db: &slatedb::Db,
+    metadata: LocatorMetadata,
+) -> Result<HashMap<u64, GitPackLocatorRecord>> {
+    if let Some(value) = db.get(PACK_BINDINGS_KEY).await.map_err(read_error)? {
+        let identity = metadata
+            .identity
+            .ok_or_else(|| corrupt("pack", "binding snapshot has no catalog identity"))?;
+        return Ok(
+            decode_pack_bindings(&value, identity, metadata.next_pack_slot)
+                .ok_or_else(|| corrupt("pack", "invalid compact locator binding snapshot"))?
+                .into_iter()
+                .collect(),
+        );
+    }
+
     let mut rows = db
         .scan_prefix([PACK_FAMILY], ..)
         .await
@@ -1569,7 +1589,10 @@ async fn load_bindings(db: &slatedb::Db) -> Result<HashMap<u64, GitPackLocatorRe
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack key"))?;
         let record = decode_pack_record(&row.value)
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack record"))?;
-        if bindings.insert(slot, record).is_some() || !pack_ids.insert(record.pack_id) {
+        if slot >= metadata.next_pack_slot
+            || bindings.insert(slot, record).is_some()
+            || !pack_ids.insert(record.pack_id)
+        {
             return Err(corrupt(
                 "pack",
                 "duplicate compact locator pack slot or identity",

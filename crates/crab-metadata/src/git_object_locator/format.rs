@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crab_xet::hash::MerkleHash;
 
 use super::{
@@ -6,6 +8,9 @@ use super::{
 };
 
 pub(crate) const METADATA_KEY: [u8; 1] = [0x00];
+// One immutable binding dictionary is published with each catalog checkpoint.
+// Readers use it instead of scanning the pack family across every active SST.
+pub(crate) const PACK_BINDINGS_KEY: [u8; 2] = [0x00, 0x01];
 pub(crate) const OBJECT_FAMILY: u8 = 0x01;
 pub(crate) const PACK_FAMILY: u8 = 0x02;
 pub(crate) const ORDINAL_FAMILY: u8 = 0x03;
@@ -27,6 +32,9 @@ pub(crate) const PACK_OBJECT_VALUE_LEN: usize = 4;
 pub(crate) const PACK_OBJECT_INDEX_MARKER_KEY: [u8; 2] = [PACK_OBJECT_FAMILY, 0xff];
 pub(crate) const PACK_OBJECT_INDEX_REBUILDING_VALUE: [u8; 1] = [0];
 pub(crate) const PACK_OBJECT_INDEX_MARKER_VALUE: [u8; 1] = [1];
+const PACK_BINDINGS_FORMAT_FINGERPRINT: [u8; 8] = *b"CRABBND1";
+const PACK_BINDINGS_HEADER_LEN: usize = 56;
+const PACK_BINDING_RECORD_LEN: usize = 8 + PACK_VALUE_LEN;
 
 const PACK_HEADER_LEN: u64 = 12;
 const PACK_TRAILER_LEN: u64 = 20;
@@ -286,6 +294,71 @@ pub(crate) fn decode_pack_record(bytes: &[u8]) -> Option<GitPackLocatorRecord> {
         return None;
     }
     Some(record)
+}
+
+pub(crate) fn encode_pack_bindings(
+    identity: GitObjectCatalogIdentity,
+    next_pack_slot: u64,
+    bindings: &[(u64, GitPackLocatorRecord)],
+) -> Vec<u8> {
+    let mut bindings = bindings.to_vec();
+    bindings.sort_unstable_by_key(|(slot, _)| *slot);
+    let capacity = PACK_BINDINGS_HEADER_LEN
+        .saturating_add(bindings.len().saturating_mul(PACK_BINDING_RECORD_LEN));
+    let mut bytes = Vec::with_capacity(capacity);
+    bytes.extend_from_slice(&PACK_BINDINGS_FORMAT_FINGERPRINT);
+    bytes.extend_from_slice(&<[u8; 32]>::from(identity.catalog_digest));
+    bytes.extend_from_slice(&next_pack_slot.to_be_bytes());
+    bytes.extend_from_slice(
+        &u64::try_from(bindings.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (slot, record) in bindings {
+        bytes.extend_from_slice(&slot.to_be_bytes());
+        bytes.extend_from_slice(&encode_pack_record(record));
+    }
+    bytes
+}
+
+pub(crate) fn decode_pack_bindings(
+    bytes: &[u8],
+    identity: GitObjectCatalogIdentity,
+    next_pack_slot: u64,
+) -> Option<Vec<(u64, GitPackLocatorRecord)>> {
+    if bytes.len() < PACK_BINDINGS_HEADER_LEN
+        || bytes[..8] != PACK_BINDINGS_FORMAT_FINGERPRINT
+        || bytes[8..40] != <[u8; 32]>::from(identity.catalog_digest)
+        || u64::from_be_bytes(bytes[40..48].try_into().ok()?) != next_pack_slot
+    {
+        return None;
+    }
+    let count = u64::from_be_bytes(bytes[48..56].try_into().ok()?);
+    let count = usize::try_from(count).ok()?;
+    let records_len = count.checked_mul(PACK_BINDING_RECORD_LEN)?;
+    let expected_len = PACK_BINDINGS_HEADER_LEN.checked_add(records_len)?;
+    if bytes.len() != expected_len {
+        return None;
+    }
+
+    let mut bindings = Vec::with_capacity(count);
+    let mut pack_ids = HashSet::with_capacity(count);
+    let mut previous_slot = 0;
+    for index in 0..count {
+        let offset = PACK_BINDINGS_HEADER_LEN + index * PACK_BINDING_RECORD_LEN;
+        let slot = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
+        if slot == 0 || slot >= next_pack_slot || slot <= previous_slot {
+            return None;
+        }
+        let record_start = offset + 8;
+        let record = decode_pack_record(&bytes[record_start..record_start + PACK_VALUE_LEN])?;
+        if !pack_ids.insert(record.pack_id) {
+            return None;
+        }
+        bindings.push((slot, record));
+        previous_slot = slot;
+    }
+    Some(bindings)
 }
 
 pub(crate) fn encode_metadata(metadata: LocatorMetadata) -> [u8; METADATA_VALUE_LEN] {
@@ -556,6 +629,44 @@ mod tests {
         invalid[32..40].copy_from_slice(&1_u64.to_be_bytes());
         invalid[80..].copy_from_slice(&(MIN_PACK_SIZE - 1).to_be_bytes());
         assert_eq!(decode_pack_record(&invalid), None);
+    }
+
+    #[test]
+    fn published_pack_binding_snapshot_round_trips_in_slot_order() {
+        let identity = GitObjectCatalogIdentity {
+            generation: 7,
+            pack_index_hash: hash(3),
+            object_count: 4,
+            catalog_digest: hash(5),
+        };
+        let bindings = vec![
+            (
+                9,
+                GitPackLocatorRecord {
+                    pack_id: hash(1),
+                    committed_generation: 7,
+                    pack_index_hash: hash(2),
+                    object_count: 4,
+                    pack_size: 128,
+                },
+            ),
+            (
+                3,
+                GitPackLocatorRecord {
+                    pack_id: hash(2),
+                    committed_generation: 7,
+                    pack_index_hash: hash(3),
+                    object_count: 4,
+                    pack_size: 128,
+                },
+            ),
+        ];
+
+        let encoded = encode_pack_bindings(identity, 10, &bindings);
+        let mut expected = bindings;
+        expected.sort_unstable_by_key(|(slot, _)| *slot);
+        assert_eq!(decode_pack_bindings(&encoded, identity, 10), Some(expected));
+        assert_eq!(decode_pack_bindings(&encoded, identity, 11), None);
     }
 
     #[test]

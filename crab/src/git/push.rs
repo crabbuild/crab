@@ -13121,6 +13121,19 @@ impl PushPipeline {
         }
         let packs = read_bulk_pack_list(store, &self.router, &base.pack_index_hash).await?;
         self.verify_committed_pack_inventory(&packs).await?;
+        // A complete, locally resolvable ref-tip frontier is cheaper than
+        // opening the locator and remains a safe superset boundary for Git's
+        // non-thin pack generation. Legacy or partially local inventories
+        // continue through exact locator/index classification below.
+        let objects_dir = self.objects_dir()?;
+        if let Some(ref_tips) = ref_tip_pack_basis_if_local(&packs, &objects_dir) {
+            info!(
+                pack_count = packs.len(),
+                ref_tips = ref_tips.len(),
+                "step 10: using manifest ref tips before Git locator lookup"
+            );
+            return Ok(Some(RemotePackBasis::RefTips(ref_tips)));
+        }
         let inventory: HashMap<
             MerkleHash,
             crab_metadata::git_object_locator::GitPackInventoryEntry,
@@ -13191,7 +13204,7 @@ impl PushPipeline {
             .collect::<Result<Vec<[u8; 20]>>>()?;
         misses.sort_unstable();
         misses.dedup();
-        let pack_dir = self.objects_dir()?.join("pack");
+        let pack_dir = objects_dir.join("pack");
         for pack in &packs {
             if misses.is_empty() {
                 break;
@@ -20822,6 +20835,120 @@ mod tests {
         let tips = ref_tip_pack_basis_if_local(&[pack], &objects_dir);
 
         assert!(tips.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn large_locator_basis_prefers_local_manifest_ref_tips() {
+        let _guard = GitDirGuard::new();
+        let (fixture, pack_path, idx_path, rev_path, commit, pack_id, pack_size, object_count) =
+            visibility_pack_fixture();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(RecordingReadStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "locator-ref-tip-fast-path".to_owned());
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_size,
+            content_hash: pack_id.clone(),
+            ref_tips: vec![commit.clone()],
+            object_count,
+        };
+        let (pack_index_hash, _, pack_index) =
+            crate::metadata::manifest::compact_pack_index(1, &[pack.clone()])
+                .expect("build ref-tip fast-path pack index");
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index,
+            },
+        )
+        .await
+        .expect("upload ref-tip fast-path pack index");
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack_path).expect("read ref-tip fast-path pack")),
+            )
+            .await
+            .expect("upload ref-tip fast-path pack");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read ref-tip fast-path index")),
+            )
+            .await
+            .expect("upload ref-tip fast-path index");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(
+                    std::fs::read(&rev_path).expect("read ref-tip fast-path reverse index"),
+                ),
+            )
+            .await
+            .expect("upload ref-tip fast-path reverse index");
+        crab_metadata::pack_origin::record_verified_pack_origin(
+            store.as_storage(),
+            router.repo_prefix(),
+            &pack,
+        )
+        .await
+        .expect("record ref-tip fast-path origin");
+
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), commit.clone());
+        manifest.pack_index_hash = pack_index_hash;
+        manifest.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("publish ref-tip fast-path manifest");
+
+        let pipeline = PushPipeline::new(
+            PushConfig {
+                git_dir: Some(fixture.path().join("repo.git")),
+                ..PushConfig::default()
+            },
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline
+            .read_base_manifest()
+            .await
+            .expect("read fast-path base");
+        reads.lock().expect("read log lock").clear();
+        let candidates = (0..GIT_LOCATOR_MIN_CANDIDATES)
+            .map(|value| gix_hash::ObjectId::from([value as u8; 20]))
+            .collect::<Vec<_>>();
+
+        let basis = pipeline
+            .compute_git_object_locator_basis(&candidates)
+            .await
+            .expect("compute ref-tip fast-path basis");
+
+        assert!(matches!(basis, Some(RemotePackBasis::RefTips(tips)) if tips == vec![commit]));
+        assert!(
+            reads
+                .lock()
+                .expect("read log lock")
+                .iter()
+                .all(|path| !path.contains("git_object_catalog_db/")),
+            "ref-tip basis should not open the locator catalog"
+        );
     }
 
     #[test]

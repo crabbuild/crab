@@ -10,10 +10,11 @@ use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
-    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
-    decode_metadata, decode_object_key, decode_object_location, decode_object_metadata,
-    decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_key, decode_pack_record,
-    object_key, ordinal_key, ordinal_metadata_key, validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_BINDINGS_KEY,
+    PACK_FAMILY, decode_metadata, decode_object_key, decode_object_location,
+    decode_object_metadata, decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_bindings,
+    decode_pack_key, decode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
+    validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocation, GitObjectLocator,
@@ -984,7 +985,25 @@ async fn load_state(
         .ok_or_else(|| corrupt("metadata", "compact locator metadata is missing"))?;
     let metadata = decode_metadata(&value)
         .ok_or_else(|| corrupt("metadata", "invalid compact locator metadata"))?;
+    let bindings = match reader.get(PACK_BINDINGS_KEY).await.map_err(read_error)? {
+        Some(value) => {
+            let identity = metadata
+                .identity
+                .ok_or_else(|| corrupt("pack", "binding snapshot has no catalog identity"))?;
+            decode_pack_bindings(&value, identity, metadata.next_pack_slot)
+                .ok_or_else(|| corrupt("pack", "invalid compact locator binding snapshot"))?
+                .into_iter()
+                .collect()
+        }
+        None => load_bindings(reader, metadata.next_pack_slot).await?,
+    };
+    Ok((metadata.identity, bindings))
+}
 
+async fn load_bindings(
+    reader: &slatedb::DbReader,
+    next_pack_slot: u64,
+) -> Result<HashMap<u64, GitPackLocatorRecord>> {
     let mut rows = reader
         .scan_prefix([PACK_FAMILY], ..)
         .await
@@ -996,7 +1015,7 @@ async fn load_state(
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack key"))?;
         let record = decode_pack_record(&row.value)
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack record"))?;
-        if slot >= metadata.next_pack_slot
+        if slot >= next_pack_slot
             || bindings.insert(slot, record).is_some()
             || !pack_ids.insert(record.pack_id)
         {
@@ -1006,7 +1025,7 @@ async fn load_state(
             ));
         }
     }
-    Ok((metadata.identity, bindings))
+    Ok(bindings)
 }
 
 fn is_manifest_missing(error: &slatedb::Error) -> bool {
