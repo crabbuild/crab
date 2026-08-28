@@ -366,6 +366,7 @@ pub fn consolidate_pack_suffix(
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
     let mut source_oids = Vec::<[u8; 20]>::new();
+    let mut source_indexes = Vec::with_capacity(sources.len());
     for source in sources {
         validate_source(source)?;
         let installed = install_pack_file_from_path(
@@ -400,20 +401,18 @@ pub fn consolidate_pack_suffix(
                     })?;
             source_oids.push(oid);
         }
+        source_indexes.push(installed.idx_path);
     }
-    // A source pack may refer to an object in a later source pack. Install
-    // the complete set before fsck so valid cross-pack links are visible.
-    run_git(
-        Command::new("git")
-            .arg(format!("--git-dir={}", source_git.display()))
-            .arg("fsck")
-            .arg("--strict")
-            .arg("--full")
-            .arg("--no-reflogs")
-            .arg("--no-dangling")
-            .arg("--no-progress"),
-        "validate consolidated source packs",
-    )?;
+    // Selected suffixes may reference stable packs outside this operation;
+    // validate each selected pack's own body and index without requiring a
+    // complete repository graph.
+    let mut verify = Command::new("git");
+    verify
+        .arg("verify-pack")
+        .arg("--")
+        .args(&source_indexes)
+        .stdout(Stdio::null());
+    run_git(&mut verify, "verify consolidated source packs")?;
     source_oids.sort_unstable();
     source_oids.dedup();
 
