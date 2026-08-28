@@ -76,7 +76,7 @@ export function FeatureArticleRail({
 
   return (
     <>
-      <details className="group mb-10 rounded-xl border border-border bg-card p-4 xl:hidden">
+      <details className="group mb-10 rounded-xl border border-border bg-card p-4 lg:hidden">
         <summary className="flex min-h-8 cursor-pointer list-none items-center justify-between gap-4 text-sm font-semibold [&::-webkit-details-marker]:hidden">
           <span className="flex items-center gap-2">
             <List size={15} aria-hidden="true" />
@@ -91,7 +91,7 @@ export function FeatureArticleRail({
 
       <nav
         aria-label="Article table of contents"
-        className="sticky top-24 hidden pr-2 xl:block"
+        className="hidden pr-2 lg:block"
       >
         <div className="flex items-center justify-between gap-3 font-mono text-[10px] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
           <span>In this story</span>

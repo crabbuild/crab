@@ -538,6 +538,16 @@ details.faq-item[open] .faq-chevron {
   padding: 0.8rem 0.9rem;
 }
 
+@media (min-width: 64rem) {
+  /* Sticky rails own the outer columns, so wide visuals cannot cover navigation. */
+  [data-feature-article] .wide-article-visual {
+    left: auto;
+    width: 100%;
+    translate: 0 0 !important;
+    transform: none;
+  }
+}
+
 @media (max-width: 640px) {
   .feature-blog-prose > p:first-child::first-letter {
     font-size: 2.8em;

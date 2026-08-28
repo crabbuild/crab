@@ -69,7 +69,6 @@ import {
   BinaryHistoryGrowthDiagram,
   ChunkReuseDiagram,
   GarbageCollectionReachabilityDiagram,
-  PushPublicationBoundaryDiagram,
 } from "@/components/blog/blog-detail-diagrams"
 import {
   CacheHierarchyDiagram,
@@ -210,7 +209,6 @@ export function getMDXComponents(components?: MDXComponents) {
     BinaryHistoryGrowthDiagram,
     ChunkReuseDiagram,
     GarbageCollectionReachabilityDiagram,
-    PushPublicationBoundaryDiagram,
     CacheHierarchyDiagram,
     CrabMentalModelDiagram,
     DedupPipelineDiagram,

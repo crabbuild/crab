@@ -90,9 +90,9 @@ export function FeatureBlogArticle({
 
         <div
           data-feature-article
-          className="mx-auto grid w-full gap-10 px-4 py-16 sm:px-6 lg:py-24 xl:grid-cols-[14rem_minmax(0,48rem)_14rem] xl:items-start xl:justify-between xl:gap-10 xl:px-8 2xl:px-12"
+          className="mx-auto grid w-full max-w-[88rem] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[13rem_minmax(0,48rem)] lg:items-start lg:justify-center lg:gap-10 lg:px-8 lg:py-24 xl:grid-cols-[14rem_minmax(0,48rem)_14rem] xl:justify-between 2xl:px-12"
         >
-          <aside className="min-w-0">
+          <aside className="min-w-0 lg:sticky lg:top-24 lg:self-start">
             <FeatureArticleRail items={toc} />
           </aside>
 
@@ -102,8 +102,8 @@ export function FeatureBlogArticle({
             </div>
           </div>
 
-          <aside className="hidden min-w-0 justify-self-end xl:block">
-            <div className="sticky top-24 w-56 space-y-5">
+          <aside className="hidden min-w-0 justify-self-end xl:sticky xl:top-24 xl:block xl:self-start">
+            <div className="w-56 space-y-5">
               <div className="border-t-2 border-primary pt-4">
                 <div className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-[0.16em] text-primary uppercase">
                   <GitBranch size={13} aria-hidden="true" />
