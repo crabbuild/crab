@@ -1,10 +1,11 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs::File;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
+
+#[cfg(test)]
+use std::process::Command;
 
 use futures_util::StreamExt;
 use schemars::JsonSchema;
@@ -24,7 +25,6 @@ use crate::metadata::manifest::{
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_coordination::PushLock;
-use crab_git::pack_locator::{PackLocationIter, write_pack_reverse_index};
 use crab_storage::{repo_pack_index_path, repo_pack_path, repo_pack_reverse_index_path};
 use crab_xet::hash::MerkleHash;
 
@@ -32,7 +32,6 @@ const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 const REPACK_DISK_RESERVE: u64 = 1024 * 1024 * 1024;
 const MAX_PACKS_PER_OPERATION: u64 = 1_000_000;
 const MAX_REPACK_DOWNLOAD_CONCURRENCY: usize = 16;
-const MAX_REPACK_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 // The owner rolls up a bounded suffix so repeated cycles make progress
 // without allowing one repository to monopolize maintenance or disk I/O.
 const GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS: usize = 4_096;
@@ -986,6 +985,7 @@ fn validate_pack_inventory(router: &StoreLayout, packs: &[PackManifestEntry]) ->
     Ok(())
 }
 
+#[cfg(test)]
 fn run_git(command: &mut Command, operation: &str) -> Result<()> {
     debug!(operation, command = ?command, "running git repack subprocess");
     let status = command.status()?;
@@ -997,8 +997,9 @@ fn run_git(command: &mut Command, operation: &str) -> Result<()> {
     )))
 }
 
+#[cfg(test)]
 fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
-    let mut file = File::open(path)?;
+    let mut file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut file, &mut hasher)?;
@@ -1191,6 +1192,8 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
 
+    use crab_git::pack_locator::{PackLocationIter, write_pack_reverse_index};
+
     use super::*;
 
     fn budget_pack(size: u64, object_count: u64) -> PackManifestEntry {
@@ -1301,23 +1304,6 @@ mod tests {
         assert_eq!(updated.shard_index_hash, manifest.shard_index_hash);
         assert_eq!(updated.commit_graph_hash, None);
         assert_eq!(updated.ref_registry_hash, manifest.ref_registry_hash);
-    }
-
-    #[test]
-    fn repack_inventory_accepts_pack_bodies_larger_than_index_limit() {
-        let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let store = Store::new(backend);
-        let router = StoreLayout::new(store, "org/repack-test".to_owned());
-        let pack_id = "a".repeat(64);
-        let packs = vec![PackManifestEntry {
-            pack_id: pack_id.clone(),
-            size: MAX_REPACK_INDEX_BYTES + 1,
-            content_hash: pack_id,
-            ref_tips: Vec::new(),
-            object_count: 1,
-        }];
-
-        validate_pack_inventory(&router, &packs).expect("large pack body is valid inventory");
     }
 
     #[test]
