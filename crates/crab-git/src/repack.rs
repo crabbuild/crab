@@ -5,9 +5,13 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use crate::pack::{PackError, install_pack_file_from_path};
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
+
+const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
+const MAX_VERIFY_PACKS_PER_COMMAND: usize = 512;
 
 /// A downloaded canonical pack selected by a pinned repository manifest.
 #[derive(Debug, Clone)]
@@ -354,65 +358,69 @@ pub fn repack_repository_geometric(
 pub fn consolidate_pack_suffix(
     sources: &[RepackSource],
 ) -> Result<GeometricRepackedRepository, RepackError> {
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    consolidate_pack_suffix_with_concurrency(sources, concurrency)
+}
+
+/// Consolidate selected packs with bounded local index parallelism.
+///
+/// A zero `index_concurrency` value is treated as one. The source bodies are
+/// independent files, so indexing them concurrently shortens the local
+/// installation phase without changing the order used by Git pack-objects.
+pub fn consolidate_pack_suffix_with_concurrency(
+    sources: &[RepackSource],
+    index_concurrency: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
             pack_id: "geometric-repack".to_owned(),
             reason: "geometric consolidation requires at least two source packs".to_owned(),
         });
     }
+    let mut source_ids = BTreeSet::new();
+    for source in sources {
+        if !source_ids.insert(source.canonical_id.as_str()) {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "duplicate source pack id".to_owned(),
+            });
+        }
+    }
     let workspace =
         tempfile::tempdir().map_err(|source| io_error("create repack workspace", source))?;
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    let mut source_oids = Vec::<[u8; 20]>::new();
-    let mut source_indexes = Vec::with_capacity(sources.len());
-    for source in sources {
-        validate_source(source)?;
-        let installed = install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-        let mut locations =
-            PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-        if locations.object_count() != source.object_count {
-            return Err(RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!(
-                    "index has {} objects but manifest records {}",
-                    locations.object_count(),
-                    source.object_count
-                ),
-            });
-        }
-        for location in &mut locations {
-            let location = location?;
-            let oid =
-                location
-                    .oid
-                    .as_bytes()
-                    .try_into()
-                    .map_err(|_| RepackError::SourceIntegrity {
-                        pack_id: source.canonical_id.clone(),
-                        reason: "selected pack contains a non-SHA1 object".to_owned(),
-                    })?;
-            source_oids.push(oid);
-        }
-        source_indexes.push(installed.idx_path);
-    }
+    let install_started = Instant::now();
+    let (mut source_oids, source_indexes) =
+        install_source_packs(&pack_dir, sources, index_concurrency)?;
+    tracing::debug!(
+        source_pack_count = sources.len(),
+        index_concurrency = index_concurrency.max(1).min(sources.len()),
+        elapsed_ms = install_started.elapsed().as_millis() as u64,
+        "installed source packs for consolidation"
+    );
     // Selected suffixes may reference stable packs outside this operation;
     // validate each selected pack's own body and index without requiring a
     // complete repository graph.
-    let mut verify = Command::new("git");
-    verify
-        .arg("verify-pack")
-        .arg("--")
-        .args(&source_indexes)
-        .stdout(Stdio::null());
-    run_git(&mut verify, "verify consolidated source packs")?;
+    let verify_started = Instant::now();
+    for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
+        let mut verify = Command::new("git");
+        verify
+            .arg("verify-pack")
+            .arg("--")
+            .args(index_batch)
+            .stdout(Stdio::null());
+        run_git(&mut verify, "verify consolidated source packs")?;
+    }
+    tracing::debug!(
+        source_pack_count = source_indexes.len(),
+        elapsed_ms = verify_started.elapsed().as_millis() as u64,
+        "verified consolidated source packs"
+    );
     source_oids.sort_unstable();
     source_oids.dedup();
 
@@ -428,6 +436,7 @@ pub fn consolidate_pack_suffix(
     let stdin = File::open(&pack_list)
         .map_err(|source| io_error(format!("open {}", pack_list.display()), source))?;
     let output_prefix = pack_dir.join("pack-crab-rollup");
+    let pack_generation_started = Instant::now();
     run_git(
         Command::new("git")
             .arg(format!("--git-dir={}", source_git.display()))
@@ -443,6 +452,11 @@ pub fn consolidate_pack_suffix(
             .stdout(Stdio::null()),
         "consolidate selected Git packs",
     )?;
+    tracing::debug!(
+        source_pack_count = sources.len(),
+        elapsed_ms = pack_generation_started.elapsed().as_millis() as u64,
+        "consolidated selected Git packs"
+    );
     let pack_path = std::fs::read_dir(&pack_dir)
         .map_err(|source| io_error(format!("read {}", pack_dir.display()), source))?
         .filter_map(std::result::Result::ok)
@@ -488,6 +502,91 @@ pub fn consolidate_pack_suffix(
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
         packs: vec![generated],
+    })
+}
+
+struct InstalledSourcePack {
+    index_path: PathBuf,
+    oids: Vec<[u8; 20]>,
+}
+
+fn install_source_packs(
+    pack_dir: &Path,
+    sources: &[RepackSource],
+    index_concurrency: usize,
+) -> Result<(Vec<[u8; 20]>, Vec<PathBuf>), RepackError> {
+    let batch_size = index_concurrency.max(1).min(sources.len());
+    let mut source_oids = Vec::new();
+    let mut source_indexes = Vec::with_capacity(sources.len());
+    for batch in sources.chunks(batch_size) {
+        let results = std::thread::scope(|scope| {
+            let handles = batch
+                .iter()
+                .map(|source| scope.spawn(move || install_source_pack(pack_dir, source)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+        for (source, result) in batch.iter().zip(results) {
+            let installed = match result {
+                Ok(Ok(installed)) => installed,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "source pack installation worker panicked".to_owned(),
+                    });
+                }
+            };
+            source_oids.extend(installed.oids);
+            source_indexes.push(installed.index_path);
+        }
+    }
+    Ok((source_oids, source_indexes))
+}
+
+fn install_source_pack(
+    pack_dir: &Path,
+    source: &RepackSource,
+) -> Result<InstalledSourcePack, RepackError> {
+    validate_source(source)?;
+    let installed = install_pack_file_from_path(
+        pack_dir,
+        &source.path,
+        &source.canonical_id,
+        source.size,
+        false,
+    )?;
+    let mut locations =
+        PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
+    if locations.object_count() != source.object_count {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: source.canonical_id.clone(),
+            reason: format!(
+                "index has {} objects but manifest records {}",
+                locations.object_count(),
+                source.object_count
+            ),
+        });
+    }
+    let mut oids = Vec::new();
+    for location in &mut locations {
+        let location = location?;
+        let oid = location
+            .oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "selected pack contains a non-SHA1 object".to_owned(),
+            })?;
+        oids.push(oid);
+    }
+    Ok(InstalledSourcePack {
+        index_path: installed.idx_path,
+        oids,
     })
 }
 
@@ -931,7 +1030,7 @@ mod tests {
             assert!(pack.index_path().is_file());
             assert!(pack.reverse_index_path().is_file());
         }
-        let selected = consolidate_pack_suffix(&sources)?;
+        let selected = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
 

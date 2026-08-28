@@ -429,7 +429,8 @@ async fn run_repack_locked(
                 object_count: pack.object_count,
             })
             .collect::<Vec<_>>();
-        crab_git::repack::consolidate_pack_suffix(&sources).map_err(CrabError::from)
+        crab_git::repack::consolidate_pack_suffix_with_concurrency(&sources, download_concurrency)
+            .map_err(CrabError::from)
     })
     .await
     .map_err(|error| CrabError::Internal(format!("repack worker join failed: {error}")))??;
