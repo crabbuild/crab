@@ -90,9 +90,9 @@ export function FeatureBlogArticle({
 
         <div
           data-feature-article
-          className="mx-auto grid max-w-[88rem] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[13rem_minmax(0,48rem)_13rem] lg:gap-12 lg:px-8 lg:py-24"
+          className="mx-auto grid w-full max-w-[88rem] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[13rem_minmax(0,48rem)] lg:items-start lg:justify-center lg:gap-10 lg:px-8 lg:py-24 xl:grid-cols-[14rem_minmax(0,48rem)_14rem] xl:justify-between 2xl:px-12"
         >
-          <aside className="min-w-0">
+          <aside className="min-w-0 lg:sticky lg:top-24 lg:self-start">
             <FeatureArticleRail items={toc} />
           </aside>
 
@@ -102,8 +102,8 @@ export function FeatureBlogArticle({
             </div>
           </div>
 
-          <aside className="hidden lg:block">
-            <div className="sticky top-24 space-y-5">
+          <aside className="hidden min-w-0 justify-self-end xl:sticky xl:top-24 xl:right-0 xl:col-start-3 xl:row-start-1 xl:block xl:self-start">
+            <div className="w-56 space-y-5">
               <div className="border-t-2 border-primary pt-4">
                 <div className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-[0.16em] text-primary uppercase">
                   <GitBranch size={13} aria-hidden="true" />
@@ -113,6 +113,77 @@ export function FeatureBlogArticle({
                   Git should keep owning history. Your object store should keep
                   owning the heavy bytes. Crab makes the boundary explicit.
                 </p>
+                <svg
+                  viewBox="0 0 224 104"
+                  className="mt-5 h-auto w-full"
+                  role="img"
+                  aria-label="One commit points to Git history and a Crab pointer whose bytes live in object storage"
+                >
+                  <path
+                    d="M46 52H92M92 52V25M92 52v27M92 25h29M92 79h29"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    className="text-border"
+                  />
+                  <rect
+                    x="4"
+                    y="35"
+                    width="42"
+                    height="34"
+                    rx="8"
+                    fill="color-mix(in oklch, var(--primary) 9%, var(--card))"
+                    stroke="var(--primary)"
+                  />
+                  <text
+                    x="25"
+                    y="55"
+                    textAnchor="middle"
+                    fill="var(--foreground)"
+                    fontSize="8"
+                    fontFamily="ui-monospace, monospace"
+                  >
+                    COMMIT
+                  </text>
+                  <rect
+                    x="121"
+                    y="9"
+                    width="98"
+                    height="33"
+                    rx="8"
+                    fill="var(--card)"
+                    stroke="var(--border)"
+                  />
+                  <text
+                    x="170"
+                    y="29"
+                    textAnchor="middle"
+                    fill="var(--foreground)"
+                    fontSize="8"
+                    fontFamily="ui-monospace, monospace"
+                  >
+                    GIT HISTORY
+                  </text>
+                  <rect
+                    x="121"
+                    y="62"
+                    width="98"
+                    height="33"
+                    rx="8"
+                    fill="color-mix(in oklch, var(--primary) 7%, var(--card))"
+                    stroke="var(--primary)"
+                  />
+                  <text
+                    x="170"
+                    y="82"
+                    textAnchor="middle"
+                    fill="var(--foreground)"
+                    fontSize="8"
+                    fontFamily="ui-monospace, monospace"
+                  >
+                    OBJECT STORE
+                  </text>
+                </svg>
               </div>
 
               <Link
