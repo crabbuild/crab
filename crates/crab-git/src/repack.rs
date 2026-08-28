@@ -365,7 +365,7 @@ pub fn consolidate_pack_suffix(
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    let mut source_oids = BTreeSet::new();
+    let mut source_oids = Vec::<[u8; 20]>::new();
     for source in sources {
         validate_source(source)?;
         let installed = install_pack_file_from_path(
@@ -388,9 +388,21 @@ pub fn consolidate_pack_suffix(
             });
         }
         for location in &mut locations {
-            source_oids.insert(location?.oid.to_string());
+            let location = location?;
+            let oid =
+                location
+                    .oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "selected pack contains a non-SHA1 object".to_owned(),
+                    })?;
+            source_oids.push(oid);
         }
     }
+    source_oids.sort_unstable();
+    source_oids.dedup();
 
     let pack_list = workspace.path().join("selected-packs.txt");
     let mut input = File::create(&pack_list)
@@ -440,10 +452,21 @@ pub fn consolidate_pack_suffix(
         generated.reverse_index_path(),
         generated.pack_size,
     )?;
-    let mut generated_oids = BTreeSet::new();
+    let mut generated_oids = Vec::<[u8; 20]>::new();
     for location in &mut generated_locations {
-        generated_oids.insert(location?.oid.to_string());
+        let location = location?;
+        let oid = location
+            .oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RepackError::SourceIntegrity {
+                pack_id: generated.pack_id.clone(),
+                reason: "consolidated pack contains a non-SHA1 object".to_owned(),
+            })?;
+        generated_oids.push(oid);
     }
+    generated_oids.sort_unstable();
+    generated_oids.dedup();
     if generated_oids != source_oids {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id.clone(),
