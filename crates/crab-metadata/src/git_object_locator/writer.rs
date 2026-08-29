@@ -67,11 +67,73 @@ const EXISTING_LOOKUP_SCAN_SMALL_CATALOG_RATIO: u64 = 4;
 const RETIRED_CHECKPOINT_LIFETIME: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExistingObject {
     ordinal: GitObjectOrdinal,
     pack_slot: u64,
     metadata: GitObjectMetadata,
+}
+
+// Existing rows are read-mostly during repack. Keep the repository-sized base
+// compact and mutate it in place; overlays hold only new OIDs and deletions.
+#[derive(Debug, Default)]
+struct ExistingOrdinalIndex {
+    base: Vec<([u8; 20], ExistingObject)>,
+    updates: HashMap<[u8; 20], ExistingObject>,
+    removed: HashSet<[u8; 20]>,
+}
+
+impl ExistingOrdinalIndex {
+    fn from_sorted_entries(entries: Vec<([u8; 20], ExistingObject)>) -> Self {
+        Self {
+            base: entries,
+            updates: HashMap::new(),
+            removed: HashSet::new(),
+        }
+    }
+
+    fn get(&self, oid: &[u8; 20]) -> Option<ExistingObject> {
+        if let Some(object) = self.updates.get(oid) {
+            return Some(*object);
+        }
+        if self.removed.contains(oid) {
+            return None;
+        }
+        self.base
+            .binary_search_by_key(oid, |(existing, _)| *existing)
+            .ok()
+            .map(|index| self.base[index].1)
+    }
+
+    fn insert(&mut self, oid: [u8; 20], object: ExistingObject) {
+        self.removed.remove(&oid);
+        if let Ok(index) = self
+            .base
+            .binary_search_by_key(&oid, |(existing, _)| *existing)
+        {
+            self.base[index].1 = object;
+        } else {
+            self.updates.insert(oid, object);
+        }
+    }
+
+    fn remove(&mut self, oid: &[u8; 20]) {
+        self.updates.remove(oid);
+        if self
+            .base
+            .binary_search_by_key(oid, |(existing, _)| *existing)
+            .is_ok()
+        {
+            self.removed.insert(*oid);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.base
+            .len()
+            .saturating_add(self.updates.len())
+            .saturating_sub(self.removed.len())
+    }
 }
 
 /// Counts produced by one stale-locator sweep.
@@ -111,7 +173,7 @@ pub struct GitObjectLocatorWriter {
     bindings: HashMap<u64, GitPackLocatorRecord>,
     empty_catalog_binding: Option<u64>,
     replacement_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
-    existing_ordinals: Option<HashMap<[u8; 20], ExistingObject>>,
+    existing_ordinals: Option<ExistingOrdinalIndex>,
     ordinal_lookup_candidates: u64,
     pack_membership_index_ready: bool,
     rebuild_remaining_rows: Option<HashMap<u64, u64>>,
@@ -536,7 +598,7 @@ impl GitObjectLocatorWriter {
             let existing_object = existing_object.or_else(|| {
                 self.existing_ordinals
                     .as_ref()
-                    .and_then(|ordinals| ordinals.get(&entry.oid).copied())
+                    .and_then(|ordinals| ordinals.get(&entry.oid))
             });
             let existing_object = existing_object.or(existing_objects[entry_index]);
             let (ordinal, previous_object) = match existing_object {
@@ -757,7 +819,7 @@ impl GitObjectLocatorWriter {
             .saturating_add(u64::try_from(entry_count).unwrap_or(u64::MAX));
         let current_objects = self.metadata.next_object_ordinal;
         if current_objects == 0 {
-            self.existing_ordinals = Some(HashMap::new());
+            self.existing_ordinals = Some(ExistingOrdinalIndex::default());
         } else if should_load_existing_ordinals(current_objects, self.ordinal_lookup_candidates) {
             self.load_existing_ordinals().await?;
         }
@@ -777,7 +839,7 @@ impl GitObjectLocatorWriter {
             .scan_prefix_with_options([OBJECT_FAMILY], .., &options)
             .await
             .map_err(read_error)?;
-        let mut ordinals = HashMap::new();
+        let mut ordinals = Vec::new();
         while let Some(row) = rows.next().await.map_err(read_error)? {
             let oid = decode_object_key(&row.key)
                 .ok_or_else(|| corrupt("object", "invalid compact locator object key"))?;
@@ -789,18 +851,28 @@ impl GitObjectLocatorWriter {
                     "compact locator object ordinal exceeds catalog metadata",
                 ));
             }
-            ordinals.insert(
+            ordinals.push((
                 oid,
                 ExistingObject {
                     ordinal: location.ordinal,
                     pack_slot: location.pack_slot,
                     metadata: location.metadata,
                 },
-            );
+            ));
         }
-        self.existing_ordinals = Some(ordinals);
+        ordinals.sort_unstable_by_key(|(oid, _)| *oid);
+        if ordinals.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(corrupt(
+                "object",
+                "compact locator contains duplicate object rows",
+            ));
+        }
+        self.existing_ordinals = Some(ExistingOrdinalIndex::from_sorted_entries(ordinals));
         tracing::debug!(
-            locator_existing_objects = self.existing_ordinals.as_ref().map_or(0, HashMap::len),
+            locator_existing_objects = self
+                .existing_ordinals
+                .as_ref()
+                .map_or(0, ExistingOrdinalIndex::len),
             locator_existing_objects_ms = started.elapsed().as_millis() as u64,
             "loaded existing Git locator ordinals"
         );
@@ -1050,7 +1122,7 @@ impl GitObjectLocatorWriter {
                     ));
                 }
                 let delete_object = if let Some(ordinals) = &self.existing_ordinals {
-                    let Some(current) = ordinals.get(&oid).copied() else {
+                    let Some(current) = ordinals.get(&oid) else {
                         return Err(corrupt(
                             "pack-object-index",
                             "pack membership row has no canonical object row",
@@ -1846,6 +1918,60 @@ mod tests {
         ));
         assert!(should_load_existing_ordinals(1_000_000, 20_000));
         assert!(!should_load_existing_ordinals(1_000_000, 10_000));
+    }
+
+    #[test]
+    fn existing_ordinal_index_updates_sorted_rows_without_duplicate_storage() {
+        let first = [1; 20];
+        let second = [2; 20];
+        let new = [3; 20];
+        let mut index = ExistingOrdinalIndex::from_sorted_entries(vec![
+            (
+                first,
+                ExistingObject {
+                    ordinal: GitObjectOrdinal::try_from(1).expect("ordinal"),
+                    pack_slot: 10,
+                    metadata: GitObjectMetadata::default(),
+                },
+            ),
+            (
+                second,
+                ExistingObject {
+                    ordinal: GitObjectOrdinal::try_from(2).expect("ordinal"),
+                    pack_slot: 10,
+                    metadata: GitObjectMetadata::default(),
+                },
+            ),
+        ]);
+
+        index.insert(
+            first,
+            ExistingObject {
+                ordinal: GitObjectOrdinal::try_from(1).expect("ordinal"),
+                pack_slot: 20,
+                metadata: GitObjectMetadata::default(),
+            },
+        );
+        index.insert(
+            new,
+            ExistingObject {
+                ordinal: GitObjectOrdinal::try_from(3).expect("ordinal"),
+                pack_slot: 20,
+                metadata: GitObjectMetadata::default(),
+            },
+        );
+
+        assert_eq!(index.get(&first).map(|object| object.pack_slot), Some(20));
+        assert_eq!(index.get(&second).map(|object| object.pack_slot), Some(10));
+        assert_eq!(index.get(&new).map(|object| object.pack_slot), Some(20));
+        assert_eq!(index.updates.len(), 1);
+        assert_eq!(index.len(), 3);
+
+        index.remove(&second);
+        index.remove(&new);
+        assert!(index.get(&second).is_none());
+        assert!(index.get(&new).is_none());
+        assert_eq!(index.len(), 1);
     }
 
     #[tokio::test]
