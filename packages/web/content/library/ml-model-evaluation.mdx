@@ -1,0 +1,159 @@
+---
+title: "Review ML parameters, metrics, and plots as one evidence chain"
+description: "Connect a fraud-model setting change to scalar quality gates and a precision-recall curve before selecting a candidate."
+date: "2026-08-29"
+author: "Crab Team"
+category: "use-case"
+tags: ["ml", "metrics", "params", "plots", "model-review"]
+excerpt: "Build a repeatable model-review packet with `crab params`, `crab metrics`, and `crab plots` instead of judging a candidate from one score."
+level: "intermediate"
+path: "ml-workflows"
+order: 4
+concepts:
+  ["parameter diff", "metric diff", "precision-recall curve", "review evidence"]
+prerequisites: ["Run an ML experiment sweep without dirtying your workspace"]
+outcome: "Produce reviewable evidence that connects model inputs, scalar outcomes, and curve behavior across revisions."
+diagramType: "Interactive metric matrix"
+knowledgeCheck:
+  question: "Why should a model review include both parameter and metric diffs?"
+  options:
+    - "So reviewers can connect an input change to the measured outcome"
+    - "Because metrics commands retrain the model"
+    - "Because plot rendering changes the artifact version ID"
+  answer: 0
+  explanation: "Parameters explain what changed; metrics and plots show the recorded outcome. Crab's read commands do not execute missing stages."
+meta:
+  contentType: "How-to"
+  goal: "Teach evidence-based ML review using Crab parameter, metric, and plot commands."
+  audience: "ML reviewers and CI owners evaluating candidate quality."
+---
+
+The best recall in a sweep is not automatically the best production model. Fraud systems trade recall against customer friction, precision, latency, and policy thresholds. Review should connect the exact inputs to scalar metrics and curve behavior.
+
+<MlExperimentSweepExplorer />
+
+## Declare stable evidence paths
+
+The evaluation stage in `crab.yaml` produces a JSON metrics file and a CSV plot source:
+
+```yaml title="crab.yaml"
+metrics:
+  - metrics/evaluation.json
+
+plots:
+  - plots/precision_recall.csv:
+      x: recall
+      y: precision
+
+stages:
+  evaluate:
+    cmd: python3 src/evaluate.py --config params.json
+    deps:
+      - src/common.py
+      - src/evaluate.py
+      - models/fraud-model.pkl
+      - data/features.csv
+    params:
+      - evaluate.threshold
+      - evaluate.minimum_recall
+    metrics:
+      - metrics/evaluation.json
+    plots:
+      - plots/precision_recall.csv:
+          x: recall
+          y: precision
+```
+
+Use stable names and units:
+
+```json title="metrics/evaluation.json"
+{
+  "accuracy": 1.0,
+  "f1": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "samples": 6,
+  "threshold": 0.5
+}
+```
+
+## Inspect the current run
+
+These commands read recorded files. They do not execute `evaluate` if evidence is missing:
+
+```bash
+crab params show --json
+crab metrics show --json
+crab plots show --format html --output crab_plots/index.html
+```
+
+If a key is absent, verify that its file exists and is declared in the workflow before assuming the reader command is wrong.
+
+## Compare the candidate with the baseline
+
+For Git revisions:
+
+```bash
+crab params diff origin/main HEAD --json > params.diff.json
+crab metrics diff origin/main HEAD --json > metrics.diff.json
+crab plots diff origin/main HEAD \
+  --format html \
+  --output plot-diff.html
+```
+
+For isolated experiments:
+
+```bash
+crab exp show <candidate-id> --json
+crab exp diff <baseline-id> <candidate-id> --json
+```
+
+A useful review packet contains:
+
+| Evidence       | Review question                                                           |
+| -------------- | ------------------------------------------------------------------------- |
+| Parameter diff | Which learning rate, depth, seed, or threshold changed?                   |
+| Metric diff    | Did recall improve without unacceptable false positives or latency?       |
+| Plot overlay   | Did the curve improve across the operating region, not only at one point? |
+| Stage hashes   | Were upstream data and feature stages actually comparable?                |
+
+## Treat quality gates as domain policy
+
+Crab proves workflow identity and recorded bytes. It does not decide that `0.841` recall is safe for production. Put domain checks in evaluation code or CI:
+
+```bash
+crab run evaluate --json
+python3 src/check_quality_gate.py metrics/evaluation.json
+```
+
+The script might require minimum recall, maximum false-positive rate, latency, fairness slices, and schema compatibility. Keep those thresholds reviewable in params or policy files.
+
+## Render the same visualization everywhere
+
+List the available plot templates:
+
+```bash
+crab plots templates
+```
+
+Commit plot declarations and source data when they are small and useful for later comparison. Store bulky rendered dashboards as CI artifacts or Crab-managed outputs.
+
+## Make CI emit structured evidence
+
+```bash
+crab run --validate
+crab run evaluate --cache-only --jsonl | tee evaluate.events.jsonl
+crab params diff origin/main HEAD --json > params.diff.json
+crab metrics diff origin/main HEAD --json > metrics.diff.json
+crab plots diff origin/main HEAD --format html --output plot-diff.html
+```
+
+The cache-only execution proves the candidate result was published. The three diffs make it reviewable. Neither substitutes for application-specific quality checks.
+
+<TakeawayBox title="Review a chain, not a score">
+  Parameters explain the changed input. Stage hashes establish comparable
+  workflow state. Metrics summarize outcomes. Plots expose behavior across a
+  range. Domain checks decide whether those outcomes are acceptable.
+</TakeawayBox>
+
+Once the candidate passes review, [capture its model bytes as an immutable workflow artifact](/library/ml-artifact-versioning).

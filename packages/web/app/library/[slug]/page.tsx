@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Clock,
   GitBranch,
+  FlaskConical,
   Layers,
   Network,
   Package,
@@ -49,6 +50,7 @@ const categoryIcons: Record<LibraryGuideMeta["category"], typeof Package> = {
 const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
+  "ml-workflows": FlaskConical,
   "core-internals": Network,
   "advanced-operations": Layers,
 }
@@ -131,7 +133,7 @@ export default async function LibraryGuidePage({
   return (
     <MarketingLayout>
       <StructuredData data={structuredData} />
-      <article className="relative border-b border-border min-[1400px]:[&_.wide-article-visual]:max-w-[54rem] min-[1400px]:[&_.wide-article-visual]:-translate-x-1/2">
+      <article className="relative border-b border-border min-[1400px]:[&_.wide-article-visual]:relative min-[1400px]:[&_.wide-article-visual]:left-1/2 min-[1400px]:[&_.wide-article-visual]:max-w-5xl min-[1400px]:[&_.wide-article-visual]:-translate-x-1/2">
         <section className="mx-auto max-w-3xl px-4 pt-4 pb-10 sm:px-6 lg:px-8 lg:pt-8">
           <nav className="mb-8">
             <Link

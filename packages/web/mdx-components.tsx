@@ -65,6 +65,12 @@ import {
   DailyWorkflowStateLab,
 } from "@/components/library/first-workflow-learning-labs"
 import {
+  ArtifactPromotionLab,
+  MlExperimentSweepExplorer,
+  MlWorkflowCacheExplorer,
+} from "@/components/library/ml-workflow-visuals"
+import { WorkflowCommandAtlas } from "@/components/library/workflow-command-atlas"
+import {
   PushDataLanesDiagram,
   PushPipelineBoard,
   PushVisibilityLab,
@@ -209,6 +215,10 @@ export function getMDXComponents(components?: MDXComponents) {
     CrabLfsDirectStorageLab,
     CrabCapabilityNavigator,
     DailyWorkflowStateLab,
+    MlWorkflowCacheExplorer,
+    MlExperimentSweepExplorer,
+    ArtifactPromotionLab,
+    WorkflowCommandAtlas,
     PushDataLanesDiagram,
     PushPipelineBoard,
     PushVisibilityLab,

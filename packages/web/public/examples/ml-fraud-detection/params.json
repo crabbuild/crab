@@ -1,0 +1,16 @@
+{
+  "features": {
+    "lookback_days": 30
+  },
+  "train": {
+    "algorithm": "logistic_regression",
+    "learning_rate": 0.2,
+    "l2": 0.01,
+    "max_iter": 800,
+    "seed": 42
+  },
+  "evaluate": {
+    "threshold": 0.5,
+    "minimum_recall": 0.82
+  }
+}

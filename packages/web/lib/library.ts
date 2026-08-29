@@ -33,6 +33,7 @@ export type LibraryGuideLevel = "Beginner" | "Intermediate" | "Deep Dive"
 export type LibraryPathKey =
   | "start-here"
   | "first-workflow"
+  | "ml-workflows"
   | "core-internals"
   | "advanced-operations"
 
@@ -65,13 +66,22 @@ export const LIBRARY_PATHS: LibraryPath[] = [
     order: 2,
   },
   {
+    key: "ml-workflows",
+    label: "ML Workflows",
+    shortLabel: "ML",
+    description:
+      "Build, compare, version, and promote a production ML pipeline.",
+    audience: "ML engineers and platform teams",
+    order: 3,
+  },
+  {
     key: "core-internals",
     label: "Core Internals",
     shortLabel: "Internals",
     description:
       "Follow the storage, deduplication, cache, and hydration pipeline.",
     audience: "Technical reviewers",
-    order: 3,
+    order: 4,
   },
   {
     key: "advanced-operations",
@@ -80,7 +90,7 @@ export const LIBRARY_PATHS: LibraryPath[] = [
     description:
       "Reason about consistency, cleanup, cost, large repos, and Git LFS migration.",
     audience: "Platform and migration teams",
-    order: 4,
+    order: 5,
   },
 ]
 

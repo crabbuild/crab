@@ -1,0 +1,158 @@
+---
+title: "Promote and roll back ML artifacts safely"
+description: "Move staging and production labels with compare-and-swap, preserve immutable model versions, and verify history from a clean consumer."
+date: "2026-08-29"
+author: "Crab Team"
+category: "use-case"
+tags: ["ml", "artifacts", "promotion", "compare-and-swap", "rollback"]
+excerpt: "Complete the fraud-model lifecycle with race-safe promotion, exact-version consumption, clean-client verification, and an auditable rollback."
+level: "deep-dive"
+path: "ml-workflows"
+order: 6
+concepts:
+  ["promotion label", "compare-and-swap", "artifact history", "rollback"]
+prerequisites: ["Version and retrieve an immutable ML artifact"]
+outcome: "Promote and roll back a model label without overwriting a concurrent decision or changing immutable payload bytes."
+diagramType: "Interactive CAS promotion lab"
+knowledgeCheck:
+  question: "Why should automation pass `--expected` during production promotion?"
+  options:
+    - "To compress the model again"
+    - "To reject the write if another operator moved the label after it was read"
+    - "To rename the immutable version ID"
+  answer: 1
+  explanation: "Compare-and-swap protects the label decision from stale writers. It does not copy or modify version payloads."
+meta:
+  contentType: "How-to"
+  goal: "Teach race-safe artifact promotion and rollback with verification."
+  audience: "ML platform engineers and release automation owners."
+---
+
+Promotion answers a narrow question: which immutable model version should a human-facing stage label select now?
+
+It does not retrain, copy payload bytes, edit the version manifest, or prove model quality.
+
+<ArtifactPromotionLab />
+
+Choose a candidate, switch between `staging` and `production`, then simulate a concurrent label change. The lab previews the exact compare-and-swap boundary without changing a real registry.
+
+## 1. Read current canonical state
+
+```bash
+crab artifacts show fraud-model --json
+crab artifacts history fraud-model --json
+```
+
+Record both the candidate version ID and the version currently selected by `staging` or `production`. Do not infer them from a filename or experiment label.
+
+## 2. Validate the candidate by immutable ID
+
+```bash
+crab artifacts get \
+  fraud-model \
+  --version <candidate-version> \
+  --output validation/candidate.pkl
+
+python3 src/smoke_model.py validation/candidate.pkl
+python3 src/check_quality_gate.py metrics/evaluation.json
+```
+
+Add the organization's schema, latency, fairness, security, and canary checks. Hash verification is necessary, but it is not a deployment decision.
+
+## 3. Promote staging with compare-and-swap
+
+```bash
+crab artifacts promote \
+  fraud-model \
+  <candidate-version> \
+  staging \
+  --expected <current-staging-version> \
+  --json
+```
+
+If another operator changed `staging` after your read, the compare-and-swap fails. Reread the registry and decide whether their selection should remain. Do not retry using a guessed expected value.
+
+If the label does not exist yet, there is no current version to compare. Omit
+`--expected` only for that first promotion, then read the new mapping and use
+compare-and-swap for every later move.
+
+After staging tests pass, repeat the pattern for production:
+
+```bash
+crab artifacts promote \
+  fraud-model \
+  <candidate-version> \
+  production \
+  --expected <current-production-version> \
+  --json
+```
+
+## 4. Verify the consumer boundary
+
+Inspect mapping and history:
+
+```bash
+crab artifacts show fraud-model
+crab artifacts history fraud-model
+```
+
+Then retrieve by stage from a clean client:
+
+```bash
+crab artifacts get \
+  fraud-model \
+  --stage production \
+  --output runtime/fraud-model.pkl \
+  --json
+```
+
+The consumer should record the immutable version ID it resolved. A later production promotion can move the label, but it cannot change the bytes of that recorded version.
+
+## 5. Roll back by moving the label
+
+Rollback selects a previously validated immutable version:
+
+```bash
+crab artifacts show fraud-model --json
+
+crab artifacts promote \
+  fraud-model \
+  <previous-good-version> \
+  production \
+  --expected <failing-version> \
+  --json
+```
+
+No model payload is rebuilt or copied. History records the prior mapping and timestamp, preserving the sequence of decisions.
+
+## 6. Use the complete operational loop
+
+```bash
+# Producer
+crab run --cache-push
+crab metrics show
+git commit -am "record approved fraud candidate"
+crab artifacts version create fraud-model --json
+
+# Release automation
+crab artifacts show fraud-model --json
+crab artifacts get fraud-model --version <candidate> --output validation/model.pkl
+python3 src/smoke_model.py validation/model.pkl
+crab artifacts promote fraud-model <candidate> staging --expected <old-staging>
+crab artifacts promote fraud-model <candidate> production --expected <old-production>
+
+# Independent consumer
+crab artifacts get fraud-model --stage production --output runtime/model.pkl
+crab artifacts history fraud-model --json
+```
+
+This series has now covered the main ML command families: stage authoring, DAG validation and execution, cache publication and replay, status and journals, experiments and queues, params/metrics/plots, and the complete artifact list/show/create/get/promote/history lifecycle.
+
+<TakeawayBox title="Mutable discovery, immutable consumption">
+  Teams can discover the current candidate through `staging` or `production`.
+  Reproducible consumers record the resolved version ID. Compare-and-swap keeps
+  concurrent label decisions from silently overwriting each other, while
+  immutable versions keep rollback cheap and exact.
+</TakeawayBox>
+
+Finish with the [complete Crab ML workflow CLI cookbook](/library/ml-workflow-cli-cookbook), then use [Workflow artifacts](/docs/cli/workflow/artifacts), [Artifact promotions](/docs/cli/workflow/artifact-promotions), and the [`crab workflow` reference](/docs/cli/reference/crab-workflow) for command-level details.

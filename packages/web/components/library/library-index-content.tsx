@@ -5,6 +5,7 @@ import {
   ArrowRight,
   BookOpen,
   GitBranch,
+  FlaskConical,
   Package,
   GraduationCap,
   Layers,
@@ -36,6 +37,7 @@ const categoryIcons: Record<string, typeof Package> = {
 const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
+  "ml-workflows": FlaskConical,
   "core-internals": Network,
   "advanced-operations": Layers,
 }

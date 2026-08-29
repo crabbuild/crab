@@ -1,0 +1,148 @@
+---
+title: "How does Crab know what to rerun?"
+description: "Follow stage hashes, lockfiles, cache hits, misses, journals, and remote replay through the fraud detection DAG."
+date: "2026-08-29"
+author: "Crab Team"
+category: "architecture"
+tags: ["ml", "workflow-cache", "stage-hash", "lockfile", "ci"]
+excerpt: "Use the fraud pipeline to understand content-addressed invalidation, diagnose a surprising miss, and prove cache publication from a clean clone."
+level: "intermediate"
+path: "ml-workflows"
+order: 2
+concepts: ["stage hash", "cache invalidation", "crab.lock", "run journal"]
+prerequisites: ["Build a real fraud detection workflow with Crab"]
+outcome: "Predict, inspect, and verify every execute-versus-cache decision in an ML DAG."
+diagramType: "Interactive invalidation trace"
+knowledgeCheck:
+  question: "What is the strongest proof that a remote cache entry was published correctly?"
+  options:
+    - "A second run in the producer workspace"
+    - "A clean clone restores outputs with `crab run --cache-only`"
+    - "The model file still exists locally"
+  answer: 1
+  explanation: "A clean clone has neither the producer's outputs nor its local cache. Cache-only replay proves the remote entry is complete."
+meta:
+  contentType: "Conceptual"
+  goal: "Explain Crab Workflow cache identity and invalidation with concrete operator commands."
+  audience: "ML engineers debugging expensive or unexpected workflow reruns."
+---
+
+Crab does not ask whether a file modification time looks recent. It asks whether a stage has the same declared identity as a previous successful run.
+
+Conceptually, each key covers:
+
+```text
+stage key = hash(command + dependency bytes + parameter values + selected environment)
+```
+
+The real implementation uses canonical workflow structures and content identities. The equation is a mental model, not a byte-level serialization contract.
+
+<MlWorkflowCacheExplorer />
+
+## Read the three records separately
+
+| Record               | Lives in                                       | Answers                                                |
+| -------------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| Workflow declaration | `crab.yaml`                                    | What should run, and what does it consume and produce? |
+| Successful state     | `crab.lock`                                    | Which exact inputs and outputs completed successfully? |
+| Cached payload       | `.crab/cache/stages/` or the configured remote | Can matching outputs be restored without executing?    |
+
+A matching lockfile does not replace payload bytes. A cache entry without a matching stage key is not eligible. Both identity and materialization have to line up.
+
+## Preview the decision
+
+Run a dry plan whenever compute is expensive:
+
+```bash
+crab run --dry
+crab workflow status
+crab status --workflow --why train
+```
+
+If `train` is stale and the reason is surprising, request the hash breakdown:
+
+```bash
+crab run train --dry --explain-miss
+```
+
+Typical causes are changed dependency bytes, a changed command, a selected parameter value, or an allowed environment variable. Fix an undeclared dependency in `crab.yaml`; do not hide it by forcing a run.
+
+## Choose the correct cache mode
+
+| Intent                              | Command                             | Reads cache       | Writes cache          |
+| ----------------------------------- | ----------------------------------- | ----------------- | --------------------- |
+| Normal development                  | `crab run`                          | Yes               | Yes, locally          |
+| Recompute the selected path         | `crab run train --force-downstream` | Upstream may hit  | Yes                   |
+| Execute without reading old results | `crab run --no-run-cache`           | No run-cache hits | Yes                   |
+| Test without committing results     | `crab run --no-commit`              | May read          | No new cache entries  |
+| Prove publication in CI             | `crab run --cache-only`             | Required          | No fallback execution |
+
+Use `--no-overwrite` when restored outputs must not replace differing workspace files:
+
+```bash
+crab run --cache-only --no-overwrite
+```
+
+## Understand downstream invalidation
+
+Suppose `src/train.py` changes. `ingest` and `features` retain their keys. `train` changes because its dependency changed. `evaluate` must then reconsider its key because it consumes `models/fraud-model.pkl`.
+
+```bash
+crab run train --downstream
+```
+
+If only the target should run, without automatically adding upstream stages, use the DVC-compatible single-item mode:
+
+```bash
+crab repro --single-item train
+```
+
+That is an execution selection, not a promise that missing upstream data is safe. The stage still needs its declared inputs.
+
+## Share results through the Crab remote
+
+Publish new entries as stages complete:
+
+```bash
+crab run --cache-push
+```
+
+Backfill all local entries that are absent remotely:
+
+```bash
+crab workflow push-cache --all --json
+```
+
+In a clean CI clone, require replay:
+
+```bash
+crab pull
+crab run --pull --cache-only --jsonl | tee workflow-events.jsonl
+```
+
+`--pull` fetches missing dependencies or cache entries. `--cache-only` prevents a hidden recomputation and exits with code 3 on a miss.
+
+## Inspect crashes without trusting partial output
+
+Crab records run trajectories under `.crab/workflow/runs/`. Inspect them with:
+
+```bash
+crab workflow journal ls
+crab workflow journal show <run-id>
+```
+
+Resume handling is conservative because a partly written model can look plausible while being invalid. Use normal resume verification first. `--resume-trust-outputs` is an explicit operator decision for a case where you have independently proved the output files.
+
+Prune old terminal journals without touching active runs:
+
+```bash
+crab workflow journal gc --keep 50
+```
+
+<TakeawayBox title="A cache hit is a proof chain">
+  The declaration selects inputs, the stage key identifies them, the lockfile
+  records a successful result, and the cache restores verified outputs. A clean
+  clone proves the entire chain rather than only the producer's local state.
+</TakeawayBox>
+
+Next, [run and queue a parameter sweep](/library/ml-experiment-sweeps).
