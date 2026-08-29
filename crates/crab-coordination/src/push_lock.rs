@@ -1,6 +1,7 @@
 //! Storage-backed short-TTL lease for serializing repository mutations.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +29,10 @@ pub const BATCH_RESOURCE: &str = "batch";
 pub const HISTORY_RECOVERY_RESOURCE: &str = "history-recovery";
 /// Internal resource serializing destructive repository maintenance.
 pub const REPOSITORY_MAINTENANCE_RESOURCE: &str = "repository-maintenance";
+
+const COORDINATION_RETRY_MAX_ATTEMPTS: u32 = 5;
+const COORDINATION_RETRY_BASE_MILLIS: u64 = 100;
+const COORDINATION_RETRY_CAP_MILLIS: u64 = 10_000;
 
 /// JSON payload stored in a push-lock object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -624,6 +629,15 @@ async fn renew_one(
     holder: &str,
     ttl: Duration,
 ) -> Result<UpdateVersion> {
+    retry_coordination_operation(path, holder, || renew_one_once(store, path, holder, ttl)).await
+}
+
+async fn renew_one_once(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+    ttl: Duration,
+) -> Result<UpdateVersion> {
     let object_path = Path::from(path);
     let (body, etag) = get_with_version(store, &object_path)
         .await
@@ -828,6 +842,18 @@ pub(crate) async fn release_with_known_etag(
     holder: &str,
     etag: Option<UpdateVersion>,
 ) -> Result<()> {
+    retry_coordination_operation(path, holder, || {
+        release_with_known_etag_once(store, path, holder, etag.clone())
+    })
+    .await
+}
+
+async fn release_with_known_etag_once(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+    etag: Option<UpdateVersion>,
+) -> Result<()> {
     if let Some(etag) = etag
         && has_cas_token(&etag)
     {
@@ -851,9 +877,72 @@ pub(crate) async fn release_if_holder(
     path: &str,
     holder: &str,
 ) -> Result<()> {
-    release_if_holder_checked(store, path, holder)
-        .await
-        .map(|_| ())
+    retry_coordination_operation(path, holder, || {
+        release_if_holder_checked(store, path, holder)
+    })
+    .await
+    .map(|_| ())
+}
+
+async fn retry_coordination_operation<T, F, Fut>(
+    path: &str,
+    holder: &str,
+    mut operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut attempt = 0_u32;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if coordination_error_is_retryable(&error)
+                    && attempt + 1 < COORDINATION_RETRY_MAX_ATTEMPTS =>
+            {
+                let delay = coordination_retry_delay(path, holder, attempt);
+                debug!(
+                    lock_path = %path,
+                    retry_attempt = attempt + 1,
+                    retry_limit = COORDINATION_RETRY_MAX_ATTEMPTS,
+                    delay_ms = delay.as_millis(),
+                    "retrying transient coordination operation"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn coordination_error_is_retryable(error: &CoordinationError) -> bool {
+    matches!(
+        error,
+        CoordinationError::ObjectStore {
+            source: object_store::Error::Generic { .. },
+            ..
+        }
+    )
+}
+
+fn coordination_retry_delay(path: &str, holder: &str, attempt: u32) -> Duration {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(holder.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&attempt.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut random = [0_u8; 8];
+    random.copy_from_slice(&digest.as_bytes()[..8]);
+    let multiplier = 1_u64.checked_shl(attempt.min(6)).unwrap_or(u64::MAX);
+    let bound = COORDINATION_RETRY_BASE_MILLIS
+        .saturating_mul(multiplier)
+        .min(COORDINATION_RETRY_CAP_MILLIS);
+    let delay = u64::from_le_bytes(random) % bound.saturating_add(1);
+    Duration::from_millis(delay)
 }
 
 async fn release_if_holder_checked(
@@ -1009,7 +1098,7 @@ mod tests {
         PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn memory_store() -> Arc<dyn ObjectStore> {
@@ -1020,6 +1109,13 @@ mod tests {
     struct RequestCountingStore {
         inner: Arc<InMemory>,
         requests: Arc<AtomicUsize>,
+        fail_next_update: AtomicBool,
+    }
+
+    impl RequestCountingStore {
+        fn fail_next_update(&self) {
+            self.fail_next_update.store(true, Ordering::Release);
+        }
     }
 
     impl std::fmt::Display for RequestCountingStore {
@@ -1037,6 +1133,14 @@ mod tests {
             options: PutOptions,
         ) -> object_store::Result<PutResult> {
             self.requests.fetch_add(1, Ordering::Relaxed);
+            if matches!(&options.mode, PutMode::Update(_))
+                && self.fail_next_update.swap(false, Ordering::AcqRel)
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "service unavailable: slow down".into(),
+                });
+            }
             self.inner.put_opts(location, payload, options).await
         }
 
@@ -1124,6 +1228,61 @@ mod tests {
         .release()
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lock_release_retries_transient_update() {
+        let inner = Arc::new(InMemory::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ObjectStore> = metered.clone();
+        let lock = PushLock::acquire_internal(
+            &store,
+            "org/repo",
+            GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let path = Path::from(lock.path());
+        metered.fail_next_update();
+
+        lock.release().await.unwrap();
+
+        let (body, _) = get_with_version(&store, &path).await.unwrap();
+        let payload: PushLockPayload = serde_json::from_slice(&body).unwrap();
+        assert!(payload.is_released());
+        assert!(requests.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[tokio::test]
+    async fn lock_renew_retries_transient_update() {
+        let inner = Arc::new(InMemory::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ObjectStore> = metered.clone();
+        let mut lock = PushLock::acquire_internal(
+            &store,
+            "org/repo",
+            GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        metered.fail_next_update();
+
+        lock.renew().await.unwrap();
+        lock.release().await.unwrap();
+
+        assert!(requests.load(Ordering::Relaxed) >= 4);
     }
 
     #[tokio::test]
@@ -1256,6 +1415,7 @@ mod tests {
         let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 
@@ -1355,6 +1515,7 @@ mod tests {
         let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 

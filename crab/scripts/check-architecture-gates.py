@@ -3161,7 +3161,12 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
                 "storage",
             ],
             "local-index": ["dep:rusqlite"],
-            "remote-index": ["dep:futures-util", "dep:object_store", "dep:slatedb"],
+            "remote-index": [
+                "dep:futures-util",
+                "dep:object_store",
+                "dep:slatedb",
+                "storage",
+            ],
             "storage": [
                 "dep:base64",
                 "dep:crab-storage",

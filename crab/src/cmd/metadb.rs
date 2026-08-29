@@ -399,6 +399,8 @@ struct CommitGraphMaintenance {
 }
 
 const GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const GENERATION_OWNER_ONCE_RETRY_LIMIT: u32 = 3;
+const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
 
 async fn run_generation_owner(
     once: bool,
@@ -498,6 +500,7 @@ async fn generation_owner_loop(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let mut consecutive_errors = 0_u32;
+    let mut once_errors = 0_u32;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -514,6 +517,7 @@ async fn generation_owner_loop(
         {
             Ok(mut sample) => {
                 consecutive_errors = 0;
+                once_errors = 0;
                 if once {
                     sample.next_eligibility_secs = 0;
                 }
@@ -528,6 +532,29 @@ async fn generation_owner_loop(
             Err(CrabError::Cancelled) if cancel.is_cancelled() => {
                 return Ok(());
             }
+            Err(error)
+                if once
+                    && generation_owner_once_retryable(&error)
+                    && once_errors < GENERATION_OWNER_ONCE_RETRY_LIMIT =>
+            {
+                once_errors = once_errors.saturating_add(1);
+                let delay = generation_owner_retry_delay(
+                    GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS,
+                    once_errors - 1,
+                );
+                warn!(
+                    %error,
+                    retry_attempt = once_errors,
+                    retry_limit = GENERATION_OWNER_ONCE_RETRY_LIMIT,
+                    delay_ms = delay.as_millis(),
+                    "Git generation owner one-shot sample encountered a transient error; retrying"
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(delay) => {}
+                }
+                continue;
+            }
             Err(error) if once => return Err(error),
             Err(error) => {
                 consecutive_errors = consecutive_errors.saturating_add(1);
@@ -540,6 +567,13 @@ async fn generation_owner_loop(
             () = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+fn generation_owner_once_retryable(error: &CrabError) -> bool {
+    matches!(
+        error,
+        CrabError::NetworkTransient(_) | CrabError::Throttled { .. }
+    )
 }
 
 async fn generation_owner_sample(
@@ -596,14 +630,34 @@ async fn generation_owner_sample(
             .unwrap_or(u64::MAX);
     let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
     let (locator_advanced, catalog, locator_sweep) =
-        maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel).await?;
+        maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel)
+            .await
+            .map_err(|error| {
+                warn!(
+                    generation,
+                    %error,
+                    error_debug = ?error,
+                    "Git generation owner catalog maintenance failed"
+                );
+                error
+            })?;
     // The owner is also the repair path for imports and Git-only pushes that
     // had no post-CAS MetaDb writer. Once locator coverage is current, publish
     // the receipt so doctor and GC can distinguish complete derived state from
     // a silently unverified generation. Empty repositories have no index
     // anchor and therefore do not need a receipt.
     if anchor.is_some() {
-        write_generation_index_receipt(store, router, &manifest).await?;
+        write_generation_index_receipt(store, router, &manifest)
+            .await
+            .map_err(|error| {
+                warn!(
+                    generation,
+                    %error,
+                    error_debug = ?error,
+                    "Git generation owner receipt publication failed"
+                );
+                error
+            })?;
     }
     if locator_advanced {
         return Ok(GenerationOwnerSample {
@@ -915,7 +969,15 @@ async fn maintain_object_catalog(
     let release = lock.release().await.map_err(CrabError::from);
     match (operation, release) {
         (Ok(result), Ok(())) => Ok(result),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => {
+            warn!(
+                %error,
+                error_debug = ?error,
+                "Git generation owner locator lock release failed"
+            );
+            Err(error)
+        }
     }
 }
 
