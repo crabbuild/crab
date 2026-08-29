@@ -4,6 +4,8 @@
 //! only, selected after their manifest generation and referenced immutable
 //! objects are known to be present.
 
+pub(crate) mod discovery;
+
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::io::Write;

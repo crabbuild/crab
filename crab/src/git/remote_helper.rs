@@ -662,7 +662,7 @@ pub async fn run_remote_helper(
         };
 
     // Resolve config early — needed for store construction and CachingStore.
-    let config = resolve_remote_helper_config()?;
+    let mut config = resolve_remote_helper_config()?;
 
     // Classify before constructing any store. A corrupt configured profile is
     // an error, never a reason to reinterpret a logical authority as a bucket.
@@ -681,6 +681,18 @@ pub async fn run_remote_helper(
         &cancel,
     )
     .await?;
+
+    if managed_repository.is_none() && config.replication.is_none() {
+        let layout = StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone());
+        let discovered =
+            crate::replication::discovery::load(&resolved.store, &layout, &invocation_url).await?;
+        if crate::replication::discovery::apply_if_unconfigured(&mut config, discovered) {
+            tracing::debug!(
+                discovery_path = %layout.replica_discovery_path(),
+                "loaded replica routing from primary discovery"
+            );
+        }
+    }
 
     // Wrap with CachingStore when a cache service is configured.
     // The caching store routes immutable reads (packs, shards) through

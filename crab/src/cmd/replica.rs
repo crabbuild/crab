@@ -36,6 +36,7 @@ use crate::replication::{
     replica_statuses_with_options, resume_active_active_writes, sync_readiness_cache_control_plane,
     validate_active_active_config, validate_replica_url_provider,
 };
+use crate::storage::StoreLayout;
 #[cfg(feature = "coordinator-cosmosdb")]
 use crab_coordination::cosmosdb_coordinator::AzureCosmosDbCoordinatorBackend;
 #[cfg(feature = "coordinator-dynamodb")]
@@ -1722,7 +1723,7 @@ pub struct RemovePayload {
 pub async fn exec(command: ReplicaCommand, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
     match command {
-        ReplicaCommand::Add(args) => run_add(&args).await,
+        ReplicaCommand::Add(args) => run_add_with_cancel(&args, cancel).await,
         ReplicaCommand::Export(args) => run_export(&args),
         ReplicaCommand::Cost(args) => run_cost(&args),
         ReplicaCommand::Runbook(args) => run_runbook(&args),
@@ -1730,24 +1731,30 @@ pub async fn exec(command: ReplicaCommand, cancel: &CancellationToken) -> Result
         ReplicaCommand::Verify(args) => run_verify(&args, cancel).await,
         ReplicaCommand::Backfill(BackfillCommand::Status(args)) => run_backfill_status(&args).await,
         ReplicaCommand::Enable(args) => run_replica_enable(&args, cancel).await,
-        ReplicaCommand::Disable(args) => run_replica_toggle(&args.name, false, args.json),
+        ReplicaCommand::Disable(args) => {
+            run_replica_toggle(&args.name, false, args.json, cancel).await
+        }
         ReplicaCommand::Mode(args) => run_mode(&args),
         ReplicaCommand::Writers(command) => run_writers(command),
         ReplicaCommand::Coordinator(command) => run_coordinator(command).await,
         ReplicaCommand::Failover(command) => run_failover(command).await,
         ReplicaCommand::Repair(args) => run_repair(&args, cancel).await,
-        ReplicaCommand::Promote(args) => run_promote(&args).await,
-        ReplicaCommand::SetPrimary(args) => run_set_primary(&args).await,
+        ReplicaCommand::Promote(args) => run_promote(&args, cancel).await,
+        ReplicaCommand::SetPrimary(args) => run_set_primary(&args, cancel).await,
         ReplicaCommand::Diagnostics(args) => run_diagnostics(&args, cancel).await,
         ReplicaCommand::Certify(args) => run_certify(&args, cancel).await,
         ReplicaCommand::Evidence(command) => run_evidence_with_cancel(&command, cancel),
         ReplicaCommand::Status(args) => run_status(&args, cancel).await,
         ReplicaCommand::Doctor(args) => run_doctor(&args, cancel).await,
-        ReplicaCommand::Remove(args) => run_remove(&args).await,
+        ReplicaCommand::Remove(args) => run_remove(&args, cancel).await,
     }
 }
 
 pub async fn run_add(args: &AddArgs) -> Result<()> {
+    run_add_with_cancel(args, &CancellationToken::new()).await
+}
+
+async fn run_add_with_cancel(args: &AddArgs, cancel: &CancellationToken) -> Result<()> {
     let provider: ReplicationProviderKind = args.provider.into();
     let rpo: ReplicationRpo = args.rpo.into();
     validate_replica_url_provider(provider, &args.replica)?;
@@ -1771,6 +1778,7 @@ pub async fn run_add(args: &AddArgs) -> Result<()> {
         let cwd = std::env::current_dir()?;
         let path = project_config_path(&cwd);
         add_replica_to_project_config(&path, args, provider, rpo)?;
+        publish_project_replica_discovery(&cwd, cancel).await?;
     }
 
     let payload = AddPayload {
@@ -1880,6 +1888,7 @@ pub async fn run_wait(args: &WaitArgs, cancel: &CancellationToken) -> Result<()>
 
     if ready && args.enable_read {
         set_replica_read_enabled(&project_config_path(&cwd), &args.name, true)?;
+        publish_project_replica_discovery(&cwd, cancel).await?;
     }
 
     let payload = WaitPayload {
@@ -1978,9 +1987,15 @@ pub async fn run_verify(args: &VerifyArgs, cancel: &CancellationToken) -> Result
     })
 }
 
-pub fn run_replica_toggle(name: &str, enabled: bool, json: bool) -> Result<()> {
+pub async fn run_replica_toggle(
+    name: &str,
+    enabled: bool,
+    json: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let changed = set_replica_read_enabled(&project_config_path(&cwd), name, enabled)?;
+    publish_project_replica_discovery(&cwd, cancel).await?;
     let payload = TogglePayload {
         name: name.to_owned(),
         enabled,
@@ -2040,7 +2055,9 @@ async fn enable_replica_reads_after_cutover_check(
             origin: format!("replica {name} cannot be enabled for reads: {reason}"),
         });
     }
-    set_replica_read_enabled(&project_config_path(root), name, true)
+    let changed = set_replica_read_enabled(&project_config_path(root), name, true)?;
+    publish_project_replica_discovery(root, cancel).await?;
+    Ok(changed)
 }
 
 pub async fn run_backfill_status(args: &BackfillStatusArgs) -> Result<()> {
@@ -3502,7 +3519,7 @@ fn validate_repair_args(args: &RepairArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_promote(args: &PromoteArgs) -> Result<()> {
+pub async fn run_promote(args: &PromoteArgs, cancel: &CancellationToken) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let path = project_config_path(&cwd);
     let mut config = ProjectConfig::load(&path)?;
@@ -3582,6 +3599,7 @@ pub async fn run_promote(args: &PromoteArgs) -> Result<()> {
             replication.primary = Some(new_primary);
         }
         ProjectConfig::write(&path, &config)?;
+        publish_project_replica_discovery(&cwd, cancel).await?;
         let audit_root = path.parent().unwrap_or(cwd.as_path());
         if let Err(err) = record_replica_promote_audit(audit_root, &payload) {
             warn!(%err, "failed to append replica promotion audit event");
@@ -3612,7 +3630,7 @@ fn record_replica_promote_audit(repo_root: &Path, payload: &PromotePayload) -> R
     append_event(&repo_root.join(default_log_path()), &event)
 }
 
-pub async fn run_set_primary(args: &SetPrimaryArgs) -> Result<()> {
+pub async fn run_set_primary(args: &SetPrimaryArgs, cancel: &CancellationToken) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let path = project_config_path(&cwd);
     let mut config = ProjectConfig::load(&path)?;
@@ -3684,6 +3702,7 @@ pub async fn run_set_primary(args: &SetPrimaryArgs) -> Result<()> {
             plan_ready,
         )?;
         write_primary_to_project_config(&path, &mut config, &new_primary)?;
+        publish_project_replica_discovery(&cwd, cancel).await?;
         payload.applied = true;
     }
 
@@ -8609,7 +8628,7 @@ fn collect_sensitive(values: &mut Vec<String>, value: &str) {
     values.push(trimmed.to_owned());
 }
 
-pub async fn run_remove(args: &RemoveArgs) -> Result<()> {
+pub async fn run_remove(args: &RemoveArgs, cancel: &CancellationToken) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let path = project_config_path(&cwd);
     let apply_status = if args.apply {
@@ -8639,6 +8658,7 @@ pub async fn run_remove(args: &RemoveArgs) -> Result<()> {
         None
     };
     let removed = remove_replica_from_project_config(&path, &args.name)?;
+    publish_project_replica_discovery(&cwd, cancel).await?;
     let payload = RemovePayload {
         removed,
         name: args.name.clone(),
@@ -11818,6 +11838,32 @@ fn resolved_replication_context(root: &Path) -> Result<(Option<String>, Config)>
         .and_then(|replication| replication.primary.clone())
         .or_else(|| config.remote_url.clone());
     Ok((primary, config))
+}
+
+async fn publish_project_replica_discovery(root: &Path, cancel: &CancellationToken) -> Result<()> {
+    let (primary, config) = resolved_replication_context(root)?;
+    let primary = primary.ok_or_else(|| CrabError::Configuration {
+        key: "replication.primary".into(),
+        origin: "replica discovery publication requires a configured primary remote".into(),
+    })?;
+    let Some(replication) = config.replication.as_ref() else {
+        return Ok(());
+    };
+    let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
+    let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
+    let locator = resolver.classify(&primary)?;
+    if matches!(&locator, crab_git::RepositoryLocator::Managed(_)) {
+        return Ok(());
+    }
+    let resolved = crate::auth::build_repository_store(
+        &config,
+        locator,
+        crab_auth::TransferOperation::PushUpload,
+        cancel,
+    )
+    .await?;
+    let layout = StoreLayout::new(resolved.store.clone(), resolved.repository_prefix);
+    crate::replication::discovery::publish(&resolved.store, &layout, &primary, replication).await
 }
 
 fn select_configured_replica<'a>(
