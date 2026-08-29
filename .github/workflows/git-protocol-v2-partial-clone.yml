@@ -84,6 +84,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: ${{ github.workspace }}/target/crab-protocol-v2
+  CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
+  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   unit-and-transcript:
@@ -126,10 +128,44 @@ jobs:
             crates/crab-remote-git/src/reader.rs \
             crates/crab-remote-git/src/repository.rs
 
+  release-build:
+    name: Build shared protocol release artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Build release artifact with source provenance
+        run: |
+          GIT_SHA="$(git rev-parse HEAD)" \
+            cargo build -p crab --release --locked --features gix-transport
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          # Artifact upload normalizes file modes, so tar preserves the executable bit.
+          tar -C "${CARGO_TARGET_DIR}/release" \
+            -czf "${RUNNER_TEMP}/${CRAB_RELEASE_ARCHIVE}" crab
+
+      - name: Upload shared release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/${{ env.CRAB_RELEASE_ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   real-git-version-matrix:
     name: Real Git compatibility (${{ matrix.label }})
     runs-on: ubuntu-latest
-    needs: unit-and-transcript
+    needs: [unit-and-transcript, release-build]
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -158,9 +194,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install compatibility dependencies
         run: |
           sudo apt-get update -y
@@ -171,10 +204,19 @@ jobs:
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Build release artifact with source provenance
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract shared release artifact
         run: |
-          GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
 
       - name: Install selected Git
         shell: bash
@@ -255,7 +297,7 @@ jobs:
   rustfs-lifecycle:
     name: Released-shape RustFS partial-clone lifecycle
     runs-on: ubuntu-latest
-    needs: unit-and-transcript
+    needs: [unit-and-transcript, release-build]
     timeout-minutes: 45
     env:
       CRAB_E2E_BUCKET: crab
@@ -273,9 +315,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install smoke dependencies
         run: |
           sudo apt-get update -y
@@ -283,10 +322,19 @@ jobs:
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Build release artifact with source provenance
+      - name: Download shared release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.CRAB_RELEASE_ARTIFACT }}
+          path: ${{ runner.temp }}/crab-protocol-v2-release
+
+      - name: Extract shared release artifact
         run: |
-          GIT_SHA="$(git rev-parse HEAD)" \
-            cargo build -p crab --release --locked --features gix-transport
+          mkdir -p "${CARGO_TARGET_DIR}/release"
+          tar -xzf "${RUNNER_TEMP}/crab-protocol-v2-release/${CRAB_RELEASE_ARCHIVE}" \
+            -C "${CARGO_TARGET_DIR}/release"
+          test -x "${CARGO_TARGET_DIR}/release/crab"
+          "${CARGO_TARGET_DIR}/release/crab" version | grep -F "$(git rev-parse HEAD)"
 
       - name: Start RustFS
         run: |

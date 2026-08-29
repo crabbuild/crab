@@ -208,7 +208,7 @@ workflow before starting a release:
 
 1. Run `.github/workflows/cache-service.yml` with `workflow_dispatch` on the
    release commit.
-2. Wait for the `RustFS cache-service smoke` job to pass.
+2. Wait for the `Build, test & smoke cache service` job to pass.
 3. Keep the workflow run ID. Release CI derives the expected report run ID as
    `gha-<run-id>-<attempt>` and downloads the default artifact
    `cache-service-rustfs-smoke-<run-id>-<attempt>`.

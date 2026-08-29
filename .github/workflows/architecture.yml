@@ -99,10 +99,12 @@ jobs:
         working-directory: crab
         run: make architecture-check
 
-  crate-interfaces:
-    name: Split-crate interface checks
+  # Split-crate checks reuse library artifacts; binary and integration checks share
+  # executable builds. Two cohorts retain parallel feedback without duplicate targets.
+  split-crate-contracts:
+    name: Split-crate contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -111,62 +113,46 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
       - name: Run split-crate interface checks
+        id: crate_interfaces
+        continue-on-error: true
         working-directory: crab
         run: make crate-interface-check
 
-  crate-behavior:
-    name: Split-crate behavior checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Run split-crate behavior checks
+        id: crate_behavior
+        continue-on-error: true
         working-directory: crab
         run: make crate-behavior-check
 
-  split-crate-clippy:
-    name: Split-crate clippy checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Run split-crate clippy checks
+        id: split_crate_clippy
+        continue-on-error: true
         working-directory: crab
         run: make split-crate-clippy-check
 
-  split-crate-tests:
-    name: Split-crate test checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Run split-crate test checks
+        id: split_crate_tests
+        continue-on-error: true
         working-directory: crab
         run: make split-crate-test-check
 
-  shipped-binary-versions:
-    name: Shipped binary version checks
+      - name: Fail when a split-crate contract failed
+        if: >-
+          always() &&
+          (steps.crate_interfaces.outcome != 'success' ||
+           steps.crate_behavior.outcome != 'success' ||
+           steps.split_crate_clippy.outcome != 'success' ||
+           steps.split_crate_tests.outcome != 'success')
+        run: exit 1
+
+  binary-contracts:
+    name: Binary and integration contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -179,27 +165,30 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
 
       - name: Run shipped binary version checks
+        id: shipped_binary_versions
+        continue-on-error: true
         working-directory: crab
         run: make shipped-binary-version-check
 
-  install-layout:
-    name: Install layout check
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux system dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
-
       - name: Run install layout check
+        id: install_layout
+        continue-on-error: true
         working-directory: crab
         run: make install-layout-check
+
+      - name: Run final integration checks
+        id: final_integration
+        continue-on-error: true
+        working-directory: crab
+        run: make final-integration-check
+
+      - name: Fail when a binary or integration contract failed
+        if: >-
+          always() &&
+          (steps.shipped_binary_versions.outcome != 'success' ||
+           steps.install_layout.outcome != 'success' ||
+           steps.final_integration.outcome != 'success')
+        run: exit 1
 
   auth-helper-packaging:
     name: Auth helper packaging check
@@ -248,22 +237,3 @@ jobs:
       - name: Run release archive contents check
         working-directory: crab
         run: make release-archive-contents-check
-
-  final-integration:
-    name: Final integration checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux system dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
-
-      - name: Run final integration checks
-        working-directory: crab
-        run: make final-integration-check
