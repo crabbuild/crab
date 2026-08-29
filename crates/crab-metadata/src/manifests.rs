@@ -33,7 +33,7 @@ pub struct Manifest {
     /// Complete ref map: ref name to SHA.
     pub refs: BTreeMap<String, String>,
     /// Peeled-target map for annotated tags: ref name to target-commit SHA.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub peeled_refs: BTreeMap<String, String>,
     /// HEAD symref target, such as `refs/heads/main`.
     pub head: String,
@@ -605,6 +605,26 @@ mod tests {
         let z = json.find("refs/heads/z").unwrap();
 
         assert!(a < z);
+    }
+
+    #[test]
+    fn manifest_serialization_includes_empty_peeled_refs() {
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+
+        let json = serde_json::to_value(manifest).unwrap();
+
+        assert_eq!(json["peeled_refs"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn manifest_decode_accepts_missing_peeled_refs() {
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        let mut json = serde_json::to_value(manifest).unwrap();
+        json.as_object_mut().unwrap().remove("peeled_refs");
+
+        let decoded: Manifest = serde_json::from_value(json).unwrap();
+
+        assert!(decoded.peeled_refs.is_empty());
     }
 
     #[test]
