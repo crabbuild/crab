@@ -25,10 +25,10 @@ type Scenario = {
 }
 
 const STAGES = [
-  { name: "ingest", output: "raw.parquet" },
-  { name: "features", output: "features.parquet" },
-  { name: "train", output: "model.pkl" },
-  { name: "evaluate", output: "metrics.json" },
+  { name: "ingest", output: "raw.csv" },
+  { name: "features", output: "features.csv" },
+  { name: "train", output: "fraud-model.pkl" },
+  { name: "evaluate", output: "metrics + plot" },
 ] as const
 
 const SCENARIOS: Scenario[] = [
@@ -36,7 +36,7 @@ const SCENARIOS: Scenario[] = [
     id: "first-run",
     label: "First run",
     change: "No cache exists yet",
-    command: "crab run --cache-push",
+    command: "crab run --parallelism 2",
     reason:
       "Every content-addressed stage key is new, so the complete DAG executes.",
     stages: ["run", "run", "run", "run"],
@@ -258,16 +258,16 @@ export function MlWorkflowCacheExplorer() {
 }
 
 const SWEEP_ROWS = [
-  { lr: "0.01", results: [0.781, 0.804, 0.798] },
-  { lr: "0.05", results: [0.812, 0.841, 0.833] },
-  { lr: "0.10", results: [0.793, 0.818, 0.806] },
+  { lr: "0.1", results: [0.781, 0.804, 0.798] },
+  { lr: "0.2", results: [0.812, 0.841, 0.833] },
+  { lr: "0.3", results: [0.793, 0.818, 0.806] },
 ] as const
-const DEPTHS = [4, 8, 12] as const
+const L2_VALUES = ["0.0", "0.01", "0.1"] as const
 
 export function MlExperimentSweepExplorer() {
   const [selected, setSelected] = useState({ row: 1, column: 1 })
   const row = SWEEP_ROWS[selected.row]
-  const depth = DEPTHS[selected.column]
+  const l2 = L2_VALUES[selected.column]
   const recall = row.results[selected.column]
   const precision = Math.min(0.94, recall + 0.071)
 
@@ -282,15 +282,15 @@ export function MlExperimentSweepExplorer() {
           <div
             className="grid grid-cols-[4.5rem_repeat(3,minmax(4.5rem,1fr))] gap-2"
             role="grid"
-            aria-label="Recall by learning rate and tree depth"
+            aria-label="Recall by learning rate and L2 regularization"
           >
             <div />
-            {DEPTHS.map((value) => (
+            {L2_VALUES.map((value) => (
               <div
                 key={value}
                 className="px-2 py-1 text-center text-[11px] font-semibold text-muted-foreground"
               >
-                depth {value}
+                L2 {value}
               </div>
             ))}
             {SWEEP_ROWS.map((sweepRow, rowIndex) => (
@@ -304,11 +304,11 @@ export function MlExperimentSweepExplorer() {
                   const strength = Math.round((value - 0.76) * 550)
                   return (
                     <button
-                      key={`${sweepRow.lr}-${DEPTHS[columnIndex]}`}
+                      key={`${sweepRow.lr}-${L2_VALUES[columnIndex]}`}
                       type="button"
                       role="gridcell"
                       aria-selected={isSelected}
-                      aria-label={`Learning rate ${sweepRow.lr}, depth ${DEPTHS[columnIndex]}, recall ${value.toFixed(3)}`}
+                      aria-label={`Learning rate ${sweepRow.lr}, L2 ${L2_VALUES[columnIndex]}, recall ${value.toFixed(3)}`}
                       onClick={() =>
                         setSelected({ row: rowIndex, column: columnIndex })
                       }
@@ -335,7 +335,8 @@ export function MlExperimentSweepExplorer() {
             ))}
           </div>
           <div className="mt-4 rounded-md border border-border bg-muted/25 px-3 py-2 font-mono text-[11px] text-foreground">
-            crab exp show lr-{row.lr.replace(".", "-")}-d{depth} --json
+            crab exp show lr-{row.lr.replace(".", "-")}-l2-
+            {l2.replace(".", "-")} --json
           </div>
         </div>
 
@@ -344,7 +345,7 @@ export function MlExperimentSweepExplorer() {
             Selected experiment
           </div>
           <div className="mt-3 text-lg font-bold text-foreground">
-            lr {row.lr} · depth {depth}
+            lr {row.lr} · L2 {l2}
           </div>
           <dl className="mt-4 space-y-3 text-sm">
             <MetricRow

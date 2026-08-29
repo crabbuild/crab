@@ -47,12 +47,14 @@ plots:
 
 stages:
   evaluate:
-    cmd: python src/evaluate.py
+    cmd: python3 src/evaluate.py --config params.json
     deps:
+      - src/common.py
       - src/evaluate.py
       - models/fraud-model.pkl
-      - data/features.parquet
+      - data/features.csv
     params:
+      - evaluate.threshold
       - evaluate.minimum_recall
     metrics:
       - metrics/evaluation.json
@@ -66,10 +68,12 @@ Use stable names and units:
 
 ```json title="metrics/evaluation.json"
 {
-  "recall_at_threshold": 0.841,
-  "precision_at_threshold": 0.912,
-  "false_positive_rate": 0.018,
-  "p95_scoring_ms": 11.7
+  "accuracy": 1.0,
+  "f1": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "samples": 6,
+  "threshold": 0.5
 }
 ```
 
@@ -119,7 +123,7 @@ Crab proves workflow identity and recorded bytes. It does not decide that `0.841
 
 ```bash
 crab run evaluate --json
-python src/check_quality_gate.py metrics/evaluation.json
+python3 src/check_quality_gate.py metrics/evaluation.json
 ```
 
 The script might require minimum recall, maximum false-positive rate, latency, fairness slices, and schema compatibility. Keep those thresholds reviewable in params or policy files.

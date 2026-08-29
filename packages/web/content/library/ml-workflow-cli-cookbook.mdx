@@ -45,21 +45,24 @@ This cookbook closes the loop on the fraud-detection series. It covers every **p
 # Declarative DAG
 crab run --validate
 crab run --dry --explain-miss
-crab run --cache-push
+crab run --parallelism 2 --json
 crab repro train --downstream
 
 # Inline cached stage
 crab run --name smoke-model \
   --deps models/fraud-model.pkl \
+  --deps src/smoke_model.py \
   --outs metrics/smoke.json \
-  -- python src/smoke_model.py
+  -- python3 src/smoke_model.py models/fraud-model.pkl \
+    --report metrics/smoke.json
 
 # Authoring helpers
-crab stage add -n prepare \
-  -d src/prepare.py \
-  -d data/transactions.csv \
-  -o data/prepared.parquet \
-  python src/prepare.py
+crab stage add -n smoke-model \
+  -d models/fraud-model.pkl \
+  -d src/smoke_model.py \
+  -o metrics/smoke.json \
+  python3 src/smoke_model.py models/fraud-model.pkl \
+    --report metrics/smoke.json
 crab stage list --json
 
 # Shared stage policy
@@ -80,8 +83,6 @@ crab workflow dag --format mermaid
 crab workflow journal ls
 crab workflow journal show <run-id>
 crab workflow journal gc --keep 50
-
-crab workflow push-cache --all --json
 ```
 
 For a multi-team repository, preview and apply split lockfiles:
@@ -111,7 +112,7 @@ crab status --workflow --why train
 ```bash
 # Create and inspect
 crab exp save -n baseline
-crab exp run -S train.learning_rate=0.05 -n candidate --json
+crab exp run -S train.learning_rate=0.2 -n candidate --json
 crab exp show candidate --json
 crab exp ls
 crab exp diff baseline candidate --json
@@ -124,10 +125,6 @@ crab exp promote weekly-candidate --branch experiments/weekly-candidate
 # Checkpoint lineage
 crab exp run --resume <checkpoint-experiment>
 crab exp reset <checkpoint-experiment> --checkpoint <checkpoint-id>
-
-# Share
-crab exp push weekly-candidate
-crab exp pull weekly-candidate
 
 # Maintain local state
 crab exp remove old-candidate
@@ -143,8 +140,8 @@ The `crab exp` family provides submission plus short worker aliases:
 
 ```bash
 crab exp queue \
-  -S train.learning_rate=0.01,0.05,0.10 \
-  -S train.max_depth=4,8,12 \
+  -S train.learning_rate=0.1,0.2,0.3 \
+  -S train.l2=0.0,0.01,0.1 \
   --json
 crab exp start --jobs 2
 crab exp status --json
@@ -163,6 +160,18 @@ crab queue stop
 ```
 
 Use graceful `stop` for planned shutdown. Preserve logs before killing or removing failed tasks.
+
+## Publish workflow and experiment state through a remote
+
+These commands require a configured, writable `crab://` remote. They are not
+part of the dependency-free local quickstart:
+
+```bash
+crab run --cache-push
+crab workflow push-cache --all --json
+crab exp push weekly-candidate
+crab exp pull weekly-candidate
+```
 
 ## Read params, metrics, and plots
 

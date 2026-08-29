@@ -1,0 +1,70 @@
+params:
+  - params.json
+
+metrics:
+  - metrics/evaluation.json
+
+plots:
+  - plots/precision_recall.csv:
+      x: recall
+      y: precision
+
+artifacts:
+  fraud-model:
+    path: models/fraud-model.pkl
+    type: model
+    desc: Weekly card-not-present fraud classifier
+    labels: [fraud, payments]
+
+stages:
+  ingest:
+    cmd: python3 src/ingest.py
+    deps:
+      - src/common.py
+      - src/ingest.py
+      - data/transactions.csv
+    outs:
+      - data/raw.csv
+
+  features:
+    cmd: python3 src/features.py --config params.json
+    deps:
+      - src/common.py
+      - src/features.py
+      - data/raw.csv
+    params:
+      - features.lookback_days
+    outs:
+      - data/features.csv
+
+  train:
+    cmd: python3 src/train.py --config params.json
+    deps:
+      - src/common.py
+      - src/train.py
+      - data/features.csv
+    params:
+      - train.algorithm
+      - train.learning_rate
+      - train.l2
+      - train.max_iter
+      - train.seed
+    outs:
+      - models/fraud-model.pkl
+
+  evaluate:
+    cmd: python3 src/evaluate.py --config params.json
+    deps:
+      - src/common.py
+      - src/evaluate.py
+      - models/fraud-model.pkl
+      - data/features.csv
+    params:
+      - evaluate.threshold
+      - evaluate.minimum_recall
+    metrics:
+      - metrics/evaluation.json
+    plots:
+      - plots/precision_recall.csv:
+          x: recall
+          y: precision

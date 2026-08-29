@@ -38,7 +38,7 @@ Imagine a payments team retrains a fraud classifier every week. The source code 
 This series uses that same system from first pipeline run through production promotion:
 
 ```text
-transactions.csv → features.parquet → fraud-model.pkl → metrics.json
+transactions.csv → raw.csv → features.csv → fraud-model.pkl → metrics + plot
 ```
 
 Crab keeps the workflow declaration and small evidence in Git, large bytes in object storage, and reusable stage results in a content-addressed cache. No separate Crab data server sits between the team and its bucket.
@@ -47,37 +47,39 @@ Crab keeps the workflow declaration and small evidence in Git, large bytes in ob
 
 ## 1. Create the project boundary
 
-Start with a Git repository connected to a Crab remote you control:
+Start with a local Git repository. The complete example uses only the Python 3
+standard library; copy it from the
+[example source](https://github.com/crabbuild/crab-oss/tree/main/packages/web/public/examples/ml-fraud-detection)
+or create these files alongside the snippets below.
 
 ```bash
 mkdir fraud-detection && cd fraud-detection
 git init
-crab init crab://ml-platform/fraud-detection
 mkdir -p data models metrics plots src
 ```
 
-Track the file families that will become large. The patterns are committed policy, so another clone uses the same representation:
+Download or copy `data/transactions.csv` and every script under `src/` from the
+example source. The workflow runs locally without a Crab remote.
 
-```bash
-crab track "data/**/*.csv"
-crab track "data/**/*.parquet"
-crab track "models/**/*.pkl"
-git add .gitattributes .crab.toml
-```
+Use a small `params.json` for reviewable training inputs:
 
-Use a small `params.yaml` for reviewable training inputs:
-
-```yaml title="params.yaml"
-features:
-  lookback_days: 30
-train:
-  algorithm: hist_gradient_boosting
-  learning_rate: 0.05
-  max_depth: 8
-  max_iter: 200
-  seed: 42
-evaluate:
-  minimum_recall: 0.82
+```json title="params.json"
+{
+  "features": {
+    "lookback_days": 30
+  },
+  "train": {
+    "algorithm": "logistic_regression",
+    "learning_rate": 0.2,
+    "l2": 0.01,
+    "max_iter": 800,
+    "seed": 42
+  },
+  "evaluate": {
+    "threshold": 0.5,
+    "minimum_recall": 0.82
+  }
+}
 ```
 
 ## 2. Declare the complete DAG
@@ -86,7 +88,7 @@ Each stage names its command, dependencies, parameter keys, and outputs. An outp
 
 ```yaml title="crab.yaml"
 params:
-  - params.yaml
+  - params.json
 
 metrics:
   - metrics/evaluation.json
@@ -105,44 +107,49 @@ artifacts:
 
 stages:
   ingest:
-    cmd: python src/ingest.py
+    cmd: python3 src/ingest.py
     deps:
+      - src/common.py
       - src/ingest.py
       - data/transactions.csv
     outs:
-      - data/raw.parquet
+      - data/raw.csv
 
   features:
-    cmd: python src/features.py --config params.yaml
+    cmd: python3 src/features.py --config params.json
     deps:
+      - src/common.py
       - src/features.py
-      - data/raw.parquet
+      - data/raw.csv
     params:
       - features.lookback_days
     outs:
-      - data/features.parquet
+      - data/features.csv
 
   train:
-    cmd: python src/train.py --config params.yaml
+    cmd: python3 src/train.py --config params.json
     deps:
+      - src/common.py
       - src/train.py
-      - data/features.parquet
+      - data/features.csv
     params:
       - train.algorithm
       - train.learning_rate
-      - train.max_depth
+      - train.l2
       - train.max_iter
       - train.seed
     outs:
       - models/fraud-model.pkl
 
   evaluate:
-    cmd: python src/evaluate.py
+    cmd: python3 src/evaluate.py --config params.json
     deps:
+      - src/common.py
       - src/evaluate.py
       - models/fraud-model.pkl
-      - data/features.parquet
+      - data/features.csv
     params:
+      - evaluate.threshold
       - evaluate.minimum_recall
     metrics:
       - metrics/evaluation.json
@@ -171,10 +178,12 @@ You can also author simpler stages from the CLI:
 
 ```bash
 crab stage add -n ingest \
+  --force \
+  -d src/common.py \
   -d src/ingest.py \
   -d data/transactions.csv \
-  -o data/raw.parquet \
-  python src/ingest.py
+  -o data/raw.csv \
+  python3 src/ingest.py
 ```
 
 Editing YAML directly is clearer for this example because it also declares params, metrics, plots, and the artifact catalog.
@@ -187,31 +196,54 @@ Preview the execution decision first:
 crab run --dry --explain-miss
 ```
 
-Then run the DAG and publish each new stage-cache entry after it commits:
+Then run the DAG locally:
 
 ```bash
-crab run --parallelism 2 --cache-push
-crab workflow status
+crab run --parallelism 2 --json
+crab workflow status --json
 crab metrics show
+crab plots show --json
+python3 src/smoke_model.py
+python3 src/check_quality_gate.py
 ```
 
 The first run writes `crab.lock`. That lockfile records the exact successful stage state. A second unchanged run should reuse matching results:
 
 ```bash
-crab run --dry
+crab run --parallelism 2 --json
 ```
+
+All four stage results should report `"cache_hit": true`.
 
 Use the interactive diagram above to see why a training-code change reuses ingest and features but invalidates train and evaluate. Crab calculates each stage key from the declared command, dependencies, parameter values, and selected environment—not from timestamps or stage names alone.
 
-## 5. Commit reproducible state, then prove sharing
+## 5. Commit reproducible state
 
 Commit declarations, scripts, params, the lockfile, and small review evidence:
 
 ```bash
-git add crab.yaml crab.lock params.yaml src/ metrics/ plots/
+git add crab.yaml crab.lock params.json data/ src/ metrics/ plots/
 git commit -m "add fraud detection workflow"
+```
+
+The commands through this point require only Git, Crab, and Python 3.
+
+## 6. Configure remote sharing when needed
+
+The following boundary requires a real `crab://` remote that your account can
+write. Substitute your organization and repository, then declare the large file
+families as committed policy. The tutorial fixture is intentionally tiny; in a
+production repository, configure these patterns before the first commit that
+contains large datasets or models.
+
+```bash
+crab init crab://ml-platform/fraud-detection
+crab track "data/**/*.csv"
+crab track "models/**/*.pkl"
+git add .gitattributes .crab.toml
+git commit -m "configure Crab storage policy"
 crab push
-crab workflow push-cache --all
+crab workflow push-cache --all --json
 ```
 
 The decisive proof uses a clean clone, because the producer workspace already has local outputs and cache entries:

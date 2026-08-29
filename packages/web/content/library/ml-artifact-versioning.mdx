@@ -114,7 +114,7 @@ Retrieval verifies the content while streaming and writes a new destination only
 Run an application-level smoke test after registry verification:
 
 ```bash
-python src/smoke_model.py validation/fraud-model.pkl
+python3 src/smoke_model.py validation/fraud-model.pkl
 ```
 
 The registry proves payload identity. It cannot prove the pickle loads in the intended runtime, the feature schema matches, or the fraud policy gates pass.
@@ -129,7 +129,7 @@ crab artifacts show fraud-model --json
 crab artifacts get fraud-model \
   --version <version-id> \
   --output /tmp/fraud-model-review.pkl
-python src/smoke_model.py /tmp/fraud-model-review.pkl
+python3 src/smoke_model.py /tmp/fraud-model-review.pkl
 ```
 
 Use an isolated destination appropriate to your environment. The clean client proves registry visibility, payload availability, hash verification, and the no-overwrite boundary.

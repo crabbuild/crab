@@ -53,8 +53,8 @@ crab artifacts get \
   --version <candidate-version> \
   --output validation/candidate.pkl
 
-python src/smoke_model.py validation/candidate.pkl
-python src/check_quality_gate.py metrics/evaluation.json
+python3 src/smoke_model.py validation/candidate.pkl
+python3 src/check_quality_gate.py metrics/evaluation.json
 ```
 
 Add the organization's schema, latency, fairness, security, and canary checks. Hash verification is necessary, but it is not a deployment decision.
@@ -71,6 +71,10 @@ crab artifacts promote \
 ```
 
 If another operator changed `staging` after your read, the compare-and-swap fails. Reread the registry and decide whether their selection should remain. Do not retry using a guessed expected value.
+
+If the label does not exist yet, there is no current version to compare. Omit
+`--expected` only for that first promotion, then read the new mapping and use
+compare-and-swap for every later move.
 
 After staging tests pass, repeat the pattern for production:
 
@@ -133,7 +137,7 @@ crab artifacts version create fraud-model --json
 # Release automation
 crab artifacts show fraud-model --json
 crab artifacts get fraud-model --version <candidate> --output validation/model.pkl
-python src/smoke_model.py validation/model.pkl
+python3 src/smoke_model.py validation/model.pkl
 crab artifacts promote fraud-model <candidate> staging --expected <old-staging>
 crab artifacts promote fraud-model <candidate> production --expected <old-production>
 
