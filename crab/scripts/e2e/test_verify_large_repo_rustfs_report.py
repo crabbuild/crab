@@ -323,6 +323,10 @@ def valid_team_load() -> dict[str, Any]:
         "fetch_seed": {
             "clients": fetch_count,
             "successful_clones": fetch_count,
+            "generated_pack_producers": 1,
+            "cache_hits": 0,
+            "cache_misses": fetch_count,
+            "origin_requests": 100,
             **team_summary(),
             "results": team_results(fetch_count, ["ok"] * fetch_count),
         },
@@ -488,6 +492,24 @@ class ReportVerificationTests(unittest.TestCase):
             ["clone_failed", *(["ok"] * 99)],
         )
         with self.assertRaisesRegex(VERIFY.VerificationError, "clone_failed"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_requires_a_generated_pack_producer(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["generated_pack_producers"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "generated-pack producers"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_rejects_duplicate_generated_pack_producers(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["generated_pack_producers"] = 3
+        with self.assertRaisesRegex(VERIFY.VerificationError, "generated-pack producers"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_requires_cache_events_for_every_client(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["cache_misses"] = 99
+        with self.assertRaisesRegex(VERIFY.VerificationError, "cache events"):
             VERIFY.verify_team_load(report)
 
     def test_prevalidated_owner_path_allows_no_remote_visibility_build(self) -> None:

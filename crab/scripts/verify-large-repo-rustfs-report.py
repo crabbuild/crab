@@ -256,6 +256,28 @@ def verify_team_load(team_load: Any, *, require_release_counts: bool = False) ->
         fetch_seed.get("successful_clones") == fetch_clients,
         "fetch seed clones did not all complete",
     )
+    producers = require_nonnegative_int(
+        fetch_seed.get("generated_pack_producers"),
+        "team_load.fetch_seed.generated_pack_producers",
+    )
+    require(
+        1 <= producers <= 2,
+        "cold fetch seed fanout must use one or two generated-pack producers",
+    )
+    cache_hits = require_nonnegative_int(
+        fetch_seed.get("cache_hits"), "team_load.fetch_seed.cache_hits"
+    )
+    cache_misses = require_nonnegative_int(
+        fetch_seed.get("cache_misses"), "team_load.fetch_seed.cache_misses"
+    )
+    require(
+        cache_hits + cache_misses >= fetch_clients,
+        "cold fetch seed fanout is missing cache events for clients",
+    )
+    origin_requests = require_nonnegative_int(
+        fetch_seed.get("origin_requests"), "team_load.fetch_seed.origin_requests"
+    )
+    require(origin_requests > 0, "cold fetch seed fanout recorded no origin requests")
     verify_team_summary(fetch_seed, "team_load.fetch_seed")
     verify_team_results(
         fetch_seed.get("results"),
@@ -661,6 +683,7 @@ def verify_report(
         verify_team_load(team_load, require_release_counts=True)
         required_team_checks = {
             "concurrent-fetch-seed-clones",
+            "concurrent-fetch-seed-generated-pack-producers",
             "concurrent-incremental-fetches",
             "independent_ref_pushes-outcomes",
             "independent-ref-pushes-preserved",

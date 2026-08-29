@@ -129,7 +129,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `commands` | Exit status, duration, process-tree CPU, peak child RSS, aggregate operation telemetry, and redacted logs |
 | `pushes` | Per-commit latency, resource use, and storage/cache counters |
 | `stages` | Clone/fetch measurements, active pack inventory, generation-bound locator/visibility health, and per-owner-pass locator sweep counters |
-| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures; `--require-team-load` makes it mandatory for a full gate |
+| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures plus cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
 | `cache_service` | Optional service health/capability proof and aggregate Git-pack cache traffic; `--require-cache-service` makes the service and observed pack traffic mandatory |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
 | `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |

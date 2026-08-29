@@ -1317,6 +1317,7 @@ class LargeRepositoryQualification:
                 "exit_code": record["exit_code"],
                 "duration_ms": record["duration_ms"],
                 "failure_category": "ok" if record["exit_code"] == 0 else "clone_failed",
+                "telemetry": record["telemetry"],
             }
 
         started = time.monotonic()
@@ -1327,20 +1328,45 @@ class LargeRepositoryQualification:
                 runs.append(future.result())
         durations = [int(run["duration_ms"]) for run in runs]
         successful = sum(run["failure_category"] == "ok" for run in runs)
+        producers = sum(
+            int(run["telemetry"].get("pack_generation_ms", 0)) > 0 for run in runs
+        )
+        cache_hits = sum(int(run["telemetry"].get("cache_hits", 0)) for run in runs)
+        cache_misses = sum(
+            int(run["telemetry"].get("cache_misses", 0)) for run in runs
+        )
+        origin_requests = sum(
+            int(run["telemetry"].get("storage_requests", 0)) for run in runs
+        )
         self.report["team_load"]["fetch_seed"] = {
             "checkpoint": checkpoint,
             "clients": count,
             "successful_clones": successful,
+            "generated_pack_producers": producers,
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "origin_requests": origin_requests,
             "duration_ms": int((time.monotonic() - started) * 1_000),
             "median_client_ms": percentile(durations, 0.50),
             "p95_client_ms": percentile(durations, 0.95),
             "p99_client_ms": percentile(durations, 0.99),
-            "results": sorted(runs, key=lambda run: int(run["ordinal"])),
+            "results": sorted(
+                (
+                    {key: value for key, value in run.items() if key != "telemetry"}
+                    for run in runs
+                ),
+                key=lambda run: int(run["ordinal"]),
+            ),
         }
         self.check(
             "concurrent-fetch-seed-clones",
             len(runs) == count and successful == count,
             {"clients": count, "successful_clones": successful},
+        )
+        self.check(
+            "concurrent-fetch-seed-generated-pack-producers",
+            1 <= producers <= 2,
+            {"clients": count, "producers": producers},
         )
         self.write_report()
 
