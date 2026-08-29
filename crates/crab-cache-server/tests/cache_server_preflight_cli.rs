@@ -1880,8 +1880,8 @@ impl EvidenceFixture {
             "cli_push_dedup": [
                 {
                     "name": "cli-dedup-push",
-                    "dedup_queries_delta": 1,
-                    "dedup_known_chunks_delta": 3,
+                    "dedup_queries_delta": 0,
+                    "dedup_known_chunks_delta": 0,
                     "dedup_unknown_chunks_delta": 0,
                     "xorb_puts_delta": 0,
                     "xorb_gets_delta": 1,

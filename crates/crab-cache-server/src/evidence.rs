@@ -1421,17 +1421,17 @@ impl EvidenceVerifier {
             return;
         };
         self.check(
-            "cli-dedup-queries-observed",
-            int_field(&record, "dedup_queries_delta").is_some_and(|value| value > 0),
+            "cli-dedup-advisory-queries-bypassed",
+            int_field(&record, "dedup_queries_delta") == Some(0),
             json!({ "dedup_queries_delta": record.get("dedup_queries_delta") }),
         );
         self.check(
-            "cli-dedup-known-chunks-observed",
-            int_field(&record, "dedup_known_chunks_delta").is_some_and(|value| value > 0),
+            "cli-dedup-advisory-known-chunks-empty",
+            int_field(&record, "dedup_known_chunks_delta") == Some(0),
             json!({ "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta") }),
         );
         self.check(
-            "cli-dedup-no-unknown-chunks",
+            "cli-dedup-advisory-unknown-chunks-empty",
             int_field(&record, "dedup_unknown_chunks_delta") == Some(0),
             json!({ "dedup_unknown_chunks_delta": record.get("dedup_unknown_chunks_delta") }),
         );

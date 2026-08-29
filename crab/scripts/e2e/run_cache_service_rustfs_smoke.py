@@ -4427,13 +4427,13 @@ class CacheServiceRustfsSmoke:
         self.write_report()
 
         self.check(
-            "cli-dedup-push-cache-service-queried",
-            record.dedup_queries_delta > 0,
+            "cli-dedup-add-push-advisory-query-bypassed",
+            record.dedup_queries_delta == 0,
             {"delta": record.dedup_queries_delta},
         )
         self.check(
-            "cli-dedup-push-cache-service-returned-known-chunks",
-            record.dedup_known_chunks_delta > 0 and record.dedup_unknown_chunks_delta == 0,
+            "cli-dedup-add-push-advisory-results-empty",
+            record.dedup_known_chunks_delta == 0 and record.dedup_unknown_chunks_delta == 0,
             {
                 "known_delta": record.dedup_known_chunks_delta,
                 "unknown_delta": record.dedup_unknown_chunks_delta,
@@ -5931,20 +5931,20 @@ def audit_cli_dedup(report: dict[str, Any], errors: list[str]) -> None:
         return
     audit_require(
         errors,
-        int(record.get("dedup_queries_delta", 0)) > 0,
-        "dedup queried cache service",
+        int(record.get("dedup_queries_delta", -1)) == 0,
+        "add/push bypassed advisory dedup query",
         record,
     )
     audit_require(
         errors,
-        int(record.get("dedup_known_chunks_delta", 0)) > 0,
-        "dedup returned known chunks",
+        int(record.get("dedup_known_chunks_delta", -1)) == 0,
+        "add/push did not consume advisory known chunks",
         record,
     )
     audit_require(
         errors,
-        int(record.get("dedup_unknown_chunks_delta", 0)) == 0,
-        "dedup avoided unknown chunks",
+        int(record.get("dedup_unknown_chunks_delta", -1)) == 0,
+        "add/push did not consume advisory unknown chunks",
         record,
     )
     cacheable_keys = record.get("cacheable_origin_get_key_delta", {})
