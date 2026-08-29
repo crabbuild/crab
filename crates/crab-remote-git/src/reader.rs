@@ -323,6 +323,36 @@ impl RemoteGitReader {
                 .await;
         }
 
+        if session.coverage().is_some() {
+            // A generation-bound catalog already contains the OID-to-pack
+            // join. The operation layer has checked that coverage against its
+            // pinned manifest, so avoid reopening every immutable pack index
+            // for current repositories; use indexes only for catalog misses
+            // from a partially repaired publication.
+            let mut lookups = self
+                .lookup_batch_from_catalog(session, requested, budget, cancellation)
+                .await?;
+            let missing = lookups
+                .iter()
+                .enumerate()
+                .filter_map(|(index, lookup)| {
+                    matches!(lookup, GitObjectLookup::Miss).then_some((index, requested[index]))
+                })
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                return Ok(lookups);
+            }
+
+            let missing_ids = missing.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+            let fallback = self
+                .lookup_batch_from_pack_indexes(&missing_ids, budget, cancellation)
+                .await?;
+            for ((index, _), lookup) in missing.into_iter().zip(fallback) {
+                lookups[index] = lookup;
+            }
+            return Ok(lookups);
+        }
+
         let mut lookups = self
             .lookup_batch_from_pack_indexes(requested, budget, cancellation)
             .await?;
@@ -345,6 +375,64 @@ impl RemoteGitReader {
             lookups[index] = lookup;
         }
         Ok(lookups)
+    }
+
+    pub(crate) async fn lookup_packed_locators_with_session(
+        &self,
+        session: &GitObjectLocatorSession,
+        requested: &[gix_hash::ObjectId],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLocator>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut oid_bytes = Vec::new();
+        oid_bytes
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<[u8; 20]>()),
+                source,
+            })?;
+        for oid in requested {
+            oid_bytes.push(
+                oid.as_bytes()
+                    .try_into()
+                    .map_err(|_| Error::UnsupportedObjectFormat)?,
+            );
+        }
+        let lookups = self
+            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+            .await?;
+        drop(oid_bytes);
+        if lookups.len() != requested.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        let mut locators = Vec::new();
+        locators
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<GitObjectLocator>()),
+                source,
+            })?;
+        for (oid, lookup) in requested.iter().copied().zip(lookups) {
+            match lookup {
+                GitObjectLookup::Hit(locator) => locators.push(locator),
+                GitObjectLookup::Corrupt => {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Locator,
+                    });
+                }
+                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
+            }
+        }
+        Ok(locators)
     }
 
     async fn lookup_batch_from_catalog(
@@ -598,18 +686,31 @@ impl RemoteGitReader {
         if requested.is_empty() {
             return Ok(Vec::new());
         }
-        let oid_bytes = requested
-            .iter()
-            .map(|oid| {
-                oid.as_bytes()
-                    .try_into()
-                    .map_err(|_| Error::UnsupportedObjectFormat)
-            })
-            .collect::<Result<Vec<[u8; 20]>>>()?;
-        let lookups = self
-            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+        let locators = self
+            .lookup_packed_locators_with_session(session, requested, budget, cancellation)
             .await?;
-        if lookups.len() != requested.len() {
+        self.read_packed_many_with_session_and_locators(
+            requested,
+            &locators,
+            concurrency,
+            budget,
+            cancellation,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_packed_many_with_session_and_locators(
+        self: &Arc<Self>,
+        requested: &[gix_hash::ObjectId],
+        locators: &[GitObjectLocator],
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requested.len() != locators.len() {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Locator,
             });
@@ -623,16 +724,7 @@ impl RemoteGitReader {
                     .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
                 source,
             })?;
-        for (oid, lookup) in requested.iter().copied().zip(lookups) {
-            let locator = match lookup {
-                GitObjectLookup::Hit(locator) => locator,
-                GitObjectLookup::Corrupt => {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::Locator,
-                    });
-                }
-                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
-            };
+        for (oid, locator) in requested.iter().copied().zip(locators.iter().copied()) {
             check_limit(
                 "packed entry bytes",
                 locator.location.entry_len,
@@ -1380,22 +1472,59 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Inventory,
             })?;
         let path = repo_pack_index_path(&self.repo_prefix, &pack_id);
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        let metadata = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            metadata = self.store.head(&path) => metadata?,
+        let source_size = if let Some(source_size) =
+            self.runtime.cached_pack_index_source_size(&cache_key).await
+        {
+            source_size
+        } else {
+            // HEAD is immutable metadata, but it still consumes an origin
+            // request. Coalesce concurrent misses before reading the index so
+            // a fanout of delta-base lookups does not multiply HEAD traffic.
+            budget.charge(BudgetDimension::StorageRequests, 1).await?;
+            let store = self.store.clone();
+            let path = path.clone();
+            let work_runtime = Arc::clone(&self.runtime);
+            let source_size = self
+                .runtime
+                .load_pack_index_size_singleflight(
+                    cache_key.clone(),
+                    cancellation,
+                    move |shared_cancellation| async move {
+                        let origin_permit =
+                            work_runtime.origin_permit(&shared_cancellation).await?;
+                        let metadata = tokio::select! {
+                            biased;
+                            () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
+                            metadata = store.head(&path) => metadata?,
+                        };
+                        drop(origin_permit);
+                        Ok(metadata.size)
+                    },
+                )
+                .await?;
+            self.runtime
+                .insert_pack_index_source_size(cache_key.clone(), source_size)
+                .await;
+            source_size
         };
-        drop(origin_permit);
         check_limit(
             "pack index bytes",
-            metadata.size,
+            source_size,
             self.limits.max_pack_index_bytes,
         )?;
-        charge_origin_range(budget, metadata.size).await?;
+        // A concurrent producer may have populated the parsed cache while this
+        // caller waited for the size flight. Avoid charging or loading it
+        // again when the verified index is already available.
+        if let Some(index) = self
+            .runtime
+            .cached_pack_index(&cache_key, self.limits.max_pack_index_bytes)
+            .await
+        {
+            return Ok(index);
+        }
+        charge_origin_range(budget, source_size).await?;
         let store = self.store.clone();
-        let size = metadata.size;
+        let size = source_size;
         let flight_runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let index = flight_runtime
@@ -2293,6 +2422,9 @@ fn usize_limit(value: u64, limit: &'static str) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use crab_metadata::git_object_locator::{
+        GitLocatorCoverage, GitObjectLocatorEntry, GitObjectLocatorWriter, GitPackLocatorRecord,
+    };
     use object_store::memory::InMemory;
 
     use super::*;
@@ -2462,6 +2594,142 @@ mod tests {
                 ..
             })] if *actual_pack == pack_id
         ));
+    }
+
+    #[tokio::test]
+    async fn large_batch_prefers_catalog_and_falls_back_for_catalog_misses() {
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let pack_index_hash = MerkleHash::from_hex(&"22".repeat(32)).expect("index hash");
+        let pack = GitPackLocatorRecord {
+            pack_id,
+            committed_generation: 1,
+            pack_index_hash,
+            object_count: 2,
+            pack_size: 220,
+        };
+        let catalog_oid = [1; 20];
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open catalog writer");
+        let binding = writer.bind_packs(&[pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(
+                binding,
+                &[GitObjectLocatorEntry {
+                    oid: catalog_oid,
+                    location: GitObjectLocation {
+                        pack_offset: 12,
+                        entry_len: 96,
+                        crc32: 7,
+                    },
+                    metadata: Default::default(),
+                }],
+            )
+            .await
+            .expect("write catalog row");
+        writer.flush_objects().await.expect("flush catalog row");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: pack.committed_generation,
+                pack_index_hash,
+            })
+            .await
+            .expect("publish catalog coverage");
+        writer.close().await.expect("close catalog writer");
+
+        let session = GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open catalog reader");
+        assert!(session.is_available());
+        assert_eq!(
+            session.coverage(),
+            Some(GitLocatorCoverage {
+                generation: pack.committed_generation,
+                pack_index_hash,
+            })
+        );
+
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                Arc::new(PackIndex {
+                    object_ids: vec![gix_hash::ObjectId::from([2; 20])],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [0; 20],
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::clone(&store)),
+            "org/repo",
+            [GitPackInventoryEntry {
+                pack_id,
+                object_count: pack.object_count,
+                pack_size: pack.pack_size,
+            }],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            pack.committed_generation,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime, 1);
+        let catalog_request = vec![catalog_oid; PACK_INDEX_LOOKUP_MIN_OBJECTS];
+        let catalog_lookups = reader
+            .lookup_batch_for_read(
+                &session,
+                &catalog_request,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("catalog lookup");
+        assert!(
+            catalog_lookups
+                .iter()
+                .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
+        );
+        let catalog_oids =
+            vec![gix_hash::ObjectId::from(catalog_oid); PACK_INDEX_LOOKUP_MIN_OBJECTS];
+        let catalog_locators = reader
+            .lookup_packed_locators_with_session(
+                &session,
+                &catalog_oids,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("packed locator lookup");
+        assert_eq!(catalog_locators.len(), catalog_oids.len());
+        assert!(catalog_locators.iter().all(|locator| {
+            locator.pack_id == pack_id
+                && locator.location.pack_offset == 12
+                && locator.location.entry_len == 96
+        }));
+
+        let fallback_request = vec![[2; 20]; PACK_INDEX_LOOKUP_MIN_OBJECTS];
+        let fallback_lookups = reader
+            .lookup_batch_for_read(
+                &session,
+                &fallback_request,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("pack-index fallback lookup");
+        assert!(
+            fallback_lookups
+                .iter()
+                .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
+        );
+        session.close().await.expect("close catalog reader");
     }
 
     #[test]

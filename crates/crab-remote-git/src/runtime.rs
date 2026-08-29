@@ -241,6 +241,8 @@ type SharedPackedResult = std::result::Result<Arc<PackedEntry>, Arc<Error>>;
 type PackedFlight = watch::Receiver<Option<SharedPackedResult>>;
 type SharedPackIndexResult = std::result::Result<Arc<PackIndex>, Arc<Error>>;
 type PackIndexFlight = watch::Receiver<Option<SharedPackIndexResult>>;
+type SharedPackIndexSizeResult = std::result::Result<u64, Arc<Error>>;
+type PackIndexSizeFlight = watch::Receiver<Option<SharedPackIndexSizeResult>>;
 type SharedGeneratedPackResult = std::result::Result<Arc<GeneratedPack>, Arc<Error>>;
 type GeneratedPackFlight = watch::Receiver<Option<SharedGeneratedPackResult>>;
 
@@ -287,6 +289,8 @@ pub struct RemoteGitRuntime {
     inventory_cache:
         Mutex<BoundedLru<InventoryCacheKey, Arc<HashMap<MerkleHash, GitPackInventoryEntry>>>>,
     packed_flights: Mutex<HashMap<PackedFlightKey, PackedFlight>>,
+    pack_index_size_cache: Mutex<BoundedLru<PackIndexCacheKey, u64>>,
+    pack_index_size_flights: Mutex<HashMap<PackIndexCacheKey, PackIndexSizeFlight>>,
     pack_index_flights: Mutex<HashMap<PackIndexFlightKey, PackIndexFlight>>,
     generated_pack_flights: Mutex<HashMap<GeneratedPackFlightKey, GeneratedPackFlight>>,
     negative_cache: Mutex<BoundedLru<ObjectCacheKey, Instant>>,
@@ -339,6 +343,11 @@ impl RemoteGitRuntime {
                 options.max_inventory_cache_bytes,
             )),
             packed_flights: Mutex::new(HashMap::new()),
+            pack_index_size_cache: Mutex::new(BoundedLru::new(
+                options.max_pack_index_cache_entries,
+                options.max_pack_index_cache_bytes,
+            )),
+            pack_index_size_flights: Mutex::new(HashMap::new()),
             pack_index_flights: Mutex::new(HashMap::new()),
             generated_pack_flights: Mutex::new(HashMap::new()),
             negative_cache: Mutex::new(BoundedLru::new(
@@ -396,7 +405,12 @@ impl RemoteGitRuntime {
             negative_entries,
             negative_bytes,
             active_object_flights: self.packed_flights.lock().await.len(),
-            active_pack_index_flights: self.pack_index_flights.lock().await.len(),
+            active_pack_index_flights: self
+                .pack_index_size_flights
+                .lock()
+                .await
+                .len()
+                .saturating_add(self.pack_index_flights.lock().await.len()),
             active_generated_pack_flights: self.generated_pack_flights.lock().await.len(),
         }
     }
@@ -730,6 +744,8 @@ impl RemoteGitRuntime {
     }
 
     pub(crate) async fn insert_pack_index(&self, key: PackIndexCacheKey, index: Arc<PackIndex>) {
+        self.insert_pack_index_source_size(key.clone(), index.source_bytes)
+            .await;
         let bytes = index.resident_bytes();
         let evicted = self.pack_index_cache.lock().await.insert(key, index, bytes);
         if evicted > 0 {
@@ -740,6 +756,98 @@ impl RemoteGitRuntime {
                 outcome: None,
                 cache: Some(CacheOutcome::Eviction),
             });
+        }
+    }
+
+    pub(crate) async fn cached_pack_index_source_size(
+        &self,
+        key: &PackIndexCacheKey,
+    ) -> Option<u64> {
+        self.pack_index_size_cache.lock().await.get(key)
+    }
+
+    pub(crate) async fn insert_pack_index_source_size(
+        &self,
+        key: PackIndexCacheKey,
+        source_bytes: u64,
+    ) {
+        let _ = self.pack_index_size_cache.lock().await.insert(
+            key,
+            source_bytes,
+            std::mem::size_of::<u64>(),
+        );
+    }
+
+    pub(crate) async fn load_pack_index_size_singleflight<F, Fut>(
+        self: &Arc<Self>,
+        key: PackIndexCacheKey,
+        cancellation: &CancellationToken,
+        work: F,
+    ) -> Result<u64>
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<u64>> + Send + 'static,
+    {
+        let mut work = Some(work);
+        let mut receiver =
+            if let Some(receiver) = self.pack_index_size_flights.lock().await.get(&key).cloned() {
+                receiver
+            } else {
+                let admission = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    permit = Arc::clone(&self.pack_index_flight_admission).acquire_owned() => {
+                        permit.map_err(|_| Error::Cancelled)?
+                    }
+                };
+                let mut flights = self.pack_index_size_flights.lock().await;
+                if let Some(receiver) = flights.get(&key) {
+                    drop(admission);
+                    receiver.clone()
+                } else {
+                    let (sender, receiver) = watch::channel(None);
+                    flights.insert(key.clone(), receiver.clone());
+                    let runtime = Arc::clone(self);
+                    let task_key = key;
+                    let task_work = work.take().ok_or(Error::InternalInvariant {
+                        invariant: "new pack-index size flight has no work",
+                    })?;
+                    self.tasks.spawn(async move {
+                        let _admission = admission;
+                        let result = task_work(runtime.background_cancellation()).await;
+                        runtime
+                            .pack_index_size_flights
+                            .lock()
+                            .await
+                            .remove(&task_key);
+                        let _ = sender.send(Some(result.map_err(Arc::new)));
+                    });
+                    receiver
+                }
+            };
+
+        loop {
+            let completed = receiver.borrow().clone();
+            if let Some(result) = completed {
+                return match result {
+                    Ok(size) => Ok(size),
+                    Err(source) => match Arc::try_unwrap(source) {
+                        Ok(error) => Err(error),
+                        Err(source) => Err(Error::SharedRead { source }),
+                    },
+                };
+            }
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                changed = receiver.changed() => {
+                    if changed.is_err() {
+                        return Err(Error::InternalInvariant {
+                            invariant: "pack-index size flight ended without a result",
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1340,6 +1448,57 @@ mod tests {
         assert!(runtime.cached_pack_index(&keys[0], 32).await.is_none());
         assert!(runtime.cached_pack_index(&keys[1], 32).await.is_some());
         assert!(runtime.cached_pack_index(&keys[2], 32).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn pack_index_size_singleflight_coalesces_concurrent_heads() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let key = PackIndexCacheKey::new(
+            &identity,
+            crab_xet::hash::compute_data_hash(b"pack-index-size"),
+        );
+        let starts = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(0));
+        let first_runtime = Arc::clone(&runtime);
+        let first_starts = Arc::clone(&starts);
+        let first_gate = Arc::clone(&gate);
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .load_pack_index_size_singleflight(
+                    first_key,
+                    &CancellationToken::new(),
+                    move |_| async move {
+                        first_starts.fetch_add(1, Ordering::SeqCst);
+                        let permit = first_gate.acquire().await.expect("size gate open");
+                        permit.forget();
+                        Ok(128)
+                    },
+                )
+                .await
+        });
+        while starts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let second_runtime = Arc::clone(&runtime);
+        let second = tokio::spawn(async move {
+            second_runtime
+                .load_pack_index_size_singleflight(key, &CancellationToken::new(), |_| async {
+                    Ok(256)
+                })
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        gate.add_permits(1);
+        assert_eq!(first.await.expect("first joins").expect("first size"), 128);
+        assert_eq!(
+            second.await.expect("second joins").expect("second size"),
+            128
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

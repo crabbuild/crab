@@ -314,6 +314,12 @@ pub struct CachedRange {
     pub total_size: u64,
 }
 
+/// An open cached object file and its current byte length.
+pub struct CachedFile {
+    pub file: std::fs::File,
+    pub size: u64,
+}
+
 /// Result of reading a range from an object already present on disk.
 pub enum CacheRangeRead {
     Hit(CachedRange),
@@ -439,6 +445,36 @@ impl CacheStore {
         self.touch_metadata(key)?;
 
         Ok(Some(Bytes::from(data)))
+    }
+
+    /// Open a cached object for streaming without reading the body into RAM.
+    ///
+    /// Opening the file before returning keeps an in-flight response valid if
+    /// eviction removes the directory entry while the response is draining.
+    pub fn get_file(&self, key: &ServerObjectKey) -> Result<Option<CachedFile>> {
+        let path = self.object_path(key);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.remove_metadata_for_missing_file(key, &path)?;
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(CacheServiceError::InternalError(
+                    format!("failed to open {}: {e}", path.display()).into(),
+                ));
+            }
+        };
+        let size = file
+            .metadata()
+            .map_err(|e| {
+                CacheServiceError::InternalError(
+                    format!("failed to stat cached file {}: {e}", path.display()).into(),
+                )
+            })?
+            .len();
+        self.touch_metadata(key)?;
+        Ok(Some(CachedFile { file, size }))
     }
 
     /// Read a byte range from a cached file. Returns `None` on miss.
@@ -1947,6 +1983,23 @@ mod tests {
         assert_eq!(store.current_bytes(), body.len() as u64);
         let got = store.get(&key).unwrap().expect("should be a hit");
         assert_eq!(got.as_ref(), body);
+    }
+
+    #[test]
+    fn get_file_opens_cached_pack_without_reading_body() {
+        use std::io::Read;
+
+        let store = test_store();
+        let key = pack_key("pack-file");
+        let body = Bytes::from_static(b"file-backed pack bytes");
+        store.put_unverified(&key, body.clone()).unwrap();
+
+        let cached = store.get_file(&key).unwrap().expect("should be a hit");
+        assert_eq!(cached.size, body.len() as u64);
+        let mut file_body = Vec::new();
+        let mut file = cached.file;
+        file.read_to_end(&mut file_body).unwrap();
+        assert_eq!(file_body, body);
     }
 
     #[test]

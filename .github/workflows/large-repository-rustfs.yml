@@ -19,7 +19,14 @@ on:
       - "crab/docs/architecture/git-protocol-v2.md"
       - "crab/docs/guides/metadb.md"
       - "crab/src/git/push.rs"
+      - "crab/src/git/fetch.rs"
+      - "crab/src/git/remote_helper.rs"
       - "crab/src/git/upload_pack_wire.rs"
+      - "crab/docs/architecture/caching-architecture.md"
+      - "crates/crab-cache/**"
+      - "crates/crab-cache-store/**"
+      - "crates/crab-cache-server/**"
+      - "Cargo.lock"
       - "crates/crab-coordination/src/lib.rs"
       - "crates/crab-coordination/src/push_lock.rs"
       - "crates/crab-coordination/src/read_admission.rs"
@@ -43,7 +50,14 @@ on:
       - "crab/docs/architecture/git-protocol-v2.md"
       - "crab/docs/guides/metadb.md"
       - "crab/src/git/push.rs"
+      - "crab/src/git/fetch.rs"
+      - "crab/src/git/remote_helper.rs"
       - "crab/src/git/upload_pack_wire.rs"
+      - "crab/docs/architecture/caching-architecture.md"
+      - "crates/crab-cache/**"
+      - "crates/crab-cache-store/**"
+      - "crates/crab-cache-server/**"
+      - "Cargo.lock"
       - "crates/crab-coordination/src/lib.rs"
       - "crates/crab-coordination/src/push_lock.rs"
       - "crates/crab-coordination/src/read_admission.rs"
@@ -86,6 +100,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: crab
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      CRAB_CACHE_SERVICE_URL: http://127.0.0.1:19002
+      CRAB_CACHE_PSK: cache-smoke-psk
       CARGO_TARGET_DIR: /Volumes/Workspace/crabbuild-target/crab-large-repo-qualification-${{ github.run_id }}-${{ github.run_attempt }}
       QUALIFICATION_ROOT: /Volumes/Workspace/CrabBuild/crabbuild-qualification
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
@@ -105,12 +121,14 @@ jobs:
           test -d /Volumes/Workspace/Github/kubernetes/kubernetes/.git
           test -x "$(command -v aws)"
           test -x "$(command -v docker)"
+          test -x "$(command -v curl)"
           docker info >/dev/null
 
       - name: Build release Crab
         run: |
           GIT_SHA="$(git rev-parse HEAD)" \
             cargo build -p crab --release --locked --features gix-transport
+          cargo build -p crab-cache-server --bin crab-cache-server --release --locked
 
       - name: Start pinned RustFS
         run: |
@@ -135,6 +153,47 @@ jobs:
           docker logs crab-large-repo-rustfs >&2 || true
           exit 1
 
+      - name: Start cache service
+        run: |
+          set -euo pipefail
+          cache_root="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cache_config="${cache_root}/config.toml"
+          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
+          mkdir -p "$cache_root/data"
+          cat > "$cache_config" <<EOF
+          [server]
+          listen_addr = "127.0.0.1:19002"
+          drain_timeout_secs = 30
+          mutable_path_mode = "strict"
+
+          [auth]
+          mechanism = "psk"
+          psk_hash = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
+
+          [origin]
+          url = "s3://crab"
+
+          [cache]
+          root = "${cache_root}/data"
+          max_bytes = 21474836480
+
+          [dedup]
+          scope = "all"
+          EOF
+          "${CARGO_TARGET_DIR}/release/crab-cache-server" \
+            --config "$cache_config" serve > "$cache_log" 2>&1 &
+          echo $! > "$cache_pid"
+          for _ in $(seq 1 90); do
+            if curl --fail --silent --show-error \
+              "${CRAB_CACHE_SERVICE_URL}/v1/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" >&2 || true
+          exit 1
+
       - name: Run consecutive qualifications
         run: |
           set -euo pipefail
@@ -145,6 +204,7 @@ jobs:
             --root "$QUALIFICATION_ROOT"
             --source /Volumes/Workspace/Github/kubernetes/kubernetes
             --object-store-version "$RUSTFS_IMAGE"
+            --require-cache-service
             --cold-clone-fanout 50
             --warm-clone-fanout 100
             --team-load
@@ -153,16 +213,37 @@ jobs:
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$first"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
             "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
-            --require-team-load
+            --require-team-load \
+            --require-cache-service
           python3 crab/scripts/e2e/run_large_repo_rustfs.py "${common[@]}" --run-id "$second"
           python3 crab/scripts/verify-large-repo-rustfs-report.py \
             "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
-            --require-team-load
+            --require-team-load \
+            --require-cache-service
           python3 crab/scripts/verify-large-repo-rustfs-report.py compare \
             "$QUALIFICATION_ROOT/$first/artifacts/report.json" \
             "$QUALIFICATION_ROOT/$second/artifacts/report.json" \
             --require-team-load \
+            --require-cache-service \
             --output "$QUALIFICATION_ROOT/comparison-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+
+      - name: Capture cache service logs
+        if: always()
+        run: |
+          set -euo pipefail
+          cache_pid="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.pid"
+          cache_log="${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          if test -s "$cache_pid"; then
+            kill "$(cat "$cache_pid")" >/dev/null 2>&1 || true
+            for _ in $(seq 1 30); do
+              kill -0 "$(cat "$cache_pid")" >/dev/null 2>&1 || break
+              sleep 1
+            done
+          fi
+          if test -f "$cache_log"; then
+            sed 's/cache-smoke-psk/<redacted>/g' "$cache_log" > \
+              "${QUALIFICATION_ROOT}/cache-service-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-captured.log"
+          fi
 
       - name: Capture RustFS logs
         if: always()
@@ -180,6 +261,7 @@ jobs:
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-a/artifacts/**
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/gha-${{ github.run_id }}-${{ github.run_attempt }}-b/artifacts/**
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/comparison-${{ github.run_id }}-${{ github.run_attempt }}.json
+            /Volumes/Workspace/CrabBuild/crabbuild-qualification/cache-service-${{ github.run_id }}-${{ github.run_attempt }}-captured.log
             /Volumes/Workspace/CrabBuild/crabbuild-qualification/rustfs-${{ github.run_id }}-${{ github.run_attempt }}.log
           if-no-files-found: warn
           retention-days: 30

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
@@ -55,6 +55,9 @@ struct ObjectStoreGeneratedPackLeaseProvider {
 
 struct ObjectStoreGeneratedPackLease {
     lock: crab_coordination::PushLock,
+    // Cache waiters release the session lease before polling; the producer
+    // reacquires one here so only actual pack generation consumes read capacity.
+    read_admission: crab_coordination::ReadAdmissionTicket,
 }
 
 enum VisibilityRequirement {
@@ -132,11 +135,45 @@ impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLea
                 .try_acquire_internal(&self.prefix, resource, ttl)
                 .await
             {
-                Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
-                    Box::new(ObjectStoreGeneratedPackLease { lock }),
-                )),
-                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
-                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held)
+                Ok(lock) => {
+                    let read_admission = acquire_read_admission(
+                        &self.store,
+                        &self.prefix,
+                        &CancellationToken::new(),
+                    )
+                    .await;
+                    match read_admission {
+                        Ok(read_admission) => {
+                            Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
+                                Box::new(ObjectStoreGeneratedPackLease {
+                                    lock,
+                                    read_admission,
+                                }),
+                            ))
+                        }
+                        Err(error) => {
+                            if let Err(release_error) = lock.release().await {
+                                tracing::warn!(
+                                    error = %release_error,
+                                    "generated-pack lease release failed after read admission failure"
+                                );
+                            }
+                            Err(crab_remote_git::GeneratedPackLeaseError::new(error))
+                        }
+                    }
+                }
+                Err(crab_coordination::CoordinationError::PushLockHeld {
+                    expires_at_unix, ..
+                }) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let retry_after = expires_at_unix
+                        .map(|expires_at| Duration::from_secs(expires_at.saturating_sub(now)))
+                        .unwrap_or(ttl)
+                        .min(ttl);
+                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held { retry_after })
                 }
                 Err(error) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
             }
@@ -152,6 +189,10 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
+            self.read_admission
+                .renew()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)?;
             self.lock
                 .renew()
                 .await
@@ -166,10 +207,13 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
-            self.lock
-                .release()
-                .await
-                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+            let read_result = self.read_admission.release().await;
+            let lock_result = self.lock.release().await;
+            match (read_result, lock_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+                (Ok(()), Err(error)) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+            }
         })
     }
 }
@@ -306,9 +350,10 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut read_admission = acquire_read_admission(store, prefix, cancellation).await?;
+    let started = std::time::Instant::now();
+    let read_admission = acquire_read_admission(store.inner(), prefix, cancellation).await?;
     let result = serve_with_read_admission(
-        &mut read_admission,
+        read_admission,
         reader,
         writer,
         store,
@@ -319,27 +364,21 @@ where
         cancellation,
     )
     .await;
-    let release = read_admission.release().await.map_err(CrabError::from);
-    match (result, release) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                "upload-pack read admission release failed after session failure"
-            );
-            Err(error)
-        }
-    }
+    tracing::debug!(
+        result = result.is_ok(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "protocol-v2 upload-pack session completed"
+    );
+    result
 }
 
 async fn acquire_read_admission(
-    store: &crab_storage::Store,
+    store: &Arc<dyn object_store::ObjectStore>,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<crab_coordination::ReadAdmissionTicket> {
     let mut ticket = crab_coordination::ReadAdmissionTicket::new(
-        store.inner(),
+        store,
         prefix,
         crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
         crab_coordination::DEFAULT_READ_ADMISSION_TTL,
@@ -434,7 +473,7 @@ fn read_admission_retry_delay(attempt: usize, retry_after: Option<Duration>) -> 
 }
 
 async fn serve_with_read_admission<R, W>(
-    read_admission: &mut crab_coordination::ReadAdmissionTicket,
+    read_admission: crab_coordination::ReadAdmissionTicket,
     reader: &mut R,
     writer: &mut W,
     store: &crab_storage::Store,
@@ -448,7 +487,12 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let renewal_interval = (read_admission.ttl() / 3).max(Duration::from_secs(1));
+    let admission = Arc::new(tokio::sync::Mutex::new(Some(read_admission)));
+    let renewal_interval = (admission.lock().await.as_ref().map_or(
+        Duration::from_secs(1),
+        crab_coordination::ReadAdmissionTicket::ttl,
+    ) / 3)
+        .max(Duration::from_secs(1));
     let mut ticker = tokio::time::interval(renewal_interval);
     ticker.tick().await;
     let operation = serve_admitted(
@@ -459,14 +503,15 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        &admission,
         cancellation,
     );
     tokio::pin!(operation);
     let mut renewal_error = None;
-    loop {
+    let result = loop {
         tokio::select! {
             result = &mut operation => {
-                return match result {
+                break match result {
                     Err(error) => Err(error),
                     Ok(()) => match renewal_error {
                         Some(error) => Err(CrabError::from(error)),
@@ -475,12 +520,47 @@ where
                 };
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = read_admission.renew().await {
+                let renewal = {
+                    let mut admission = admission.lock().await;
+                    match admission.as_mut() {
+                        Some(ticket) => ticket.renew().await,
+                        None => Ok(()),
+                    }
+                };
+                if let Err(error) = renewal {
                     cancellation.cancel();
                     renewal_error = Some(error);
                 }
             }
         }
+    };
+    let release_started = std::time::Instant::now();
+    let release = release_read_admission(&admission).await;
+    tracing::debug!(
+        result = release.is_ok(),
+        elapsed_ms = release_started.elapsed().as_millis() as u64,
+        "upload-pack read admission released"
+    );
+    match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after session failure"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn release_read_admission(
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
+) -> Result<()> {
+    let read_admission = admission.lock().await.take();
+    match read_admission {
+        Some(read_admission) => read_admission.release().await.map_err(CrabError::from),
+        None => Ok(()),
     }
 }
 
@@ -492,6 +572,7 @@ async fn serve_admitted<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -595,6 +676,7 @@ where
                             negotiation_rounds,
                             progress,
                             Some(&common_haves),
+                            admission,
                             cancellation,
                         )
                         .await?;
@@ -610,6 +692,7 @@ where
                     negotiation_rounds,
                     progress,
                     None,
+                    admission,
                     cancellation,
                 )
                 .await?;
@@ -863,7 +946,10 @@ async fn open_repository_with_visibility_requirement(
                 .await?;
             if matches!(
                 publication,
-                Some(super::push::GitVisibilityPublication::Published)
+                Some(
+                    super::push::GitVisibilityPublication::Published
+                        | super::push::GitVisibilityPublication::CatalogBound
+                )
             ) {
                 tracing::info!(
                     required_generation,
@@ -1395,6 +1481,126 @@ async fn write_acknowledgments<W: AsyncWrite + Unpin>(
 
 #[expect(
     clippy::too_many_arguments,
+    reason = "the preplanning cache boundary carries the pinned proof and protocol response state"
+)]
+async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    semantic_request: &UploadPackRequest,
+    negotiation_rounds: u32,
+    progress: bool,
+    acknowledged_haves: Option<&[ObjectId]>,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
+    cancellation: &CancellationToken,
+    started: std::time::Instant,
+    request_class: &'static str,
+) -> Result<()> {
+    let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
+    let request_digest = preplanned_pack_request_digest(request);
+    let cache_key =
+        repository.generated_pack_request_cache_key(authorization_digest, request_digest);
+    // The generated-pack producer reacquires one read slot under its cross-process lease.
+    // Waiters must release the session slot before polling or sixteen identical requests can
+    // prevent the sole producer from entering planning.
+    release_read_admission(admission).await?;
+    tracing::debug!("released upload-pack read admission before request-plan cache wait");
+
+    let producer = async {
+        let plan = match proof {
+            #[cfg(test)]
+            UploadPackVisibilityProof::Materialized(visibility) => {
+                plan_upload_pack(
+                    repository,
+                    visibility,
+                    visible_ref_names,
+                    semantic_request,
+                    cancellation,
+                )
+                .await
+            }
+            UploadPackVisibilityProof::Catalog(visibility) => {
+                plan_upload_pack_catalog(
+                    repository,
+                    visibility,
+                    visible_ref_names,
+                    semantic_request,
+                    cancellation,
+                )
+                .await
+            }
+        }
+        .map_err(|error| CrabError::Protocol(format!("upload-pack request rejected: {error}")))?;
+        if !plan.shallow.is_empty() || !plan.unshallow.is_empty() {
+            return Err(CrabError::Internal(
+                "non-deepening shallow fetch unexpectedly changed shallow boundaries".to_owned(),
+            ));
+        }
+        tracing::info!(
+            protocol_version = 2,
+            request_class,
+            negotiation_rounds,
+            canonical_filter = %request.filter.canonical_spec(),
+            haves = request.haves.len(),
+            common_haves = plan.common_haves.len(),
+            shallow = request.shallow.len(),
+            visible_objects = proof.object_count_for_refs(visible_ref_names),
+            planned_objects = plan.object_ids.len(),
+            "protocol-v2 upload-pack preplanned cache producer selected"
+        );
+        repository
+            .generate_pack(&plan.object_ids, cancellation)
+            .await
+            .map_err(remote_error)
+    };
+    let pack = match repository
+        .generate_pack_request_cached(cache_key, producer, cancellation)
+        .await
+    {
+        Ok(pack) => pack,
+        Err(crab_remote_git::GeneratedPackRequestCacheError::Producer(error)) => {
+            return reject_protocol_request(writer, error, cancellation).await;
+        }
+        Err(crab_remote_git::GeneratedPackRequestCacheError::Cache(error)) => {
+            return reject_protocol_request(writer, remote_error(error), cancellation).await;
+        }
+    };
+
+    if let Some(acknowledged_haves) = acknowledged_haves {
+        write_data(writer, b"acknowledgments\n", cancellation).await?;
+        for have in acknowledged_haves {
+            let line = format!("ACK {have}\n");
+            write_data(writer, line.as_bytes(), cancellation).await?;
+        }
+        write_data(writer, b"ready\n", cancellation).await?;
+        write_delimiter(writer, cancellation).await?;
+    }
+    write_data(writer, b"packfile\n", cancellation).await?;
+    if progress && !request.no_progress {
+        write_packet(writer, b"counting objects\n", Some(2), cancellation).await?;
+    }
+    tracing::info!(
+        protocol_version = 2,
+        request_class,
+        negotiation_rounds,
+        canonical_filter = %request.filter.canonical_spec(),
+        planned_objects = pack.object_count(),
+        reconstructed_objects = pack.object_count(),
+        transferred_bytes = pack.size(),
+        latency_ms = started.elapsed().as_millis() as u64,
+        "protocol-v2 upload-pack preplanned pack generated"
+    );
+    pack.write_sideband(writer, cancellation)
+        .await
+        .map_err(remote_error)?;
+    write_flush(writer, cancellation).await?;
+    write_response_end(writer, cancellation).await
+}
+
+#[expect(
+    clippy::too_many_arguments,
     reason = "the response boundary carries the pinned repository, proof, negotiation, and wire state"
 )]
 async fn write_fetch_response<W: AsyncWrite + Unpin>(
@@ -1406,6 +1612,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     negotiation_rounds: u32,
     progress: bool,
     acknowledged_haves: Option<&[ObjectId]>,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     let started = std::time::Instant::now();
@@ -1423,6 +1630,24 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         include_tags: request.include_tags,
         filter: request.filter.clone(),
     };
+    if request_pack_preplanning_cache_eligible(request) {
+        return write_preplanned_cached_fetch_response(
+            writer,
+            repository,
+            proof,
+            visible_ref_names,
+            request,
+            &semantic_request,
+            negotiation_rounds,
+            progress,
+            acknowledged_haves,
+            admission,
+            cancellation,
+            started,
+            request_class,
+        )
+        .await;
+    }
     let plan = match match proof {
         #[cfg(test)]
         UploadPackVisibilityProof::Materialized(visibility) => {
@@ -1515,6 +1740,12 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .thin_pack
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
+    if request.haves.is_empty() && request.done {
+        // Identical cache waiters do not perform repository reads while the
+        // producer builds the immutable response artifact.
+        release_read_admission(admission).await?;
+        tracing::debug!("released upload-pack read admission before generated-pack cache wait");
+    }
     let generated = if request.haves.is_empty() {
         let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
         let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
@@ -1602,6 +1833,50 @@ fn generated_pack_request_digest(
         request.shallow.as_slice(),
         response_shallow,
         response_unshallow,
+    ] {
+        let mut objects = objects.to_vec();
+        objects.sort_unstable();
+        hash.update(&(objects.len() as u64).to_be_bytes());
+        for oid in objects {
+            hash.update(oid.as_bytes());
+        }
+    }
+    *hash.finalize().as_bytes()
+}
+
+fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
+    !request.haves.is_empty()
+        && !request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+        && matches!(request.filter, UploadPackFilter::None)
+}
+
+fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.upload-pack.preplanned-request.v1\0");
+    let filter = request.filter.canonical_spec();
+    hash.update(&(filter.len() as u64).to_be_bytes());
+    hash.update(filter.as_bytes());
+    hash.update(&[
+        u8::from(request.deepen_relative),
+        u8::from(request.include_tags),
+        u8::from(request.thin_pack),
+        u8::from(request.ofs_delta),
+    ]);
+    match request.deepen {
+        Some(depth) => {
+            hash.update(&[1]);
+            hash.update(&depth.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    for objects in [
+        request.wants.as_slice(),
+        request.haves.as_slice(),
+        request.shallow.as_slice(),
     ] {
         let mut objects = objects.to_vec();
         objects.sort_unstable();
@@ -1882,6 +2157,39 @@ mod tests {
     }
 
     #[test]
+    fn preplanned_pack_request_digest_binds_shallow_incremental_negotiation() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let request = FetchRequest {
+            wants: vec![second],
+            haves: vec![first],
+            shallow: vec![first],
+            thin_pack: true,
+            ..FetchRequest::default()
+        };
+        assert!(request_pack_preplanning_cache_eligible(&request));
+
+        let digest = preplanned_pack_request_digest(&request);
+        let mut changed = request.clone();
+        changed.wants = vec![first];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.haves = vec![second];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.shallow = vec![second];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.deepen = Some(1);
+        assert!(!request_pack_preplanning_cache_eligible(&changed));
+        changed = request;
+        changed.filter = UploadPackFilter::BlobNone;
+        assert!(!request_pack_preplanning_cache_eligible(&changed));
+    }
+
+    #[test]
     fn dense_selected_response_requires_a_catalog_filter_without_shallow_state() {
         let mut request = FetchRequest {
             filter: UploadPackFilter::BlobNone,
@@ -1917,7 +2225,7 @@ mod tests {
         .expect("first lease acquisition")
         {
             crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
                 panic!("first lease must be available")
             }
         };
@@ -1928,10 +2236,14 @@ mod tests {
         )
         .await
         .expect("contending lease acquisition");
-        assert!(matches!(
-            blocked,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held
-        ));
+        let retry_after = match blocked {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { retry_after } => retry_after,
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(_) => {
+                panic!("contending lease must remain held")
+            }
+        };
+        assert!(!retry_after.is_zero());
+        assert!(retry_after <= Duration::from_secs(5));
 
         first.release().await.expect("release first lease");
         let replacement = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
@@ -1943,11 +2255,60 @@ mod tests {
         .expect("replacement lease acquisition")
         {
             crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
                 panic!("released lease must be acquirable")
             }
         };
         replacement.release().await.expect("release replacement");
+    }
+
+    #[tokio::test]
+    async fn generated_pack_lease_reserves_one_read_admission_slot() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let provider = ObjectStoreGeneratedPackLeaseProvider {
+            store: Arc::clone(&store),
+            prefix: "org/repo".to_owned(),
+        };
+        let lease = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
+                panic!("lease must be available")
+            }
+        };
+
+        let mut admitted = Vec::new();
+        for _ in 0..crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY {
+            let mut ticket = crab_coordination::ReadAdmissionTicket::new(
+                &store,
+                "org/repo",
+                crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+                Duration::from_secs(60),
+            )
+            .expect("read admission ticket");
+            for _ in 0..crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY {
+                if ticket.try_admit().await.expect("read admission probe") {
+                    admitted.push(ticket);
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            admitted.len(),
+            crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY - 1
+        );
+
+        for ticket in admitted {
+            ticket.release().await.expect("release read admission");
+        }
+        lease.release().await.expect("release generated-pack lease");
     }
 
     #[test]

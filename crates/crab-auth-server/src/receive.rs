@@ -17,7 +17,9 @@ use crab_metadata::{
     manifests::{
         Manifest, PackManifestEntry, parse_pack_segment_entries, validate_manifest_payload,
     },
-    pack_metadata::{parse_pack_metadata, validate_pack_metadata_for_entry},
+    pack_metadata::{
+        parse_pack_metadata, serialize_pack_metadata_bounded, validate_pack_metadata_for_entry,
+    },
     receipts::{
         CommittedChunkReceipt, GenerationIndexReceipt, OriginReceipt, PushCommitReceipt,
         RECEIPT_SCHEMA_VERSION, generation_file_index_digest, generation_git_object_locator_digest,
@@ -455,7 +457,14 @@ pub async fn read_verified_staged_object(
     object: &StagedWrite,
 ) -> Result<bytes::Bytes> {
     let path = ObjectPath::from(object.staged_key.clone());
-    let (bytes, _) = store.get_with_etag(&path).await?;
+    let maximum = if is_pack_metadata_key(&object.canonical_key) {
+        object
+            .size
+            .min(crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+    } else {
+        object.size
+    };
+    let (bytes, _) = store.get_with_etag_bounded(&path, maximum).await?;
     validate_staged_object_bytes(object, &bytes)?;
     Ok(bytes)
 }
@@ -467,6 +476,20 @@ fn is_pack_metadata_key(key: &str) -> bool {
         && key.contains("/packs/")
 }
 
+async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -> bool {
+    match store.head(path).await {
+        Ok(meta) => meta.size > crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        Err(error) => {
+            tracing::debug!(
+                path = %path,
+                error = %error,
+                "could not confirm oversized pack metadata during receive fallback"
+            );
+            false
+        }
+    }
+}
+
 async fn promote_pack_metadata_union(
     store: &Store,
     canonical: &ObjectPath,
@@ -475,7 +498,13 @@ async fn promote_pack_metadata_union(
     let staged = parse_pack_metadata(&staged_bytes, canonical.as_ref())?;
     let mut requested = staged.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
     for _ in 0..64 {
-        match store.get_with_etag(canonical).await {
+        match store
+            .get_with_etag_bounded(
+                canonical,
+                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+            )
+            .await
+        {
             Ok((body, etag)) => {
                 let mut existing = parse_pack_metadata(&body, canonical.as_ref())?;
                 if existing.pack_id != staged.pack_id
@@ -486,16 +515,25 @@ async fn promote_pack_metadata_union(
                     ));
                 }
                 let before = existing.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
+                if before.is_empty() && !staged.ref_tips.is_empty() {
+                    // An empty hint may be a deliberate legacy fallback after
+                    // a previous union exceeded the bound. It cannot be
+                    // enriched without proving the complete ref-tip set again.
+                    return Ok(());
+                }
                 requested.extend(before.iter().cloned());
                 if requested == before {
                     return Ok(());
                 }
                 existing.ref_tips = requested.iter().cloned().collect();
-                let body = serde_json::to_vec(&existing).map_err(|error| {
-                    AuthServerError::Internal(format!(
-                        "pack metadata union serialize failed: {error}"
-                    ))
-                })?;
+                let Some(body) = serialize_pack_metadata_bounded(&existing)? else {
+                    tracing::warn!(
+                        path = %canonical,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "pack metadata ref-tip union exceeded its bound; retaining legacy hint"
+                    );
+                    return Ok(());
+                };
                 match store
                     .update(canonical, bytes::Bytes::from(body), etag)
                     .await
@@ -508,11 +546,8 @@ async fn promote_pack_metadata_union(
             Err(StorageError::NotFound { .. }) => {
                 let mut metadata = staged.clone();
                 metadata.ref_tips = requested.iter().cloned().collect();
-                let body = serde_json::to_vec(&metadata).map_err(|error| {
-                    AuthServerError::Internal(format!(
-                        "pack metadata create serialize failed: {error}"
-                    ))
-                })?;
+                let body = serialize_pack_metadata_bounded(&metadata)?
+                    .ok_or_else(|| invalid("pack metadata hint exceeded its size bound"))?;
                 match store
                     .create_strict(canonical, bytes::Bytes::from(body))
                     .await
@@ -522,7 +557,19 @@ async fn promote_pack_metadata_union(
                     Err(error) => return Err(error.into()),
                 }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if matches!(&error, StorageError::CorruptObject { .. })
+                    && existing_pack_metadata_is_oversized(store, canonical).await
+                {
+                    tracing::warn!(
+                        path = %canonical,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "existing oversized pack metadata is treated as a legacy hint"
+                    );
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
         }
     }
     Err(AuthServerError::CasConflict {
@@ -1273,11 +1320,23 @@ async fn download_service_locator_evidence_with_legacy_repair(
     let temp = tempfile::tempdir()?;
     let idx_path = temp.path().join("pack.idx");
     let rev_path = temp.path().join("pack.rev");
+    let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+        .ok_or_else(|| invalid("committed Git pack index size overflows its bound"))?;
+    let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+        .ok_or_else(|| invalid("committed Git reverse index size overflows its bound"))?;
     store
-        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .download_to_path_bounded(
+            &router.pack_index_path(&pack.pack_id),
+            &idx_path,
+            index_maximum,
+        )
         .await?;
     match store
-        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .download_to_path_bounded(
+            &router.pack_reverse_index_path(&pack.pack_id),
+            &rev_path,
+            reverse_maximum,
+        )
         .await
     {
         Ok(_) => {}
@@ -1336,7 +1395,9 @@ async fn load_service_pack_kind_metadata(
     rev_path: &Path,
 ) -> Result<Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let bytes = match store.get_with_etag(&path).await {
+    let maximum = crab_git::pack_locator::pack_kind_metadata_size(pack.object_count)
+        .ok_or_else(|| invalid("Git kind metadata size overflows its bound"))?;
+    let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
         Err(StorageError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -1401,7 +1462,7 @@ async fn derive_service_locator_evidence(
     let temp = tempfile::tempdir()?;
     let source = temp.path().join("source.pack");
     let downloaded = store
-        .download_to_path(&router.pack_path(&pack.pack_id), &source)
+        .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
         .await?;
     if downloaded != pack.size {
         return Err(invalid(format!(
@@ -3578,6 +3639,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn promote_pack_metadata_keeps_oversized_existing_hint_legacy() -> Result<()> {
+        let store = store();
+        let pack_id = hash('a');
+        let path = repo_pack_metadata_path("org/repo", &pack_id);
+        let existing = Bytes::from(vec![
+            b' ';
+            usize::try_from(
+                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1
+            )
+            .map_err(|_| invalid(
+                "test metadata size does not fit usize"
+            ))?
+        ]);
+        store.put(&path, existing.clone()).await?;
+
+        let staged = PackMetadata {
+            pack_id,
+            ref_tips: vec![oid('2')],
+            object_count: 1,
+        };
+        let staged_bytes = serde_json::to_vec(&staged)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+
+        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
+
+        let (body, _) = store.get_with_etag(&path).await?;
+        assert_eq!(body, existing);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn promote_pack_metadata_does_not_enrich_empty_legacy_hint() -> Result<()> {
+        let store = store();
+        let pack_id = hash('a');
+        let path = repo_pack_metadata_path("org/repo", &pack_id);
+        let existing = PackMetadata {
+            pack_id: pack_id.clone(),
+            ref_tips: Vec::new(),
+            object_count: 1,
+        };
+        let existing_bytes = serde_json::to_vec(&existing)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+        store
+            .put(&path, Bytes::from(existing_bytes.clone()))
+            .await?;
+
+        let staged = PackMetadata {
+            pack_id,
+            ref_tips: vec![oid('2')],
+            object_count: 1,
+        };
+        let staged_bytes = serde_json::to_vec(&staged)
+            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
+
+        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
+
+        let (body, _) = store.get_with_etag(&path).await?;
+        assert_eq!(body, existing_bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn promote_staged_objects_revalidates_staged_bytes_before_canonical_write() -> Result<()>
     {
         let store = store();
@@ -3595,7 +3718,7 @@ mod tests {
         store
             .put(
                 &ObjectPath::from(object.staged_key.clone()),
-                Bytes::from_static(b"tampered"),
+                Bytes::from_static(b"bad!"),
             )
             .await?;
 
@@ -3611,6 +3734,24 @@ mod tests {
             .await
             .expect_err("canonical object must not be written after promotion failure");
         assert!(matches!(canonical_err, StorageError::NotFound { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_verified_staged_object_rejects_an_oversized_provider_body() -> Result<()> {
+        let store = store();
+        let object = staged_object_for_bytes(
+            "org/repo/packs/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack"
+                .to_owned(),
+            b"pack",
+        );
+        put_staged(&store, &object, Bytes::from_static(b"oversized")).await?;
+
+        let error = read_verified_staged_object(&store, &object)
+            .await
+            .expect_err("staged reads must stop at their declared size");
+        assert!(matches!(error, AuthServerError::CorruptObject { .. }));
+        assert!(error.to_string().contains("bounded read"));
         Ok(())
     }
 

@@ -153,6 +153,7 @@ track for Kubernetes-scale Git history and team fanout. It covers bitmap
 reachability, delta-preserving response packs, a generation-bound object
 catalog, split commit graphs, bounded geometric maintenance, stale-pack
 retention, indexed stale-pack cleanup, and concurrency qualification. Its
-implementation is in progress; the roadmap records completed code separately
-from pending Kubernetes/RustFS, fault, provider, and canary acceptance
-evidence.
+implementation includes real Kubernetes/RustFS replay, clone, shallow-fetch,
+and 100-client coordination proof; the roadmap records those completed gates
+separately from the pending 10,000-push, fault, provider, retention, failover,
+and canary acceptance evidence.

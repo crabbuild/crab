@@ -802,10 +802,15 @@ async fn run_remote_helper_with_context(
                     &cancel,
                 )
                 .await;
+                // Bind the cache facade to the selected primary or replica.
+                // Reusing the primary facade after replica routing would read
+                // a different repository view than the pinned layout.
+                let stateless_store =
+                    cache_aware_storage_for_selected_read(&read_store, &cache.config().cache);
                 crate::git::upload_pack_wire::serve(
                     &mut reader,
                     &mut writer,
-                    read_store.as_storage(),
+                    &stateless_store,
                     read_router.repo_prefix(),
                     &hidden_ref_patterns,
                     &fetch_policy,
@@ -1921,6 +1926,22 @@ where
     selected
 }
 
+fn cache_aware_storage_for_selected_read(
+    read_store: &crate::storage::store::Store,
+    config: &crate::core::config::CacheConfig,
+) -> crab_storage::Store {
+    match crab_cache_store::CachingStore::new(read_store.clone(), config) {
+        Ok(cache) => cache.cache_aware_storage(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to build selected-read cache facade, using selected store directly"
+            );
+            read_store.as_storage().clone()
+        }
+    }
+}
+
 /// Check whether the committed manifest pins a split commit graph.
 ///
 /// Returns the cached result when available; otherwise probes the store
@@ -2170,13 +2191,18 @@ impl RemoteFetchStore {
 
     async fn fetch_pack_metadata(&self, pack_id: &str) -> Option<PackMetadata> {
         let path = self.router.pack_metadata_path(pack_id);
+        let max_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES;
         let body = if let Some(cs) = &self.caching_store {
-            cs.get_with_etag(&path).await.ok()?.0
+            cs.get_with_etag_bounded(&path, max_bytes).await.ok()?.0
         } else {
-            self.store.get_with_etag(&path).await.ok()?.0
+            self.store
+                .get_with_etag_bounded(&path, max_bytes)
+                .await
+                .ok()?
+                .0
         };
 
-        match serde_json::from_slice::<PackMetadata>(&body) {
+        match crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref()) {
             Ok(metadata) if metadata.pack_id == pack_id => Some(metadata),
             Ok(metadata) => {
                 tracing::debug!(
@@ -2186,10 +2212,10 @@ impl RemoteFetchStore {
                 );
                 None
             }
-            Err(e) => {
+            Err(error) => {
                 tracing::debug!(
                     pack_id,
-                    error = %e,
+                    error = %error,
                     "pack metadata unreadable; treating pack as legacy"
                 );
                 None
@@ -2203,7 +2229,24 @@ impl RemoteFetchStore {
         dest: &std::path::Path,
     ) -> Result<u64> {
         let path = self.router.pack_path(pack_id);
-        self.store.download_to_path(&path, dest).await
+        let expected_size = self
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == pack_id)
+            .map(|pack| pack.size)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: "pack is absent from the pinned manifest inventory".to_owned(),
+            })?;
+        if let Some(caching_store) = &self.caching_store {
+            return caching_store
+                .download_to_path_bounded(&path, dest, expected_size)
+                .await
+                .map_err(Into::into);
+        }
+        self.store
+            .download_to_path_bounded(&path, dest, expected_size)
+            .await
     }
 }
 
@@ -2226,8 +2269,33 @@ impl PackStore for RemoteFetchStore {
 
     async fn validate_pack_index(&self, pack_id: &str) -> Result<Option<String>> {
         let path = self.router.pack_index_path(pack_id);
+        let object_count = self
+            .packs
+            .iter()
+            .find(|pack| pack.pack_id == pack_id)
+            .map(|pack| pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: "pack is absent from the pinned manifest inventory".to_owned(),
+            })?;
+        let maximum =
+            crab_git::pack_locator::max_pack_index_size(object_count).ok_or_else(|| {
+                CrabError::CorruptObject {
+                    path: path.as_ref().to_owned(),
+                    reason: "Git pack index size overflows its bound".to_owned(),
+                }
+            })?;
         let temp = tempfile::NamedTempFile::new()?;
-        self.store.download_to_path(&path, temp.path()).await?;
+        if let Some(caching_store) = &self.caching_store {
+            caching_store
+                .download_to_path_bounded(&path, temp.path(), maximum)
+                .await
+                .map_err(CrabError::from)?;
+        } else {
+            self.store
+                .download_to_path_bounded(&path, temp.path(), maximum)
+                .await?;
+        }
         let display_path = path.to_string();
         let checksum = tokio::task::spawn_blocking(move || {
             crab_git::pack::verify_pack_index_file(temp.path())
@@ -3400,6 +3468,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protocol_v2_cache_facade_reads_from_selected_store() {
+        let (selected_store, _) = memory_store_with_manifest(
+            "refs/heads/main",
+            "2222222222222222222222222222222222222222",
+        )
+        .await;
+        let unique = tempfile::tempdir().expect("temporary path");
+        let suffix = unique
+            .path()
+            .file_name()
+            .expect("temporary path name")
+            .to_string_lossy();
+        let path = object_store::path::Path::from(format!(
+            "org/repo/.crab/git/packs/selected-read-{suffix}.pack"
+        ));
+        let expected = bytes::Bytes::from_static(b"selected replica pack");
+        selected_store
+            .put(&path, expected.clone())
+            .await
+            .expect("write selected replica pack");
+
+        let facade = cache_aware_storage_for_selected_read(
+            &selected_store,
+            &crate::core::config::CacheConfig::default(),
+        );
+        let (actual, _) = facade
+            .get_with_etag(&path)
+            .await
+            .expect("read selected replica pack through cache facade");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
     async fn fetch_batch_accepts_refs_from_selected_replica_manifest() {
         let _guard = GitWorktreeGuard::new();
         let replica_tip = TEST_GIT_REPO.commit_sha.clone();
@@ -3582,6 +3684,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_fetch_store_ignores_oversized_pack_metadata() {
+        let (store, router) = memory_store_with_manifest(
+            "refs/heads/main",
+            "6666666666666666666666666666666666666666",
+        )
+        .await;
+        let pack_id = "a".repeat(64);
+        store
+            .put(
+                &router.pack_metadata_path(&pack_id),
+                bytes::Bytes::from(vec![
+                    b' ';
+                    usize::try_from(
+                        crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1,
+                    )
+                    .unwrap()
+                ]),
+            )
+            .await
+            .expect("write oversized pack metadata");
+        let fetch_store = RemoteFetchStore::new(store, router, 1, Vec::new(), None, true, 1);
+
+        assert!(fetch_store.fetch_pack_metadata(&pack_id).await.is_none());
+    }
+
+    #[tokio::test]
     async fn remote_fetch_store_rejects_missing_empty_and_corrupt_pack_index() {
         let (store, router) = memory_store_with_manifest(
             "refs/heads/main",
@@ -3591,16 +3719,22 @@ mod tests {
         let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
             .await
             .expect("read manifest");
+        let pack_id = "a".repeat(64);
         let fetch_store = RemoteFetchStore::new(
             store.clone(),
             router.clone(),
             manifest.generation,
-            Vec::new(),
+            vec![PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: 1024,
+                content_hash: pack_id.clone(),
+                ref_tips: Vec::new(),
+                object_count: 1,
+            }],
             None,
             false,
             1,
         );
-        let pack_id = "a".repeat(64);
 
         let missing = fetch_store
             .validate_pack_index(&pack_id)

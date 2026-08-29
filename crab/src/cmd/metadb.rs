@@ -399,6 +399,8 @@ struct CommitGraphMaintenance {
 }
 
 const GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const GENERATION_OWNER_ONCE_RETRY_LIMIT: u32 = 3;
+const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
 
 async fn run_generation_owner(
     once: bool,
@@ -498,6 +500,7 @@ async fn generation_owner_loop(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let mut consecutive_errors = 0_u32;
+    let mut once_errors = 0_u32;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -514,6 +517,7 @@ async fn generation_owner_loop(
         {
             Ok(mut sample) => {
                 consecutive_errors = 0;
+                once_errors = 0;
                 if once {
                     sample.next_eligibility_secs = 0;
                 }
@@ -528,6 +532,29 @@ async fn generation_owner_loop(
             Err(CrabError::Cancelled) if cancel.is_cancelled() => {
                 return Ok(());
             }
+            Err(error)
+                if once
+                    && generation_owner_once_retryable(&error)
+                    && once_errors < GENERATION_OWNER_ONCE_RETRY_LIMIT =>
+            {
+                once_errors = once_errors.saturating_add(1);
+                let delay = generation_owner_retry_delay(
+                    GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS,
+                    once_errors - 1,
+                );
+                warn!(
+                    %error,
+                    retry_attempt = once_errors,
+                    retry_limit = GENERATION_OWNER_ONCE_RETRY_LIMIT,
+                    delay_ms = delay.as_millis(),
+                    "Git generation owner one-shot sample encountered a transient error; retrying"
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(delay) => {}
+                }
+                continue;
+            }
             Err(error) if once => return Err(error),
             Err(error) => {
                 consecutive_errors = consecutive_errors.saturating_add(1);
@@ -540,6 +567,13 @@ async fn generation_owner_loop(
             () = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+fn generation_owner_once_retryable(error: &CrabError) -> bool {
+    matches!(
+        error,
+        CrabError::NetworkTransient(_) | CrabError::Throttled { .. }
+    )
 }
 
 async fn generation_owner_sample(
@@ -591,24 +625,39 @@ async fn generation_owner_sample(
     };
     let active_packs = u64::try_from(packs.len()).unwrap_or(u64::MAX);
     let active_pack_bytes = packs.iter().map(|pack| pack.size).sum();
-    let geometric_repack_packs = u64::try_from(crab_git::repack::geometric_repack_cut(
-        &packs
-            .iter()
-            .map(|pack| pack.object_count)
-            .collect::<Vec<_>>(),
-        2,
-    ))
-    .unwrap_or(u64::MAX);
+    let geometric_repack_packs =
+        u64::try_from(crate::cmd::repack::generation_owner_repack_count(&packs))
+            .unwrap_or(u64::MAX);
     let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
     let (locator_advanced, catalog, locator_sweep) =
-        maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel).await?;
+        maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel)
+            .await
+            .map_err(|error| {
+                warn!(
+                    generation,
+                    %error,
+                    error_debug = ?error,
+                    "Git generation owner catalog maintenance failed"
+                );
+                error
+            })?;
     // The owner is also the repair path for imports and Git-only pushes that
     // had no post-CAS MetaDb writer. Once locator coverage is current, publish
     // the receipt so doctor and GC can distinguish complete derived state from
     // a silently unverified generation. Empty repositories have no index
     // anchor and therefore do not need a receipt.
     if anchor.is_some() {
-        write_generation_index_receipt(store, router, &manifest).await?;
+        write_generation_index_receipt(store, router, &manifest)
+            .await
+            .map_err(|error| {
+                warn!(
+                    generation,
+                    %error,
+                    error_debug = ?error,
+                    "Git generation owner receipt publication failed"
+                );
+                error
+            })?;
     }
     if locator_advanced {
         return Ok(GenerationOwnerSample {
@@ -652,24 +701,24 @@ async fn generation_owner_sample(
         || after.git_validation_digest != manifest.git_validation_digest;
     let visibility = match visibility {
         Some(crate::git::push::GitVisibilityPublication::Published) => "published",
+        Some(crate::git::push::GitVisibilityPublication::CatalogBound) => "catalog_bound",
         Some(crate::git::push::GitVisibilityPublication::CompletePackOnly(_)) => {
             "complete_pack_only"
         }
         None => "superseded",
     };
     if superseded || !visibility_current {
+        let action = if superseded {
+            "superseded"
+        } else if visibility == "catalog_bound" {
+            "catalog_visibility_handoff"
+        } else {
+            "visibility_repair"
+        };
         return Ok(GenerationOwnerSample {
             generation,
-            action: if superseded {
-                "superseded"
-            } else {
-                "visibility_repair"
-            },
-            maintenance_reason: generation_owner_reason(if superseded {
-                "superseded"
-            } else {
-                "visibility_repair"
-            }),
+            action,
+            maintenance_reason: generation_owner_reason(action),
             next_eligibility_secs: if superseded { 0 } else { interval_secs },
             locator_advanced,
             visibility,
@@ -716,20 +765,44 @@ async fn generation_owner_sample(
             config,
             "generation-owner geometric repack",
         )?;
-        let outcome = crate::cmd::repack::run_repack(
+        let repack_config = crate::cmd::repack::RepackConfig {
+            lock_ttl,
+            ..Default::default()
+        };
+        let repack = crate::cmd::repack::run_bounded_repack(
             store,
             router.repo_prefix(),
-            &crate::cmd::repack::RepackConfig {
-                lock_ttl,
-                ..Default::default()
-            },
+            &repack_config,
+            crate::cmd::repack::RepackBudget::generation_owner(),
             cancel,
         )
         .await?;
-        graph.action = "geometric_repack";
-        graph.bytes_read = outcome.bytes_read;
-        graph.bytes_written = outcome.bytes_written;
-        superseded = true;
+        match repack {
+            crate::cmd::repack::RepackRunResult::Completed { outcome, bounded } => {
+                graph.action = if bounded {
+                    "geometric_repack_bounded"
+                } else {
+                    "geometric_repack"
+                };
+                graph.bytes_read = outcome.bytes_read;
+                graph.bytes_written = outcome.bytes_written;
+                superseded = true;
+            }
+            crate::cmd::repack::RepackRunResult::Deferred {
+                resource,
+                actual,
+                maximum,
+            } => {
+                graph.action = "geometric_repack_deferred";
+                info!(
+                    generation,
+                    resource,
+                    actual,
+                    maximum,
+                    "generation-owner geometric repack deferred by maintenance budget"
+                );
+            }
+        }
     }
     Ok(GenerationOwnerSample {
         generation,
@@ -757,12 +830,15 @@ fn generation_owner_reason(action: &str) -> &'static str {
     match action {
         "ref_journal_compaction" => "active_ref_journal",
         "catalog_advance" => "catalog_coverage_stale",
+        "catalog_visibility_handoff" => "catalog_proof_handoff",
         "visibility_repair" => "visibility_missing_or_stale",
         "commit_graph_incremental" => "commit_graph_missing_incremental",
         "commit_graph_rebuild" => "commit_graph_missing",
         "commit_graph_compaction" => "commit_graph_layers_due",
         "shallow_closure_rebuild" => "shallow_closure_missing",
         "geometric_repack" => "geometric_pack_threshold",
+        "geometric_repack_bounded" => "geometric_pack_budget",
+        "geometric_repack_deferred" => "maintenance_budget",
         "superseded" => "manifest_superseded",
         _ => "no_maintenance_due",
     }
@@ -893,7 +969,15 @@ async fn maintain_object_catalog(
     let release = lock.release().await.map_err(CrabError::from);
     match (operation, release) {
         (Ok(result), Ok(())) => Ok(result),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => {
+            warn!(
+                %error,
+                error_debug = ?error,
+                "Git generation owner locator lock release failed"
+            );
+            Err(error)
+        }
     }
 }
 
@@ -2501,7 +2585,7 @@ async fn rebuild_git_object_locators(
         let temp = tempfile::tempdir()?;
         let source = temp.path().join("source.pack");
         let downloaded = match store
-            .download_to_path(&router.pack_path(&pack.pack_id), &source)
+            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
             .await
         {
             Ok(size) => size,
@@ -3945,6 +4029,8 @@ mod tests {
             ("commit_graph_compaction", "commit_graph_layers_due"),
             ("shallow_closure_rebuild", "shallow_closure_missing"),
             ("geometric_repack", "geometric_pack_threshold"),
+            ("geometric_repack_bounded", "geometric_pack_budget"),
+            ("geometric_repack_deferred", "maintenance_budget"),
             ("superseded", "manifest_superseded"),
             ("none", "no_maintenance_due"),
         ];

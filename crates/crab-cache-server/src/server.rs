@@ -213,7 +213,7 @@ pub fn prepare_server(
             origin_health_checked_at: tokio::sync::Mutex::new(
                 Instant::now() - Duration::from_secs(10),
             ),
-            cache_miss_locks: tokio::sync::Mutex::new(HashMap::new()),
+            cache_miss_locks: std::sync::Mutex::new(HashMap::new()),
             push_warming_body_permits: AppState::push_warming_body_permits(),
             dedup_index_rebuild,
             dedup_last_ingestion_error: tokio::sync::RwLock::new(None),

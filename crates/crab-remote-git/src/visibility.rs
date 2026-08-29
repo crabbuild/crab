@@ -59,7 +59,7 @@ async fn rebuild_with_operation(
 ) -> Result<GitVisibilityIndex> {
     let maximum = operation.max_logical_objects();
     let mut cache = HashMap::<ObjectId, ObjectLinks>::new();
-    let mut total = 0u64;
+    let mut seen_objects = HashSet::new();
     let mut refs = BTreeMap::new();
 
     for reference in &repository.refs().entries {
@@ -86,18 +86,11 @@ async fn rebuild_with_operation(
                     }
                     continue;
                 }
-                total = total.saturating_add(1);
-                if total > maximum {
-                    return Err(Error::LimitExceeded {
-                        limit: "visibility proof objects",
-                        actual: total,
-                        maximum,
-                    });
-                }
+                charge_unique_object(&mut seen_objects, next.oid, maximum)?;
 
                 if let Some(cached) = cache.get(&next.oid) {
                     ensure_kind(cached.kind, next)?;
-                    insert_terminals(&mut objects, &cached.terminals, &mut total, maximum)?;
+                    insert_terminals(&mut objects, &mut seen_objects, &cached.terminals, maximum)?;
                     pending.extend(cached.children.iter().copied());
                     continue;
                 }
@@ -118,7 +111,7 @@ async fn rebuild_with_operation(
             for (next, object) in reads.into_iter().zip(objects_read) {
                 ensure_kind(object.kind, next)?;
                 let links = object_links(&object, next.tag_depth, operation)?;
-                insert_terminals(&mut objects, &links.terminals, &mut total, maximum)?;
+                insert_terminals(&mut objects, &mut seen_objects, &links.terminals, maximum)?;
                 pending.extend(links.children.iter().copied());
                 cache.insert(next.oid, links);
             }
@@ -151,22 +144,36 @@ async fn rebuild_with_operation(
 
 fn insert_terminals(
     objects: &mut HashSet<ObjectId>,
+    seen_objects: &mut HashSet<ObjectId>,
     terminals: &[ObjectId],
-    total: &mut u64,
     maximum: u64,
 ) -> Result<()> {
     for oid in terminals {
         if !objects.insert(*oid) {
             continue;
         }
-        *total = total.saturating_add(1);
-        if *total > maximum {
-            return Err(Error::LimitExceeded {
-                limit: "visibility proof objects",
-                actual: *total,
-                maximum,
-            });
-        }
+        charge_unique_object(seen_objects, *oid, maximum)?;
+    }
+    Ok(())
+}
+
+fn charge_unique_object(
+    seen_objects: &mut HashSet<ObjectId>,
+    oid: ObjectId,
+    maximum: u64,
+) -> Result<()> {
+    if !seen_objects.insert(oid) {
+        return Ok(());
+    }
+    let actual = u64::try_from(seen_objects.len()).map_err(|_| Error::InternalInvariant {
+        invariant: "visibility proof object count cannot be represented",
+    })?;
+    if actual > maximum {
+        return Err(Error::LimitExceeded {
+            limit: "visibility proof objects",
+            actual,
+            maximum,
+        });
     }
     Ok(())
 }
@@ -245,4 +252,30 @@ fn object_links(
         children,
         terminals,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_budget_counts_shared_objects_once() {
+        let oid = ObjectId::from_hex(b"0000000000000000000000000000000000000000")
+            .expect("valid object id");
+        let mut seen = HashSet::new();
+
+        charge_unique_object(&mut seen, oid, 1).expect("first object fits");
+        charge_unique_object(&mut seen, oid, 1).expect("shared object fits once");
+
+        let other = ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+            .expect("valid object id");
+        assert!(matches!(
+            charge_unique_object(&mut seen, other, 1),
+            Err(Error::LimitExceeded {
+                actual: 2,
+                maximum: 1,
+                ..
+            })
+        ));
+    }
 }

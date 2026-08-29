@@ -277,7 +277,7 @@ async fn start_test_server_with_origin_settings_and_policy(
         // Start fresh so the first health check uses the cached `true` value
         // rather than probing the in-memory origin.
         origin_health_checked_at: tokio::sync::Mutex::new(Instant::now()),
-        cache_miss_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        cache_miss_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         push_warming_body_permits: tokio::sync::Semaphore::new(8),
         dedup_index_rebuild: DedupIndexRebuildStats {
             status: "not_run".to_string(),

@@ -21,10 +21,49 @@ VERIFY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = VERIFY
 SPEC.loader.exec_module(VERIFY)
 
+QUALIFICATION_SCRIPT = Path(__file__).resolve().parent / "run_large_repo_rustfs.py"
+QUALIFICATION_SPEC = importlib.util.spec_from_file_location(
+    "run_large_repo_rustfs", QUALIFICATION_SCRIPT
+)
+if QUALIFICATION_SPEC is None or QUALIFICATION_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {QUALIFICATION_SCRIPT}")
+QUALIFICATION = importlib.util.module_from_spec(QUALIFICATION_SPEC)
+sys.modules[QUALIFICATION_SPEC.name] = QUALIFICATION
+QUALIFICATION_SPEC.loader.exec_module(QUALIFICATION)
+
+PROTOCOL_SCRIPT = Path(__file__).resolve().parent / "run_protocol_v2_partial_clone_rustfs_smoke.py"
+PROTOCOL_SPEC = importlib.util.spec_from_file_location(
+    "run_protocol_v2_partial_clone_rustfs_smoke", PROTOCOL_SCRIPT
+)
+if PROTOCOL_SPEC is None or PROTOCOL_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {PROTOCOL_SCRIPT}")
+PROTOCOL = importlib.util.module_from_spec(PROTOCOL_SPEC)
+sys.modules[PROTOCOL_SPEC.name] = PROTOCOL
+PROTOCOL_SPEC.loader.exec_module(PROTOCOL)
+
 
 OID = "a" * 40
 BASE = "b" * 40
 DIGEST = "c" * 64
+
+
+class QualificationHarnessTests(unittest.TestCase):
+    def test_snapshot_executable_is_immune_to_source_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "shared-crab"
+            snapshot = root / "run" / "bin" / "crab"
+            source.write_text("first build", encoding="utf-8")
+            source.chmod(0o755)
+
+            resolved = QUALIFICATION.snapshot_executable(
+                source,
+                snapshot,
+                "run-local Crab binary",
+            )
+            source.write_text("replacement build", encoding="utf-8")
+
+            self.assertEqual(resolved.read_text(encoding="utf-8"), "first build")
 
 
 def resources() -> dict[str, Any]:
@@ -53,6 +92,7 @@ def telemetry() -> dict[str, int]:
         "upload_pack_duration_ms": 1,
         "visibility_plan_ms": 1,
         "pack_generation_ms": 1,
+        "source_download_ms": 1,
         "locator_scan": 0,
         "locator_full_scan": 0,
         "locator_exact_fallback": 0,
@@ -140,7 +180,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.1",
+        "version": "1.2",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -238,6 +278,7 @@ def valid_report() -> dict[str, Any]:
             "incremental_fsck": True,
             "sample_size": 3,
             "advertised_refs": {"refs/heads/main": OID},
+            "clone_refs": {"refs/heads/main": OID},
         },
         "metrics": {
             "replay_pushes": replay_count,
@@ -301,6 +342,10 @@ def valid_team_load() -> dict[str, Any]:
         "fetch_seed": {
             "clients": fetch_count,
             "successful_clones": fetch_count,
+            "generated_pack_producers": 1,
+            "cache_hits": 0,
+            "cache_misses": fetch_count,
+            "origin_requests": 100,
             **team_summary(),
             "results": team_results(fetch_count, ["ok"] * fetch_count),
         },
@@ -333,6 +378,34 @@ def valid_team_load() -> dict[str, Any]:
     }
 
 
+def valid_cache_service() -> dict[str, Any]:
+    return {
+        "configured": True,
+        "required": True,
+        "url": "http://127.0.0.1:19002",
+        "health_status": 200,
+        "capabilities_status": 200,
+        "capabilities_schema": "crab-cache-service.capabilities.v1",
+        "route_schema": "crab-cache-service.routes.v3",
+        "stats": {
+            "status": 200,
+            "error": None,
+            "pack": {
+                "cache_hits": 1,
+                "cache_misses": 1,
+                "origin_fetches": 1,
+                "origin_head_requests": 1,
+                "bytes_served_from_cache": 10,
+                "bytes_served_from_origin": 10,
+                "bytes_served_total": 20,
+                "push_warming_writes": 1,
+                "push_warming_bytes": 10,
+                "read_requests": 3,
+            },
+        },
+    }
+
+
 class ReportVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -346,12 +419,108 @@ class ReportVerificationTests(unittest.TestCase):
         path.write_text(json.dumps(report), encoding="utf-8")
         return path
 
+    def test_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
+        path = self.root / "stderr.log"
+        path.write_text(
+            "\n".join(
+                json.dumps({"fields": {"cache_event": event}})
+                for event in ("Hit", "Miss", "hit", "miss")
+            ),
+            encoding="utf-8",
+        )
+        qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+            QUALIFICATION.LargeRepositoryQualification
+        )
+
+        parsed = qualification.telemetry_from_log(path)
+
+        self.assertEqual(parsed["cache_hits"], 2)
+        self.assertEqual(parsed["cache_misses"], 2)
+
+    def test_protocol_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
+        logs = self.root / "logs"
+        logs.mkdir()
+        (logs / "client.stderr.log").write_text(
+            "\n".join(
+                json.dumps({"fields": {"cache_event": event}})
+                for event in ("Hit", "Miss", "hit", "miss")
+            ),
+            encoding="utf-8",
+        )
+        smoke = PROTOCOL.ProtocolV2PartialCloneSmoke.__new__(
+            PROTOCOL.ProtocolV2PartialCloneSmoke
+        )
+        smoke.logs = logs
+
+        parsed = smoke.storage_telemetry()
+
+        self.assertEqual(parsed["cache_hits"], 2)
+        self.assertEqual(parsed["cache_misses"], 2)
+
     def test_valid_smoke_report_is_accepted_explicitly(self) -> None:
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)
         self.assertEqual(result.replay_count, 3)
 
     def test_release_team_load_contract_requires_all_scenarios(self) -> None:
         VERIFY.verify_team_load(valid_team_load(), require_release_counts=True)
+
+    def test_smoke_report_can_prove_release_team_load_contract(self) -> None:
+        report = valid_report()
+        report["team_load"] = valid_team_load()
+        report["checks"].extend(
+            {"name": name, "ok": True}
+            for name in (
+                "concurrent-fetch-seed-clones",
+                "concurrent-fetch-seed-generated-pack-producers",
+                "concurrent-incremental-fetches",
+                "independent_ref_pushes-outcomes",
+                "independent-ref-pushes-preserved",
+                "same_ref_pushes-outcomes",
+                "same-ref-winner-published",
+            )
+        )
+
+        result = VERIFY.verify_report(
+            self.write("report.json", report),
+            allow_smoke=True,
+            require_team_load=True,
+        )
+
+        self.assertEqual(result.profile, "smoke")
+
+    def test_required_cache_service_contract(self) -> None:
+        report = valid_report()
+        report["cache_service"] = valid_cache_service()
+        report["checks"].extend(
+            {
+                "name": name,
+                "ok": True,
+            }
+            for name in (
+                "cache-service-configured",
+                "cache-service-healthy",
+                "cache-service-capabilities",
+                "cache-service-admin-stats",
+                "cache-service-pack-traffic",
+            )
+        )
+        result = VERIFY.verify_report(
+            self.write("report.json", report),
+            allow_smoke=True,
+            require_cache_service=True,
+        )
+        self.assertEqual(result.replay_count, 3)
+
+    def test_required_cache_service_contract_rejects_missing_pack_traffic(self) -> None:
+        report = valid_report()
+        report["cache_service"] = valid_cache_service()
+        report["cache_service"]["stats"]["pack"]["read_requests"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "no Git pack read traffic"):
+            VERIFY.verify_report(
+                self.write("report.json", report),
+                allow_smoke=True,
+                require_cache_service=True,
+            )
 
     def test_team_load_missing_latency_field_is_rejected(self) -> None:
         report = valid_team_load()
@@ -366,6 +535,24 @@ class ReportVerificationTests(unittest.TestCase):
             ["clone_failed", *(["ok"] * 99)],
         )
         with self.assertRaisesRegex(VERIFY.VerificationError, "clone_failed"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_requires_a_generated_pack_producer(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["generated_pack_producers"] = 0
+        with self.assertRaisesRegex(VERIFY.VerificationError, "generated-pack producers"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_rejects_duplicate_generated_pack_producers(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["generated_pack_producers"] = 3
+        with self.assertRaisesRegex(VERIFY.VerificationError, "generated-pack producers"):
+            VERIFY.verify_team_load(report)
+
+    def test_fetch_seed_requires_cache_events_for_every_client(self) -> None:
+        report = valid_team_load()
+        report["fetch_seed"]["cache_misses"] = 99
+        with self.assertRaisesRegex(VERIFY.VerificationError, "cache events"):
             VERIFY.verify_team_load(report)
 
     def test_prevalidated_owner_path_allows_no_remote_visibility_build(self) -> None:
@@ -401,6 +588,21 @@ class ReportVerificationTests(unittest.TestCase):
                     }
                 }
             )
+
+    def test_catalog_visibility_handoff_allows_metadata_only_proof(self) -> None:
+        VERIFY.verify_full_visibility_telemetry(
+            {
+                "visibility_owner_seed": {
+                    "actions": ["catalog_visibility_handoff", "none"],
+                    "visibility_states": ["published", "published"],
+                    "telemetry": {
+                        "visibility_duration_ms": 0,
+                        "storage_requests": 0,
+                        "storage_bytes": 0,
+                    },
+                }
+            }
+        )
 
     def test_blobless_catalog_filter_requires_ordinal_metadata_telemetry(self) -> None:
         report = valid_report()
@@ -514,6 +716,18 @@ class ReportVerificationTests(unittest.TestCase):
         report = valid_report()
         report["correctness"]["advertised_refs"]["refs/heads/main"] = BASE
         with self.assertRaisesRegex(VERIFY.VerificationError, "advertised main ref mismatch"):
+            VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+
+    def test_missing_clone_ref_evidence_is_rejected(self) -> None:
+        report = valid_report()
+        del report["correctness"]["clone_refs"]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "clone_refs"):
+            VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
+
+    def test_clone_ref_drift_is_rejected(self) -> None:
+        report = valid_report()
+        report["correctness"]["clone_refs"]["refs/heads/main"] = BASE
+        with self.assertRaisesRegex(VERIFY.VerificationError, "clone advertised refs"):
             VERIFY.verify_report(self.write("report.json", report), allow_smoke=True)
 
 

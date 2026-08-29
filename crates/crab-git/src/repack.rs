@@ -2,12 +2,17 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
-use crate::pack::{PackError, install_pack_file_from_path};
+use crate::pack::{PackError, install_pack_file_from_path, verify_pack_file_sha1};
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
+use sha1::{Digest, Sha1};
+
+const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
+const MAX_VERIFY_PACKS_PER_COMMAND: usize = 512;
 
 /// A downloaded canonical pack selected by a pinned repository manifest.
 #[derive(Debug, Clone)]
@@ -155,6 +160,47 @@ pub fn geometric_repack_cut(object_counts: &[u64], factor: u64) -> usize {
         rolled_objects = rolled_objects.saturating_add(counts[cut - 1]);
     }
     counts.len()
+}
+
+/// Return the smallest suffix worth coalescing during background maintenance.
+///
+/// `weights` are sorted internally in descending order, normally using
+/// verified compressed pack bytes. The smallest tier is promoted only after it
+/// has accumulated enough weight to be comparable with its next tier, and the
+/// largest pack is left untouched whenever a lower-tier promotion is possible.
+/// Two packs are consolidated only when the smaller pack has reached the next
+/// tier; a tiny tail must not rewrite the repository-sized pack.
+#[must_use]
+pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
+    if factor < 2 || weights.len() < 2 {
+        return 0;
+    }
+    let mut weights = weights.to_vec();
+    weights.sort_unstable_by(|left, right| right.cmp(left));
+
+    if weights.len() == 2 {
+        return if weights[1].saturating_mul(factor) > weights[0] {
+            2
+        } else {
+            0
+        };
+    }
+
+    let mut selected_count = 1;
+    let mut selected_weight = weights[weights.len() - 1];
+    for candidate_index in (1..weights.len().saturating_sub(1)).rev() {
+        let candidate_weight = weights[candidate_index];
+        if selected_weight.saturating_mul(factor) <= candidate_weight {
+            break;
+        }
+        selected_count += 1;
+        selected_weight = selected_weight.saturating_add(candidate_weight);
+    }
+    if selected_count > 1 {
+        selected_count
+    } else {
+        0
+    }
 }
 
 /// Consolidates source packs using Git's geometric pack policy.
@@ -306,10 +352,28 @@ pub fn repack_repository_geometric(
 ///
 /// This is the object-store maintenance primitive: callers select the
 /// geometric roll-up suffix and leave stable large packs remote. Installed Git
-/// packs are self-contained, so enumerating and repacking their indexed OIDs
-/// preserves the selected object universe without downloading untouched packs.
+/// packs are self-contained, so Git can consume their verified pack basenames
+/// directly without downloading or serializing an additional OID list. The
+/// generated pack is still compared with the source object universe before it
+/// leaves this function.
 pub fn consolidate_pack_suffix(
     sources: &[RepackSource],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    consolidate_pack_suffix_with_concurrency(sources, concurrency)
+}
+
+/// Consolidate selected packs with bounded local index parallelism.
+///
+/// A zero `index_concurrency` value is treated as one. The source bodies are
+/// independent files, so indexing them concurrently shortens the local
+/// installation phase without changing the order used by Git pack-objects.
+pub fn consolidate_pack_suffix_with_concurrency(
+    sources: &[RepackSource],
+    index_concurrency: usize,
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
@@ -317,54 +381,69 @@ pub fn consolidate_pack_suffix(
             reason: "geometric consolidation requires at least two source packs".to_owned(),
         });
     }
+    let mut source_ids = BTreeSet::new();
+    for source in sources {
+        if !source_ids.insert(source.canonical_id.as_str()) {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "duplicate source pack id".to_owned(),
+            });
+        }
+    }
     let workspace =
         tempfile::tempdir().map_err(|source| io_error("create repack workspace", source))?;
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    let mut source_oids = BTreeSet::new();
-    for source in sources {
-        validate_source(source)?;
-        let installed = install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-        let mut locations =
-            PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-        if locations.object_count() != source.object_count {
-            return Err(RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!(
-                    "index has {} objects but manifest records {}",
-                    locations.object_count(),
-                    source.object_count
-                ),
-            });
-        }
-        for location in &mut locations {
-            source_oids.insert(location?.oid.to_string());
-        }
+    let install_started = Instant::now();
+    let (mut source_oids, source_indexes) =
+        install_source_packs(&pack_dir, sources, index_concurrency)?;
+    tracing::debug!(
+        source_pack_count = sources.len(),
+        index_concurrency = index_concurrency.max(1).min(sources.len()),
+        elapsed_ms = install_started.elapsed().as_millis() as u64,
+        "installed source packs for consolidation"
+    );
+    // Selected suffixes may reference stable packs outside this operation;
+    // validate each selected pack's own body and index without requiring a
+    // complete repository graph.
+    let verify_started = Instant::now();
+    for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
+        let mut verify = Command::new("git");
+        verify
+            .arg("verify-pack")
+            .arg("--")
+            .args(index_batch)
+            .stdout(Stdio::null());
+        run_git(&mut verify, "verify consolidated source packs")?;
     }
+    tracing::debug!(
+        source_pack_count = source_indexes.len(),
+        elapsed_ms = verify_started.elapsed().as_millis() as u64,
+        "verified consolidated source packs"
+    );
+    source_oids.sort_unstable();
+    source_oids.dedup();
 
-    let object_list = workspace.path().join("selected-objects.txt");
-    let mut input = File::create(&object_list)
-        .map_err(|source| io_error(format!("create {}", object_list.display()), source))?;
-    for oid in &source_oids {
-        writeln!(input, "{oid}")
-            .map_err(|source| io_error(format!("write {}", object_list.display()), source))?;
+    let pack_list = workspace.path().join("selected-packs.txt");
+    let mut input = File::create(&pack_list)
+        .map_err(|source| io_error(format!("create {}", pack_list.display()), source))?;
+    for source in sources {
+        let pack_name = format!("pack-{}.pack", source.canonical_id);
+        writeln!(input, "{pack_name}")
+            .map_err(|source| io_error(format!("write {}", pack_list.display()), source))?;
     }
     drop(input);
-    let stdin = File::open(&object_list)
-        .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
+    let stdin = File::open(&pack_list)
+        .map_err(|source| io_error(format!("open {}", pack_list.display()), source))?;
     let output_prefix = pack_dir.join("pack-crab-rollup");
+    let pack_generation_started = Instant::now();
     run_git(
         Command::new("git")
             .arg(format!("--git-dir={}", source_git.display()))
             .arg("pack-objects")
             .arg("--quiet")
+            .arg("--stdin-packs")
             .arg("--reuse-delta")
             .arg("--reuse-object")
             .arg("--delta-base-offset")
@@ -374,6 +453,11 @@ pub fn consolidate_pack_suffix(
             .stdout(Stdio::null()),
         "consolidate selected Git packs",
     )?;
+    tracing::debug!(
+        source_pack_count = sources.len(),
+        elapsed_ms = pack_generation_started.elapsed().as_millis() as u64,
+        "consolidated selected Git packs"
+    );
     let pack_path = std::fs::read_dir(&pack_dir)
         .map_err(|source| io_error(format!("read {}", pack_dir.display()), source))?
         .filter_map(std::result::Result::ok)
@@ -395,10 +479,21 @@ pub fn consolidate_pack_suffix(
         generated.reverse_index_path(),
         generated.pack_size,
     )?;
-    let mut generated_oids = BTreeSet::new();
+    let mut generated_oids = Vec::<[u8; 20]>::new();
     for location in &mut generated_locations {
-        generated_oids.insert(location?.oid.to_string());
+        let location = location?;
+        let oid = location
+            .oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RepackError::SourceIntegrity {
+                pack_id: generated.pack_id.clone(),
+                reason: "consolidated pack contains a non-SHA1 object".to_owned(),
+            })?;
+        generated_oids.push(oid);
     }
+    generated_oids.sort_unstable();
+    generated_oids.dedup();
     if generated_oids != source_oids {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id.clone(),
@@ -411,6 +506,241 @@ pub fn consolidate_pack_suffix(
     })
 }
 
+/// Join a complete pack inventory without inflating or recompressing entries.
+///
+/// OFS_DELTA offsets are relative to the current entry, so shifting every
+/// entry in one source pack by the same amount preserves those links. Strict
+/// indexing validates REF_DELTA links after all source bodies are joined.
+pub fn concatenate_complete_pack_inventory(
+    sources: &[RepackSource],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    if sources.len() < 2 {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: "complete-pack-concatenation".to_owned(),
+            reason: "complete-pack concatenation requires at least two source packs".to_owned(),
+        });
+    }
+
+    let workspace =
+        tempfile::tempdir().map_err(|source| io_error("create concatenation workspace", source))?;
+    let source_git = workspace.path().join("source.git");
+    initialize_bare_repository(&source_git)?;
+    let pack_dir = source_git.join("objects/pack");
+    let output_path = workspace.path().join("complete-pack-concatenated.pack");
+    let mut output = File::create(&output_path)
+        .map_err(|source| io_error("create concatenated pack", source))?;
+    let mut source_ids = BTreeSet::new();
+    let mut total_objects = 0_u64;
+    for source in sources {
+        if !source_ids.insert(source.canonical_id.as_str()) {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "duplicate source pack id".to_owned(),
+            });
+        }
+        validate_source(source)?;
+        verify_pack_file_sha1(&source.path)?;
+        let mut input = File::open(&source.path)
+            .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
+        let mut header = [0_u8; 12];
+        input
+            .read_exact(&mut header)
+            .map_err(|error| io_error(format!("read {} header", source.path.display()), error))?;
+        let version =
+            u32::from_be_bytes(header[4..8].try_into().map_err(|_| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack header has an invalid version".to_owned(),
+                },
+            })?);
+        if &header[..4] != b"PACK" || !matches!(version, 2 | 3) {
+            return Err(RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack has an unsupported header".to_owned(),
+                },
+            });
+        }
+        let object_count = u64::from(u32::from_be_bytes(header[8..12].try_into().map_err(
+            |_| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack header has an invalid object count".to_owned(),
+                },
+            },
+        )?));
+        if object_count != source.object_count {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: format!(
+                    "pack header has {object_count} objects but manifest records {}",
+                    source.object_count
+                ),
+            });
+        }
+        total_objects = total_objects.checked_add(object_count).ok_or_else(|| {
+            RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "concatenated pack object count overflows u32".to_owned(),
+            }
+        })?;
+    }
+    let total_objects_u32 =
+        u32::try_from(total_objects).map_err(|_| RepackError::SourceIntegrity {
+            pack_id: "complete-pack-concatenation".to_owned(),
+            reason: "concatenated pack object count exceeds Git's pack limit".to_owned(),
+        })?;
+    output
+        .write_all(b"PACK")
+        .and_then(|_| output.write_all(&2_u32.to_be_bytes()))
+        .and_then(|_| output.write_all(&total_objects_u32.to_be_bytes()))
+        .map_err(|source| io_error("write concatenated pack header", source))?;
+
+    let mut pack_sha1 = Sha1::new();
+    pack_sha1.update(b"PACK");
+    pack_sha1.update(2_u32.to_be_bytes());
+    pack_sha1.update(total_objects_u32.to_be_bytes());
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    for source in sources {
+        let mut input = File::open(&source.path)
+            .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
+        let source_size = source.size;
+        let body_size = source_size
+            .checked_sub(32)
+            .ok_or_else(|| RepackError::Pack {
+                source: PackError::InvalidPackFile {
+                    path: source.path.clone(),
+                    reason: "source pack is too short for header and checksum".to_owned(),
+                },
+            })?;
+        input
+            .seek(std::io::SeekFrom::Start(12))
+            .map_err(|error| io_error(format!("seek {} body", source.path.display()), error))?;
+        let mut remaining = body_size;
+        while remaining > 0 {
+            let read_len = remaining.min(buffer.len() as u64) as usize;
+            input
+                .read_exact(&mut buffer[..read_len])
+                .map_err(|error| io_error(format!("read {} body", source.path.display()), error))?;
+            output
+                .write_all(&buffer[..read_len])
+                .map_err(|source| io_error("write concatenated pack body", source))?;
+            pack_sha1.update(&buffer[..read_len]);
+            remaining -= read_len as u64;
+        }
+    }
+    let checksum: [u8; 20] = pack_sha1.finalize().into();
+    output
+        .write_all(&checksum)
+        .and_then(|_| output.flush())
+        .map_err(|source| io_error("finish concatenated pack", source))?;
+    drop(output);
+
+    let (pack_hash, pack_size) = hash_file(&output_path)?;
+    let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
+    let installed =
+        install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
+    let generated = verified_generated_pack(installed.pack_path)?;
+    if generated.object_count != total_objects {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: generated.pack_id,
+            reason: format!(
+                "concatenated pack contains {} objects but sources contain {total_objects}",
+                generated.object_count
+            ),
+        });
+    }
+    Ok(GeometricRepackedRepository {
+        _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
+struct InstalledSourcePack {
+    index_path: PathBuf,
+    oids: Vec<[u8; 20]>,
+}
+
+fn install_source_packs(
+    pack_dir: &Path,
+    sources: &[RepackSource],
+    index_concurrency: usize,
+) -> Result<(Vec<[u8; 20]>, Vec<PathBuf>), RepackError> {
+    let batch_size = index_concurrency.max(1).min(sources.len());
+    let mut source_oids = Vec::new();
+    let mut source_indexes = Vec::with_capacity(sources.len());
+    for batch in sources.chunks(batch_size) {
+        let results = std::thread::scope(|scope| {
+            let handles = batch
+                .iter()
+                .map(|source| scope.spawn(move || install_source_pack(pack_dir, source)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+        for (source, result) in batch.iter().zip(results) {
+            let installed = match result {
+                Ok(Ok(installed)) => installed,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "source pack installation worker panicked".to_owned(),
+                    });
+                }
+            };
+            source_oids.extend(installed.oids);
+            source_indexes.push(installed.index_path);
+        }
+    }
+    Ok((source_oids, source_indexes))
+}
+
+fn install_source_pack(
+    pack_dir: &Path,
+    source: &RepackSource,
+) -> Result<InstalledSourcePack, RepackError> {
+    validate_source(source)?;
+    let installed = install_pack_file_from_path(
+        pack_dir,
+        &source.path,
+        &source.canonical_id,
+        source.size,
+        false,
+    )?;
+    let mut locations =
+        PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
+    if locations.object_count() != source.object_count {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: source.canonical_id.clone(),
+            reason: format!(
+                "index has {} objects but manifest records {}",
+                locations.object_count(),
+                source.object_count
+            ),
+        });
+    }
+    let mut oids = Vec::new();
+    for location in &mut locations {
+        let location = location?;
+        let oid = location
+            .oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "selected pack contains a non-SHA1 object".to_owned(),
+            })?;
+        oids.push(oid);
+    }
+    Ok(InstalledSourcePack {
+        index_path: installed.idx_path,
+        oids,
+    })
+}
+
 /// Generates one self-contained pack for an exact set of selected objects.
 ///
 /// The source packs are validated before Git repacks them. The generated
@@ -418,7 +748,7 @@ pub fn consolidate_pack_suffix(
 /// filtered-out object as a delta base.
 pub fn repack_selected_objects(
     sources: &[RepackSource],
-    selected_oids: &[String],
+    selected_oids: &[gix_hash::ObjectId],
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.is_empty() {
         return Err(RepackError::SelectedObjectSet {
@@ -426,11 +756,22 @@ pub fn repack_selected_objects(
             reason: "no source packs were supplied".to_owned(),
         });
     }
-    let selected = selected_oids.iter().cloned().collect::<BTreeSet<_>>();
-    if selected.is_empty() || selected.len() != selected_oids.len() {
+    let mut selected = selected_oids.to_vec();
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|oid| oid.as_bytes().len() != std::mem::size_of::<[u8; 20]>())
+    {
         return Err(RepackError::SelectedObjectSet {
             pack_id: "selected-pack".to_owned(),
-            reason: "selected object IDs must be non-empty and unique".to_owned(),
+            reason: "selected object IDs must be non-empty SHA-1 IDs".to_owned(),
+        });
+    }
+    selected.sort_unstable();
+    if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: "selected-pack".to_owned(),
+            reason: "selected object IDs must be unique".to_owned(),
         });
     }
 
@@ -496,11 +837,27 @@ pub fn repack_selected_objects(
         &generated.reverse_index_path,
         generated.pack_size,
     )?;
-    let mut generated_oids = BTreeSet::new();
+    let mut generated_oids = Vec::<[u8; 20]>::new();
     for location in &mut generated_locations {
-        generated_oids.insert(location?.oid.to_string());
+        let location = location?;
+        let oid =
+            location
+                .oid
+                .as_bytes()
+                .try_into()
+                .map_err(|_| RepackError::SelectedObjectSet {
+                    pack_id: generated.pack_id.clone(),
+                    reason: "generated pack contains a non-SHA1 object".to_owned(),
+                })?;
+        generated_oids.push(oid);
     }
-    if generated_oids != selected {
+    generated_oids.sort_unstable();
+    let selected_matches = generated_oids.len() == selected.len()
+        && generated_oids
+            .iter()
+            .zip(&selected)
+            .all(|(generated, selected)| selected.as_bytes() == generated);
+    if !selected_matches {
         return Err(RepackError::SelectedObjectSet {
             pack_id: generated.pack_id,
             reason: format!(
@@ -718,6 +1075,60 @@ mod tests {
     }
 
     #[test]
+    fn incremental_cut_waits_for_a_lower_pack_tier_before_rewriting_large_packs() {
+        assert_eq!(incremental_repack_cut(&[900, 9], 2), 0);
+        assert_eq!(incremental_repack_cut(&[900, 700, 9], 2), 0);
+        assert_eq!(incremental_repack_cut(&[900, 700, 9, 9], 2), 2);
+        assert_eq!(incremental_repack_cut(&[900, 700], 2), 2);
+    }
+
+    #[test]
+    fn incremental_cut_keeps_the_largest_pack_out_of_lower_tier_promotions() {
+        assert_eq!(incremental_repack_cut(&[900, 700, 600, 400], 2), 3);
+    }
+
+    #[test]
+    #[expect(
+        clippy::same_item_push,
+        reason = "the test models one identical tiny pack per developer push"
+    )]
+    fn incremental_cut_keeps_tiny_pushes_logarithmic() {
+        let mut packs = vec![1_000_000_u64];
+        for _ in 0..1_000 {
+            packs.push(1);
+            let cut = incremental_repack_cut(&packs, 2);
+            if cut != 0 {
+                let split = packs.len() - cut;
+                let merged = packs[split..].iter().copied().sum();
+                packs.truncate(split);
+                packs.push(merged);
+            }
+        }
+
+        assert_eq!(packs.iter().copied().sum::<u64>(), 1_001_000);
+        assert_eq!(packs.iter().copied().max(), Some(1_000_000));
+        assert!(packs.len() <= 12, "pack count grew to {}", packs.len());
+    }
+
+    #[test]
+    fn selected_object_repack_rejects_duplicate_ids_before_io() {
+        let oid = gix_hash::ObjectId::from([7_u8; 20]);
+        let source = RepackSource {
+            canonical_id: "source".to_owned(),
+            path: PathBuf::new(),
+            size: 0,
+            object_count: 0,
+        };
+
+        let error = repack_selected_objects(&[source], &[oid, oid]).unwrap_err();
+        assert!(matches!(
+            error,
+            RepackError::SelectedObjectSet { reason, .. }
+                if reason == "selected object IDs must be unique"
+        ));
+    }
+
+    #[test]
     fn geometric_repack_preserves_complete_ref_object_graph() -> Result<(), RepackError> {
         let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
         let repository = root.path().join("repository");
@@ -770,7 +1181,7 @@ mod tests {
             assert!(pack.index_path().is_file());
             assert!(pack.reverse_index_path().is_file());
         }
-        let selected = consolidate_pack_suffix(&sources)?;
+        let selected = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
 
@@ -783,12 +1194,187 @@ mod tests {
         )?
         .lines()
         .take(2)
-        .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .next()
+                .and_then(|oid| gix_hash::ObjectId::from_hex(oid.as_bytes()).ok())
+        })
         .collect::<Vec<_>>();
         assert_eq!(selected_oids.len(), 2);
         let selected = repack_selected_objects(&sources, &selected_oids)?;
         assert_eq!(selected.packs().len(), 1);
         assert_eq!(selected.packs()[0].object_count, selected_oids.len() as u64);
+        Ok(())
+    }
+
+    #[test]
+    fn concatenate_complete_pack_inventory_preserves_pack_objects() -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let repository = root.path().join("repository.git");
+        run_git(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg("--quiet")
+                .arg(&repository),
+            "initialize concatenation test repository",
+        )?;
+
+        let repository_arg = repository.to_str().ok_or_else(|| {
+            io_error(
+                "encode concatenation test repository path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let first_data = vec![b'a'; 64 * 1024];
+        let first_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            &first_data,
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let mut first_delta_data = first_data.clone();
+        first_delta_data[1_024] = b'b';
+        let first_delta_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            &first_delta_data,
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first delta concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let second_oid = String::from_utf8(git_with_stdin(
+            &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+            b"second concatenation object\n",
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode second concatenation test object",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+
+        let first_prefix = root.path().join("first");
+        let first_prefix_arg = first_prefix.to_str().ok_or_else(|| {
+            io_error(
+                "encode first concatenation pack path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let first_hash = String::from_utf8(git_with_stdin(
+            &[
+                "--git-dir",
+                repository_arg,
+                "pack-objects",
+                "--delta-base-offset",
+                first_prefix_arg,
+            ],
+            format!("{first_oid}\n{first_delta_oid}\n").as_bytes(),
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode first concatenation pack hash",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let second_prefix = root.path().join("second");
+        let second_prefix_arg = second_prefix.to_str().ok_or_else(|| {
+            io_error(
+                "encode second concatenation pack path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let second_hash = String::from_utf8(git_with_stdin(
+            &[
+                "--git-dir",
+                repository_arg,
+                "pack-objects",
+                "--delta-base-offset",
+                second_prefix_arg,
+            ],
+            format!("{second_oid}\n").as_bytes(),
+        ))
+        .map_err(|error| {
+            io_error(
+                "decode second concatenation pack hash",
+                io::Error::new(io::ErrorKind::InvalidData, error),
+            )
+        })?
+        .trim()
+        .to_owned();
+        let first = source_descriptor(root.path().join(format!("first-{first_hash}.pack")))?;
+        let first_pack_info = git_output(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(first.path.with_extension("idx")),
+            "inspect first concatenation test pack",
+        )?;
+        assert!(
+            first_pack_info
+                .lines()
+                .any(|line| line.split_whitespace().count() >= 6),
+            "first test pack should contain a delta entry"
+        );
+        let second = source_descriptor(root.path().join(format!("second-{second_hash}.pack")))?;
+
+        let concatenated = concatenate_complete_pack_inventory(&[first, second])?;
+        let generated =
+            concatenated
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "complete-pack-concatenation".to_owned(),
+                    reason: "test produced no concatenated pack".to_owned(),
+                })?;
+        assert_eq!(generated.object_count, 3);
+        let mut locations = PackLocationIter::open(
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )?;
+        let mut actual = Vec::new();
+        for location in &mut locations {
+            let location = location?;
+            actual.push(location.oid);
+        }
+        actual.sort_unstable();
+        let mut expected = vec![
+            gix_hash::ObjectId::from_hex(first_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode first test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+            gix_hash::ObjectId::from_hex(first_delta_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode first delta test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+            gix_hash::ObjectId::from_hex(second_oid.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode second test object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })?,
+        ];
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
         Ok(())
     }
 
@@ -808,6 +1394,29 @@ mod tests {
         assert!(repository.join(".git").is_dir());
         assert!(!root.path().join("ambient.git").exists());
         Ok(())
+    }
+
+    fn git_with_stdin(args: &[&str], input: &[u8]) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git");
+        child
+            .stdin
+            .take()
+            .expect("piped git stdin")
+            .write_all(input)
+            .expect("write git stdin");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
     }
 
     fn commit_all(repository: &Path, message: &str) -> Result<(), RepackError> {

@@ -579,6 +579,7 @@ async fn plan_upload_pack_inner(
     let operation = repository
         .operation(OperationKind::UploadPack, cancellation)
         .await?;
+    tracing::debug!("upload-pack plan operation opened");
     let result = plan_with_operation(
         repository,
         &operation,
@@ -588,7 +589,12 @@ async fn plan_upload_pack_inner(
         cancellation,
     )
     .await;
-    match operation.finish(result).await {
+    let result = operation.finish(result).await;
+    tracing::debug!(
+        result = result.is_ok(),
+        "upload-pack plan operation finished"
+    );
+    match result {
         Err(RemoteGitError::AuthorizationDenied) => Err(ReadError::UnauthorizedObject),
         result => result.map_err(ReadError::from),
     }
@@ -638,7 +644,13 @@ async fn plan_with_operation(
     request: &UploadPackRequest,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<PackPlan> {
+    tracing::debug!(
+        wants = request.wants.len(),
+        haves = request.haves.len(),
+        "upload-pack plan authorization started"
+    );
     authorize_wants_source(operation, visibility, visible_ref_names, &request.wants).await?;
+    tracing::debug!("upload-pack plan authorization completed");
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
     if let Some(plan) = plan_from_visibility_source(
@@ -719,8 +731,7 @@ async fn plan_with_operation(
         .filter_map(|(visible, oid)| visible.then_some(*oid))
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
-    let deduplicate_by_oid =
-        should_deduplicate_by_oid(request) && !filter_requires_traversal_context(&request.filter);
+    let deduplicate_by_oid = should_deduplicate_by_oid(request);
     let sparse_matchers =
         prepare_sparse_matchers(operation, visibility, visible_ref_names, &request.filter).await?;
     let mut queue = VecDeque::new();
@@ -939,11 +950,7 @@ async fn visibility_object_selection(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<VisibilityObjectSelection>> {
-    if request.wants.is_empty()
-        || !request.shallow.is_empty()
-        || request.deepen.is_some()
-        || request.deepen_relative
-    {
+    if request.wants.is_empty() || request.deepen.is_some() || request.deepen_relative {
         return Ok(None);
     }
 
@@ -985,16 +992,28 @@ async fn visibility_object_selection(
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect::<Vec<_>>();
-            let selected_objects = visibility
-                .objects_for_refs(operation, &selected_refs_owned)
+            let tag_references = references
+                .iter()
+                .filter_map(|reference| {
+                    let peeled = reference.peeled?;
+                    (reference.name.starts_with("refs/tags/")
+                        && visible.contains(reference.name.as_str()))
+                    .then_some((reference.name.as_str(), peeled))
+                })
+                .collect::<Vec<_>>();
+            let tag_targets = tag_references
+                .iter()
+                .map(|(_, peeled)| *peeled)
+                .collect::<Vec<_>>();
+            let tag_targets_reachable = visibility
+                .contains_for_refs(operation, &selected_refs_owned, &tag_targets)
                 .await?;
-            selected_refs.extend(references.iter().filter_map(|reference| {
-                let peeled = reference.peeled?;
-                (reference.name.starts_with("refs/tags/")
-                    && visible.contains(reference.name.as_str())
-                    && selected_objects.contains(&peeled))
-                .then_some(reference.name.as_str())
-            }));
+            selected_refs.extend(
+                tag_references
+                    .into_iter()
+                    .zip(tag_targets_reachable)
+                    .filter_map(|((name, _), reachable)| reachable.then_some(name)),
+            );
         }
         let selected_refs_owned = selected_refs
             .iter()
@@ -1004,6 +1023,10 @@ async fn visibility_object_selection(
             .objects_for_refs(operation, &selected_refs_owned)
             .await?
     } else {
+        tracing::debug!(
+            haves = request.haves.len(),
+            "upload-pack visibility incremental selection started"
+        );
         let visible_haves = visibility
             .contains_for_refs(operation, visible_ref_names, &request.haves)
             .await?;
@@ -1024,6 +1047,12 @@ async fn visibility_object_selection(
             };
             objects.extend(increment);
         }
+
+        tracing::debug!(
+            common_haves = common_haves.len(),
+            selected_objects = objects.len(),
+            "upload-pack visibility incremental selection completed"
+        );
 
         if request.include_tags {
             let selected = objects.iter().copied().collect::<HashSet<_>>();
@@ -1075,7 +1104,6 @@ fn plan_from_visibility(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
         || !matches!(request.filter, UploadPackFilter::None)
@@ -1257,7 +1285,6 @@ async fn plan_from_visibility_catalog(
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if !request.filter.is_catalog_exact()
         || request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
     {
@@ -1545,7 +1572,6 @@ async fn plan_from_visibility_source(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
         || !matches!(request.filter, UploadPackFilter::None)
@@ -1723,7 +1749,11 @@ fn filter_requires_traversal_context(filter: &UploadPackFilter) -> bool {
 }
 
 fn should_deduplicate_by_oid(request: &UploadPackRequest) -> bool {
-    !request.deepen_relative && request.shallow.is_empty()
+    // A shallow boundary without a depth update is OID-defined, so revisiting an unchanged
+    // tree cannot change selection unless the filter depends on its traversal context.
+    !request.deepen_relative
+        && !filter_requires_traversal_context(&request.filter)
+        && (request.shallow.is_empty() || request.deepen.is_none())
 }
 
 async fn ensure_visible_objects(
@@ -2187,11 +2217,6 @@ mod tests {
             },
             UploadPackRequest {
                 wants: vec![oid('1')],
-                shallow: vec![oid('3')],
-                ..UploadPackRequest::default()
-            },
-            UploadPackRequest {
-                wants: vec![oid('1')],
                 deepen: Some(1),
                 ..UploadPackRequest::default()
             },
@@ -2218,7 +2243,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_absolute_depth_traversal_deduplicates_shared_objects() {
+    fn traversal_deduplicates_only_when_depth_and_filter_context_cannot_change_semantics() {
         let mut request = UploadPackRequest {
             deepen: Some(100),
             ..UploadPackRequest::default()
@@ -2231,6 +2256,21 @@ mod tests {
         request.shallow.clear();
         request.deepen_relative = true;
         assert!(!should_deduplicate_by_oid(&request));
+
+        request.deepen_relative = false;
+        request.deepen = None;
+        request.shallow.push(oid('1'));
+        assert!(should_deduplicate_by_oid(&request));
+
+        request.filter = UploadPackFilter::TreeDepth(1);
+        assert!(!should_deduplicate_by_oid(&request));
+
+        request.shallow.clear();
+        assert!(!should_deduplicate_by_oid(&request));
+
+        request.filter = UploadPackFilter::BlobNone;
+        request.shallow.push(oid('1'));
+        assert!(should_deduplicate_by_oid(&request));
     }
 
     #[test]
@@ -2586,6 +2626,9 @@ mod tests {
         let request = UploadPackRequest {
             wants: vec![oid('3')],
             haves: vec![oid('1'), oid('f')],
+            // A normal fetch from a shallow clone does not move its boundary.
+            // The generation-bound transition is therefore exact and avoids a tree walk.
+            shallow: vec![oid('1')],
             ..UploadPackRequest::default()
         };
 
@@ -2605,6 +2648,8 @@ mod tests {
 
         assert_eq!(plan.object_ids, vec![oid('3'), oid('4')]);
         assert_eq!(plan.common_haves, vec![oid('1')]);
+        assert!(plan.shallow.is_empty());
+        assert!(plan.unshallow.is_empty());
     }
 
     #[test]

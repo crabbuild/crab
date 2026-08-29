@@ -480,17 +480,39 @@ impl<'a> GitReceiveWorkspace<'a> {
                 bytes::Bytes::from(kind_metadata),
             )
             .await?;
-        let metadata = PackMetadata {
+        let mut metadata = PackMetadata {
             pack_id: pack_id.clone(),
             ref_tips: pack.ref_tips.clone(),
             object_count,
         };
         let metadata_path = self.router.pack_metadata_path(&pack_id);
-        let metadata_bytes = serde_json::to_vec(&metadata)
-            .map_err(|e| AuthServerError::Internal(format!("pack metadata serialize: {e}")))?;
+        let metadata_bytes = match crab_metadata::pack_metadata::serialize_pack_metadata_bounded(
+            &metadata,
+        )? {
+            Some(bytes) => bytes,
+            None => {
+                tracing::warn!(
+                    pack_id = %pack_id,
+                    maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                    "synthesized pack metadata ref-tip hint exceeded its bound; publishing an empty hint"
+                );
+                metadata.ref_tips.clear();
+                crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)?
+                    .ok_or_else(|| {
+                        AuthServerError::Internal(
+                            "empty synthesized pack metadata hint exceeded its size bound"
+                                .to_owned(),
+                        )
+                    })?
+            }
+        };
         self.store
             .put_exact(&metadata_path, bytes::Bytes::from(metadata_bytes))
             .await?;
+        let pack = PackManifestEntry {
+            ref_tips: metadata.ref_tips,
+            ..pack
+        };
         crab_metadata::pack_origin::record_verified_pack_origin(
             self.store,
             self.router.repo_prefix(),
@@ -787,7 +809,8 @@ impl<'a> GitReceiveWorkspace<'a> {
         for pack in read_bulk_pack_list(self.store, router, &manifest.pack_index_hash).await? {
             validate_pack_manifest_entry(&pack)?;
             let path = router.pack_path(&pack.pack_id);
-            self.install_pack_from_object(&path, git_dir).await?;
+            self.install_pack_from_object(&path, git_dir, pack.size)
+                .await?;
         }
         Ok(())
     }
@@ -805,7 +828,9 @@ impl<'a> GitReceiveWorkspace<'a> {
                 && object.canonical_key.ends_with(".pack")
             {
                 let path = ObjectPath::from(object.staged_key.clone());
-                let pack_path = self.install_pack_from_object(&path, git_dir).await?;
+                let pack_path = self
+                    .install_pack_from_object(&path, git_dir, object.size)
+                    .await?;
                 let file_name = pack_path
                     .file_name()
                     .and_then(std::ffi::OsStr::to_str)
@@ -829,6 +854,7 @@ impl<'a> GitReceiveWorkspace<'a> {
         &self,
         path: &ObjectPath,
         git_dir: &Path,
+        expected_size: u64,
     ) -> Result<std::path::PathBuf> {
         let file_name = path
             .as_ref()
@@ -837,7 +863,9 @@ impl<'a> GitReceiveWorkspace<'a> {
             .ok_or_else(|| invalid("pack path has no filename"))?;
         validate_pack_object_filename(file_name)?;
         let pack_path = git_dir.join("objects").join("pack").join(file_name);
-        self.store.download_to_path(path, &pack_path).await?;
+        self.store
+            .download_to_path_bounded(path, &pack_path, expected_size)
+            .await?;
         run_git(["index-pack", path_str(&pack_path)?], Some(git_dir))?;
         Ok(pack_path)
     }

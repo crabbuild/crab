@@ -323,8 +323,12 @@ The Git object locator uses the same short-lived writer model. It disables
 SlateDB's periodic collector because the dependency's first timer tick would
 scan remote state on every publication. A writer that advances exact locator
 coverage across a 32-generation boundary instead runs one foreground collection
-after its reader checkpoint is published and the database is closed. SlateDB's
-five-minute minimum age remains in force.
+after its reader checkpoint is published and the database is closed. That
+compactor consumes the bounded L0 frontier with one compaction and one
+subcompaction, using four bounded read-ahead fetch tasks; writer-side
+existing-object lookup switches from point gets to a bounded ordered scan only
+when active SST fan-out makes the scan cheaper. Sparse or small requests retain
+exact OID gets. SlateDB's five-minute minimum age remains in force.
 
 If you are upgrading from a pre-spec build that wrote
 `{repo_prefix}/file-index/{hash}` objects, those legacy remote

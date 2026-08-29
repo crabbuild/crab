@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crab_metadata::git_object_locator::{
-    GitObjectKind, GitObjectLocatorSession, GitObjectLookup, GitObjectMetadata, GitObjectOrdinal,
+    GitObjectKind, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup, GitObjectMetadata,
+    GitObjectOrdinal,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -759,6 +760,51 @@ impl OperationContext {
                 session,
                 entries,
                 oids,
+                batch_concurrency(
+                    self.state.runtime.options(),
+                    self.state.options.object_limits(),
+                    self.state.options.operation_limits(),
+                ),
+                &self.budget,
+                &self.cancellation,
+            )
+            .instrument(self.span.clone())
+            .await
+    }
+
+    pub(crate) async fn lookup_packed_entry_locators(
+        &self,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<GitObjectLocator>> {
+        check_cancelled(&self.cancellation)?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "non-empty operation has no locator session",
+            })?;
+        reader
+            .lookup_packed_locators_with_session(session, oids, &self.budget, &self.cancellation)
+            .instrument(self.span.clone())
+            .await
+    }
+
+    pub(crate) async fn read_packed_entries_with_locators(
+        &self,
+        oids: &[gix_hash::ObjectId],
+        locators: &[GitObjectLocator],
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .read_packed_many_with_session_and_locators(
+                oids,
+                locators,
                 batch_concurrency(
                     self.state.runtime.options(),
                     self.state.options.object_limits(),

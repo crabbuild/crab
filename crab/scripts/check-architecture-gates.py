@@ -2871,7 +2871,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             "default": [],
             "active-probe": ["dep:reqwest"],
             "local-cache": ["dep:filetime", "dep:rusqlite", "dep:tokio"],
-            "remote-client": ["active-probe", "dep:tokio"],
+            "remote-client": ["active-probe", "dep:futures-util", "dep:tokio"],
             "xet-chunk-cache": [
                 "dep:base64",
                 "dep:crc32fast",
@@ -3161,7 +3161,12 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
                 "storage",
             ],
             "local-index": ["dep:rusqlite"],
-            "remote-index": ["dep:futures-util", "dep:object_store", "dep:slatedb"],
+            "remote-index": [
+                "dep:futures-util",
+                "dep:object_store",
+                "dep:slatedb",
+                "storage",
+            ],
             "storage": [
                 "dep:base64",
                 "dep:crab-storage",

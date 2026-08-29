@@ -22,7 +22,7 @@ pub use active_probe::{
     ActiveProbeAuth, ActiveProbeObject, ActiveProbeOutcome, build_active_probe, run_active_probe,
 };
 #[cfg(feature = "remote-client")]
-pub use cache_client::{CacheClient, build_cache_service_http_client};
+pub use cache_client::{CacheClient, CacheObjectStream, build_cache_service_http_client};
 pub use error::{CacheError, Result};
 pub use key::CacheKey;
 #[cfg(feature = "local-cache")]

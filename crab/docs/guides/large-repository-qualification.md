@@ -36,6 +36,10 @@ object/read bounds remain in force inside each admitted session.
 - Git, Python 3, AWS CLI, Docker, and a reachable RustFS S3 endpoint.
 - A dedicated bucket. The default local fixture uses bucket `crab`, endpoint
   `http://127.0.0.1:9000`, and fixture credentials `crab`/`crab`.
+- For the cache-service gate, a reachable `crab-cache-server` plus its
+  authentication environment: `CRAB_CACHE_SERVICE_URL` and exactly one of
+  `CRAB_CACHE_PSK` or `CRAB_CACHE_TOKEN`. The service must use the same RustFS
+  origin and an isolated cache root.
 
 All build artifacts must use a checkout-specific target directory on the
 workspace volume:
@@ -71,12 +75,14 @@ python3 crab/scripts/e2e/run_large_repo_rustfs.py \
   --object-store-version rustfs/rustfs:1.0.0-beta.8-glibc \
   --cold-clone-fanout 50 \
   --warm-clone-fanout 100 \
+  --require-cache-service \
   --team-load \
   --cleanup-remote
 
 python3 crab/scripts/verify-large-repo-rustfs-report.py \
   /Volumes/Workspace/CrabBuild/crabbuild-qualification/kubernetes-team-load-a/artifacts/report.json \
-  --require-team-load
+  --require-team-load \
+  --require-cache-service
 ```
 
 Use a unique run ID. Generated clones, logs, temporary files, and reports stay
@@ -114,7 +120,7 @@ non-zero; it is never accepted as performance evidence.
 ## Report contract
 
 The versioned JSON report uses schema `crab.large-repository-rustfs`, version
-`1.1`. Its main sections are:
+`1.2`. Its main sections are:
 
 | Field | Evidence |
 |---|---|
@@ -123,7 +129,8 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `commands` | Exit status, duration, process-tree CPU, peak child RSS, aggregate operation telemetry, and redacted logs |
 | `pushes` | Per-commit latency, resource use, and storage/cache counters |
 | `stages` | Clone/fetch measurements, active pack inventory, generation-bound locator/visibility health, and per-owner-pass locator sweep counters |
-| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures; `--require-team-load` makes it mandatory for a full gate |
+| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures plus cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
+| `cache_service` | Optional service health/capability proof and aggregate Git-pack cache traffic; `--require-cache-service` makes the service and observed pack traffic mandatory |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
 | `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
 | `metrics` | Count and min/median/p95/p99/max duration summaries by operation family |
@@ -137,11 +144,15 @@ fields. It records repository-wide generation-receipt and maintenance health
 without treating unrelated file-index repair as a Git acceleration failure.
 
 Remote-operation telemetry is emitted once per bounded operation. It records
-only numeric counts and durations, plus bounded counts for locator lookup modes;
+only numeric counts and durations, including the source-pack download portion
+of response-pack generation, plus bounded counts for locator lookup modes;
 per-object debug logging is disabled because its volume would distort both
 timing and storage evidence on large histories. The blobless catalog-filter
 stage must record ordinal-metadata lookup activity, proving that the optimized
 ordinal path was exercised.
+Cache hit/miss parsing is case-insensitive because generated-pack cache events
+are emitted from a Rust debug enum (`Hit`/`Miss`) while object-cache events use
+lowercase strings. This keeps warm-fanout measurements faithful to the logs.
 Each `visibility_owner_*` stage also records `locator_sweep` entries for every
 owner pass. `object_rows_scanned` is the number of canonical rows examined by
 that sweep, while `pack_rows_scanned` and the deletion counters describe stale
@@ -149,15 +160,19 @@ pack cleanup. A pure repack should show bounded stale-pack work without a
 repository-sized canonical scan; an interrupted rebuild must show the explicit
 recovery pass instead of being silently reported as a ready catalog.
 Cold visibility repair downloads each unique committed pack once into the
-run-scoped temporary directory, verifies its manifest identity, and performs
-the reachability walk against that local ODB. The owner telemetry therefore
-reports pack-count storage requests and compressed pack bytes; the run volume
-must have room for the committed pack set plus one transient pack copy while
-Git builds its local index.
+run-scoped temporary directory using four bounded workers, verifies its
+manifest identity, and performs the reachability walk against that local ODB.
+The owner telemetry therefore reports pack-count storage requests and
+compressed pack bytes; the run volume must have room for the committed pack
+set plus transient pack copies while Git builds its local index.
 
 The GitHub workflow runs only the report contract tests on ordinary pull
 requests. The Kubernetes full and team-load job is restricted to a dedicated
 self-hosted runner on the weekly schedule or by manual dispatch. The standalone
 verifier accepts historical single-client reports by default, while the
-workflow invokes `--require-team-load` so a release-gate report cannot omit
-the concurrency scenarios.
+workflow invokes `--require-team-load` and `--require-cache-service` so a
+release-gate report cannot omit the concurrency scenarios or silently bypass
+the shared cache service. The cache-service gate requires valid health and
+capability contracts plus non-zero pack traffic in `/v1/admin/stats`; this
+proves that the large Git reads exercised the bounded streaming path rather
+than merely proving that a service was running.

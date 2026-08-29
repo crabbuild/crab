@@ -32,6 +32,7 @@ pub use pack::{
 pub use pack_locator::{
     PackKindMetadataIter, PackLocationIter, PackLocatorError, PackObjectLocation,
     decode_pack_kind_metadata, decode_pack_kind_metadata_iter, encode_pack_kind_metadata,
+    max_pack_index_size, pack_kind_metadata_size, pack_reverse_index_size,
     validate_pack_kind_metadata, write_pack_reverse_index,
 };
 pub use pointer_detect::{PointerKind, classify};

@@ -929,6 +929,51 @@ impl CachingStore {
         }
     }
 
+    #[cfg(feature = "remote-client")]
+    async fn get_cache_service_stream(&self, path: &Path) -> Result<Option<GetResult>> {
+        if classify_path(path.as_ref()) == PathClass::Mutable || !self.cache_reads_enabled() {
+            return Ok(None);
+        }
+
+        let Some(client) = &self.cache_client else {
+            return Ok(None);
+        };
+        let Some(response) = client.get_stream(path.as_ref()).await? else {
+            return Ok(None);
+        };
+        let Some(size) = response.content_length() else {
+            return Err(CacheError::Service {
+                reason: format!("cache service omitted Content-Length for {path}"),
+            }
+            .into());
+        };
+
+        use futures_util::StreamExt as _;
+
+        let stream = response
+            .into_stream()
+            .map(|result| {
+                result.map_err(|error| object_store::Error::Generic {
+                    store: "crab-cache",
+                    source: Box::new(error),
+                })
+            })
+            .boxed();
+        Ok(Some(GetResult {
+            payload: GetResultPayload::Stream(stream),
+            meta: ObjectMeta {
+                location: path.clone(),
+                last_modified: SystemTime::now().into(),
+                size,
+                e_tag: None,
+                version: None,
+            },
+            range: 0..size,
+            attributes: Attributes::default(),
+            extensions: Default::default(),
+        }))
+    }
+
     /// Read cache-service object metadata without origin fallback.
     ///
     /// Returns `Ok(None)` when cache-service reads are not enabled.
@@ -1149,6 +1194,53 @@ impl CachingStore {
         }
 
         Ok(())
+    }
+
+    /// Stream an object to a local file, using the remote cache service for
+    /// immutable paths when it is enabled and falling back to origin.
+    ///
+    /// The byte bound protects fetch callers from a cache response that is
+    /// larger than the manifest commitment. Cache failures are advisory: the
+    /// authoritative origin remains the correctness path.
+    pub async fn download_to_path_bounded(
+        &self,
+        path: &Path,
+        dest: &std::path::Path,
+        max_bytes: u64,
+    ) -> Result<u64> {
+        if classify_path(path.as_ref()) == PathClass::Immutable {
+            #[cfg(feature = "remote-client")]
+            if self.cache_reads_enabled()
+                && let Some(client) = &self.cache_client
+            {
+                match client
+                    .download_to_path_bounded(path.as_ref(), dest, max_bytes)
+                    .await
+                {
+                    Ok(Some(bytes)) => return Ok(bytes),
+                    Ok(None) => {
+                        tracing::debug!(path = %path, "cache service stream miss, using origin")
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path,
+                            error = %error,
+                            "cache service stream failed, falling back to origin",
+                        );
+                    }
+                }
+            }
+        }
+
+        self.origin
+            .download_to_path_bounded(path, dest, max_bytes)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Stream an object to a local file without buffering the body.
+    pub async fn download_to_path(&self, path: &Path, dest: &std::path::Path) -> Result<u64> {
+        self.download_to_path_bounded(path, dest, u64::MAX).await
     }
 
     /// Batch dedup query against the cache service's chunk index.
@@ -1734,6 +1826,28 @@ impl ObjectStore for CacheAwareObjectStore {
                 }
             }
         } else {
+            #[cfg(feature = "remote-client")]
+            if cache_key_for_path(location.as_ref()).is_none() {
+                match self.store.get_cache_service_stream(location).await {
+                    Ok(Some(result)) => return Ok(result),
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %location,
+                            error = %error,
+                            "cache service stream failed, falling back to origin",
+                        );
+                    }
+                }
+
+                return self
+                    .store
+                    .origin()
+                    .inner()
+                    .get_opts(location, options)
+                    .await;
+            }
+
             let (body, _) = self
                 .store
                 .get_with_etag(location)
@@ -2302,7 +2416,7 @@ mod tests {
             evictor_notify,
             origin_healthy: AtomicBool::new(true),
             origin_health_checked_at: tokio::sync::Mutex::new(Instant::now()),
-            cache_miss_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            cache_miss_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             push_warming_body_permits: tokio::sync::Semaphore::new(8),
             dedup_index_rebuild: DedupIndexRebuildStats {
                 status: "not_run".to_string(),
@@ -2536,6 +2650,101 @@ mod tests {
             server.origin_get_count.load(Ordering::Relaxed),
             1,
             "fresh Crab-side client should hit cache server without origin GET"
+        );
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn download_to_path_uses_cache_service_for_pack_bodies() {
+        let server = start_test_cache_server().await;
+        let body = Bytes::from_static(b"pack body served from cache");
+        let pack_id = blake3::hash(&body).to_hex().to_string();
+        let path = Path::from(format!("org/repo/packs/pack-{pack_id}.pack"));
+        server
+            .origin
+            .put(&path, PutPayload::from_bytes(body.clone()))
+            .await
+            .unwrap();
+
+        let config = cache_service_config(server.addr);
+        let direct_origin = Store::new(Arc::new(InMemory::new()));
+        let first = CachingStore::new_with_local_cache(
+            direct_origin.clone(),
+            &config,
+            Arc::new(LocalCache::new(
+                server._tempdir.path().join("pack-client-a"),
+            )),
+        )
+        .unwrap();
+        let first_dest = server._tempdir.path().join("first.pack");
+        let first_bytes = first.download_to_path(&path, &first_dest).await.unwrap();
+
+        assert_eq!(first_bytes, body.len() as u64);
+        assert_eq!(tokio::fs::read(&first_dest).await.unwrap(), body);
+        assert_eq!(server.origin_get_count.load(Ordering::Relaxed), 1);
+
+        let second = CachingStore::new_with_local_cache(
+            direct_origin,
+            &config,
+            Arc::new(LocalCache::new(
+                server._tempdir.path().join("pack-client-b"),
+            )),
+        )
+        .unwrap();
+        let second_dest = server._tempdir.path().join("second.pack");
+        let second_bytes = second.download_to_path(&path, &second_dest).await.unwrap();
+
+        assert_eq!(second_bytes, body.len() as u64);
+        assert_eq!(tokio::fs::read(&second_dest).await.unwrap(), body);
+        assert_eq!(
+            server.origin_get_count.load(Ordering::Relaxed),
+            1,
+            "a fresh Crab client should stream the warm pack from the cache service"
+        );
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn cache_aware_object_store_streams_pack_bodies() {
+        let server = start_test_cache_server().await;
+        let body = Bytes::from_static(b"pack body streamed through object store");
+        let pack_id = blake3::hash(&body).to_hex().to_string();
+        let path = Path::from(format!("org/repo/packs/pack-{pack_id}.pack"));
+        server
+            .origin
+            .put(&path, PutPayload::from_bytes(body.clone()))
+            .await
+            .unwrap();
+
+        let config = cache_service_config(server.addr);
+        let first = CachingStore::new_with_local_cache(
+            Store::new(Arc::new(InMemory::new())),
+            &config,
+            Arc::new(LocalCache::new(
+                server._tempdir.path().join("object-store-client-a"),
+            )),
+        )
+        .unwrap();
+        let first_result = first.object_store().get(&path).await.unwrap();
+        assert_eq!(first_result.meta.size, body.len() as u64);
+        assert_eq!(first_result.bytes().await.unwrap(), body);
+        assert_eq!(server.origin_get_count.load(Ordering::Relaxed), 1);
+
+        let second = CachingStore::new_with_local_cache(
+            Store::new(Arc::new(InMemory::new())),
+            &config,
+            Arc::new(LocalCache::new(
+                server._tempdir.path().join("object-store-client-b"),
+            )),
+        )
+        .unwrap();
+        let second_result = second.object_store().get(&path).await.unwrap();
+        assert_eq!(second_result.meta.size, body.len() as u64);
+        assert_eq!(second_result.bytes().await.unwrap(), body);
+        assert_eq!(
+            server.origin_get_count.load(Ordering::Relaxed),
+            1,
+            "object-store consumers should receive warm pack streams without origin reads"
         );
     }
 

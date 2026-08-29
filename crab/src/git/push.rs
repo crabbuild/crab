@@ -127,28 +127,19 @@ pub(crate) async fn upsert_pack_metadata(
 ) -> Result<PackMetadata> {
     let mut requested_tips = ref_tips.into_iter().collect::<BTreeSet<_>>();
     if store.staging_write_prefix().is_some() {
-        let metadata = PackMetadata {
-            pack_id: pack_id.to_owned(),
-            ref_tips: requested_tips.into_iter().collect(),
-            object_count,
-        };
-        let body = serde_json::to_vec(&metadata).map_err(|error| {
-            CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-        })?;
+        let (metadata, body) =
+            pack_metadata_for_write(pack_id, object_count, requested_tips.into_iter().collect())?;
         store.put_exact(path, Bytes::from(body)).await?;
         return Ok(metadata);
     }
 
     // A newly generated content-addressed pack normally has no sidecar yet;
     // create-first avoids a guaranteed read on the first publication.
-    let metadata = PackMetadata {
-        pack_id: pack_id.to_owned(),
-        ref_tips: requested_tips.iter().cloned().collect(),
+    let (metadata, body) = pack_metadata_for_write(
+        pack_id,
         object_count,
-    };
-    let body = serde_json::to_vec(&metadata).map_err(|error| {
-        CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-    })?;
+        requested_tips.iter().cloned().collect(),
+    )?;
     match store.create_strict(path, Bytes::from(body)).await {
         Ok(()) => return Ok(metadata),
         Err(CrabError::CasConflict { .. }) => {}
@@ -156,13 +147,14 @@ pub(crate) async fn upsert_pack_metadata(
     }
 
     for _ in 0..max_retries.max(1) {
-        match store.get_with_etag(path).await {
+        match store
+            .get_with_etag_bounded(path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+        {
             Ok((body, etag)) => {
-                let mut metadata: PackMetadata =
-                    serde_json::from_slice(&body).map_err(|error| CrabError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!("invalid pack metadata JSON: {error}"),
-                    })?;
+                let mut metadata =
+                    crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+                        .map_err(CrabError::from)?;
                 if metadata.pack_id != pack_id || metadata.object_count != object_count {
                     return Err(CrabError::CorruptObject {
                         path: path.to_string(),
@@ -171,15 +163,29 @@ pub(crate) async fn upsert_pack_metadata(
                     });
                 }
                 let before = metadata.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
+                if before.is_empty() && !requested_tips.is_empty() {
+                    // An empty hint may be a deliberate legacy fallback after a
+                    // previous union exceeded the bound. It cannot be enriched
+                    // without proving the complete ref-tip set again.
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                }
                 requested_tips.extend(before.iter().cloned());
                 if requested_tips == before {
                     metadata.ref_tips = before.into_iter().collect();
                     return Ok(metadata);
                 }
                 metadata.ref_tips = requested_tips.iter().cloned().collect();
-                let next = serde_json::to_vec(&metadata).map_err(|error| {
-                    CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-                })?;
+                let Some(next) =
+                    crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)
+                        .map_err(CrabError::from)?
+                else {
+                    tracing::warn!(
+                        pack_id,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "pack metadata ref-tip union exceeded its bound; using legacy pack selection"
+                    );
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                };
                 match store.update(path, Bytes::from(next), etag).await {
                     Ok(_) => return Ok(metadata),
                     Err(CrabError::CasConflict { .. }) => continue,
@@ -187,21 +193,30 @@ pub(crate) async fn upsert_pack_metadata(
                 }
             }
             Err(CrabError::NotFound { .. }) => {
-                let metadata = PackMetadata {
-                    pack_id: pack_id.to_owned(),
-                    ref_tips: requested_tips.iter().cloned().collect(),
+                let (metadata, body) = pack_metadata_for_write(
+                    pack_id,
                     object_count,
-                };
-                let body = serde_json::to_vec(&metadata).map_err(|error| {
-                    CrabError::Internal(format!("failed to serialize PackMetadata: {error}"))
-                })?;
+                    requested_tips.iter().cloned().collect(),
+                )?;
                 match store.create_strict(path, Bytes::from(body)).await {
                     Ok(()) => return Ok(metadata),
                     Err(CrabError::CasConflict { .. }) => continue,
                     Err(error) => return Err(error),
                 }
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if matches!(&error, CrabError::CorruptObject { .. })
+                    && existing_pack_metadata_is_oversized(store, path).await
+                {
+                    tracing::warn!(
+                        pack_id,
+                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+                        "existing oversized pack metadata is treated as a legacy hint"
+                    );
+                    return Ok(pack_metadata_without_ref_tips(pack_id, object_count));
+                }
+                return Err(error);
+            }
         }
     }
 
@@ -209,6 +224,58 @@ pub(crate) async fn upsert_pack_metadata(
         path: path.to_string(),
         expected_etag: None,
     })
+}
+
+fn pack_metadata_without_ref_tips(pack_id: &str, object_count: u64) -> PackMetadata {
+    PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips: Vec::new(),
+        object_count,
+    }
+}
+
+fn pack_metadata_for_write(
+    pack_id: &str,
+    object_count: u64,
+    ref_tips: Vec<String>,
+) -> Result<(PackMetadata, Vec<u8>)> {
+    let metadata = PackMetadata {
+        pack_id: pack_id.to_owned(),
+        ref_tips,
+        object_count,
+    };
+    if let Some(body) = crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&metadata)
+        .map_err(CrabError::from)?
+    {
+        return Ok((metadata, body));
+    }
+
+    tracing::warn!(
+        pack_id,
+        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        "pack metadata ref-tip hint exceeded its bound; publishing an empty hint"
+    );
+    let fallback = pack_metadata_without_ref_tips(pack_id, object_count);
+    let body = crab_metadata::pack_metadata::serialize_pack_metadata_bounded(&fallback)
+        .map_err(CrabError::from)?
+        .ok_or_else(|| {
+            CrabError::Internal("empty pack metadata hint exceeded its size bound".to_owned())
+        })?;
+    Ok((fallback, body))
+}
+
+async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -> bool {
+    match store.head(path).await {
+        Ok(meta) => meta.size > crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
+        Err(error) => {
+            tracing::debug!(
+                path = %path,
+                error = %error,
+                "could not confirm oversized pack metadata during legacy fallback"
+            );
+            false
+        }
+    }
 }
 
 const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
@@ -2728,23 +2795,21 @@ pub(crate) struct GitVisibilityCapacity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitVisibilityPublication {
     Published,
+    CatalogBound,
     CompletePackOnly(GitVisibilityCapacity),
 }
 
 fn git_visibility_capacity_exceeded<'a>(
     packs: impl IntoIterator<Item = &'a PackManifestEntry>,
-    ref_count: usize,
 ) -> Result<Option<GitVisibilityCapacity>> {
     git_visibility_capacity_exceeded_at_limit(
         packs,
-        ref_count,
         crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS,
     )
 }
 
 fn git_visibility_capacity_exceeded_at_limit<'a>(
     packs: impl IntoIterator<Item = &'a PackManifestEntry>,
-    ref_count: usize,
     maximum: u64,
 ) -> Result<Option<GitVisibilityCapacity>> {
     let mut seen = HashSet::new();
@@ -2753,15 +2818,11 @@ fn git_visibility_capacity_exceeded_at_limit<'a>(
         .filter(|pack| seen.insert(pack.pack_id.as_str()))
         .try_fold(0u64, |total, pack| total.checked_add(pack.object_count))
         .ok_or_else(|| CrabError::Internal("Git pack object count overflow".to_owned()))?;
-    let ref_count = u64::try_from(ref_count)
-        .map_err(|_| CrabError::Internal("Git ref count overflow".to_owned()))?;
-    // The serialized proof stores one closure per ref. This conservative bound
-    // keeps publication cost bounded without walking every closure twice.
-    let proof_objects = packed_objects
-        .checked_mul(ref_count)
-        .ok_or_else(|| CrabError::Internal("Git visibility object count overflow".to_owned()))?;
-    Ok((proof_objects > maximum).then_some(GitVisibilityCapacity {
-        observed: proof_objects,
+    // V5 stores one shared catalog dictionary and ordinal closures per ref.
+    // Bound the unique dictionary here; the serialized proof byte limit remains
+    // the protection against an unbounded number of repeated memberships.
+    Ok((packed_objects > maximum).then_some(GitVisibilityCapacity {
+        observed: packed_objects,
         maximum,
     }))
 }
@@ -5706,29 +5767,7 @@ pub(crate) async fn while_renewing_internal_lock<T>(
     lock: &mut PushLock,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
-    let mut ticker = tokio::time::interval(renewal_interval);
-    ticker.tick().await;
-    tokio::pin!(operation);
-    let mut renewal_error = None;
-    loop {
-        tokio::select! {
-            result = &mut operation => {
-                return match result {
-                    Err(error) => Err(error),
-                    Ok(value) => match renewal_error {
-                        Some(error) => Err(CrabError::from(error)),
-                        None => Ok(value),
-                    },
-                };
-            }
-            _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = lock.renew().await {
-                    renewal_error = Some(error);
-                }
-            }
-        }
-    }
+    while_renewing_internal_lock_impl(lock, None, operation).await
 }
 
 pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
@@ -5736,13 +5775,23 @@ pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
     failure_cancel: &CancellationToken,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
+    while_renewing_internal_lock_impl(lock, Some(failure_cancel), operation).await
+}
+
+async fn while_renewing_internal_lock_impl<T>(
+    lock: &mut PushLock,
+    failure_cancel: Option<&CancellationToken>,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
     let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
     let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
     tokio::pin!(operation);
     let mut renewal_error = None;
     loop {
         tokio::select! {
+            biased;
             result = &mut operation => {
                 return match result {
                     Err(error) => Err(error),
@@ -5753,9 +5802,29 @@ pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
                 };
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = lock.renew().await {
-                    failure_cancel.cancel();
-                    renewal_error = Some(error);
+                // A backend CAS may consume its full retry deadline. Keep polling completed
+                // maintenance so a successful operation can release a still-valid lease.
+                let renewal = lock.renew();
+                tokio::pin!(renewal);
+                tokio::select! {
+                    biased;
+                    result = &mut renewal => {
+                        if let Err(error) = result {
+                            if let Some(failure_cancel) = failure_cancel {
+                                failure_cancel.cancel();
+                            }
+                            renewal_error = Some(error);
+                        }
+                    }
+                    result = &mut operation => {
+                        return match result {
+                            Err(error) => Err(error),
+                            Ok(value) => match renewal_error {
+                                Some(error) => Err(CrabError::from(error)),
+                                None => Ok(value),
+                            },
+                        };
+                    }
                 }
             }
         }
@@ -5878,12 +5947,35 @@ async fn download_locator_pack_evidence(
     let temp = tempfile::tempdir().map_err(CrabError::Io)?;
     let idx_path = temp.path().join("pack.idx");
     let rev_path = temp.path().join("pack.rev");
+    let index_maximum =
+        crab_git::pack_locator::max_pack_index_size(pack.object_count).ok_or_else(|| {
+            CrabError::CorruptObject {
+                path: router.pack_index_path(&pack.pack_id).as_ref().to_owned(),
+                reason: "Git pack index size overflows its bound".to_owned(),
+            }
+        })?;
+    let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+        .ok_or_else(|| CrabError::CorruptObject {
+            path: router
+                .pack_reverse_index_path(&pack.pack_id)
+                .as_ref()
+                .to_owned(),
+            reason: "Git reverse index size overflows its bound".to_owned(),
+        })?;
     store
-        .download_to_path(&router.pack_index_path(&pack.pack_id), &idx_path)
+        .download_to_path_bounded(
+            &router.pack_index_path(&pack.pack_id),
+            &idx_path,
+            index_maximum,
+        )
         .await?;
     check_cancelled(cancel)?;
     match store
-        .download_to_path(&router.pack_reverse_index_path(&pack.pack_id), &rev_path)
+        .download_to_path_bounded(
+            &router.pack_reverse_index_path(&pack.pack_id),
+            &rev_path,
+            reverse_maximum,
+        )
         .await
     {
         Ok(_) => {}
@@ -5934,7 +6026,7 @@ async fn download_locator_pack_evidence(
         crab_git::initialize_bare_git_dir(temp.path()).map_err(CrabError::from)?;
         let source = temp.path().join("source.pack");
         let downloaded = store
-            .download_to_path(&router.pack_path(&pack.pack_id), &source)
+            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
             .await?;
         check_cancelled(cancel)?;
         if downloaded != pack.size {
@@ -6062,7 +6154,14 @@ async fn load_pack_kind_metadata(
     rev_path: &Path,
 ) -> Result<Option<GitObjectKindMap>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let bytes = match store.get_with_etag(&path).await {
+    let maximum =
+        crab_git::pack_locator::pack_kind_metadata_size(pack.object_count).ok_or_else(|| {
+            CrabError::CorruptObject {
+                path: path.as_ref().to_owned(),
+                reason: "Git kind metadata size overflows its bound".to_owned(),
+            }
+        })?;
+    let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
         Err(CrabError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error),
@@ -6546,6 +6645,7 @@ pub(crate) async fn publish_committed_pack_locators(
         lock_ttl,
         cancel,
         true,
+        true,
     )
     .await
 }
@@ -6559,6 +6659,7 @@ async fn publish_committed_pack_locators_with_mode(
     lock_ttl: Duration,
     cancel: &CancellationToken,
     wait_for_lock: bool,
+    allow_compaction: bool,
 ) -> Result<crab_metadata::git_object_locator::LocatorWriteStats> {
     if git_generation_owner_is_active(store, router).await? {
         debug!(
@@ -6633,17 +6734,26 @@ async fn publish_committed_pack_locators_with_mode(
             &loaded_inventory
         };
 
-        // Locator publication is an owner/repair action. The caller has
-        // already released the push boundary, so this path may use the
-        // compaction-aware writer and its uncovered-pack budget.
-        let planned_object_rows = planned_locator_object_rows(store, router, current_packs).await?;
-        let mut writer =
+        let mut writer = if allow_compaction {
+            // Owner publication can amortize locator maintenance over the
+            // write, using the uncovered-pack budget to decide when to compact.
+            let planned_object_rows =
+                planned_locator_object_rows(store, router, current_packs).await?;
             crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
                 Arc::clone(store.inner()),
                 router.repo_prefix(),
                 planned_object_rows,
             )
-            .await?;
+            .await?
+        } else {
+            // A read admission must not turn a one-object repair into a
+            // repository-sized compaction; the owner handles that maintenance.
+            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_incremental_publication(
+                Arc::clone(store.inner()),
+                router.repo_prefix(),
+            )
+            .await?
+        };
         let operation = publish_pack_locator_inventory(
             &mut writer,
             store,
@@ -6695,6 +6805,7 @@ pub(crate) async fn repair_git_object_locator_if_current(
         lock_ttl,
         cancel,
         true,
+        true,
     )
     .await
 }
@@ -6713,6 +6824,7 @@ pub(crate) async fn repair_git_object_locator_if_current_for_reader(
         lock_ttl,
         cancel,
         false,
+        false,
     )
     .await
 }
@@ -6724,6 +6836,7 @@ async fn repair_git_object_locator_if_current_with_mode(
     lock_ttl: Duration,
     cancel: &CancellationToken,
     wait_for_lock: bool,
+    allow_compaction: bool,
 ) -> Result<bool> {
     let (manifest, _) = read_manifest(store, router).await?;
     // An active ref-journal transaction asks readers for the next generation.
@@ -6757,6 +6870,7 @@ async fn repair_git_object_locator_if_current_with_mode(
         lock_ttl,
         cancel,
         wait_for_lock,
+        allow_compaction,
     )
     .await?;
     Ok(stats.coverage_updated)
@@ -6856,12 +6970,25 @@ async fn repair_git_visibility_if_current_with_options(
     if manifest.refs.is_empty() {
         return Ok(Some(GitVisibilityPublication::Published));
     }
+    if allow_catalog_materialization {
+        let storage = store.as_storage().clone();
+        let storage_router =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        if crab_metadata::git_visibility::ensure_catalog_bound(&storage, &storage_router, &manifest)
+            .await
+            .map_err(CrabError::from)?
+        {
+            debug!(
+                generation = manifest.generation,
+                "completed pending Git catalog visibility handoff"
+            );
+            return Ok(Some(GitVisibilityPublication::CatalogBound));
+        }
+    }
     let packs = read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?;
-    if let Some(capacity) = git_visibility_capacity_exceeded_at_limit(
-        packs.iter(),
-        manifest.refs.len(),
-        maximum_logical_objects,
-    )? {
+    if let Some(capacity) =
+        git_visibility_capacity_exceeded_at_limit(packs.iter(), maximum_logical_objects)?
+    {
         return Ok(Some(GitVisibilityPublication::CompletePackOnly(capacity)));
     }
 
@@ -8604,7 +8731,9 @@ impl PushPipeline {
             .publish_git_visibility_index(manifest, store)
             .await
         {
-            Ok(GitVisibilityPublication::Published) => true,
+            Ok(GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound) => {
+                true
+            }
             Ok(GitVisibilityPublication::CompletePackOnly(capacity)) => {
                 warn!(
                     generation = manifest.generation,
@@ -8974,7 +9103,7 @@ impl PushPipeline {
         )
         .await?;
         match visibility {
-            GitVisibilityPublication::Published => {
+            GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound => {
                 self.publish_ref_visibility_edits(
                     store,
                     &mut edits,
@@ -9169,7 +9298,7 @@ impl PushPipeline {
             return Ok(None);
         }
         let packs = read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?;
-        git_visibility_capacity_exceeded(packs.iter(), manifest.refs.len())
+        git_visibility_capacity_exceeded(packs.iter())
     }
 
     async fn git_visibility_index_exists(
@@ -13097,6 +13226,19 @@ impl PushPipeline {
         }
         let packs = read_bulk_pack_list(store, &self.router, &base.pack_index_hash).await?;
         self.verify_committed_pack_inventory(&packs).await?;
+        // A complete, locally resolvable ref-tip frontier is cheaper than
+        // opening the locator and remains a safe superset boundary for Git's
+        // non-thin pack generation. Legacy or partially local inventories
+        // continue through exact locator/index classification below.
+        let objects_dir = self.objects_dir()?;
+        if let Some(ref_tips) = ref_tip_pack_basis_if_local(&packs, &objects_dir) {
+            info!(
+                pack_count = packs.len(),
+                ref_tips = ref_tips.len(),
+                "step 10: using manifest ref tips before Git locator lookup"
+            );
+            return Ok(Some(RemotePackBasis::RefTips(ref_tips)));
+        }
         let inventory: HashMap<
             MerkleHash,
             crab_metadata::git_object_locator::GitPackInventoryEntry,
@@ -13167,7 +13309,7 @@ impl PushPipeline {
             .collect::<Result<Vec<[u8; 20]>>>()?;
         misses.sort_unstable();
         misses.dedup();
-        let pack_dir = self.objects_dir()?.join("pack");
+        let pack_dir = objects_dir.join("pack");
         for pack in &packs {
             if misses.is_empty() {
                 break;
@@ -13199,8 +13341,21 @@ impl PushPipeline {
                 None
             } else {
                 let temp = tempfile::NamedTempFile::new().map_err(CrabError::Io)?;
+                let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+                    .ok_or_else(|| CrabError::CorruptObject {
+                        path: self
+                            .router
+                            .pack_index_path(&pack.pack_id)
+                            .as_ref()
+                            .to_owned(),
+                        reason: "Git pack index size overflows its bound".to_owned(),
+                    })?;
                 store
-                    .download_to_path(&self.router.pack_index_path(&pack.pack_id), temp.path())
+                    .download_to_path_bounded(
+                        &self.router.pack_index_path(&pack.pack_id),
+                        temp.path(),
+                        index_maximum,
+                    )
                     .await?;
                 Some(temp)
             };
@@ -17308,6 +17463,27 @@ struct MaterializedRemoteGitPacks {
     fetched_bytes: u64,
 }
 
+const REMOTE_PACK_MATERIALIZATION_CONCURRENCY: usize = 4;
+
+async fn run_bounded_pack_materialization<F, Fut>(
+    packs: Vec<PackManifestEntry>,
+    concurrency: usize,
+    cancel: &CancellationToken,
+    materialize: F,
+) -> Result<Vec<u64>>
+where
+    F: Fn(PackManifestEntry) -> Fut,
+    Fut: Future<Output = Result<u64>>,
+{
+    check_cancelled(cancel)?;
+    let results = futures_util::stream::iter(packs.into_iter().map(materialize))
+        .buffer_unordered(concurrency.max(1))
+        .try_collect::<Vec<_>>()
+        .await?;
+    check_cancelled(cancel)?;
+    Ok(results)
+}
+
 async fn materialize_remote_git_packs(
     store: &crab_storage::Store,
     router: &crab_storage::StoreLayout<crab_storage::Store>,
@@ -17316,17 +17492,19 @@ async fn materialize_remote_git_packs(
     maximum_requests: usize,
     cancel: &CancellationToken,
 ) -> Result<MaterializedRemoteGitPacks> {
-    let unique_pack_count = packs
+    let mut seen_pack_ids = HashSet::with_capacity(packs.len());
+    let unique_packs = packs
         .iter()
-        .map(|pack| pack.pack_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
+        .filter(|pack| seen_pack_ids.insert(pack.pack_id.clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unique_pack_count = unique_packs.len();
     if unique_pack_count > maximum_requests {
         return Err(CrabError::Internal(format!(
             "remote Git pack materialization requires {unique_pack_count} requests, budget is {maximum_requests}"
         )));
     }
-    let planned_bytes = packs.iter().try_fold(0_u64, |total, pack| {
+    let planned_bytes = unique_packs.iter().try_fold(0_u64, |total, pack| {
         total.checked_add(pack.size).ok_or_else(|| {
             CrabError::Internal("remote Git pack materialization byte count overflow".to_owned())
         })
@@ -17339,88 +17517,109 @@ async fn materialize_remote_git_packs(
     let git_dir = tempfile::tempdir()?;
     let pack_dir = git_dir.path().join("objects/pack");
     tokio::fs::create_dir_all(&pack_dir).await?;
-    let mut materialized = HashSet::new();
-    let mut fetched_bytes = 0_u64;
+    let git_dir_path = git_dir.path().to_owned();
+    let pack_dir_for_tasks = pack_dir.clone();
+    let store = store.clone();
+    let router = router.clone();
+    let cancel_for_tasks = cancel.clone();
+    let downloaded = run_bounded_pack_materialization(
+        unique_packs,
+        REMOTE_PACK_MATERIALIZATION_CONCURRENCY,
+        cancel,
+        move |pack| {
+            let store = store.clone();
+            let router = router.clone();
+            let cancel = cancel_for_tasks.clone();
+            let git_dir = git_dir_path.clone();
+            let pack_dir = pack_dir_for_tasks.clone();
+            async move {
+                check_cancelled(&cancel)?;
+                let remote_path = router.pack_path(&pack.pack_id);
+                let download = tempfile::Builder::new()
+                    .prefix(".crab-visibility-pack-")
+                    .suffix(".pack")
+                    .tempfile_in(&git_dir)?
+                    .into_temp_path();
+                let downloaded = tokio::select! {
+                    result = store.download_to_path_bounded(
+                        &remote_path,
+                        download.as_ref(),
+                        pack.size,
+                    ) => result?,
+                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                };
+                if downloaded != pack.size {
+                    return Err(CrabError::CorruptObject {
+                        path: remote_path.to_string(),
+                        reason: format!(
+                            "visibility repair downloaded {downloaded} bytes, expected {}",
+                            pack.size
+                        ),
+                    });
+                }
 
-    for pack in packs {
-        check_cancelled(cancel)?;
-        if !materialized.insert(pack.pack_id.clone()) {
-            continue;
-        }
-        let download = tempfile::Builder::new()
-            .prefix(".crab-visibility-pack-")
-            .suffix(".pack")
-            .tempfile_in(git_dir.path())?
-            .into_temp_path();
-        let downloaded = store
-            .download_to_path(&router.pack_path(&pack.pack_id), download.as_ref())
-            .await?;
-        if downloaded != pack.size {
-            return Err(CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).to_string(),
-                reason: format!(
-                    "visibility repair downloaded {downloaded} bytes, expected {}",
-                    pack.size
-                ),
-            });
-        }
-        fetched_bytes = fetched_bytes.saturating_add(downloaded);
+                let download_for_hash = download.to_path_buf();
+                let (actual_hash, actual_size) =
+                    tokio::task::spawn_blocking(move || hash_file_blake3(&download_for_hash))
+                        .await
+                        .map_err(|error| {
+                            CrabError::Internal(format!(
+                                "visibility pack hash join failed: {error}"
+                            ))
+                        })??;
+                if actual_size != pack.size
+                    || blake3::Hash::from(actual_hash).to_hex().as_str() != pack.pack_id
+                {
+                    return Err(CrabError::CorruptObject {
+                        path: remote_path.to_string(),
+                        reason: "visibility repair pack content hash does not match the manifest"
+                            .to_owned(),
+                    });
+                }
 
-        let download_for_hash = download.to_path_buf();
-        let (actual_hash, actual_size) =
-            tokio::task::spawn_blocking(move || hash_file_blake3(&download_for_hash))
-                .await
-                .map_err(|error| {
-                    CrabError::Internal(format!("visibility pack hash join failed: {error}"))
-                })??;
-        if actual_size != pack.size
-            || blake3::Hash::from(actual_hash).to_hex().as_str() != pack.pack_id
-        {
-            return Err(CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).to_string(),
-                reason: "visibility repair pack content hash does not match the manifest"
-                    .to_owned(),
-            });
-        }
-
-        let installed = crate::git::pack::install_pack_file_locally(
-            &pack_dir,
-            download.as_ref(),
-            &pack.pack_id,
-            pack.size,
-            false,
-        )
-        .await?;
-        check_cancelled(cancel)?;
-        let index = crab_git::pack_locator::PackLocationIter::open(
-            &installed.idx_path,
-            &installed.rev_path,
-            pack.size,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
-        if index.object_count() != pack.object_count {
-            return Err(CrabError::CorruptObject {
-                path: installed.idx_path.display().to_string(),
-                reason: format!(
-                    "visibility repair index contains {} objects, expected {}",
-                    index.object_count(),
-                    pack.object_count
-                ),
-            });
-        }
-        if index.pack_checksum().to_string() != installed.git_sha1 {
-            return Err(CrabError::CorruptObject {
-                path: installed.idx_path.display().to_string(),
-                reason: "visibility repair index checksum disagrees with the pack trailer"
-                    .to_owned(),
-            });
-        }
-    }
-
-    check_cancelled(cancel)?;
+                let installed = crate::git::pack::install_pack_file_locally(
+                    &pack_dir,
+                    download.as_ref(),
+                    &pack.pack_id,
+                    pack.size,
+                    false,
+                )
+                .await?;
+                check_cancelled(&cancel)?;
+                let index = crab_git::pack_locator::PackLocationIter::open(
+                    &installed.idx_path,
+                    &installed.rev_path,
+                    pack.size,
+                )
+                .map_err(crab_git::pack::PackError::from)?;
+                if index.object_count() != pack.object_count {
+                    return Err(CrabError::CorruptObject {
+                        path: installed.idx_path.display().to_string(),
+                        reason: format!(
+                            "visibility repair index contains {} objects, expected {}",
+                            index.object_count(),
+                            pack.object_count
+                        ),
+                    });
+                }
+                if index.pack_checksum().to_string() != installed.git_sha1 {
+                    return Err(CrabError::CorruptObject {
+                        path: installed.idx_path.display().to_string(),
+                        reason: "visibility repair index checksum disagrees with the pack trailer"
+                            .to_owned(),
+                    });
+                }
+                Ok(downloaded)
+            }
+        },
+    )
+    .await?;
+    let fetched_bytes = downloaded
+        .into_iter()
+        .fold(0_u64, |total, bytes| total.saturating_add(bytes));
     Ok(MaterializedRemoteGitPacks {
         git_dir,
-        pack_count: u64::try_from(materialized.len()).unwrap_or(u64::MAX),
+        pack_count: u64::try_from(unique_pack_count).unwrap_or(u64::MAX),
         fetched_bytes,
     })
 }
@@ -20553,7 +20752,7 @@ mod tests {
         pack.object_count =
             crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS.saturating_add(1);
 
-        let capacity = git_visibility_capacity_exceeded([&pack, &pack], 1)
+        let capacity = git_visibility_capacity_exceeded([&pack, &pack])
             .expect("count packs")
             .expect("oversized repository should use complete-pack fallback");
 
@@ -20569,17 +20768,127 @@ mod tests {
         let mut pack = pack_manifest_entry_with_tips(Vec::new());
         pack.object_count = 101;
 
-        let capacity = git_visibility_capacity_exceeded_at_limit([&pack], 1, 100)
+        let capacity = git_visibility_capacity_exceeded_at_limit([&pack], 100)
             .expect("count owner proof")
             .expect("owner limit should be enforced");
 
         assert_eq!(capacity.observed, 101);
         assert_eq!(capacity.maximum, 100);
         assert!(
-            git_visibility_capacity_exceeded_at_limit([&pack], 1, 101)
+            git_visibility_capacity_exceeded_at_limit([&pack], 101)
                 .expect("count exact owner proof")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn git_visibility_capacity_does_not_multiply_shared_refs() {
+        let mut pack = pack_manifest_entry_with_tips(Vec::new());
+        pack.object_count = 100;
+
+        assert!(
+            git_visibility_capacity_exceeded_at_limit([&pack], 100)
+                .expect("count shared-history proof")
+                .is_none(),
+            "shared ref closures use one catalog object budget"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_pack_materialization_limits_concurrent_work() {
+        let packs = (0..12)
+            .map(|index| PackManifestEntry {
+                pack_id: index.to_string(),
+                size: 1,
+                content_hash: index.to_string(),
+                ref_tips: Vec::new(),
+                object_count: 1,
+            })
+            .collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+
+        let results = run_bounded_pack_materialization(packs, 3, &cancel, {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            move |pack| {
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                async move {
+                    let in_flight = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(in_flight, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<u64, CrabError>(pack.size)
+                }
+            }
+        })
+        .await
+        .expect("bounded materialization should complete");
+
+        assert_eq!(results.len(), 12);
+        assert_eq!(results.into_iter().sum::<u64>(), 12);
+        assert_eq!(maximum.load(Ordering::SeqCst), 3);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_pack_materialization_installs_multiple_verified_packs() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "parallel-pack-materialization".to_owned());
+        let mut fixtures = Vec::new();
+        let mut packs = Vec::new();
+        let mut expected_bytes = 0_u64;
+
+        for index in 0..4 {
+            let (fixture, pack_path, idx_path, _rev_path, _git_sha1, _oid, pack_size) =
+                locator_pack_fixture_for(format!("parallel pack fixture {index}\n").as_bytes());
+            let pack_bytes = std::fs::read(&pack_path).expect("read parallel pack fixture");
+            let pack_id = blake3::hash(&pack_bytes).to_hex().to_string();
+            let index = gix_pack::index::File::at(&idx_path, gix_hash::Kind::Sha1)
+                .expect("open parallel pack fixture index");
+            let pack = PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: pack_size,
+                content_hash: pack_id.clone(),
+                ref_tips: Vec::new(),
+                object_count: u64::from(index.num_objects()),
+            };
+            store
+                .put(&router.pack_path(&pack_id), Bytes::from(pack_bytes))
+                .await
+                .expect("upload parallel pack fixture");
+            expected_bytes = expected_bytes.saturating_add(pack_size);
+            fixtures.push(fixture);
+            packs.push(pack);
+        }
+
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let materialized = materialize_remote_git_packs(
+            store.as_storage(),
+            &storage_router,
+            &packs,
+            expected_bytes,
+            packs.len(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("materialize parallel pack fixtures");
+
+        assert_eq!(materialized.pack_count, 4);
+        assert_eq!(materialized.fetched_bytes, expected_bytes);
+        assert!(packs.iter().all(|pack| {
+            materialized
+                .git_dir
+                .path()
+                .join(format!("objects/pack/pack-{}.pack", pack.pack_id))
+                .is_file()
+        }));
+        drop(fixtures);
     }
 
     #[test]
@@ -20785,6 +21094,120 @@ mod tests {
         let tips = ref_tip_pack_basis_if_local(&[pack], &objects_dir);
 
         assert!(tips.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn large_locator_basis_prefers_local_manifest_ref_tips() {
+        let _guard = GitDirGuard::new();
+        let (fixture, pack_path, idx_path, rev_path, commit, pack_id, pack_size, object_count) =
+            visibility_pack_fixture();
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(RecordingReadStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "locator-ref-tip-fast-path".to_owned());
+        let pack = PackManifestEntry {
+            pack_id: pack_id.clone(),
+            size: pack_size,
+            content_hash: pack_id.clone(),
+            ref_tips: vec![commit.clone()],
+            object_count,
+        };
+        let (pack_index_hash, _, pack_index) =
+            crate::metadata::manifest::compact_pack_index(1, &[pack.clone()])
+                .expect("build ref-tip fast-path pack index");
+        upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index,
+            },
+        )
+        .await
+        .expect("upload ref-tip fast-path pack index");
+        store
+            .put(
+                &router.pack_path(&pack_id),
+                Bytes::from(std::fs::read(&pack_path).expect("read ref-tip fast-path pack")),
+            )
+            .await
+            .expect("upload ref-tip fast-path pack");
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&idx_path).expect("read ref-tip fast-path index")),
+            )
+            .await
+            .expect("upload ref-tip fast-path index");
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(
+                    std::fs::read(&rev_path).expect("read ref-tip fast-path reverse index"),
+                ),
+            )
+            .await
+            .expect("upload ref-tip fast-path reverse index");
+        crab_metadata::pack_origin::record_verified_pack_origin(
+            store.as_storage(),
+            router.repo_prefix(),
+            &pack,
+        )
+        .await
+        .expect("record ref-tip fast-path origin");
+
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), commit.clone());
+        manifest.pack_index_hash = pack_index_hash;
+        manifest.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("publish ref-tip fast-path manifest");
+
+        let pipeline = PushPipeline::new(
+            PushConfig {
+                git_dir: Some(fixture.path().join("repo.git")),
+                ..PushConfig::default()
+            },
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline
+            .read_base_manifest()
+            .await
+            .expect("read fast-path base");
+        reads.lock().expect("read log lock").clear();
+        let candidates = (0..GIT_LOCATOR_MIN_CANDIDATES)
+            .map(|value| gix_hash::ObjectId::from([value as u8; 20]))
+            .collect::<Vec<_>>();
+
+        let basis = pipeline
+            .compute_git_object_locator_basis(&candidates)
+            .await
+            .expect("compute ref-tip fast-path basis");
+
+        assert!(matches!(basis, Some(RemotePackBasis::RefTips(tips)) if tips == vec![commit]));
+        assert!(
+            reads
+                .lock()
+                .expect("read log lock")
+                .iter()
+                .all(|path| !path.contains("git_object_catalog_db/")),
+            "ref-tip basis should not open the locator catalog"
+        );
     }
 
     #[test]
@@ -24452,6 +24875,42 @@ mod tests {
         assert_eq!(stored.ref_tips, second.ref_tips);
     }
 
+    #[tokio::test]
+    async fn pack_metadata_upsert_publishes_empty_hint_when_union_is_oversized() {
+        let (store, router) = test_store_router("pack-metadata-oversized");
+        let pack_id = "a".repeat(64);
+        let path = router.pack_metadata_path(&pack_id);
+        let ref_tips = (0..200_000)
+            .map(|tip| format!("{tip:040x}"))
+            .collect::<Vec<_>>();
+
+        let metadata = upsert_pack_metadata(&store, &path, &pack_id, 7, ref_tips, 4)
+            .await
+            .expect("oversized hint should degrade to legacy selection");
+
+        assert!(metadata.ref_tips.is_empty());
+        let (body, _) = store
+            .get_with_etag_bounded(&path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+            .expect("fallback metadata should remain bounded");
+        let stored = crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+            .expect("fallback metadata should remain valid");
+        assert!(stored.ref_tips.is_empty());
+        assert_eq!(stored.object_count, 7);
+
+        let follow_up = upsert_pack_metadata(&store, &path, &pack_id, 7, vec!["b".repeat(40)], 4)
+            .await
+            .expect("legacy fallback should not be enriched incompletely");
+        assert!(follow_up.ref_tips.is_empty());
+        let (body, _) = store
+            .get_with_etag_bounded(&path, crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
+            .await
+            .expect("legacy fallback metadata should remain readable");
+        let stored = crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref())
+            .expect("legacy fallback metadata should remain valid");
+        assert!(stored.ref_tips.is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn current_git_locator_generation_waits_for_writer_handoff() {
         let (store, router) = test_store_router("locator-writer-handoff");
@@ -24619,6 +25078,53 @@ mod tests {
 
         assert!(result.is_err());
         assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn completed_owner_does_not_wait_for_stalled_renewal() {
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(1));
+        let store: Arc<dyn ObjectStore> = Arc::new(GatedPutStore {
+            inner: object_store::memory::InMemory::new(),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            head_started: None,
+            head_release: None,
+        });
+        let mut lock = PushLock::acquire_internal(
+            &store,
+            "org/repo",
+            crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
+            Duration::from_secs(3),
+        )
+        .await
+        .expect("acquire owner");
+        started
+            .acquire()
+            .await
+            .expect("observe owner acquisition")
+            .forget();
+        let operation_started = Arc::clone(&started);
+        let cancel = CancellationToken::new();
+
+        tokio::time::timeout(
+            Duration::from_millis(1_500),
+            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async move {
+                operation_started
+                    .acquire()
+                    .await
+                    .expect("observe stalled renewal")
+                    .forget();
+                Ok(())
+            }),
+        )
+        .await
+        .expect("completed owner must win over a stalled renewal")
+        .expect("owner operation succeeds");
+        assert!(!cancel.is_cancelled());
+
+        release.add_permits(1);
+        lock.release().await.expect("release owner");
     }
 
     #[tokio::test]

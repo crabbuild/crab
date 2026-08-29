@@ -16,6 +16,9 @@ const KIND_METADATA_MAGIC: &[u8; 8] = b"CRBKIND1";
 const KIND_METADATA_VERSION: u32 = 1;
 const KIND_METADATA_HEADER_LEN: usize = KIND_METADATA_MAGIC.len() + 4 + 8 + SHA1_LEN;
 const KIND_METADATA_TRAILER_LEN: usize = 32;
+const PACK_INDEX_V2_FIXED_BYTES: u64 = 8 + (256 * 4) + (SHA1_LEN as u64 * 2);
+const PACK_INDEX_V2_MAX_BYTES_PER_OBJECT: u64 = SHA1_LEN as u64 + 4 + 4 + 8;
+const REVERSE_INDEX_FIXED_BYTES: u64 = REVERSE_HEADER_LEN as u64 + REVERSE_TRAILER_LEN as u64;
 
 /// A Git object and its complete packed-entry range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +225,31 @@ impl Iterator for PackLocationIter {
 
 impl ExactSizeIterator for PackLocationIter {}
 
+/// Return the maximum byte size of a valid SHA-1 Git pack-index v2 file.
+///
+/// The bound includes one eight-byte large-offset slot per object, which is
+/// the largest representation permitted by the v2 index format. Callers can
+/// use it before downloading an index whose expected object count is known.
+#[must_use]
+pub fn max_pack_index_size(object_count: u64) -> Option<u64> {
+    PACK_INDEX_V2_FIXED_BYTES
+        .checked_add(object_count.checked_mul(PACK_INDEX_V2_MAX_BYTES_PER_OBJECT)?)
+}
+
+/// Return the exact byte size of Crab's verified reverse-index format.
+#[must_use]
+pub fn pack_reverse_index_size(object_count: u64) -> Option<u64> {
+    REVERSE_INDEX_FIXED_BYTES.checked_add(object_count.checked_mul(REVERSE_ENTRY_LEN as u64)?)
+}
+
+/// Return the exact byte size of Crab's checksummed object-kind sidecar.
+#[must_use]
+pub fn pack_kind_metadata_size(object_count: u64) -> Option<u64> {
+    (KIND_METADATA_HEADER_LEN as u64)
+        .checked_add(object_count)?
+        .checked_add(KIND_METADATA_TRAILER_LEN as u64)
+}
+
 /// Encode one compact, checksummed object-kind sidecar.
 ///
 /// Entries are ordered by increasing pack offset, matching
@@ -240,12 +268,14 @@ pub fn encode_pack_kind_metadata(
     let object_count = u64::try_from(kinds.len()).map_err(|_| PackLocatorError::Overflow {
         path: PathBuf::from("pack kind metadata"),
     })?;
-    let capacity = KIND_METADATA_HEADER_LEN
-        .checked_add(kinds.len())
-        .and_then(|size| size.checked_add(KIND_METADATA_TRAILER_LEN))
-        .ok_or_else(|| PackLocatorError::Overflow {
+    let capacity = usize::try_from(pack_kind_metadata_size(object_count).ok_or_else(|| {
+        PackLocatorError::Overflow {
             path: PathBuf::from("pack kind metadata"),
-        })?;
+        }
+    })?)
+    .map_err(|_| PackLocatorError::Overflow {
+        path: PathBuf::from("pack kind metadata"),
+    })?;
     let mut bytes = Vec::with_capacity(capacity);
     bytes.extend_from_slice(KIND_METADATA_MAGIC);
     bytes.extend_from_slice(&KIND_METADATA_VERSION.to_le_bytes());
@@ -298,16 +328,14 @@ fn decode_pack_kind_metadata_payload(
     pack_checksum: gix_hash::ObjectId,
     object_count: u64,
 ) -> Result<Vec<gix_object::Kind>, PackLocatorError> {
-    let expected_len = KIND_METADATA_HEADER_LEN
-        .checked_add(usize::try_from(object_count).map_err(|_| {
-            PackLocatorError::InvalidKindMetadata {
-                reason: "object count does not fit in usize".to_owned(),
-            }
-        })?)
-        .and_then(|size| size.checked_add(KIND_METADATA_TRAILER_LEN))
-        .ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+    let expected_len = usize::try_from(pack_kind_metadata_size(object_count).ok_or_else(|| {
+        PackLocatorError::InvalidKindMetadata {
             reason: "sidecar length overflowed".to_owned(),
-        })?;
+        }
+    })?)
+    .map_err(|_| PackLocatorError::InvalidKindMetadata {
+        reason: "object count does not fit in usize".to_owned(),
+    })?;
     if bytes.len() != expected_len {
         return Err(PackLocatorError::InvalidKindMetadata {
             reason: format!(
@@ -689,6 +717,7 @@ mod tests {
 
     use super::{
         PackLocationIter, PackLocatorError, decode_pack_kind_metadata, encode_pack_kind_metadata,
+        max_pack_index_size, pack_kind_metadata_size, pack_reverse_index_size,
         write_pack_reverse_index,
     };
 
@@ -853,6 +882,30 @@ mod tests {
         assert_eq!(decoded[0].1, gix_object::Kind::Blob);
         assert_eq!(decoded[1].1, gix_object::Kind::Tree);
         assert_eq!(decoded[2].1, gix_object::Kind::Commit);
+        assert_eq!(pack_kind_metadata_size(3), Some(bytes.len() as u64));
+    }
+
+    #[test]
+    fn pack_sidecar_bounds_cover_valid_fixture_files_and_overflow_safely() {
+        let fixture = PackFixture::new();
+        let object_count = 3;
+        assert_eq!(
+            pack_reverse_index_size(object_count),
+            Some(
+                fs::metadata(&fixture.rev)
+                    .expect("reverse-index metadata")
+                    .len()
+            )
+        );
+        assert!(
+            fs::metadata(&fixture.idx)
+                .expect("pack-index metadata")
+                .len() as u64
+                <= max_pack_index_size(object_count).expect("pack-index bound")
+        );
+        assert_eq!(max_pack_index_size(u64::MAX), None);
+        assert_eq!(pack_reverse_index_size(u64::MAX), None);
+        assert_eq!(pack_kind_metadata_size(u64::MAX), None);
     }
 
     #[test]

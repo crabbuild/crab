@@ -28,8 +28,11 @@ replacing the segmented pack inventory selected by the unified manifest.
 ## How It Works
 
 1. Pins the unified manifest and its exact segmented pack inventory.
-2. Sorts packs by verified object count and selects the smallest suffix whose
-   replacement restores a factor-two geometric progression.
+2. The explicit command sorts packs by verified object count and selects the
+   smallest suffix whose replacement restores a factor-two geometric
+   progression. The background owner instead sorts by verified compressed
+   bytes and promotes a lower tier only after it has accumulated enough data;
+   this keeps the largest stable pack out of routine maintenance.
 3. Downloads only that suffix and its canonical indexes to a bounded temporary
    Git workspace after a free-space preflight. Stable large packs are neither
    read nor rewritten.

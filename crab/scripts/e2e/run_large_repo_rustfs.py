@@ -28,23 +28,39 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.1"
+VERSION = "1.2"
 DEFAULT_SOURCE = Path("/Volumes/Workspace/Github/kubernetes/kubernetes")
 DEFAULT_ROOT = Path("/Volumes/Workspace/CrabBuild/crabbuild-qualification")
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_REPLAY_COUNT = 1_000
 DEFAULT_SAMPLE_SIZE = 1_000
+# A repack can make catalog, visibility, graph, and shallow proofs stale in
+# sequence; keep a finite guard while allowing one complete maintenance wave.
+MAX_GENERATION_OWNER_PASSES = 16
 REMOTE_ROOT = "e2e-large-repository"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
-SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+SECRET_KEYS = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CRAB_CACHE_PSK",
+    "CRAB_CACHE_TOKEN",
+}
+CACHE_SERVICE_URL_ENV = "CRAB_CACHE_SERVICE_URL"
+CACHE_SERVICE_PSK_ENV = "CRAB_CACHE_PSK"
+CACHE_SERVICE_TOKEN_ENV = "CRAB_CACHE_TOKEN"
+CACHE_SERVICE_CAPABILITIES_SCHEMA = "crab-cache-service.capabilities.v1"
+CACHE_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
 SCRIPT_DIR = Path(__file__).resolve().parent
 CRAB_DIR = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
@@ -108,6 +124,18 @@ def resolve_executable(value: str, label: str) -> Path:
     return candidate
 
 
+def snapshot_executable(source: Path, destination: Path, label: str) -> Path:
+    """Copy an executable into a run-owned path and return the verified copy."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return resolve_executable(str(destination), label)
+
+
 class LargeRepositoryQualification:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -124,9 +152,11 @@ class LargeRepositoryQualification:
         self.fetch_root = self.run_root / "fetch-clients"
         self.team_root = self.run_root / "team-clients"
         self.source = args.source.resolve()
-        self.crab_bin = resolve_executable(args.crab_bin, "Crab binary")
+        self.crab_source_bin = resolve_executable(args.crab_bin, "Crab binary")
+        self.crab_bin = self.bin_root / "crab"
         self.git_bin = resolve_executable(args.git_bin, "Git binary")
         self.aws_bin = resolve_executable(args.aws_bin, "AWS CLI")
+        self.cache_service_url = os.environ.get(CACHE_SERVICE_URL_ENV, "").strip()
         self.remote_prefix = f"{REMOTE_ROOT}/{self.run_id}"
         self.remote_url = f"crab://{args.bucket}/{self.remote_prefix}"
         self.command_index = 0
@@ -149,6 +179,16 @@ class LargeRepositoryQualification:
                 "bucket": args.bucket,
                 "prefix": self.remote_prefix,
                 "endpoint_url": args.endpoint_url,
+            },
+            "cache_service": {
+                "configured": bool(self.cache_service_url),
+                "required": args.require_cache_service,
+                "url": self.cache_service_url or None,
+                "health_status": None,
+                "capabilities_status": None,
+                "capabilities_schema": None,
+                "route_schema": None,
+                "stats": None,
             },
             "provenance": {},
             "commands": [],
@@ -210,6 +250,8 @@ class LargeRepositoryQualification:
                 self.args.access_key,
                 self.args.secret_key,
                 self.args.session_token,
+                self.env.get(CACHE_SERVICE_PSK_ENV),
+                self.env.get(CACHE_SERVICE_TOKEN_ENV),
             )
             if value and value != "crab"
         )
@@ -332,6 +374,7 @@ class LargeRepositoryQualification:
             "upload_pack_duration_ms": 0,
             "visibility_plan_ms": 0,
             "pack_generation_ms": 0,
+            "source_download_ms": 0,
             "locator_scan": 0,
             "locator_full_scan": 0,
             "locator_exact_fallback": 0,
@@ -365,7 +408,7 @@ class LargeRepositoryQualification:
                 telemetry["storage_bytes"] += int(fields.get("storage_bytes", 0))
                 if request in telemetry:
                     telemetry[request] += 1
-            cache_event = fields.get("cache_event")
+            cache_event = str(fields.get("cache_event", "")).casefold()
             if cache_event == "hit":
                 telemetry["cache_hits"] += 1
             elif cache_event == "miss":
@@ -390,6 +433,9 @@ class LargeRepositoryQualification:
             if fields.get("telemetry_event") == "pack_generation":
                 telemetry["pack_generation_ms"] += int(
                     fields.get("pack_generation_ms", 0)
+                )
+                telemetry["source_download_ms"] += int(
+                    fields.get("source_download_ms", 0)
                 )
         return telemetry
 
@@ -535,6 +581,13 @@ class LargeRepositoryQualification:
         if self.args.team_load:
             self.fetch_root.mkdir()
             self.team_root.mkdir()
+        # Long qualifications must not observe an unrelated `make install`
+        # replacing the shared binary midway through the command sequence.
+        self.crab_bin = snapshot_executable(
+            self.crab_source_bin,
+            self.crab_bin,
+            "run-local Crab binary",
+        )
         self.install_helper_alias()
         self.write_report()
 
@@ -706,6 +759,7 @@ class LargeRepositoryQualification:
             )
         elif head["exit_code"] != 0:
             raise QualificationError(f"required bucket does not exist: {self.args.bucket}")
+        self.probe_cache_service()
         existing = self.list_remote_objects(limit=1)
         self.check(
             "isolated-remote-prefix",
@@ -717,6 +771,170 @@ class LargeRepositoryQualification:
             "endpoint_url": self.args.endpoint_url,
             "version": self.args.object_store_version,
         }
+        self.write_report()
+
+    def cache_service_request(
+        self, path: str, *, authenticated: bool
+    ) -> tuple[int, bytes, str | None]:
+        if not self.cache_service_url:
+            return 0, b"", "cache service URL is not configured"
+
+        headers: dict[str, str] = {}
+        if authenticated:
+            psk = self.env.get(CACHE_SERVICE_PSK_ENV)
+            token = self.env.get(CACHE_SERVICE_TOKEN_ENV)
+            if psk:
+                headers["X-Cache-PSK"] = psk
+            elif token:
+                headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            f"{self.cache_service_url.rstrip('/')}{path}",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=min(30, self.args.timeout)
+            ) as response:
+                return int(response.status), response.read(), None
+        except urllib.error.HTTPError as error:
+            return error.code, error.read(), f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            return 0, b"", str(error)
+
+    def probe_cache_service(self) -> None:
+        service = self.report["cache_service"]
+        if not self.cache_service_url:
+            detail = {"configured": False}
+            if self.args.require_cache_service:
+                self.check("cache-service-configured", False, detail)
+            self.write_report()
+            return
+
+        health_status, _health_body, health_error = self.cache_service_request(
+            "/v1/health", authenticated=False
+        )
+        capabilities_status, capabilities_body, capabilities_error = (
+            self.cache_service_request("/v1/capabilities", authenticated=True)
+        )
+        try:
+            capabilities = json.loads(capabilities_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            capabilities = {}
+        routes = capabilities.get("routes", {}) if isinstance(capabilities, dict) else {}
+        immutable_routes = routes.get("immutable", []) if isinstance(routes, dict) else []
+        route_patterns = {
+            item.get("pattern")
+            for item in immutable_routes
+            if isinstance(item, dict) and isinstance(item.get("pattern"), str)
+        }
+        required_routes = {
+            "{repo}/packs/pack-{id}.pack",
+            "{repo}/packs/pack-{id}.idx",
+        }
+        capabilities_ok = (
+            capabilities_status == 200
+            and isinstance(capabilities, dict)
+            and capabilities.get("schema") == CACHE_SERVICE_CAPABILITIES_SCHEMA
+            and isinstance(routes, dict)
+            and routes.get("schema") == CACHE_ROUTE_SCHEMA
+            and routes.get("transport_prefix") == "/v1/"
+            and required_routes.issubset(route_patterns)
+        )
+        service.update(
+            {
+                "configured": True,
+                "health_status": health_status,
+                "capabilities_status": capabilities_status,
+                "capabilities_schema": (
+                    capabilities.get("schema")
+                    if isinstance(capabilities, dict)
+                    else None
+                ),
+                "route_schema": routes.get("schema") if isinstance(routes, dict) else None,
+            }
+        )
+        if self.args.require_cache_service:
+            self.check(
+                "cache-service-configured",
+                True,
+                {"url": self.cache_service_url},
+            )
+            self.check(
+                "cache-service-healthy",
+                health_status == 200,
+                {"status": health_status, "error": health_error},
+            )
+            self.check(
+                "cache-service-capabilities",
+                capabilities_ok,
+                {
+                    "status": capabilities_status,
+                    "schema": service["capabilities_schema"],
+                    "route_schema": service["route_schema"],
+                    "error": capabilities_error,
+                },
+            )
+        self.write_report()
+
+    def collect_cache_service_stats(self) -> None:
+        if not self.cache_service_url:
+            return
+        status, body, error = self.cache_service_request(
+            "/v1/admin/stats", authenticated=True
+        )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = {}
+        traffic = payload.get("traffic", {}) if isinstance(payload, dict) else {}
+        by_object_type = (
+            traffic.get("by_object_type", {}) if isinstance(traffic, dict) else {}
+        )
+        pack = by_object_type.get("pack", {}) if isinstance(by_object_type, dict) else {}
+        fields = (
+            "cache_hits",
+            "cache_misses",
+            "origin_fetches",
+            "origin_head_requests",
+            "bytes_served_from_cache",
+            "bytes_served_from_origin",
+            "bytes_served_total",
+            "push_warming_writes",
+            "push_warming_bytes",
+        )
+
+        def counter(source: Any, field: str) -> int:
+            value = source.get(field) if isinstance(source, dict) else None
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+        pack_stats = {field: counter(pack, field) for field in fields}
+        pack_stats["read_requests"] = sum(
+            pack_stats[field]
+            for field in (
+                "cache_hits",
+                "cache_misses",
+                "origin_head_requests",
+            )
+        )
+        service = self.report["cache_service"]
+        service["stats"] = {
+            "status": status,
+            "error": error,
+            "pack": pack_stats,
+        }
+        if self.args.require_cache_service:
+            stats_ok = status == 200 and isinstance(payload, dict) and isinstance(traffic, dict)
+            self.check(
+                "cache-service-admin-stats",
+                stats_ok,
+                {"status": status, "error": error},
+            )
+            self.check(
+                "cache-service-pack-traffic",
+                stats_ok and pack_stats["read_requests"] > 0,
+                {"pack": pack_stats},
+            )
         self.write_report()
 
     def list_remote_objects(self, limit: int | None = None) -> list[dict[str, Any]]:
@@ -788,7 +1006,7 @@ class LargeRepositoryQualification:
         owner_runs: list[dict[str, Any]] = []
         owner_snapshots: list[dict[str, Any]] = []
         actions: list[str] = []
-        for attempt in range(1, 9):
+        for attempt in range(1, MAX_GENERATION_OWNER_PASSES + 1):
             owner = self.run_crab(
                 self.replay_repo,
                 ["metadb", "owner", "--once", "--jsonl"],
@@ -811,7 +1029,8 @@ class LargeRepositoryQualification:
                 break
         else:
             raise QualificationError(
-                f"generation owner did not converge after 8 passes: {actions}"
+                "generation owner did not converge after "
+                f"{MAX_GENERATION_OWNER_PASSES} passes: {actions}"
             )
         locator_sweeps: list[dict[str, Any]] = []
         for index, snapshot in enumerate(owner_snapshots):
@@ -1118,6 +1337,7 @@ class LargeRepositoryQualification:
                 "exit_code": record["exit_code"],
                 "duration_ms": record["duration_ms"],
                 "failure_category": "ok" if record["exit_code"] == 0 else "clone_failed",
+                "telemetry": record["telemetry"],
             }
 
         started = time.monotonic()
@@ -1128,20 +1348,45 @@ class LargeRepositoryQualification:
                 runs.append(future.result())
         durations = [int(run["duration_ms"]) for run in runs]
         successful = sum(run["failure_category"] == "ok" for run in runs)
+        producers = sum(
+            int(run["telemetry"].get("pack_generation_ms", 0)) > 0 for run in runs
+        )
+        cache_hits = sum(int(run["telemetry"].get("cache_hits", 0)) for run in runs)
+        cache_misses = sum(
+            int(run["telemetry"].get("cache_misses", 0)) for run in runs
+        )
+        origin_requests = sum(
+            int(run["telemetry"].get("storage_requests", 0)) for run in runs
+        )
         self.report["team_load"]["fetch_seed"] = {
             "checkpoint": checkpoint,
             "clients": count,
             "successful_clones": successful,
+            "generated_pack_producers": producers,
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "origin_requests": origin_requests,
             "duration_ms": int((time.monotonic() - started) * 1_000),
             "median_client_ms": percentile(durations, 0.50),
             "p95_client_ms": percentile(durations, 0.95),
             "p99_client_ms": percentile(durations, 0.99),
-            "results": sorted(runs, key=lambda run: int(run["ordinal"])),
+            "results": sorted(
+                (
+                    {key: value for key, value in run.items() if key != "telemetry"}
+                    for run in runs
+                ),
+                key=lambda run: int(run["ordinal"]),
+            ),
         }
         self.check(
             "concurrent-fetch-seed-clones",
             len(runs) == count and successful == count,
             {"clients": count, "successful_clones": successful},
+        )
+        self.check(
+            "concurrent-fetch-seed-generated-pack-producers",
+            1 <= producers <= 2,
+            {"clients": count, "producers": producers},
         )
         self.write_report()
 
@@ -1491,11 +1736,11 @@ class LargeRepositoryQualification:
         depth_ten = self.clone_root / "depth-10"
         depth_hundred = self.clone_root / "depth-100"
         depth_thousand = self.clone_root / "depth-1000"
-        self.clone("full_clone_cold", cold, ["--single-branch", "--branch", "main"], fsck=True)
+        self.clone("full_clone_cold", cold, ["--branch", "main"], fsck=True)
         self.clone(
             "full_clone_warm",
             warm,
-            ["--single-branch", "--branch", "main"],
+            ["--branch", "main"],
             fsck=True,
             remove_after=True,
         )
@@ -1605,14 +1850,77 @@ class LargeRepositoryQualification:
         )
         return [line for line in self.stdout(record).splitlines() if line]
 
+    def clone_advertised_refs(
+        self, clone: Path, advertised: dict[str, str]
+    ) -> dict[str, str | None]:
+        record = self.run_git(
+            clone,
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objectname) %(*objectname)",
+                "refs/remotes/origin",
+                "refs/tags",
+                "refs/crab-verify",
+            ],
+            "clone advertised refs",
+        )
+        refs: dict[str, str] = {}
+        peeled: dict[str, str] = {}
+        for line in self.stdout(record).splitlines():
+            fields = line.split(maxsplit=2)
+            if len(fields) < 2 or not OID_RE.fullmatch(fields[1]):
+                raise QualificationError(f"invalid clone ref line: {line!r}")
+            local_ref, oid = fields[0], fields[1]
+            refs[local_ref] = oid
+            if len(fields) == 3 and OID_RE.fullmatch(fields[2]):
+                peeled[local_ref] = fields[2]
+
+        mapped: dict[str, str] = {}
+        for local_ref, oid in refs.items():
+            if local_ref.startswith("refs/remotes/origin/"):
+                suffix = local_ref.removeprefix("refs/remotes/origin/")
+                if suffix != "HEAD":
+                    mapped[f"refs/heads/{suffix}"] = oid
+            elif local_ref.startswith("refs/crab-verify/"):
+                suffix = local_ref.removeprefix("refs/crab-verify/")
+                mapped[f"refs/{suffix}"] = oid
+                if local_ref in peeled:
+                    mapped[f"refs/{suffix}^{{}}"] = peeled[local_ref]
+            elif local_ref.startswith("refs/tags/"):
+                mapped[local_ref] = oid
+                if local_ref in peeled:
+                    mapped[f"{local_ref}^{{}}"] = peeled[local_ref]
+
+        head = self.git_value(clone, ["rev-parse", "HEAD"], "clone advertised HEAD")
+        return {
+            name: head if name == "HEAD" else mapped.get(name)
+            for name in advertised
+        }
+
     def verify_correctness(self, source_head: str, full_clone: Path) -> None:
         refs = self.remote_refs()
         main = refs.get("refs/heads/main")
         head = refs.get("HEAD")
+        self.run_git(
+            full_clone,
+            ["fetch", "origin", "+refs/*:refs/crab-verify/*"],
+            "clone all advertised refs",
+            timeout=self.args.clone_timeout,
+            extra_env={"CRAB_LOG": QUALIFICATION_DEBUG_LOG},
+        )
+        clone_refs = self.clone_advertised_refs(full_clone, refs)
         self.check(
             "advertised-refs-match-source",
-            main == source_head and head in {None, source_head},
-            {"expected_main": source_head, "actual_main": main, "head": head},
+            main == source_head
+            and head in {None, source_head}
+            and clone_refs == refs,
+            {
+                "expected_main": source_head,
+                "actual_main": main,
+                "head": head,
+                "advertised_refs": refs,
+                "clone_refs": clone_refs,
+            },
         )
         full_tip = self.git_value(full_clone, ["rev-parse", "HEAD"], "full clone HEAD")
         incremental_tip = self.git_value(
@@ -1651,6 +1959,7 @@ class LargeRepositoryQualification:
         self.report["artifacts"]["object_sample"] = str(sample_path)
         self.report["correctness"] = {
             "advertised_refs": refs,
+            "clone_refs": clone_refs,
             "source_head": source_head,
             "full_clone_head": full_tip,
             "incremental_clone_head": incremental_tip,
@@ -1764,6 +2073,7 @@ class LargeRepositoryQualification:
             self.verify_source_unchanged()
             if self.args.team_load:
                 self.run_team_load(source_head)
+            self.collect_cache_service_stats()
             self.store_snapshot("final")
             self.summarize_metrics()
             self.cleanup_remote()
@@ -1843,6 +2153,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-interval", type=float, default=0.20)
     parser.add_argument("--start-rustfs", action="store_true")
     parser.add_argument("--require-existing-bucket", action="store_true")
+    parser.add_argument("--require-cache-service", action="store_true")
     parser.add_argument("--cleanup-remote", action="store_true")
     parser.add_argument("--retain-worktrees", action="store_true")
     args = parser.parse_args()

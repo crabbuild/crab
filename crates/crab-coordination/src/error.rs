@@ -33,6 +33,13 @@ pub enum CoordinationError {
     #[error("coordination configuration error in {origin}: {key}")]
     Configuration { key: String, origin: String },
 
+    #[error("coordination operation exceeded its retry deadline for {path}: {source}")]
+    RetryDeadline {
+        path: String,
+        #[source]
+        source: Box<CoordinationError>,
+    },
+
     #[error("coordination serialization failed for {context}: {source}")]
     Serialize {
         key: String,

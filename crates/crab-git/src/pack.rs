@@ -440,7 +440,7 @@ fn install_pack_file_blocking(
     })
 }
 
-fn verify_pack_file_sha1(path: &Path) -> Result<String> {
+pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
     use std::io::{Read, Seek, SeekFrom};
 
     const HEADER_LEN: u64 = 12;

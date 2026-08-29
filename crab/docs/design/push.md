@@ -1440,7 +1440,7 @@ addressed. This section tracks both resolved and open items.
 | B8 | Late lock acquisition                             | Lock now acquired between step 4 and step 5 — no wasted uploads from lock losers |
 | B9 | Double rev-parse                                  | `batch_rev_parse` consolidates refs in a single `git rev-parse` invocation |
 | B11 | Lock renewal failure propagation                 | Heartbeat loss, deletion, CAS conflict, fatal error, or failed transient retry cancels the push through its shared token |
-| — | Locator point-read amplification                   | Each read session uses a 16 MiB SST block/metadata cache; concurrent exact lookups coalesce shared provider reads without SlateDB's 640 MiB default |
+| — | Locator lookup/compaction amplification             | Each read session uses a bounded 16 MiB SST block/metadata cache; dense or high-fanout batches use bounded read-ahead scans, sparse batches use exact gets, and locator compaction uses one full-frontier worker |
 | — | Contended lock polling amplification               | One acquisition context remembers existing lock objects and reuses its backend clock sample; repeated live-holder checks need one GET instead of a failed create plus GET, clock PUT, and clock HEAD |
 
 The cache bound is per process: 32 simultaneous fetchers can retain at most

@@ -19,10 +19,10 @@ pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 5;
 pub const MAX_GIT_VISIBILITY_INDEX_BYTES: u64 = 128 * 1024 * 1024;
 
 const MAX_GIT_VISIBILITY_REFS: usize = 100_000;
-/// Maximum number of ref-rooted object entries accepted in one proof.
+/// Maximum number of distinct Git objects in one visibility proof dictionary.
 pub const MAX_GIT_VISIBILITY_OBJECTS: u64 = 10_000_000;
 
-/// Maximum ref-rooted object entries built synchronously on a push or repair path.
+/// Maximum number of distinct Git objects built synchronously on a push or repair path.
 pub const MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS: u64 = 100_000;
 
 /// Current serialized ref-update evidence format.
@@ -433,15 +433,9 @@ impl GitCatalogVisibilityIndex {
         if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
             return Err(corrupt("visibility index contains too many refs"));
         }
-        let mut membership_count = 0u64;
         for (name, closure) in &self.refs {
             validate_ref_name(name)?;
-            membership_count = membership_count
-                .checked_add(closure.validate(object_count)?)
-                .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
-                return Err(corrupt("visibility index contains too many objects"));
-            }
+            closure.validate(object_count)?;
         }
         validate_catalog_transitions(
             &self.refs,
@@ -610,6 +604,10 @@ impl GitCatalogVisibilityIndex {
     }
 
     /// Return total ref memberships without materializing object IDs.
+    ///
+    /// A shared object is counted once for every ref that contains it. This
+    /// metric can exceed [`MAX_GIT_VISIBILITY_OBJECTS`]; the proof limit applies
+    /// to the unique object dictionary and the serialized proof size.
     #[must_use]
     pub fn membership_count(&self) -> u64 {
         self.refs.values().map(GitVisibilityClosure::len).sum()
@@ -856,7 +854,6 @@ impl GitVisibilityIndex {
         }
         let mut decoded_refs = BTreeMap::new();
         let mut dictionary = BTreeSet::new();
-        let mut membership_count = 0u64;
         for (name, objects) in refs {
             validate_ref_name(&name)?;
             let mut decoded = objects
@@ -865,16 +862,12 @@ impl GitVisibilityIndex {
                 .collect::<Result<Vec<_>>>()?;
             decoded.sort_unstable();
             decoded.dedup();
-            membership_count =
-                membership_count
-                    .checked_add(u64::try_from(decoded.len()).map_err(|_| {
-                        corrupt("visibility index object count cannot be represented")
-                    })?)
-                    .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
-                return Err(corrupt("visibility index contains too many objects"));
-            }
             dictionary.extend(decoded.iter().copied());
+            if dictionary.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+                return Err(corrupt(
+                    "visibility object dictionary contains too many objects",
+                ));
+            }
             decoded_refs.insert(name, decoded);
         }
         let objects = dictionary.into_iter().collect::<Vec<_>>();
@@ -966,15 +959,9 @@ impl GitVisibilityIndex {
         if self.refs.len() > MAX_GIT_VISIBILITY_REFS {
             return Err(corrupt("visibility index contains too many refs"));
         }
-        let mut membership_count = 0u64;
         for (name, closure) in &self.refs {
             validate_ref_name(name)?;
-            membership_count = membership_count
-                .checked_add(closure.validate(self.objects.len())?)
-                .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-            if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
-                return Err(corrupt("visibility index contains too many objects"));
-            }
+            closure.validate(self.objects.len())?;
         }
         for (name, transitions) in &self.transitions {
             if !self.refs.contains_key(name)
@@ -1516,19 +1503,16 @@ fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
     if refs.len() > MAX_GIT_VISIBILITY_REFS {
         return Err(corrupt("visibility index contains too many refs"));
     }
-    let mut object_count = 0u64;
+    let mut unique_objects = BTreeSet::new();
     for (name, objects) in refs {
         validate_ref_name(name)?;
-        object_count = object_count
-            .checked_add(
-                u64::try_from(objects.len())
-                    .map_err(|_| corrupt("visibility index object count cannot be represented"))?,
-            )
-            .ok_or_else(|| corrupt("visibility index object count overflows"))?;
-        if object_count > MAX_GIT_VISIBILITY_OBJECTS {
-            return Err(corrupt("visibility index contains too many objects"));
-        }
         validate_sorted_oids(objects, "closure")?;
+        unique_objects.extend(objects.iter().map(String::as_str));
+        if unique_objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+            return Err(corrupt(
+                "visibility object dictionary contains too many objects",
+            ));
+        }
     }
     Ok(())
 }
@@ -1834,7 +1818,6 @@ mod storage {
                 .iter()
                 .map(|oid| super::decode_oid(oid))
                 .collect::<Result<Vec<_>>>()?;
-            let mut membership_count = 0u64;
             let mut covered = vec![false; objects.len()];
             let refs = self
                 .refs
@@ -1846,14 +1829,6 @@ mod storage {
                         ));
                     }
                     let positions = closure.into_positions(objects.len())?;
-                    membership_count = membership_count
-                        .checked_add(u64::try_from(positions.len()).map_err(|_| {
-                            super::corrupt("visibility index object count cannot be represented")
-                        })?)
-                        .ok_or_else(|| super::corrupt("visibility index object count overflows"))?;
-                    if membership_count > MAX_GIT_VISIBILITY_OBJECTS {
-                        return Err(super::corrupt("visibility index contains too many objects"));
-                    }
                     let mut prior_position = None;
                     let positions = positions
                         .into_iter()
@@ -4083,6 +4058,61 @@ mod tests {
             .map(|index| (format!("refs/heads/{index}"), Vec::new()))
             .collect();
         assert!(GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), refs).is_err());
+    }
+
+    #[test]
+    fn shared_ref_history_uses_unique_dictionary_limit() {
+        let objects = (0..101)
+            .map(|value| {
+                let mut oid = [0; 20];
+                oid[..4].copy_from_slice(&(value as u32).to_be_bytes());
+                oid
+            })
+            .collect::<Vec<_>>();
+        let closure = GitVisibilityClosure::from_positions(
+            (0..objects.len() as u32).collect(),
+            objects.len(),
+        )
+        .expect("shared closure is valid");
+        let refs: BTreeMap<String, GitVisibilityClosure> = (0..MAX_GIT_VISIBILITY_REFS)
+            .map(|index| (format!("refs/heads/{index}"), closure.clone()))
+            .collect();
+        #[cfg(feature = "remote-index")]
+        let catalog_refs = refs.clone();
+
+        let index = GitVisibilityIndex::from_parts(
+            GIT_VISIBILITY_INDEX_VERSION,
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            objects,
+            refs,
+            BTreeMap::new(),
+        )
+        .expect("shared ref history fits the unique dictionary limit");
+
+        assert_eq!(
+            index.membership_count(),
+            101 * MAX_GIT_VISIBILITY_REFS as u64
+        );
+
+        #[cfg(feature = "remote-index")]
+        let catalog = GitCatalogVisibilityIndex::from_parts(
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            101,
+            catalog_refs,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("shared catalog history fits the unique dictionary limit");
+        #[cfg(feature = "remote-index")]
+        assert_eq!(
+            catalog.membership_count(),
+            101 * MAX_GIT_VISIBILITY_REFS as u64
+        );
     }
 
     #[test]

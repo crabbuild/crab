@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{MetadataError, Result};
 use crate::segmented::{self, SegmentKind, SegmentWrite, ShardSegmentEntry};
@@ -33,7 +33,7 @@ pub struct Manifest {
     /// Complete ref map: ref name to SHA.
     pub refs: BTreeMap<String, String>,
     /// Peeled-target map for annotated tags: ref name to target-commit SHA.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub peeled_refs: BTreeMap<String, String>,
     /// HEAD symref target, such as `refs/heads/main`.
     pub head: String,
@@ -415,8 +415,22 @@ pub struct PackEntry {
     /// Pack size in bytes.
     pub size: u64,
     /// Ref tips reachable from this pack (`None` for legacy packs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_non_empty_ref_tips",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ref_tips: Option<Vec<String>>,
+}
+
+fn deserialize_non_empty_ref_tips<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let ref_tips = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(ref_tips.filter(|ref_tips| !ref_tips.is_empty()))
 }
 
 impl PackEntry {
@@ -430,11 +444,14 @@ impl PackEntry {
     }
 
     /// Create a pack entry with ref-tip metadata.
+    ///
+    /// Empty metadata is represented as legacy because it cannot prove that a
+    /// pack is irrelevant to any requested ref.
     pub fn with_ref_tips(pack_id: impl Into<String>, size: u64, ref_tips: Vec<String>) -> Self {
         Self {
             pack_id: pack_id.into(),
             size,
-            ref_tips: Some(ref_tips),
+            ref_tips: (!ref_tips.is_empty()).then_some(ref_tips),
         }
     }
 }
@@ -522,6 +539,13 @@ mod tests {
     }
 
     #[test]
+    fn pack_entry_with_empty_ref_tips_is_legacy() {
+        let entry = PackEntry::with_ref_tips("empty", 2048, Vec::new());
+
+        assert!(entry.ref_tips.is_none());
+    }
+
+    #[test]
     fn pack_list_round_trip_with_ref_tips() {
         let m = PackList {
             generation: 5,
@@ -552,6 +576,14 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_pack_entry_with_empty_ref_tips_is_legacy() {
+        let json = r#"{"pack_id":"old_pack","size":4096,"ref_tips":[]}"#;
+        let entry: PackEntry = serde_json::from_str(json).unwrap();
+
+        assert!(entry.ref_tips.is_none());
+    }
+
+    #[test]
     fn default_manifest_is_generation_zero() {
         let manifest = Manifest::default_for_repo("refs/heads/main");
 
@@ -573,6 +605,26 @@ mod tests {
         let z = json.find("refs/heads/z").unwrap();
 
         assert!(a < z);
+    }
+
+    #[test]
+    fn manifest_serialization_includes_empty_peeled_refs() {
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+
+        let json = serde_json::to_value(manifest).unwrap();
+
+        assert_eq!(json["peeled_refs"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn manifest_decode_accepts_missing_peeled_refs() {
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        let mut json = serde_json::to_value(manifest).unwrap();
+        json.as_object_mut().unwrap().remove("peeled_refs");
+
+        let decoded: Manifest = serde_json::from_value(json).unwrap();
+
+        assert!(decoded.peeled_refs.is_empty());
     }
 
     #[test]

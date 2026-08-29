@@ -10,10 +10,11 @@ use slatedb::config::{DbReaderOptions, ScanOptions};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 
 use super::format::{
-    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_FAMILY,
-    decode_metadata, decode_object_key, decode_object_location, decode_object_metadata,
-    decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_key, decode_pack_record,
-    object_key, ordinal_key, ordinal_metadata_key, validate_location_for_pack,
+    METADATA_KEY, OBJECT_FAMILY, ORDINAL_FAMILY, ORDINAL_METADATA_FAMILY, PACK_BINDINGS_KEY,
+    PACK_FAMILY, decode_metadata, decode_object_key, decode_object_location,
+    decode_object_metadata, decode_ordinal_key, decode_ordinal_metadata_key, decode_pack_bindings,
+    decode_pack_key, decode_pack_record, object_key, ordinal_key, ordinal_metadata_key,
+    validate_location_for_pack,
 };
 use super::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocation, GitObjectLocator,
@@ -32,6 +33,14 @@ const MAX_SCAN_AMPLIFICATION: usize = 2;
 // scan than with tens of thousands of independent OID point reads.
 const FULL_SCAN_MIN_LOOKUP_OBJECTS: usize = MIN_SCAN_LOOKUP_OBJECTS * 16;
 const FULL_SCAN_REQUEST_RATIO: u64 = 64;
+// Small catalogs are common for newly created repositories. Once their
+// compacted SST fan-out makes a point-read wave more expensive than one
+// bounded pass, scan the catalog even when the requested SHA range is broad.
+const SMALL_CATALOG_MAX_OBJECTS: u64 = 4_096;
+const SMALL_CATALOG_REQUEST_RATIO: u64 = 4;
+const MIN_AMPLIFIED_SCAN_SSTS: u64 = 4;
+const MIN_LAYERED_SCAN_SSTS: u64 = 3;
+const AMPLIFIED_SCAN_COST_RATIO: u64 = 2;
 // Git SHA-1 object IDs are uniformly distributed in their key space. A
 // min/max range spanning most of that space turns a scan into a catalog-wide
 // read, even when the request contains only a small shallow closure.
@@ -83,6 +92,7 @@ pub struct GitObjectLocatorSession {
     reader: Option<Arc<slatedb::DbReader>>,
     identity: Option<GitObjectCatalogIdentity>,
     bindings: HashMap<u64, GitPackLocatorRecord>,
+    active_ssts: u64,
 }
 
 impl GitObjectLocatorSession {
@@ -207,6 +217,7 @@ impl GitObjectLocatorSession {
                     reader: None,
                     identity: None,
                     bindings: HashMap::new(),
+                    active_ssts: 0,
                 });
             }
             Err(source) => {
@@ -218,11 +229,13 @@ impl GitObjectLocatorSession {
             }
         };
 
+        let active_ssts = active_sst_count(&reader);
         match load_state(&reader).await {
             Ok((identity, bindings)) => Ok(Self {
                 reader: Some(reader),
                 identity,
                 bindings,
+                active_ssts,
             }),
             Err(operation) => close_after_error(reader, operation).await,
         }
@@ -263,10 +276,20 @@ impl GitObjectLocatorSession {
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let mut unique_objects = object_ids.len();
         let key_span = oid_key_span(object_ids);
-        let mut strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
+        let mut strategy = lookup_strategy(
+            unique_objects,
+            inventory_objects,
+            self.active_ssts,
+            key_span,
+        );
         if !matches!(strategy, LookupStrategy::Exact) {
             unique_objects = object_ids.iter().collect::<HashSet<_>>().len();
-            strategy = lookup_strategy(unique_objects, inventory_objects, key_span);
+            strategy = lookup_strategy(
+                unique_objects,
+                inventory_objects,
+                self.active_ssts,
+                key_span,
+            );
         }
         let scan = match strategy {
             LookupStrategy::Exact => None,
@@ -286,6 +309,7 @@ impl GitObjectLocatorSession {
                 requested_objects = object_ids.len(),
                 unique_objects,
                 inventory_objects,
+                active_ssts = self.active_ssts,
                 row_limit,
                 "compact Git locator lookup selected"
             );
@@ -308,6 +332,7 @@ impl GitObjectLocatorSession {
                 requested_objects = object_ids.len(),
                 unique_objects,
                 inventory_objects,
+                active_ssts = self.active_ssts,
                 row_limit,
                 "compact Git locator scan exceeded its amplification bound"
             );
@@ -319,6 +344,7 @@ impl GitObjectLocatorSession {
                 requested_objects = object_ids.len(),
                 unique_objects,
                 inventory_objects,
+                active_ssts = self.active_ssts,
                 oid_key_span = ?key_span,
                 "compact Git locator lookup selected"
             );
@@ -333,26 +359,27 @@ impl GitObjectLocatorSession {
         inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
     ) -> Result<Vec<GitObjectLookup>> {
         let bindings = &self.bindings;
-        let fetched: Vec<(usize, GitObjectLookup)> =
-            stream::iter(object_ids.iter().copied().enumerate().map(|(index, oid)| {
+        let unique_object_ids = object_ids.iter().copied().collect::<HashSet<_>>();
+        let fetched: Vec<([u8; 20], GitObjectLookup)> =
+            stream::iter(unique_object_ids.into_iter().map(|oid| {
                 let reader = Arc::clone(reader);
                 async move {
                     let value = reader.get(object_key(&oid)).await.map_err(read_error)?;
                     let lookup = value.map_or(GitObjectLookup::Miss, |value| {
                         classify_location(&value, bindings, inventory)
                     });
-                    Ok::<_, MetadataError>((index, lookup))
+                    Ok::<_, MetadataError>((oid, lookup))
                 }
             }))
             .buffer_unordered(LOOKUP_CONCURRENCY.min(object_ids.len()).max(1))
             .try_collect()
             .await?;
 
-        let mut lookups = vec![GitObjectLookup::Miss; object_ids.len()];
-        for (index, lookup) in fetched {
-            lookups[index] = lookup;
-        }
-        Ok(lookups)
+        let fetched = fetched.into_iter().collect::<HashMap<_, _>>();
+        Ok(object_ids
+            .iter()
+            .map(|oid| fetched.get(oid).copied().unwrap_or(GitObjectLookup::Miss))
+            .collect())
     }
 
     async fn lookup_batch_by_scan(
@@ -789,20 +816,56 @@ impl GitObjectLocatorSession {
     }
 }
 
+fn active_sst_count(reader: &slatedb::DbReader) -> u64 {
+    let manifest = reader.manifest();
+    let l0 = u64::try_from(manifest.l0().len()).unwrap_or(u64::MAX);
+    manifest.compacted().iter().fold(l0, |total, run| {
+        total.saturating_add(u64::try_from(run.sst_views.len()).unwrap_or(u64::MAX))
+    })
+}
+
 fn lookup_strategy(
     requested_objects: usize,
     inventory_objects: u64,
+    active_ssts: u64,
     key_span: OidKeySpan,
 ) -> LookupStrategy {
     let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
-    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS || inventory_objects == 0 {
+    if requested == 0 || inventory_objects == 0 {
         return LookupStrategy::Exact;
     }
     let near_complete =
         requested.saturating_mul(FULL_SCAN_MIN_COVERAGE_DIVISOR) >= inventory_objects;
+    let compaction_amplified = active_ssts >= MIN_AMPLIFIED_SCAN_SSTS
+        && requested.saturating_mul(active_ssts)
+            >= inventory_objects.saturating_mul(AMPLIFIED_SCAN_COST_RATIO);
+    let small_catalog_compacted = inventory_objects <= SMALL_CATALOG_MAX_OBJECTS
+        && active_ssts >= MIN_AMPLIFIED_SCAN_SSTS
+        && requested.saturating_mul(SMALL_CATALOG_REQUEST_RATIO) >= inventory_objects;
+    // Broad SHA ranges cannot use a bounded key-span scan. Once the catalog
+    // spans several SSTs, each exact OID probes every layer, so scale the
+    // existing 1/64 crossover by that layer fan-out.
+    let broad_multi_sst_dense = key_span == OidKeySpan::Broad
+        && active_ssts >= MIN_LAYERED_SCAN_SSTS
+        && requested
+            .saturating_mul(FULL_SCAN_REQUEST_RATIO)
+            .saturating_mul(active_ssts)
+            >= inventory_objects;
+    if small_catalog_compacted
+        || (compaction_amplified && (key_span == OidKeySpan::Narrow || near_complete))
+    {
+        return LookupStrategy::FullScan {
+            row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
+        };
+    }
+    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS {
+        return LookupStrategy::Exact;
+    }
+    let ordinary_full_scan_dense = requested.saturating_mul(FULL_SCAN_REQUEST_RATIO)
+        >= inventory_objects
+        && (key_span == OidKeySpan::Narrow || near_complete);
     if requested_objects >= FULL_SCAN_MIN_LOOKUP_OBJECTS
-        && requested.saturating_mul(FULL_SCAN_REQUEST_RATIO) >= inventory_objects
-        && (key_span == OidKeySpan::Narrow || near_complete)
+        && (ordinary_full_scan_dense || broad_multi_sst_dense)
     {
         return LookupStrategy::FullScan {
             row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
@@ -935,7 +998,25 @@ async fn load_state(
         .ok_or_else(|| corrupt("metadata", "compact locator metadata is missing"))?;
     let metadata = decode_metadata(&value)
         .ok_or_else(|| corrupt("metadata", "invalid compact locator metadata"))?;
+    let bindings = match reader.get(PACK_BINDINGS_KEY).await.map_err(read_error)? {
+        Some(value) => {
+            let identity = metadata
+                .identity
+                .ok_or_else(|| corrupt("pack", "binding snapshot has no catalog identity"))?;
+            decode_pack_bindings(&value, identity, metadata.next_pack_slot)
+                .ok_or_else(|| corrupt("pack", "invalid compact locator binding snapshot"))?
+                .into_iter()
+                .collect()
+        }
+        None => load_bindings(reader, metadata.next_pack_slot).await?,
+    };
+    Ok((metadata.identity, bindings))
+}
 
+async fn load_bindings(
+    reader: &slatedb::DbReader,
+    next_pack_slot: u64,
+) -> Result<HashMap<u64, GitPackLocatorRecord>> {
     let mut rows = reader
         .scan_prefix([PACK_FAMILY], ..)
         .await
@@ -947,7 +1028,7 @@ async fn load_state(
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack key"))?;
         let record = decode_pack_record(&row.value)
             .ok_or_else(|| corrupt("pack", "invalid compact locator pack record"))?;
-        if slot >= metadata.next_pack_slot
+        if slot >= next_pack_slot
             || bindings.insert(slot, record).is_some()
             || !pack_ids.insert(record.pack_id)
         {
@@ -957,7 +1038,7 @@ async fn load_state(
             ));
         }
     }
-    Ok((metadata.identity, bindings))
+    Ok(bindings)
 }
 
 fn is_manifest_missing(error: &slatedb::Error) -> bool {
@@ -1123,6 +1204,7 @@ mod tests {
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS,
                 MIN_SCAN_LOOKUP_OBJECTS as u64,
+                1,
                 OidKeySpan::Narrow,
             ),
             LookupStrategy::Scan {
@@ -1133,6 +1215,7 @@ mod tests {
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS - 1,
                 (MIN_SCAN_LOOKUP_OBJECTS - 1) as u64,
+                1,
                 OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
@@ -1141,6 +1224,7 @@ mod tests {
             lookup_strategy(
                 MIN_SCAN_LOOKUP_OBJECTS,
                 (MIN_SCAN_LOOKUP_OBJECTS * 2 + 1) as u64,
+                1,
                 OidKeySpan::Narrow,
             ),
             LookupStrategy::Exact
@@ -1149,6 +1233,7 @@ mod tests {
             lookup_strategy(
                 FULL_SCAN_MIN_LOOKUP_OBJECTS,
                 (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                1,
                 OidKeySpan::Narrow,
             ),
             LookupStrategy::FullScan {
@@ -1159,6 +1244,7 @@ mod tests {
             lookup_strategy(
                 FULL_SCAN_MIN_LOOKUP_OBJECTS,
                 (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * FULL_SCAN_REQUEST_RATIO,
+                1,
                 OidKeySpan::Broad,
             ),
             LookupStrategy::Exact
@@ -1167,11 +1253,58 @@ mod tests {
             lookup_strategy(
                 FULL_SCAN_MIN_LOOKUP_OBJECTS,
                 (FULL_SCAN_MIN_LOOKUP_OBJECTS as u64) * 4,
+                1,
                 OidKeySpan::Broad,
             ),
             LookupStrategy::FullScan {
                 row_limit: FULL_SCAN_MIN_LOOKUP_OBJECTS * 4,
             }
+        );
+    }
+
+    #[test]
+    fn compacted_small_catalogs_use_a_bounded_full_scan_for_broad_requests() {
+        assert_eq!(
+            lookup_strategy(256, 1_024, MIN_AMPLIFIED_SCAN_SSTS, OidKeySpan::Broad),
+            LookupStrategy::FullScan { row_limit: 1_024 }
+        );
+        assert_eq!(
+            lookup_strategy(12, 52, MIN_AMPLIFIED_SCAN_SSTS, OidKeySpan::Broad),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(12, 52, 14, OidKeySpan::Broad),
+            LookupStrategy::FullScan { row_limit: 52 }
+        );
+    }
+
+    #[test]
+    fn compacted_large_catalogs_scan_broad_multiwave_requests() {
+        assert_eq!(
+            lookup_strategy(30_031, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_643_226,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(6_900, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_643_226,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(4_279, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(28_929, 1_611_847, 3, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_611_847,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(28_929, 1_611_847, 2, OidKeySpan::Broad),
+            LookupStrategy::Exact
         );
     }
 
@@ -1442,6 +1575,30 @@ mod tests {
                 GitObjectLookup::Miss
             ]
         ));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn exact_batch_reuses_one_lookup_for_repeated_oids() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fixture = publish(Arc::clone(&store), pack(1), [6; 20], None).await;
+        let inventory = HashMap::from([(fixture.pack.pack_id, fixture.inventory)]);
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let lookups = session
+            .lookup_batch(
+                &[fixture.oid, fixture.oid, [7; 20], fixture.oid],
+                &inventory,
+            )
+            .await
+            .expect("duplicate batch lookup");
+        assert_eq!(lookups.len(), 4);
+        assert!(matches!(lookups[0], GitObjectLookup::Hit(_)));
+        assert_eq!(lookups[0], lookups[1]);
+        assert_eq!(lookups[0], lookups[3]);
+        assert_eq!(lookups[2], GitObjectLookup::Miss);
         session.close().await.expect("close reader");
     }
 
