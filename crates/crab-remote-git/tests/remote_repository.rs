@@ -1731,9 +1731,101 @@ async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellatio
     second_runtime.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let (second_repository, second_runtime) = reopen_fixture(&fixture).await;
+    let lease_provider = Arc::new(TestGeneratedPackLeaseProvider::default());
+    let first_repository = fixture
+        .repository
+        .clone()
+        .with_generated_pack_lease_provider(lease_provider.clone());
+    let second_repository =
+        second_repository.with_generated_pack_lease_provider(lease_provider.clone());
+    let object_ids = fixture_object_ids(&fixture);
+    let key = fixture
+        .repository
+        .generated_pack_request_cache_key([11; 32], [12; 32]);
+    let producer_polls = Arc::new(AtomicUsize::new(0));
+
+    fixture.backend.block_next_pack_get();
+    let first_objects = object_ids.clone();
+    let first_polls = Arc::clone(&producer_polls);
+    let first_producer_repository = first_repository.clone();
+    let first = tokio::spawn(async move {
+        first_repository
+            .generate_pack_request_cached(
+                key,
+                async move {
+                    first_polls.fetch_add(1, Ordering::SeqCst);
+                    first_producer_repository
+                        .generate_pack(&first_objects, &CancellationToken::new())
+                        .await
+                },
+                &CancellationToken::new(),
+            )
+            .await
+    });
+    fixture.backend.wait_for_blocked_pack_get().await;
+
+    let second_objects = object_ids.clone();
+    let second_polls = Arc::clone(&producer_polls);
+    let second_producer_repository = second_repository.clone();
+    let second = tokio::spawn(async move {
+        second_repository
+            .generate_pack_request_cached(
+                key,
+                async move {
+                    second_polls.fetch_add(1, Ordering::SeqCst);
+                    second_producer_repository
+                        .generate_pack(&second_objects, &CancellationToken::new())
+                        .await
+                },
+                &CancellationToken::new(),
+            )
+            .await
+    });
+    lease_provider.wait_for_held_attempt().await;
+    assert_eq!(producer_polls.load(Ordering::SeqCst), 1);
+
+    fixture.backend.release_blocked_pack_get();
+    let first_pack = first
+        .await
+        .expect("first request joins")
+        .expect("first request receives pack");
+    let second_pack = second
+        .await
+        .expect("second request joins")
+        .expect("second request receives pack");
+
+    assert_eq!(producer_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.generated_pack_descriptor_puts(), 1);
+    assert_eq!(first_pack.object_count(), second_pack.object_count());
+    assert_eq!(
+        fs::read(first_pack.path()).expect("read first pack"),
+        fs::read(second_pack.path()).expect("read second pack")
+    );
+    fixture.runtime.shutdown().await;
+    second_runtime.shutdown().await;
+}
+
 #[derive(Default)]
 struct TestGeneratedPackLeaseProvider {
     lease: Arc<Mutex<()>>,
+    held_attempts: AtomicUsize,
+    held_notify: Notify,
+}
+
+impl TestGeneratedPackLeaseProvider {
+    async fn wait_for_held_attempt(&self) {
+        loop {
+            let notified = self.held_notify.notified();
+            if self.held_attempts.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 struct TestGeneratedPackLease {
@@ -1757,7 +1849,11 @@ impl GeneratedPackLeaseProvider for TestGeneratedPackLeaseProvider {
                         _guard: guard,
                     }))
                 }
-                Err(_) => GeneratedPackLeaseAttempt::Held,
+                Err(_) => {
+                    self.held_attempts.fetch_add(1, Ordering::SeqCst);
+                    self.held_notify.notify_waiters();
+                    GeneratedPackLeaseAttempt::Held
+                }
             })
         })
     }

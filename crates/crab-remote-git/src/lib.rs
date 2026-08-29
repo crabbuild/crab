@@ -37,7 +37,8 @@ pub use objects::{
 pub use operation::{OperationContext, OperationKind, ShallowClosureSelection};
 pub use pack::{
     GeneratedPack, GeneratedPackCacheKey, GeneratedPackLease, GeneratedPackLeaseAttempt,
-    GeneratedPackLeaseError, GeneratedPackLeaseProvider,
+    GeneratedPackLeaseError, GeneratedPackLeaseProvider, GeneratedPackRequestCacheError,
+    GeneratedPackRequestCacheKey,
 };
 pub use path::GitPath;
 pub use reader::{RemoteGitObject, RemoteGitObjectMetadata};

@@ -1471,6 +1471,126 @@ async fn write_acknowledgments<W: AsyncWrite + Unpin>(
 
 #[expect(
     clippy::too_many_arguments,
+    reason = "the preplanning cache boundary carries the pinned proof and protocol response state"
+)]
+async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    repository: &RemoteGitRepository,
+    proof: &UploadPackVisibilityProof,
+    visible_ref_names: &[String],
+    request: &FetchRequest,
+    semantic_request: &UploadPackRequest,
+    negotiation_rounds: u32,
+    progress: bool,
+    acknowledged_haves: Option<&[ObjectId]>,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
+    cancellation: &CancellationToken,
+    started: std::time::Instant,
+    request_class: &'static str,
+) -> Result<()> {
+    let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
+    let request_digest = preplanned_pack_request_digest(request);
+    let cache_key =
+        repository.generated_pack_request_cache_key(authorization_digest, request_digest);
+    // The generated-pack producer reacquires one read slot under its cross-process lease.
+    // Waiters must release the session slot before polling or sixteen identical requests can
+    // prevent the sole producer from entering planning.
+    release_read_admission(admission).await?;
+    tracing::debug!("released upload-pack read admission before request-plan cache wait");
+
+    let producer = async {
+        let plan = match proof {
+            #[cfg(test)]
+            UploadPackVisibilityProof::Materialized(visibility) => {
+                plan_upload_pack(
+                    repository,
+                    visibility,
+                    visible_ref_names,
+                    semantic_request,
+                    cancellation,
+                )
+                .await
+            }
+            UploadPackVisibilityProof::Catalog(visibility) => {
+                plan_upload_pack_catalog(
+                    repository,
+                    visibility,
+                    visible_ref_names,
+                    semantic_request,
+                    cancellation,
+                )
+                .await
+            }
+        }
+        .map_err(|error| CrabError::Protocol(format!("upload-pack request rejected: {error}")))?;
+        if !plan.shallow.is_empty() || !plan.unshallow.is_empty() {
+            return Err(CrabError::Internal(
+                "non-deepening shallow fetch unexpectedly changed shallow boundaries".to_owned(),
+            ));
+        }
+        tracing::info!(
+            protocol_version = 2,
+            request_class,
+            negotiation_rounds,
+            canonical_filter = %request.filter.canonical_spec(),
+            haves = request.haves.len(),
+            common_haves = plan.common_haves.len(),
+            shallow = request.shallow.len(),
+            visible_objects = proof.object_count_for_refs(visible_ref_names),
+            planned_objects = plan.object_ids.len(),
+            "protocol-v2 upload-pack preplanned cache producer selected"
+        );
+        repository
+            .generate_pack(&plan.object_ids, cancellation)
+            .await
+            .map_err(remote_error)
+    };
+    let pack = match repository
+        .generate_pack_request_cached(cache_key, producer, cancellation)
+        .await
+    {
+        Ok(pack) => pack,
+        Err(crab_remote_git::GeneratedPackRequestCacheError::Producer(error)) => {
+            return reject_protocol_request(writer, error, cancellation).await;
+        }
+        Err(crab_remote_git::GeneratedPackRequestCacheError::Cache(error)) => {
+            return reject_protocol_request(writer, remote_error(error), cancellation).await;
+        }
+    };
+
+    if let Some(acknowledged_haves) = acknowledged_haves {
+        write_data(writer, b"acknowledgments\n", cancellation).await?;
+        for have in acknowledged_haves {
+            let line = format!("ACK {have}\n");
+            write_data(writer, line.as_bytes(), cancellation).await?;
+        }
+        write_data(writer, b"ready\n", cancellation).await?;
+        write_delimiter(writer, cancellation).await?;
+    }
+    write_data(writer, b"packfile\n", cancellation).await?;
+    if progress && !request.no_progress {
+        write_packet(writer, b"counting objects\n", Some(2), cancellation).await?;
+    }
+    tracing::info!(
+        protocol_version = 2,
+        request_class,
+        negotiation_rounds,
+        canonical_filter = %request.filter.canonical_spec(),
+        planned_objects = pack.object_count(),
+        reconstructed_objects = pack.object_count(),
+        transferred_bytes = pack.size(),
+        latency_ms = started.elapsed().as_millis() as u64,
+        "protocol-v2 upload-pack preplanned pack generated"
+    );
+    pack.write_sideband(writer, cancellation)
+        .await
+        .map_err(remote_error)?;
+    write_flush(writer, cancellation).await?;
+    write_response_end(writer, cancellation).await
+}
+
+#[expect(
+    clippy::too_many_arguments,
     reason = "the response boundary carries the pinned repository, proof, negotiation, and wire state"
 )]
 async fn write_fetch_response<W: AsyncWrite + Unpin>(
@@ -1500,6 +1620,24 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         include_tags: request.include_tags,
         filter: request.filter.clone(),
     };
+    if request_pack_preplanning_cache_eligible(request) {
+        return write_preplanned_cached_fetch_response(
+            writer,
+            repository,
+            proof,
+            visible_ref_names,
+            request,
+            &semantic_request,
+            negotiation_rounds,
+            progress,
+            acknowledged_haves,
+            admission,
+            cancellation,
+            started,
+            request_class,
+        )
+        .await;
+    }
     let plan = match match proof {
         #[cfg(test)]
         UploadPackVisibilityProof::Materialized(visibility) => {
@@ -1685,6 +1823,50 @@ fn generated_pack_request_digest(
         request.shallow.as_slice(),
         response_shallow,
         response_unshallow,
+    ] {
+        let mut objects = objects.to_vec();
+        objects.sort_unstable();
+        hash.update(&(objects.len() as u64).to_be_bytes());
+        for oid in objects {
+            hash.update(oid.as_bytes());
+        }
+    }
+    *hash.finalize().as_bytes()
+}
+
+fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
+    !request.haves.is_empty()
+        && !request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+        && matches!(request.filter, UploadPackFilter::None)
+}
+
+fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.upload-pack.preplanned-request.v1\0");
+    let filter = request.filter.canonical_spec();
+    hash.update(&(filter.len() as u64).to_be_bytes());
+    hash.update(filter.as_bytes());
+    hash.update(&[
+        u8::from(request.deepen_relative),
+        u8::from(request.include_tags),
+        u8::from(request.thin_pack),
+        u8::from(request.ofs_delta),
+    ]);
+    match request.deepen {
+        Some(depth) => {
+            hash.update(&[1]);
+            hash.update(&depth.to_be_bytes());
+        }
+        None => {
+            hash.update(&[0]);
+        }
+    }
+    for objects in [
+        request.wants.as_slice(),
+        request.haves.as_slice(),
+        request.shallow.as_slice(),
     ] {
         let mut objects = objects.to_vec();
         objects.sort_unstable();
@@ -1962,6 +2144,39 @@ mod tests {
             digest,
             generated_pack_request_digest(&reordered, &[first, second], &[])
         );
+    }
+
+    #[test]
+    fn preplanned_pack_request_digest_binds_shallow_incremental_negotiation() {
+        let first =
+            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
+        let second =
+            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
+        let request = FetchRequest {
+            wants: vec![second],
+            haves: vec![first],
+            shallow: vec![first],
+            thin_pack: true,
+            ..FetchRequest::default()
+        };
+        assert!(request_pack_preplanning_cache_eligible(&request));
+
+        let digest = preplanned_pack_request_digest(&request);
+        let mut changed = request.clone();
+        changed.wants = vec![first];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.haves = vec![second];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.shallow = vec![second];
+        assert_ne!(digest, preplanned_pack_request_digest(&changed));
+        changed = request.clone();
+        changed.deepen = Some(1);
+        assert!(!request_pack_preplanning_cache_eligible(&changed));
+        changed = request;
+        changed.filter = UploadPackFilter::BlobNone;
+        assert!(!request_pack_preplanning_cache_eligible(&changed));
     }
 
     #[test]

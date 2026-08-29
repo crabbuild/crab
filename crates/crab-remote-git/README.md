@@ -36,8 +36,9 @@ The supported entry points are:
   work budget;
 - `RemoteGitRepository::{refs,resolve,snapshot}`: ref and reachable-revision
   selection;
-- `RemoteGitRepository::{generate_pack,generate_pack_cached}`: verified
-  delta-preserving response packs, with immutable reuse for no-have requests;
+- `RemoteGitRepository::{generate_pack,generate_pack_cached,generate_pack_request_cached}`:
+  verified response packs, with immutable reuse after selection or before an
+  exact request is planned;
 - `RemoteGitSnapshot::{entry,list_directory,blob_metadata,read_blob}`: browser
   navigation and Git-representation content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
@@ -73,15 +74,18 @@ use `is_current` after a short freshness interval. A changed manifest always
 requires a new complete open handshake; cached state is never refreshed in
 place.
 
-No-have response packs can be persisted beneath the repository's immutable
-`generated-packs/v1` namespace. Keys bind physical repository identity,
-manifest Git state, the visible authorization union, canonical request
-semantics, output policy, and the canonicalized object selection. The request
-key includes the generated-pack descriptor format version, so stale derived
-descriptors naturally miss after a format change. Complete pack bodies and
-descriptors are verified on every read. Runtime single-flight and the existing
-renewable internal-lock contract coalesce concurrent producers; cancelling one
-waiter does not cancel work still needed by another process.
+Response packs can be persisted beneath the repository's immutable
+`generated-packs/v1` namespace. Selection-bound keys cover physical repository
+identity, manifest Git state, the visible authorization union, canonical
+request semantics, output policy, and canonicalized object selection.
+Request-bound keys let identical non-deepening shallow fetches acquire the
+renewable cross-process producer lease before reachability planning; the
+producer must return a verified self-contained pack. Both key forms include
+the generated-pack descriptor format version, so stale derived descriptors
+naturally miss after a format change. Complete pack bodies and descriptors are
+verified on every read. Runtime single-flight and the renewable internal-lock
+contract coalesce concurrent producers; cancelling one waiter does not cancel
+work still needed by another process.
 Catalog-exact dense filters (`blob:none` and `object:type`) can assemble a
 large selected response directly from verified packed entries, preserving
 delta payloads and materializing only bases omitted from the selection. The
