@@ -30,6 +30,14 @@ pub fn refresh_mount_runtime(
         resolve_refresh_head(git_dir, &config.source, config.ref_name.as_deref())?;
     info!(head_oid = %head_oid, head_ref = %head_ref, "resolved new HEAD after fetch");
 
+    if output.head_oid == head_oid && output.head_ref == head_ref {
+        return Ok(MountRuntimeUpdate {
+            head_oid,
+            head_ref,
+            generation: output.resolver.generation(),
+        });
+    }
+
     let update = publish_runtime_snapshot(output, config, &head_oid, &head_ref)?;
     info!(
         mountpoint = %mountpoint.display(),
@@ -103,6 +111,7 @@ fn publish_runtime_snapshot(
     output.engine.invalidate_read_source_cache();
     output.head_oid = head_oid.to_owned();
     output.head_ref = head_ref.to_owned();
+    output.generation = generation;
     run_read_tree_head(&config.git_dir);
 
     Ok(MountRuntimeUpdate {

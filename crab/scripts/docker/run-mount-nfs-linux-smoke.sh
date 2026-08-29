@@ -29,6 +29,7 @@ trap cleanup EXIT
 
 command -v "$DOCKER" >/dev/null 2>&1 || die "docker is required"
 "$DOCKER" info >/dev/null 2>&1 || die "Docker daemon is not running"
+GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)" || die "could not resolve checkout commit"
 
 mkdir -p "$RUN_ROOT" "$HOST_TARGET" "$HOST_CARGO"
 
@@ -44,6 +45,9 @@ printf "artifact_root=%s\n" "$RUN_ROOT"
     -v "$HOST_CARGO:/cargo" \
     -v "$RUN_ROOT:/e2e" \
     -e CARGO_HOME=/cargo \
+    -e CARGO_INCREMENTAL=0 \
+    -e CARGO_PROFILE_DEV_DEBUG=0 \
+    -e GIT_COMMIT="$GIT_COMMIT" \
     -e CRAB_NFS_SMOKE_RUN_ID="$RUN_ID" \
     -e CRAB_NFS_SMOKE_REPORT="$RUN_ROOT/nfs-smoke-report.json" \
     "$RUST_IMAGE" bash -s <<'INNER'
@@ -108,12 +112,6 @@ apt-get update >/e2e/logs/apt-update.log
 apt-get install -y --no-install-recommends \
     ca-certificates git make nfs-common pkg-config procps python3 util-linux \
     >/e2e/logs/apt-install.log
-
-# The checkout is bind-mounted from the host and may have a different owner.
-# Mark this exact path trusted so Git can read the revision used in evidence.
-git config --global --add safe.directory /src
-GIT_COMMIT="$(git -C /src rev-parse HEAD)"
-export GIT_COMMIT
 
 cd /src/crab
 cargo build -p crab --bin crab --no-default-features --features nfs \

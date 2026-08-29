@@ -64,8 +64,8 @@
 #                     NFS_THRESHOLD_REQUIRE_CALIBRATION_READY=1
 #                     NFS_THRESHOLD_REQUIRE_RELEASE_GRADE=1
 #   make mount-large-rustfs-smoke
-#                     Verify large-file `crab mount` read-only and writable
-#                     overlay writeback against Docker RustFS/S3.
+#                     Verify native Linux NFS large-file reads, concurrent
+#                     overlay writes, and Git/Xet writeback against RustFS/S3.
 #   make mount-nfs-linux-smoke
 #                     Verify native Linux NFS `crab mount` through Docker.
 #   make mount-nfs-macos-smoke
@@ -513,6 +513,7 @@ nfs-smoke-report-verify-self-test:
 	@$(PYTHON) scripts/verify-nfs-smoke-report.py self-test
 
 nfs-smoke-script-check:
+	@bash -n scripts/docker/run-mount-large-rustfs-smoke.sh
 	@bash -n scripts/docker/run-mount-nfs-linux-smoke.sh
 	@bash -n scripts/run-mount-nfs-macos-smoke.sh
 	@$(PYTHON) scripts/check-nfs-smoke-scripts.py --self-test
