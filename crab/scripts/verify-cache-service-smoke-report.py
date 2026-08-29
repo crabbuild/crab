@@ -1580,14 +1580,14 @@ class Verifier:
 
     def verify_cli_dedup_traffic(self) -> None:
         record = self.record("cli_push_dedup", "cli-dedup-push")
-        self.check("cli-dedup-queries-observed", self.int_value(record, "dedup_queries_delta") > 0, {
+        self.check("cli-dedup-advisory-queries-bypassed", self.int_value(record, "dedup_queries_delta") == 0, {
             "dedup_queries_delta": record.get("dedup_queries_delta"),
         })
-        self.check("cli-dedup-known-chunks-observed", self.int_value(record, "dedup_known_chunks_delta") > 0, {
+        self.check("cli-dedup-advisory-known-chunks-empty", self.int_value(record, "dedup_known_chunks_delta") == 0, {
             "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta"),
         })
         self.check(
-            "cli-dedup-no-unknown-chunks",
+            "cli-dedup-advisory-unknown-chunks-empty",
             self.int_value(record, "dedup_unknown_chunks_delta") == 0,
             {"dedup_unknown_chunks_delta": record.get("dedup_unknown_chunks_delta")},
         )
