@@ -55,6 +55,9 @@ struct ObjectStoreGeneratedPackLeaseProvider {
 
 struct ObjectStoreGeneratedPackLease {
     lock: crab_coordination::PushLock,
+    // Cache waiters release the session lease before polling; the producer
+    // reacquires one here so only actual pack generation consumes read capacity.
+    read_admission: crab_coordination::ReadAdmissionTicket,
 }
 
 enum VisibilityRequirement {
@@ -132,9 +135,33 @@ impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLea
                 .try_acquire_internal(&self.prefix, resource, ttl)
                 .await
             {
-                Ok(lock) => Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
-                    Box::new(ObjectStoreGeneratedPackLease { lock }),
-                )),
+                Ok(lock) => {
+                    let read_admission = acquire_read_admission(
+                        &self.store,
+                        &self.prefix,
+                        &CancellationToken::new(),
+                    )
+                    .await;
+                    match read_admission {
+                        Ok(read_admission) => {
+                            Ok(crab_remote_git::GeneratedPackLeaseAttempt::Acquired(
+                                Box::new(ObjectStoreGeneratedPackLease {
+                                    lock,
+                                    read_admission,
+                                }),
+                            ))
+                        }
+                        Err(error) => {
+                            if let Err(release_error) = lock.release().await {
+                                tracing::warn!(
+                                    error = %release_error,
+                                    "generated-pack lease release failed after read admission failure"
+                                );
+                            }
+                            Err(crab_remote_git::GeneratedPackLeaseError::new(error))
+                        }
+                    }
+                }
                 Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
                     Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held)
                 }
@@ -152,6 +179,10 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
+            self.read_admission
+                .renew()
+                .await
+                .map_err(crab_remote_git::GeneratedPackLeaseError::new)?;
             self.lock
                 .renew()
                 .await
@@ -166,10 +197,13 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackLease {
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
-            self.lock
-                .release()
-                .await
-                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+            let read_result = self.read_admission.release().await;
+            let lock_result = self.lock.release().await;
+            match (read_result, lock_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+                (Ok(()), Err(error)) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
+            }
         })
     }
 }
@@ -307,9 +341,9 @@ where
     W: AsyncWrite + Unpin,
 {
     let started = std::time::Instant::now();
-    let mut read_admission = acquire_read_admission(store, prefix, cancellation).await?;
+    let read_admission = acquire_read_admission(store.inner(), prefix, cancellation).await?;
     let result = serve_with_read_admission(
-        &mut read_admission,
+        read_admission,
         reader,
         writer,
         store,
@@ -323,35 +357,18 @@ where
     tracing::debug!(
         result = result.is_ok(),
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "protocol-v2 upload-pack session completed before read-admission release"
+        "protocol-v2 upload-pack session completed"
     );
-    let release_started = std::time::Instant::now();
-    let release = read_admission.release().await.map_err(CrabError::from);
-    tracing::debug!(
-        result = release.is_ok(),
-        elapsed_ms = release_started.elapsed().as_millis() as u64,
-        "upload-pack read admission released"
-    );
-    match (result, release) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            tracing::warn!(
-                error = %release_error,
-                "upload-pack read admission release failed after session failure"
-            );
-            Err(error)
-        }
-    }
+    result
 }
 
 async fn acquire_read_admission(
-    store: &crab_storage::Store,
+    store: &Arc<dyn object_store::ObjectStore>,
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<crab_coordination::ReadAdmissionTicket> {
     let mut ticket = crab_coordination::ReadAdmissionTicket::new(
-        store.inner(),
+        store,
         prefix,
         crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
         crab_coordination::DEFAULT_READ_ADMISSION_TTL,
@@ -446,7 +463,7 @@ fn read_admission_retry_delay(attempt: usize, retry_after: Option<Duration>) -> 
 }
 
 async fn serve_with_read_admission<R, W>(
-    read_admission: &mut crab_coordination::ReadAdmissionTicket,
+    read_admission: crab_coordination::ReadAdmissionTicket,
     reader: &mut R,
     writer: &mut W,
     store: &crab_storage::Store,
@@ -460,7 +477,12 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let renewal_interval = (read_admission.ttl() / 3).max(Duration::from_secs(1));
+    let admission = Arc::new(tokio::sync::Mutex::new(Some(read_admission)));
+    let renewal_interval = (admission.lock().await.as_ref().map_or(
+        Duration::from_secs(1),
+        crab_coordination::ReadAdmissionTicket::ttl,
+    ) / 3)
+        .max(Duration::from_secs(1));
     let mut ticker = tokio::time::interval(renewal_interval);
     ticker.tick().await;
     let operation = serve_admitted(
@@ -471,14 +493,15 @@ where
         hidden_ref_patterns,
         fetch_policy,
         progress,
+        &admission,
         cancellation,
     );
     tokio::pin!(operation);
     let mut renewal_error = None;
-    loop {
+    let result = loop {
         tokio::select! {
             result = &mut operation => {
-                return match result {
+                break match result {
                     Err(error) => Err(error),
                     Ok(()) => match renewal_error {
                         Some(error) => Err(CrabError::from(error)),
@@ -487,12 +510,47 @@ where
                 };
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = read_admission.renew().await {
+                let renewal = {
+                    let mut admission = admission.lock().await;
+                    match admission.as_mut() {
+                        Some(ticket) => ticket.renew().await,
+                        None => Ok(()),
+                    }
+                };
+                if let Err(error) = renewal {
                     cancellation.cancel();
                     renewal_error = Some(error);
                 }
             }
         }
+    };
+    let release_started = std::time::Instant::now();
+    let release = release_read_admission(&admission).await;
+    tracing::debug!(
+        result = release.is_ok(),
+        elapsed_ms = release_started.elapsed().as_millis() as u64,
+        "upload-pack read admission released"
+    );
+    match (result, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "upload-pack read admission release failed after session failure"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn release_read_admission(
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
+) -> Result<()> {
+    let read_admission = admission.lock().await.take();
+    match read_admission {
+        Some(read_admission) => read_admission.release().await.map_err(CrabError::from),
+        None => Ok(()),
     }
 }
 
@@ -504,6 +562,7 @@ async fn serve_admitted<R, W>(
     hidden_ref_patterns: &[String],
     fetch_policy: &FetchAdmissionPolicy,
     progress: bool,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()>
 where
@@ -607,6 +666,7 @@ where
                             negotiation_rounds,
                             progress,
                             Some(&common_haves),
+                            admission,
                             cancellation,
                         )
                         .await?;
@@ -622,6 +682,7 @@ where
                     negotiation_rounds,
                     progress,
                     None,
+                    admission,
                     cancellation,
                 )
                 .await?;
@@ -1421,6 +1482,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     negotiation_rounds: u32,
     progress: bool,
     acknowledged_haves: Option<&[ObjectId]>,
+    admission: &Arc<tokio::sync::Mutex<Option<crab_coordination::ReadAdmissionTicket>>>,
     cancellation: &CancellationToken,
 ) -> Result<()> {
     let started = std::time::Instant::now();
@@ -1530,6 +1592,12 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
         .thin_pack
         .then_some(plan.common_haves.as_slice())
         .unwrap_or_default();
+    if request.haves.is_empty() && request.done {
+        // Identical cache waiters do not perform repository reads while the
+        // producer builds the immutable response artifact.
+        release_read_admission(admission).await?;
+        tracing::debug!("released upload-pack read admission before generated-pack cache wait");
+    }
     let generated = if request.haves.is_empty() {
         let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
         let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
@@ -1963,6 +2031,55 @@ mod tests {
             }
         };
         replacement.release().await.expect("release replacement");
+    }
+
+    #[tokio::test]
+    async fn generated_pack_lease_reserves_one_read_admission_slot() {
+        let store: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let provider = ObjectStoreGeneratedPackLeaseProvider {
+            store: Arc::clone(&store),
+            prefix: "org/repo".to_owned(),
+        };
+        let lease = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
+            &provider,
+            "generated-pack-request",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("lease acquisition")
+        {
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
+            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+                panic!("lease must be available")
+            }
+        };
+
+        let mut admitted = Vec::new();
+        for _ in 0..crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY {
+            let mut ticket = crab_coordination::ReadAdmissionTicket::new(
+                &store,
+                "org/repo",
+                crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY,
+                Duration::from_secs(60),
+            )
+            .expect("read admission ticket");
+            for _ in 0..crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY {
+                if ticket.try_admit().await.expect("read admission probe") {
+                    admitted.push(ticket);
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            admitted.len(),
+            crab_coordination::DEFAULT_READ_ADMISSION_CAPACITY - 1
+        );
+
+        for ticket in admitted {
+            ticket.release().await.expect("release read admission");
+        }
+        lease.release().await.expect("release generated-pack lease");
     }
 
     #[test]
