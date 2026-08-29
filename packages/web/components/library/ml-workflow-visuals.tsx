@@ -98,25 +98,27 @@ export function MlWorkflowCacheExplorer() {
       caption="Choose a real workflow change. Orange stages execute; green stages reuse their matching result. The selected scenario changes only the simulated explanation—no command runs in your browser."
       className="wide-article-visual"
     >
-      <div className="grid gap-5 lg:grid-cols-[14rem_minmax(0,1fr)]">
+      <div className="space-y-4">
         <div
-          className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1"
+          className="overflow-x-auto pb-2"
           aria-label="Workflow change scenarios"
         >
-          {SCENARIOS.map((scenario) => (
-            <Button
-              key={scenario.id}
-              type="button"
-              variant={scenario.id === active.id ? "default" : "outline"}
-              size="lg"
-              aria-pressed={scenario.id === active.id}
-              onClick={() => setActiveId(scenario.id)}
-              className="min-h-11 justify-start px-3 text-left"
-            >
-              {scenario.id === "same-inputs" ? <RotateCcw /> : <Play />}
-              {scenario.label}
-            </Button>
-          ))}
+          <div className="flex min-w-max gap-2">
+            {SCENARIOS.map((scenario) => (
+              <Button
+                key={scenario.id}
+                type="button"
+                variant={scenario.id === active.id ? "default" : "outline"}
+                size="lg"
+                aria-pressed={scenario.id === active.id}
+                onClick={() => setActiveId(scenario.id)}
+                className="min-h-11 shrink-0 gap-2 px-3"
+              >
+                {scenario.id === "same-inputs" ? <RotateCcw /> : <Play />}
+                {scenario.label}
+              </Button>
+            ))}
+          </div>
         </div>
 
         <div className="min-w-0">
