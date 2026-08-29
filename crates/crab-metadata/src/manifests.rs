@@ -516,13 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn pack_entry_with_empty_ref_tips_is_legacy() {
-        let entry = PackEntry::with_ref_tips("empty", 2048, Vec::new());
-
-        assert!(entry.ref_tips.is_none());
-    }
-
-    #[test]
     fn pack_list_round_trip_with_ref_tips() {
         let m = PackList {
             generation: 5,

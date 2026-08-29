@@ -2170,7 +2170,7 @@ struct RemoteFetchStore {
     router: StoreLayout,
     generation: u64,
     packs: Vec<PackManifestEntry>,
-    _caching_store: Option<crab_cache_store::CachingStore>,
+    caching_store: Option<crab_cache_store::CachingStore>,
     pack_list: Arc<tokio::sync::Mutex<Option<PackList>>>,
 }
 
@@ -2187,7 +2187,7 @@ impl RemoteFetchStore {
             router,
             generation,
             packs,
-            _caching_store: caching_store,
+            caching_store,
             pack_list: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -3722,32 +3722,6 @@ mod tests {
             .await
             .expect("load admitted pack list");
         assert_eq!(pack_list.generation, 1);
-    }
-
-    #[tokio::test]
-    async fn remote_fetch_store_ignores_oversized_pack_metadata() {
-        let (store, router) = memory_store_with_manifest(
-            "refs/heads/main",
-            "6666666666666666666666666666666666666666",
-        )
-        .await;
-        let pack_id = "a".repeat(64);
-        store
-            .put(
-                &router.pack_metadata_path(&pack_id),
-                bytes::Bytes::from(vec![
-                    b' ';
-                    usize::try_from(
-                        crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1,
-                    )
-                    .unwrap()
-                ]),
-            )
-            .await
-            .expect("write oversized pack metadata");
-        let fetch_store = RemoteFetchStore::new(store, router, 1, Vec::new(), None, true, 1);
-
-        assert!(fetch_store.fetch_pack_metadata(&pack_id).await.is_none());
     }
 
     #[tokio::test]

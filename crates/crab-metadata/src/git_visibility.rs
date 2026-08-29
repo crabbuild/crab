@@ -1498,24 +1498,6 @@ fn encode_oid(oid: &GitVisibilityOid) -> String {
     encoded
 }
 
-#[cfg(feature = "storage")]
-fn validate_ref_closures(refs: &BTreeMap<String, Vec<String>>) -> Result<()> {
-    if refs.len() > MAX_GIT_VISIBILITY_REFS {
-        return Err(corrupt("visibility index contains too many refs"));
-    }
-    let mut unique_objects = BTreeSet::new();
-    for (name, objects) in refs {
-        validate_ref_name(name)?;
-        validate_sorted_oids(objects, "closure")?;
-        unique_objects.extend(objects.iter().map(String::as_str));
-        if unique_objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
-            return Err(corrupt(
-                "visibility object dictionary contains too many objects",
-            ));
-        }
-    }
-    Ok(())
-}
 fn validate_hash(value: &str, field: &str) -> Result<()> {
     if value.len() != 64
         || !value

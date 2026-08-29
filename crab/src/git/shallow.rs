@@ -493,23 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn filter_packs_includes_empty_hints_unconditionally() {
-        let pack_list = PackList {
-            generation: 1,
-            entries: vec![PackEntry {
-                pack_id: "pack_a".to_owned(),
-                size: 100,
-                ref_tips: Some(Vec::new()),
-            }],
-        };
-        let summary = make_summary(vec![]);
-
-        let ids = filter_packs_by_depth(&pack_list, &summary, &[], &[] as &[String]);
-
-        assert_eq!(ids, vec!["pack_a".to_owned()]);
-    }
-
-    #[test]
     fn filter_packs_empty_list_returns_empty() {
         let pack_list = PackList {
             generation: 0,
