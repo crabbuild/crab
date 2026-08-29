@@ -1,6 +1,15 @@
 "use client"
 
 import { useState } from "react"
+import {
+  BarChart3,
+  FlaskConical,
+  ListChecks,
+  Package,
+  Play,
+  Workflow,
+} from "lucide-react"
+import type { LucideIcon } from "lucide-react"
 
 import { DiagramFrame } from "@/components/blog/blog-diagrams"
 import { Button } from "@/components/ui/button"
@@ -8,6 +17,7 @@ import { Button } from "@/components/ui/button"
 type CommandFamily = {
   id: string
   label: string
+  icon: LucideIcon
   purpose: string
   commands: { command: string; detail: string }[]
 }
@@ -16,6 +26,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "run",
     label: "Run & author",
+    icon: Play,
     purpose: "Declare stages and control execution.",
     commands: [
       { command: "crab run", detail: "Execute or replay declared stages" },
@@ -35,6 +46,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "workflow",
     label: "Workflow state",
+    icon: Workflow,
     purpose: "Inspect DAG, locks, journals, and shared cache.",
     commands: [
       { command: "crab workflow status", detail: "Report stage freshness" },
@@ -68,6 +80,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "experiments",
     label: "Experiments",
+    icon: FlaskConical,
     purpose: "Run, compare, share, and maintain isolated experiments.",
     commands: [
       { command: "crab exp run", detail: "Execute an isolated experiment" },
@@ -102,6 +115,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "queue",
     label: "Queue",
+    icon: ListChecks,
     purpose: "Operate local experiment tasks and workers.",
     commands: [
       { command: "crab queue start", detail: "Start bounded workers" },
@@ -118,6 +132,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "evidence",
     label: "Evidence",
+    icon: BarChart3,
     purpose: "Read parameters and compare model evidence.",
     commands: [
       { command: "crab params show", detail: "Read flattened parameters" },
@@ -136,6 +151,7 @@ const COMMAND_FAMILIES: CommandFamily[] = [
   {
     id: "artifacts",
     label: "Artifacts",
+    icon: Package,
     purpose: "Version, retrieve, and promote immutable model bytes.",
     commands: [
       { command: "crab artifacts list", detail: "List catalog state" },
@@ -170,27 +186,34 @@ export function WorkflowCommandAtlas() {
       caption={`${total} public command forms across six families. Select a family to inspect its operator boundary; the internal checkpoint control protocol is intentionally excluded.`}
       className="wide-article-visual"
     >
-      <div className="grid gap-5 lg:grid-cols-[13rem_minmax(0,1fr)]">
+      <div className="space-y-4">
         <div
-          className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1"
+          className="overflow-x-auto pb-2"
           aria-label="Workflow command families"
         >
-          {COMMAND_FAMILIES.map((family) => (
-            <Button
-              key={family.id}
-              type="button"
-              size="lg"
-              variant={family.id === active.id ? "default" : "outline"}
-              aria-pressed={family.id === active.id}
-              onClick={() => setActiveId(family.id)}
-              className="min-h-11 justify-between px-3"
-            >
-              {family.label}
-              <span className="rounded-full bg-background/15 px-1.5 font-mono text-[10px]">
-                {family.commands.length}
-              </span>
-            </Button>
-          ))}
+          <div className="flex min-w-max gap-2">
+            {COMMAND_FAMILIES.map((family) => {
+              const Icon = family.icon
+
+              return (
+                <Button
+                  key={family.id}
+                  type="button"
+                  size="lg"
+                  variant={family.id === active.id ? "default" : "outline"}
+                  aria-pressed={family.id === active.id}
+                  onClick={() => setActiveId(family.id)}
+                  className="min-h-11 shrink-0 gap-2 px-3"
+                >
+                  <Icon size={15} aria-hidden="true" />
+                  <span>{family.label}</span>
+                  <span className="rounded-full bg-background/15 px-1.5 font-mono text-[10px]">
+                    {family.commands.length}
+                  </span>
+                </Button>
+              )
+            })}
+          </div>
         </div>
 
         <section className="min-w-0 rounded-lg border border-border bg-card">
