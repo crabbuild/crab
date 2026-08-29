@@ -50,7 +50,17 @@ fn repository() -> tempfile::TempDir {
         ),
         "git config user.email",
     );
-    assert_success(&crab(dir.path(), &["init", &remote_url]), "crab init");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build local-init runtime");
+    runtime
+        .block_on(crab::cmd::init::run_init_in(
+            &remote_url,
+            dir.path(),
+            &tokio_util::sync::CancellationToken::new(),
+        ))
+        .expect("initialize local repository state");
     assert_success(
         &git(dir.path(), &["commit", "-qm", "initialize crab"]),
         "initial commit",
