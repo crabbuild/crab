@@ -329,7 +329,7 @@ def check_release_workflow(root: Path) -> list[str]:
         "--verify-tag",
         "--fail-on-no-commits",
         '--notes-file "$notes_file"',
-        "cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked",
+        "cargo test -p crab --test workflow_v1_contracts --no-default-features --features simd-accel,tier,watch --locked",
         'if ! aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null 2>&1; then',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api create-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
         'aws --endpoint-url "${WORKFLOW_RUSTFS_ENDPOINT}" s3api head-bucket --bucket "${WORKFLOW_RUSTFS_BUCKET}" >/dev/null',
