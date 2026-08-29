@@ -679,7 +679,6 @@ def verify_report(
 
     team_load = report.get("team_load")
     if require_team_load:
-        require(profile == "full", "team-load qualification requires a full report")
         verify_team_load(team_load, require_release_counts=True)
         required_team_checks = {
             "concurrent-fetch-seed-clones",

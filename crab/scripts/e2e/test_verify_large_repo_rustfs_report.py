@@ -464,6 +464,30 @@ class ReportVerificationTests(unittest.TestCase):
     def test_release_team_load_contract_requires_all_scenarios(self) -> None:
         VERIFY.verify_team_load(valid_team_load(), require_release_counts=True)
 
+    def test_smoke_report_can_prove_release_team_load_contract(self) -> None:
+        report = valid_report()
+        report["team_load"] = valid_team_load()
+        report["checks"].extend(
+            {"name": name, "ok": True}
+            for name in (
+                "concurrent-fetch-seed-clones",
+                "concurrent-fetch-seed-generated-pack-producers",
+                "concurrent-incremental-fetches",
+                "independent_ref_pushes-outcomes",
+                "independent-ref-pushes-preserved",
+                "same_ref_pushes-outcomes",
+                "same-ref-winner-published",
+            )
+        )
+
+        result = VERIFY.verify_report(
+            self.write("report.json", report),
+            allow_smoke=True,
+            require_team_load=True,
+        )
+
+        self.assertEqual(result.profile, "smoke")
+
     def test_required_cache_service_contract(self) -> None:
         report = valid_report()
         report["cache_service"] = valid_cache_service()
