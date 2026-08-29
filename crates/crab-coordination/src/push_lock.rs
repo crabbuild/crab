@@ -241,7 +241,9 @@ impl PushLockAcquireContext {
     ///
     /// A live lease is conservatively reported as held without probing backend
     /// time. If the diagnostic expiry says that reclamation may be necessary,
-    /// the normal backend-authored expiry check is used once before returning.
+    /// the normal backend-authored expiry check is used before returning.
+    /// Transient object-store failures are retried within a bounded probe
+    /// budget; a live holder is still reported immediately.
     pub async fn try_acquire_internal(
         &mut self,
         prefix: &str,
@@ -294,50 +296,80 @@ impl PushLockAcquireContext {
             &path,
             &PushLockPayload::new(&holder, expires_at, ttl.as_secs()),
         )?;
-        let known_existing = !self.known_paths.insert(path.clone());
-        let created = if known_existing {
-            None
-        } else {
-            match create_strict(&self.store, &Path::from(path.as_str()), body.clone()).await {
-                Ok(etag) => Some(etag),
-                Err(object_store::Error::AlreadyExists { .. })
-                | Err(object_store::Error::Precondition { .. }) => None,
-                Err(source) => return Err(store_error(&path, source)),
-            }
-        };
-        let etag = match created {
-            Some(etag) => etag,
-            None => match try_acquire_contended(
-                &self.store,
-                &Path::from(path.as_str()),
-                target,
-                body,
-                &mut self.backend_clock,
-            )
-            .await?
-            {
-                ContendedAcquire::Acquired(etag) => etag,
-                ContendedAcquire::Held {
+        let mut attempt = 0_u32;
+        loop {
+            let known_existing = !self.known_paths.insert(path.clone());
+            let result: Result<ContendedAcquire> = if known_existing {
+                try_acquire_contended(
+                    &self.store,
+                    &Path::from(path.as_str()),
+                    target,
+                    body.clone(),
+                    &mut self.backend_clock,
+                )
+                .await
+            } else {
+                match create_strict(&self.store, &Path::from(path.as_str()), body.clone()).await {
+                    Ok(etag) => Ok(ContendedAcquire::Acquired(etag)),
+                    Err(object_store::Error::AlreadyExists { .. })
+                    | Err(object_store::Error::Precondition { .. }) => {
+                        try_acquire_contended(
+                            &self.store,
+                            &Path::from(path.as_str()),
+                            target,
+                            body.clone(),
+                            &mut self.backend_clock,
+                        )
+                        .await
+                    }
+                    Err(source) => Err(store_error(&path, source)),
+                }
+            };
+            match result {
+                Ok(ContendedAcquire::Acquired(etag)) => {
+                    debug!(
+                        lock_path = %path,
+                        holder,
+                        ttl_secs = ttl.as_secs(),
+                        "push lock acquired without waiting"
+                    );
+                    return Ok(PushLock {
+                        store: Arc::clone(&self.store),
+                        path,
+                        ttl,
+                        holder,
+                        etag: Some(etag),
+                        released: false,
+                    });
+                }
+                Ok(ContendedAcquire::Held {
                     holder,
                     expires_at_unix,
-                } => {
+                }) => {
                     return Err(CoordinationError::PushLockHeld {
                         ref_name: target.to_owned(),
                         holder,
                         expires_at_unix,
                     });
                 }
-            },
-        };
-        debug!(lock_path = %path, holder, ttl_secs = ttl.as_secs(), "push lock acquired without waiting");
-        Ok(PushLock {
-            store: Arc::clone(&self.store),
-            path,
-            ttl,
-            holder,
-            etag: Some(etag),
-            released: false,
-        })
+                Err(error)
+                    if coordination_error_is_retryable(&error)
+                        && attempt + 1 < COORDINATION_RETRY_MAX_ATTEMPTS =>
+                {
+                    let delay = coordination_retry_delay(&path, &holder, attempt);
+                    debug!(
+                        lock_path = %path,
+                        retry_attempt = attempt + 1,
+                        retry_limit = COORDINATION_RETRY_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        "retrying transient push-lock probe"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -1167,10 +1199,20 @@ mod tests {
     struct RequestCountingStore {
         inner: Arc<InMemory>,
         requests: Arc<AtomicUsize>,
+        fail_next_create: AtomicBool,
+        fail_next_get: AtomicBool,
         fail_next_update: AtomicBool,
     }
 
     impl RequestCountingStore {
+        fn fail_next_create(&self) {
+            self.fail_next_create.store(true, Ordering::Release);
+        }
+
+        fn fail_next_get(&self) {
+            self.fail_next_get.store(true, Ordering::Release);
+        }
+
         fn fail_next_update(&self) {
             self.fail_next_update.store(true, Ordering::Release);
         }
@@ -1191,6 +1233,14 @@ mod tests {
             options: PutOptions,
         ) -> object_store::Result<PutResult> {
             self.requests.fetch_add(1, Ordering::Relaxed);
+            if matches!(&options.mode, PutMode::Create)
+                && self.fail_next_create.swap(false, Ordering::AcqRel)
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "service unavailable: slow down".into(),
+                });
+            }
             if matches!(&options.mode, PutMode::Update(_))
                 && self.fail_next_update.swap(false, Ordering::AcqRel)
             {
@@ -1216,6 +1266,12 @@ mod tests {
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
             self.requests.fetch_add(1, Ordering::Relaxed);
+            if self.fail_next_get.swap(false, Ordering::AcqRel) {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "service unavailable: slow down".into(),
+                });
+            }
             self.inner.get_opts(location, options).await
         }
 
@@ -1295,6 +1351,8 @@ mod tests {
         let metered = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
@@ -1324,6 +1382,8 @@ mod tests {
         let metered = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
@@ -1497,6 +1557,8 @@ mod tests {
         let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
@@ -1515,6 +1577,78 @@ mod tests {
             setup_store.head(&clock_path).await,
             Err(object_store::Error::NotFound { .. })
         ));
+        blocker.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn try_internal_contention_retries_transient_probe() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store: Arc<dyn ObjectStore> = inner.clone();
+        let blocker = PushLock::acquire_internal(
+            &setup_store,
+            "org/repo",
+            GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let metered_store: Arc<dyn ObjectStore> = metered.clone();
+        let mut context = PushLockAcquireContext::new(metered_store);
+        metered.fail_next_get();
+
+        let blocked = context
+            .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+            .await;
+
+        assert!(matches!(
+            blocked,
+            Err(CoordinationError::PushLockHeld { .. })
+        ));
+        assert!(requests.load(Ordering::Relaxed) >= 3);
+        blocker.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn try_internal_contention_retries_transient_create_probe() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store: Arc<dyn ObjectStore> = inner.clone();
+        let blocker = PushLock::acquire_internal(
+            &setup_store,
+            "org/repo",
+            GIT_MANIFEST_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let metered_store: Arc<dyn ObjectStore> = metered.clone();
+        let mut context = PushLockAcquireContext::new(metered_store);
+        metered.fail_next_create();
+
+        let blocked = context
+            .try_acquire_internal("org/repo", GIT_MANIFEST_RESOURCE, Duration::from_secs(60))
+            .await;
+
+        assert!(matches!(
+            blocked,
+            Err(CoordinationError::PushLockHeld { .. })
+        ));
+        assert!(requests.load(Ordering::Relaxed) >= 2);
         blocker.release().await.unwrap();
     }
 
@@ -1597,6 +1731,8 @@ mod tests {
         let metered_store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
             inner,
             requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
         });
         let mut context = PushLockAcquireContext::new(metered_store);

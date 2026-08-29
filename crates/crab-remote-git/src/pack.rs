@@ -942,7 +942,8 @@ async fn produce_cached_pack(
                     continue;
                 }
                 Err(source) => {
-                    tracing::debug!(
+                    tracing::warn!(
+                        generated_pack_resource = %resource,
                         error = %source,
                         error_debug = ?source,
                         "generated response-pack lease attempt failed"
@@ -1530,11 +1531,31 @@ async fn generate_pack_with_operation(
     let thin_bases = thin_bases.iter().copied().collect::<HashSet<_>>();
     let mut emitted = HashSet::with_capacity(object_ids.len());
     let mut stats = PackAssemblyStats::default();
-    for batch in object_ids.chunks(OBJECT_BATCH_SIZE) {
+    // Dense catalog responses resolve the full OID set once, allowing the
+    // locator to choose one bounded scan instead of repeating point waves for
+    // every pack assembly batch. Range reads remain batch-sized below.
+    let locator_plan = if selected_objects.is_some() {
+        Some(operation.lookup_packed_entry_locators(object_ids).await?)
+    } else {
+        None
+    };
+    for (batch_index, batch) in object_ids.chunks(OBJECT_BATCH_SIZE).enumerate() {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let entries = operation.read_packed_entries(batch).await?;
+        let entries = match locator_plan.as_ref() {
+            Some(locators) => {
+                let start = batch_index.saturating_mul(OBJECT_BATCH_SIZE);
+                let end = start.saturating_add(batch.len());
+                let locators = locators.get(start..end).ok_or(Error::InternalInvariant {
+                    invariant: "dense pack locator plan does not match object batches",
+                })?;
+                operation
+                    .read_packed_entries_with_locators(batch, locators)
+                    .await?
+            }
+            None => operation.read_packed_entries(batch).await?,
+        };
         // Selected dense responses preserve REF_DELTA dependencies by object
         // ID. The conservative path still orders entries for its historical
         // OFS_DELTA handling and thin-pack behavior.

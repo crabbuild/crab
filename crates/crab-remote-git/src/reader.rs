@@ -377,6 +377,64 @@ impl RemoteGitReader {
         Ok(lookups)
     }
 
+    pub(crate) async fn lookup_packed_locators_with_session(
+        &self,
+        session: &GitObjectLocatorSession,
+        requested: &[gix_hash::ObjectId],
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLocator>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut oid_bytes = Vec::new();
+        oid_bytes
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<[u8; 20]>()),
+                source,
+            })?;
+        for oid in requested {
+            oid_bytes.push(
+                oid.as_bytes()
+                    .try_into()
+                    .map_err(|_| Error::UnsupportedObjectFormat)?,
+            );
+        }
+        let lookups = self
+            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+            .await?;
+        drop(oid_bytes);
+        if lookups.len() != requested.len() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Locator,
+            });
+        }
+        let mut locators = Vec::new();
+        locators
+            .try_reserve_exact(requested.len())
+            .map_err(|source| Error::Allocation {
+                requested: requested
+                    .len()
+                    .saturating_mul(std::mem::size_of::<GitObjectLocator>()),
+                source,
+            })?;
+        for (oid, lookup) in requested.iter().copied().zip(lookups) {
+            match lookup {
+                GitObjectLookup::Hit(locator) => locators.push(locator),
+                GitObjectLookup::Corrupt => {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Locator,
+                    });
+                }
+                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
+            }
+        }
+        Ok(locators)
+    }
+
     async fn lookup_batch_from_catalog(
         &self,
         session: &GitObjectLocatorSession,
@@ -628,18 +686,31 @@ impl RemoteGitReader {
         if requested.is_empty() {
             return Ok(Vec::new());
         }
-        let oid_bytes = requested
-            .iter()
-            .map(|oid| {
-                oid.as_bytes()
-                    .try_into()
-                    .map_err(|_| Error::UnsupportedObjectFormat)
-            })
-            .collect::<Result<Vec<[u8; 20]>>>()?;
-        let lookups = self
-            .lookup_batch_for_read(session, &oid_bytes, budget, cancellation)
+        let locators = self
+            .lookup_packed_locators_with_session(session, requested, budget, cancellation)
             .await?;
-        if lookups.len() != requested.len() {
+        self.read_packed_many_with_session_and_locators(
+            requested,
+            &locators,
+            concurrency,
+            budget,
+            cancellation,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_packed_many_with_session_and_locators(
+        self: &Arc<Self>,
+        requested: &[gix_hash::ObjectId],
+        locators: &[GitObjectLocator],
+        concurrency: usize,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<RemoteGitPackedEntry>> {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        if requested.len() != locators.len() {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Locator,
             });
@@ -653,16 +724,7 @@ impl RemoteGitReader {
                     .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
                 source,
             })?;
-        for (oid, lookup) in requested.iter().copied().zip(lookups) {
-            let locator = match lookup {
-                GitObjectLookup::Hit(locator) => locator,
-                GitObjectLookup::Corrupt => {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::Locator,
-                    });
-                }
-                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
-            };
+        for (oid, locator) in requested.iter().copied().zip(locators.iter().copied()) {
             check_limit(
                 "packed entry bytes",
                 locator.location.entry_len,
@@ -2634,6 +2696,23 @@ mod tests {
                 .iter()
                 .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
         );
+        let catalog_oids =
+            vec![gix_hash::ObjectId::from(catalog_oid); PACK_INDEX_LOOKUP_MIN_OBJECTS];
+        let catalog_locators = reader
+            .lookup_packed_locators_with_session(
+                &session,
+                &catalog_oids,
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("packed locator lookup");
+        assert_eq!(catalog_locators.len(), catalog_oids.len());
+        assert!(catalog_locators.iter().all(|locator| {
+            locator.pack_id == pack_id
+                && locator.location.pack_offset == 12
+                && locator.location.entry_len == 96
+        }));
 
         let fallback_request = vec![[2; 20]; PACK_INDEX_LOOKUP_MIN_OBJECTS];
         let fallback_lookups = reader
