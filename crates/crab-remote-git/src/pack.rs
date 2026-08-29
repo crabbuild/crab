@@ -33,7 +33,8 @@ const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // expiry so a short object-store stall cannot create duplicate producers.
 const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(60);
-const GENERATED_PACK_LEASE_POLL: Duration = Duration::from_millis(250);
+const GENERATED_PACK_LEASE_POLL_INITIAL: Duration = Duration::from_millis(250);
+const GENERATED_PACK_LEASE_POLL_MAX: Duration = Duration::from_secs(5);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
@@ -907,6 +908,7 @@ async fn produce_cached_pack(
         tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
     let resource = format!("generated-pack-{}", cache_key.hex());
     let mut recorded_waiter = false;
+    let mut lease_wait_attempt = 0_usize;
     loop {
         if let Some(pack) =
             load_cached_pack(repository, cache_key, object_ids.len(), cancellation).await?
@@ -927,13 +929,15 @@ async fn produce_cached_pack(
                         record_generated_pack_cache(repository, crate::CacheOutcome::Coalesced, 1);
                         recorded_waiter = true;
                     }
+                    let delay = generated_pack_lease_poll(lease_wait_attempt);
+                    lease_wait_attempt = lease_wait_attempt.saturating_add(1);
                     tokio::select! {
                         biased;
                         () = cancellation.cancelled() => return Err(Error::Cancelled),
                         () = tokio::time::sleep_until(deadline) => {
                             return Err(Error::Timeout { operation: "upload-pack" });
                         }
-                        () = tokio::time::sleep(GENERATED_PACK_LEASE_POLL) => {}
+                        () = tokio::time::sleep(delay) => {}
                     }
                     continue;
                 }
@@ -957,6 +961,17 @@ async fn produce_cached_pack(
         )
         .await;
     }
+}
+
+fn generated_pack_lease_poll(attempt: usize) -> Duration {
+    // A long response-pack build must not turn every waiting client into a
+    // descriptor/lease poller, while the five-second cap keeps completion
+    // detection responsive after the producer publishes its artifact.
+    let exponent = attempt.min(5) as u32;
+    let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+    GENERATED_PACK_LEASE_POLL_INITIAL
+        .saturating_mul(multiplier)
+        .min(GENERATED_PACK_LEASE_POLL_MAX)
 }
 
 async fn produce_cached_pack_under_lease(
@@ -1983,6 +1998,21 @@ mod tests {
         };
 
         assert_ne!(current, previous);
+    }
+
+    #[test]
+    fn generated_pack_lease_poll_backoff_is_bounded() {
+        assert_eq!(
+            generated_pack_lease_poll(0),
+            GENERATED_PACK_LEASE_POLL_INITIAL
+        );
+        assert_eq!(generated_pack_lease_poll(1), Duration::from_millis(500));
+        assert_eq!(generated_pack_lease_poll(4), Duration::from_secs(4));
+        assert_eq!(generated_pack_lease_poll(5), GENERATED_PACK_LEASE_POLL_MAX);
+        assert_eq!(
+            generated_pack_lease_poll(usize::MAX),
+            GENERATED_PACK_LEASE_POLL_MAX
+        );
     }
 
     #[test]

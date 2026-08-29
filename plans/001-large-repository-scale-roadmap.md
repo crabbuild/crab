@@ -799,6 +799,14 @@ for a warm lookup, while the artifact checksum, response limit, and corruption
 tests remain unchanged. It is a request-amplification fix, not a substitute
 for the still-required response-pack SLO and provider-range qualification.
 
+Cross-process generated-pack waiters now use bounded exponential lease polling,
+starting at 250 ms and capping at 5 s. A multi-minute response-pack producer no
+longer turns every waiting client into a steady descriptor/lease poller, while
+the existing operation deadline, cancellation path, lease renewal, and
+immutable artifact verification remain unchanged. The backoff bounds and
+cross-runtime waiter-cancellation regression pass; fanout and provider SLO
+qualification remain open.
+
 The assembled-pack follow-up is committed as `d50cbd89`. `PackWriter` already
 updates the Git SHA-1 and content hash on every bounded write, so its finish
 path no longer rereads the complete temporary response solely to recompute
@@ -1007,6 +1015,8 @@ fallback at `1de8e528`):
 - exact catalog batches deduplicate repeated OIDs, and concurrent pack-index
   metadata misses share the immutable source-size `HEAD` through the bounded
   runtime single-flight/cache before fetching the index body.
+- cross-process generated-pack waiters back off their descriptor/lease polls
+  from 250 ms to a bounded 5 s cap while one producer builds a large artifact.
 
 ### PR #87 push-admission follow-up
 
@@ -1957,7 +1967,7 @@ environment dumps, or credentials.
 | 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985` | The e01 owner processed an inventory of 992 packs, swept 991 stale membership rows, and left 2 active serving packs, but took 471.1 s across ten passes; source-index elimination is correctness/IO hardening, not a measured repack wall-time win. The 10,000-push latency, memory, and interruption budgets remain open |
 | 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The b8 same-ref run passes protocol-v2 visibility and the locator request budget. Empty pack hints now remain unconditional in shallow filtering, and current generation-bound large batches avoid reopening every pack index; duplicate exact probes and concurrent index `HEAD` traffic are now bounded too. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; pack-sidecar intake, repack publication, and recovery restore are bounded, but grace-aware retention, interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar/intake plus remote-read coalescing pass. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
+| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar/intake plus remote-read/generated-pack coalescing pass. Generated-pack lease waiters now use bounded 250 ms-to-5 s polling backoff. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
 
 ### Current branch verification evidence
 
