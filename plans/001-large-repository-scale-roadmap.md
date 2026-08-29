@@ -905,6 +905,55 @@ grows and adds a regression that binds the repaired index. The fresh
 passed the real-Git lifecycle, response-loss/crash-recovery lifecycle, and all
 Git 2.30/2.40/2.45/current compatibility jobs on that fix.
 
+### Current-head dense locator and lease-renewal qualification
+
+PR #96 adds two bounded improvements for the large-catalog read and maintenance
+paths. `587f4ee9` builds one generation-pinned locator plan for a dense selected
+pack response and reuses that plan across bounded entry-read batches, instead
+of repeating the same catalog/index lookup for every batch. Sparse selections
+and ordinary full, shallow, and incremental paths retain their existing
+dispatch. `0f1757e9` renews a lease with one conditional update when the owner
+already holds a valid CAS version, falling back to a fresh holder check only
+after a CAS conflict. Its bounded retry deadline retains the last transient
+storage error as the typed coordination source. This fixes the RustFS failure
+where checkpoint-100 owner maintenance exhausted its renewal budget while the
+repository catalog was large.
+
+The isolated qualification
+`codex-0f1757e9-k8s-team-20260829` used Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, 100 replay commits, RustFS, and the
+release binary built from `0f1757e9`. The report is `status=ok`,
+`valid_for_comparison=true`, with 27/27 checks and 919 recorded commands. The
+seed contained 1,637,163 Git objects; after 101 total pushes the catalog held
+1,643,211 objects and the active serving inventory converged from 1 pack at
+seed, through 5 at checkpoint 10, to 2 at checkpoint 100. Owner maintenance
+completed the previously failing checkpoint-100 pass, including the
+95-to-2-pack geometric repack, without a renewal-budget error.
+
+- Full cold clone completed in 165,572 ms end to end; the two-pack response
+  used 2 storage requests, 1,240,337,578 response bytes, and 109,350 ms of
+  pack generation. The warm clone was a verified generated-pack cache hit
+  with 1,920 ms of remote operation time.
+- The dense `blob:none` clone selected 1,102,159 objects, completed in 24,911
+  ms, and used one reused locator plan: 3,152 storage requests, 211,059,156
+  response bytes, 8,560 ms pack generation, and 0 inflated bytes. Its full
+  clone/fsck, deterministic 1,000-object sample, refs, and source-immutability
+  checks passed. The earlier repeated-batch path took roughly 925 seconds on
+  the same repository shape; this is a measured qualification improvement,
+  not a production SLO claim.
+- The 100-client cold shallow-clone fanout had 100/100 successes in 418,722
+  ms (p99 client latency 418,364 ms), and 100 concurrent incremental fetches
+  had 100/100 successes in 39,812 ms (p99 32,095 ms). Twenty independent-ref
+  pushes all succeeded; same-ref contention produced exactly one winner and
+  19 typed rejections. All remote and local qualification artifacts were
+  cleaned.
+
+This closes the observed dense locator lookup amplification and owner-renewal
+failure for this RustFS/Kubernetes profile. It does not close repeatability,
+1,000/10,000-push differentials, cache-service fanout, injected-fault and
+provider matrices, owner failover, retention/GC, canary, or published
+production-SLO gates.
+
 Implemented on the current branch (pre-lazy qualification evidence at
 `04655f3b`; latest admission hardening at `0ba86693`; qualification-contract
 fix at `0a8e4aa8`; capability-admission fix at `3bd7a02b`; filtered-fetch
@@ -913,7 +962,8 @@ transition-bitmap fix at `01d588ea`; lazy catalog follow-up at `cbe848f4`;
 reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 `4a8fc34e`; regular locator budgeting at `88deb4e0`; stale owner-plan guard at
 `5465031e`; small-catalog point-read policy at `62d35c14`; bounded pack-hint
-fallback at `1de8e528`):
+fallback at `1de8e528`; dense locator-plan reuse at `587f4ee9`; direct-CAS
+lease renewal at `0f1757e9`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -1984,11 +2034,11 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT SINGLE-CLIENT EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528` | The current full run ends with 2 active packs and the e01 pack-source qualification retains 1,003 immutable physical history objects while serving converges to 2. The b8 locator startup smoke passes its 500-request regression budget. Large current catalogs now avoid pack-count-by-batch lookup amplification, and pack sidecar intake/publication fallback are bounded; exact batches also deduplicate repeated OIDs and pack-index metadata misses share bounded source-size reads. Response-pack egress, fanout, retention, and provider SLOs remain open |
-| 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6` | The e01 owner processed an inventory of 992 packs, swept 991 stale membership rows, and left 2 active serving packs, but took 471.1 s across ten passes; stale membership scans now use bounded read-ahead/fetch-task settings, while source-index elimination remains correctness/IO hardening rather than a measured repack wall-time win. The 10,000-push latency, memory, interruption, and scan differential budgets remain open |
-| 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The b8 same-ref run passes protocol-v2 visibility and the locator request budget. Empty pack hints now remain unconditional in shallow filtering, and current generation-bound large batches avoid reopening every pack index; duplicate exact probes and concurrent index `HEAD` traffic are now bounded too. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
+| 2 | IMPLEMENTED; CURRENT DENSE-READ EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9` | The current 100-replay run ends with 2 active packs, and its dense blob:none clone selects 1,102,159 objects in 24,911 ms with 3,152 storage requests after reusing one locator plan across batches. Large current catalogs avoid pack-count-by-batch lookup amplification, and pack sidecar intake/publication fallback are bounded; exact batches also deduplicate repeated OIDs and pack-index metadata misses share bounded source-size reads. Response-pack egress, fanout, retention, and provider SLOs remain open |
+| 3 | IMPLEMENTED; RENEWAL FAILURE REPAIRED; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9` | The current checkpoint-100 owner completed the previously failing large-catalog pass, including 95-to-2-pack geometric repack, without a renewal-budget error. Direct-CAS renewal and typed retry-source regressions pass; the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
+| 4 | IMPLEMENTED; CURRENT FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9` | The current 100-replay run passes incremental and depth-1/10/100/1,000 correctness, 100/100 concurrent incremental fetches, and the dense filtered clone. Its warm full clone is a verified cache hit. The 10,000-push shallow differential, response-pack SLO, provider range behavior, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; stale membership cleanup now uses bounded scan read-ahead, while pack-sidecar intake, repack publication, and recovery restore are bounded. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar/intake plus remote-read/generated-pack coalescing pass. Generated-pack lease waiters now use bounded 250 ms-to-5 s polling backoff, and cache-service miss registrations release on cancellation while active waiters retain coalescing. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
+| 6 | PARTIAL; CURRENT 100-CLIENT CORRECTNESS PASS | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9` | The current 27-check run passes 100/100 cold shallow-clone fanout, 100/100 concurrent incremental fetches, 20/20 independent-ref pushes, exact same-ref 1-winner/19-rejection contention, fsck/ref/object/source checks, and remote cleanup. The cold fanout p99 is 418,364 ms on local RustFS, so this is correctness evidence and a measured bottleneck, not an SLO pass; cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout gates remain pending |
 
 ### Current branch verification evidence
 
