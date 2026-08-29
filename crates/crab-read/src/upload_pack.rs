@@ -950,11 +950,7 @@ async fn visibility_object_selection(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<VisibilityObjectSelection>> {
-    if request.wants.is_empty()
-        || !request.shallow.is_empty()
-        || request.deepen.is_some()
-        || request.deepen_relative
-    {
+    if request.wants.is_empty() || request.deepen.is_some() || request.deepen_relative {
         return Ok(None);
     }
 
@@ -1108,7 +1104,6 @@ fn plan_from_visibility(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
         || !matches!(request.filter, UploadPackFilter::None)
@@ -1290,7 +1285,6 @@ async fn plan_from_visibility_catalog(
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if !request.filter.is_catalog_exact()
         || request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
     {
@@ -1578,7 +1572,6 @@ async fn plan_from_visibility_source(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.wants.is_empty()
-        || !request.shallow.is_empty()
         || request.deepen.is_some()
         || request.deepen_relative
         || !matches!(request.filter, UploadPackFilter::None)
@@ -2224,11 +2217,6 @@ mod tests {
             },
             UploadPackRequest {
                 wants: vec![oid('1')],
-                shallow: vec![oid('3')],
-                ..UploadPackRequest::default()
-            },
-            UploadPackRequest {
-                wants: vec![oid('1')],
                 deepen: Some(1),
                 ..UploadPackRequest::default()
             },
@@ -2638,6 +2626,9 @@ mod tests {
         let request = UploadPackRequest {
             wants: vec![oid('3')],
             haves: vec![oid('1'), oid('f')],
+            // A normal fetch from a shallow clone does not move its boundary.
+            // The generation-bound transition is therefore exact and avoids a tree walk.
+            shallow: vec![oid('1')],
             ..UploadPackRequest::default()
         };
 
@@ -2657,6 +2648,8 @@ mod tests {
 
         assert_eq!(plan.object_ids, vec![oid('3'), oid('4')]);
         assert_eq!(plan.common_haves, vec![oid('1')]);
+        assert!(plan.shallow.is_empty());
+        assert!(plan.unshallow.is_empty());
     }
 
     #[test]
