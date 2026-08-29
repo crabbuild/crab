@@ -5767,29 +5767,7 @@ pub(crate) async fn while_renewing_internal_lock<T>(
     lock: &mut PushLock,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
-    let mut ticker = tokio::time::interval(renewal_interval);
-    ticker.tick().await;
-    tokio::pin!(operation);
-    let mut renewal_error = None;
-    loop {
-        tokio::select! {
-            result = &mut operation => {
-                return match result {
-                    Err(error) => Err(error),
-                    Ok(value) => match renewal_error {
-                        Some(error) => Err(CrabError::from(error)),
-                        None => Ok(value),
-                    },
-                };
-            }
-            _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = lock.renew().await {
-                    renewal_error = Some(error);
-                }
-            }
-        }
-    }
+    while_renewing_internal_lock_impl(lock, None, operation).await
 }
 
 pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
@@ -5797,13 +5775,23 @@ pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
     failure_cancel: &CancellationToken,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
+    while_renewing_internal_lock_impl(lock, Some(failure_cancel), operation).await
+}
+
+async fn while_renewing_internal_lock_impl<T>(
+    lock: &mut PushLock,
+    failure_cancel: Option<&CancellationToken>,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
     let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
     let mut ticker = tokio::time::interval(renewal_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
     tokio::pin!(operation);
     let mut renewal_error = None;
     loop {
         tokio::select! {
+            biased;
             result = &mut operation => {
                 return match result {
                     Err(error) => Err(error),
@@ -5814,9 +5802,29 @@ pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
                 };
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
-                if let Err(error) = lock.renew().await {
-                    failure_cancel.cancel();
-                    renewal_error = Some(error);
+                // A backend CAS may consume its full retry deadline. Keep polling completed
+                // maintenance so a successful operation can release a still-valid lease.
+                let renewal = lock.renew();
+                tokio::pin!(renewal);
+                tokio::select! {
+                    biased;
+                    result = &mut renewal => {
+                        if let Err(error) = result {
+                            if let Some(failure_cancel) = failure_cancel {
+                                failure_cancel.cancel();
+                            }
+                            renewal_error = Some(error);
+                        }
+                    }
+                    result = &mut operation => {
+                        return match result {
+                            Err(error) => Err(error),
+                            Ok(value) => match renewal_error {
+                                Some(error) => Err(CrabError::from(error)),
+                                None => Ok(value),
+                            },
+                        };
+                    }
                 }
             }
         }
@@ -25070,6 +25078,53 @@ mod tests {
 
         assert!(result.is_err());
         assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn completed_owner_does_not_wait_for_stalled_renewal() {
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(1));
+        let store: Arc<dyn ObjectStore> = Arc::new(GatedPutStore {
+            inner: object_store::memory::InMemory::new(),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            head_started: None,
+            head_release: None,
+        });
+        let mut lock = PushLock::acquire_internal(
+            &store,
+            "org/repo",
+            crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
+            Duration::from_secs(3),
+        )
+        .await
+        .expect("acquire owner");
+        started
+            .acquire()
+            .await
+            .expect("observe owner acquisition")
+            .forget();
+        let operation_started = Arc::clone(&started);
+        let cancel = CancellationToken::new();
+
+        tokio::time::timeout(
+            Duration::from_millis(1_500),
+            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async move {
+                operation_started
+                    .acquire()
+                    .await
+                    .expect("observe stalled renewal")
+                    .forget();
+                Ok(())
+            }),
+        )
+        .await
+        .expect("completed owner must win over a stalled renewal")
+        .expect("owner operation succeeds");
+        assert!(!cancel.is_cancelled());
+
+        release.add_permits(1);
+        lock.release().await.expect("release owner");
     }
 
     #[tokio::test]
