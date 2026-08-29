@@ -23390,13 +23390,13 @@ mod tests {
         );
         assert_eq!(interrupted_snapshot.journal.transactions.len(), 1);
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must fail closed until terminal admission compacts the orphaned journal"
+            "protocol v2 must remain available while terminal admission can compact an orphaned journal"
         );
         let unchanged = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
@@ -23554,13 +23554,13 @@ mod tests {
             .expect("read pending journal state");
         assert_eq!(pending.journal.transactions.len(), 1);
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must fail closed until terminal admission compacts the orphaned journal"
+            "protocol v2 must remain available while terminal admission can compact an orphaned journal"
         );
 
         let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
@@ -23740,8 +23740,8 @@ mod tests {
         .await
         .expect("join capability discovery");
         assert!(
-            !v2_ready,
-            "capability discovery must fail closed until admission repairs catalog-bound coverage"
+            v2_ready,
+            "capability discovery must keep filtered fetch available while admission repairs catalog-bound coverage"
         );
         let still_stale = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
