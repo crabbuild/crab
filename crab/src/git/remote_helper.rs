@@ -752,6 +752,9 @@ async fn run_remote_helper_with_context(
         managed_repository,
         caching_store,
     } = context;
+    // Protocol v2 advertises and serves one immutable repository view. Keep
+    // the selected store and layout together so the handoff cannot drift.
+    let mut pinned_read_store = None;
 
     loop {
         let Some(batch) = read_batch(
@@ -773,11 +776,20 @@ async fn run_remote_helper_with_context(
             let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
             let fetch_policy = fetch_admission_policy(cache.config());
             let result = if service == "git-upload-pack" {
+                let (read_store, read_router) = pinned_read_store_for_batch(
+                    &mut pinned_read_store,
+                    &store,
+                    &prefix,
+                    Some(invocation_url.as_str()),
+                    cache.config(),
+                    &cancel,
+                )
+                .await;
                 crate::git::upload_pack_wire::serve(
                     &mut reader,
                     &mut writer,
-                    store.as_storage(),
-                    &prefix,
+                    read_store.as_storage(),
+                    read_router.repo_prefix(),
                     &hidden_ref_patterns,
                     &fetch_policy,
                     options.progress,
@@ -796,6 +808,20 @@ async fn run_remote_helper_with_context(
                 tracing::warn!(error = %error, "failed to save push state");
             }
             return result;
+        }
+        if matches!(batch, Batch::Capabilities) {
+            let (read_store, read_router) = pinned_read_store_for_batch(
+                &mut pinned_read_store,
+                &store,
+                &prefix,
+                Some(invocation_url.as_str()),
+                cache.config(),
+                &cancel,
+            )
+            .await;
+            dispatch_capabilities(&mut writer, &read_store, &read_router, &mut cache, &cancel)
+                .await?;
+            continue;
         }
         dispatch_batch(
             &batch,
@@ -1132,6 +1158,35 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    cache: &mut SessionCache,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    tracing::debug!("responding to capabilities");
+    let has_graph =
+        has_commit_graph_summary(Some(store), router.repo_prefix(), Some(router), cache).await;
+    let v2_ready = if crate::git::upload_pack_wire::hidden_ref_patterns_are_valid(
+        &cache.config().transfer_hide_refs,
+    ) {
+        crate::git::upload_pack_wire::snapshot_available(
+            store.as_storage(),
+            router.repo_prefix(),
+            cancel,
+        )
+        .await
+    } else {
+        tracing::warn!("invalid transfer.hideRefs pattern; protocol-v2 remains unavailable");
+        false
+    };
+    let caps = format_capabilities_with_v2(has_graph, v2_ready);
+    writer.write_all(caps.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Dispatch a collected batch and write the response.
 #[expect(
     clippy::too_many_arguments,
@@ -1161,31 +1216,14 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
             ));
         }
         Batch::Capabilities => {
-            tracing::debug!("responding to capabilities");
-            let router = store.map(|s| StoreLayout::new(s.clone(), prefix.to_owned()));
-            let has_graph = has_commit_graph_summary(store, prefix, router.as_ref(), cache).await;
-            let v2_ready = if let Some(store) = store {
-                if crate::git::upload_pack_wire::hidden_ref_patterns_are_valid(
-                    &cache.config().transfer_hide_refs,
-                ) {
-                    crate::git::upload_pack_wire::snapshot_available(
-                        store.as_storage(),
-                        prefix,
-                        cancel,
-                    )
-                    .await
-                } else {
-                    tracing::warn!(
-                        "invalid transfer.hideRefs pattern; protocol-v2 remains unavailable"
-                    );
-                    false
-                }
+            if let Some(store) = store {
+                let router = StoreLayout::new(store.clone(), prefix.to_owned());
+                dispatch_capabilities(writer, store, &router, cache, cancel).await?;
             } else {
-                false
-            };
-            let caps = format_capabilities_with_v2(has_graph, v2_ready);
-            writer.write_all(caps.as_bytes()).await?;
-            writer.flush().await?;
+                let caps = format_capabilities_with_v2(false, false);
+                writer.write_all(caps.as_bytes()).await?;
+                writer.flush().await?;
+            }
         }
         Batch::List { for_push } => {
             tracing::debug!(for_push, "list requested");
@@ -1770,6 +1808,62 @@ where
             primary_store_for_batch(primary_store, prefix)
         }
     }
+}
+
+async fn pinned_read_store_for_batch(
+    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    primary_store: &crate::storage::store::Store,
+    prefix: &str,
+    remote_url: Option<&str>,
+    config: &crate::core::config::Config,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> (crate::storage::store::Store, StoreLayout) {
+    pinned_read_store_for_batch_with_selector(
+        pinned,
+        primary_store,
+        prefix,
+        remote_url,
+        config,
+        cancel,
+        |config, parsed, cancel| async move {
+            crate::replication::select_read_store(&config, &parsed, "fetch", &cancel).await
+        },
+    )
+    .await
+}
+
+async fn pinned_read_store_for_batch_with_selector<F, Fut>(
+    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    primary_store: &crate::storage::store::Store,
+    prefix: &str,
+    remote_url: Option<&str>,
+    config: &crate::core::config::Config,
+    cancel: &tokio_util::sync::CancellationToken,
+    select_read: F,
+) -> (crate::storage::store::Store, StoreLayout)
+where
+    F: FnOnce(
+        crate::core::config::Config,
+        crate::git::url::CrabUrl,
+        tokio_util::sync::CancellationToken,
+    ) -> Fut,
+    Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
+{
+    if let Some((store, router)) = pinned {
+        return (store.clone(), router.clone());
+    }
+
+    let selected = read_store_for_batch_with_selector(
+        primary_store,
+        prefix,
+        remote_url,
+        config,
+        cancel,
+        select_read,
+    )
+    .await;
+    *pinned = Some(selected.clone());
+    selected
 }
 
 /// Check whether the committed manifest pins a split commit graph.
@@ -3040,7 +3134,8 @@ mod tests {
             "1111111111111111111111111111111111111111",
         )
         .await;
-        let (replica_store, replica_router) = memory_store_with_manifest(
+        let (replica_store, replica_router) = memory_store_with_manifest_at_prefix(
+            "replica/repo",
             "refs/heads/main",
             "2222222222222222222222222222222222222222",
         )
@@ -3195,6 +3290,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protocol_v2_read_store_is_selected_once_and_pinned() {
+        let (primary_store, _primary_router) = memory_store_with_manifest(
+            "refs/heads/main",
+            "1111111111111111111111111111111111111111",
+        )
+        .await;
+        let (replica_store, replica_router) = memory_store_with_manifest_at_prefix(
+            "replica/repo",
+            "refs/heads/main",
+            "2222222222222222222222222222222222222222",
+        )
+        .await;
+        let config = config_with_read_replica();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let selector_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pinned = None;
+
+        for _ in 0..2 {
+            let selector_calls = std::sync::Arc::clone(&selector_calls);
+            let replica_store = replica_store.clone();
+            let replica_router = replica_router.clone();
+            let (read_store, router) = pinned_read_store_for_batch_with_selector(
+                &mut pinned,
+                &primary_store,
+                "org/repo",
+                Some("crab://primary/org/repo"),
+                &config,
+                &cancel,
+                move |_, _, _| async move {
+                    selector_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(crate::replication::ReadStoreSelection {
+                        store: replica_store,
+                        router: replica_router,
+                        source: crate::replication::ReadSource::Replica {
+                            name: "west".into(),
+                        },
+                    })
+                },
+            )
+            .await;
+            let output = read_remote_refs(&read_store, &router, &[])
+                .await
+                .expect("read pinned replica refs");
+            assert_eq!(
+                output.refs[0].sha,
+                "2222222222222222222222222222222222222222"
+            );
+            assert_eq!(router.repo_prefix(), "replica/repo");
+        }
+
+        assert_eq!(selector_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn fetch_batch_accepts_refs_from_selected_replica_manifest() {
         let _guard = GitWorktreeGuard::new();
         let replica_tip = TEST_GIT_REPO.commit_sha.clone();
@@ -3302,6 +3451,14 @@ mod tests {
         ref_name: &str,
         sha: &str,
     ) -> (crate::storage::store::Store, StoreLayout) {
+        memory_store_with_manifest_at_prefix("org/repo", ref_name, sha).await
+    }
+
+    async fn memory_store_with_manifest_at_prefix(
+        prefix: &str,
+        ref_name: &str,
+        sha: &str,
+    ) -> (crate::storage::store::Store, StoreLayout) {
         use crate::metadata::manifest::{Manifest, create_manifest};
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -3310,7 +3467,7 @@ mod tests {
 
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
-        let router = StoreLayout::new(store.clone(), "org/repo".to_string());
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
         let refs = BTreeMap::from([(ref_name.to_owned(), sha.to_owned())]);
         let mut manifest = Manifest {
             version: 2,

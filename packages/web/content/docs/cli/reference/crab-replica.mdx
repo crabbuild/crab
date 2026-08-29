@@ -43,5 +43,12 @@ Use `crab replica doctor` for configuration and readiness diagnostics. Use
 `promote` or `set-primary` only as guarded disaster-recovery operations after
 reviewing the generated plan and provider state.
 
+Read-enabled replicas participate in both legacy Git fetches and protocol-v2
+clone/fetch sessions. Protocol v2 selects the ready replica before capability
+advertisement and pins its storage location for the upload-pack session. For a
+fresh clone, make the replica-bearing `.crab.toml` discoverable in the clone
+directory or one of its ancestors because the repository's committed config is
+not available until the initial fetch completes.
+
 Run `crab replica <subcommand> --help` for the exact provider, active-active,
 failover, and evidence options available in the installed CLI.

@@ -3184,7 +3184,7 @@ pub async fn run_hydrate_in(
     let filter = if manifest_entries.is_some() {
         // Manifest mode: match everything — filtering is done by the
         // manifest entries themselves during the walk.
-        Some(build_filter(&["**/*".to_owned()], &[])?)
+        Some(build_filter(&["*".to_owned()], &[])?)
     } else {
         resolve_patterns(args, config)?
     };
@@ -3663,7 +3663,7 @@ pub fn resolve_git_pointer_prefetch_candidates(
 ) -> Result<Vec<(PathBuf, Pointer)>> {
     let manifest_entries = resolve_manifest(args, root)?;
     let filter = if manifest_entries.is_some() {
-        build_filter(&["**/*".to_owned()], &[])?
+        build_filter(&["*".to_owned()], &[])?
     } else {
         let Some(filter) = resolve_patterns(args, config)? else {
             return Ok(Vec::new());
@@ -3699,7 +3699,7 @@ pub fn resolve_all_ref_pointer_prefetch_candidates(
     cancel: &CancellationToken,
 ) -> Result<Vec<(PathBuf, Pointer)>> {
     let include = if include.is_empty() {
-        vec!["**/*".to_owned()]
+        vec!["*".to_owned()]
     } else {
         include.to_vec()
     };
@@ -4402,7 +4402,7 @@ fn build_manifest_filter(
 fn resolve_patterns(args: &HydrateArgs, config: &Config) -> Result<Option<PatternFilter>> {
     // --all: match everything.
     if args.all {
-        let filter = build_filter(&["**/*".to_owned()], &[])?;
+        let filter = build_filter(&["*".to_owned()], &[])?;
         return Ok(Some(filter));
     }
 
@@ -4415,7 +4415,7 @@ fn resolve_patterns(args: &HydrateArgs, config: &Config) -> Result<Option<Patter
     // Explicit --include/--exclude flags.
     if !args.include.is_empty() || !args.exclude.is_empty() {
         let include = if args.include.is_empty() {
-            vec!["**/*".to_owned()]
+            vec!["*".to_owned()]
         } else {
             args.include.clone()
         };
@@ -4426,7 +4426,7 @@ fn resolve_patterns(args: &HydrateArgs, config: &Config) -> Result<Option<Patter
     // Fall back to persistent config patterns.
     if !config.hydrate.include.is_empty() || !config.hydrate.exclude.is_empty() {
         let include = if config.hydrate.include.is_empty() {
-            vec!["**/*".to_owned()]
+            vec!["*".to_owned()]
         } else {
             config.hydrate.include.clone()
         };
@@ -5314,6 +5314,7 @@ mod tests {
         };
         let config = Config::default();
         let filter = resolve_patterns(&args, &config).unwrap().unwrap();
+        assert!(filter.matches("file.bin"));
         assert!(filter.matches("any/path/file.bin"));
     }
 

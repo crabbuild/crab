@@ -117,6 +117,12 @@ verified. Use `crab replica backfill status` to inspect that gate directly.
 In read-replica mode, the `[remote]` URL remains the write authority.
 `[replication]` only augments read routing.
 
+Git protocol v2 clone and fetch select a ready replica before capability
+advertisement, then pin that replica's store and repository prefix for the
+upload-pack session. A fresh clone can use replica routing when `.crab.toml` is
+discoverable in the clone directory or one of its ancestors; the copy inside
+the repository is not available until after the initial Git fetch.
+
 Active-active mode adds coordinator and writer-region config:
 
 ```toml
