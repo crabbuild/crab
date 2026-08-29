@@ -841,6 +841,15 @@ fn lookup_strategy(
     let small_catalog_compacted = inventory_objects <= SMALL_CATALOG_MAX_OBJECTS
         && active_ssts >= MIN_AMPLIFIED_SCAN_SSTS
         && requested.saturating_mul(SMALL_CATALOG_REQUEST_RATIO) >= inventory_objects;
+    // Broad SHA ranges cannot use a bounded key-span scan. Once the catalog
+    // spans several SSTs, each exact OID probes every layer, so scale the
+    // existing 1/64 crossover by that layer fan-out.
+    let broad_multi_sst_dense = key_span == OidKeySpan::Broad
+        && active_ssts >= MIN_AMPLIFIED_SCAN_SSTS
+        && requested
+            .saturating_mul(FULL_SCAN_REQUEST_RATIO)
+            .saturating_mul(active_ssts)
+            >= inventory_objects;
     if small_catalog_compacted
         || (compaction_amplified && (key_span == OidKeySpan::Narrow || near_complete))
     {
@@ -851,9 +860,11 @@ fn lookup_strategy(
     if requested_objects < MIN_SCAN_LOOKUP_OBJECTS {
         return LookupStrategy::Exact;
     }
+    let ordinary_full_scan_dense = requested.saturating_mul(FULL_SCAN_REQUEST_RATIO)
+        >= inventory_objects
+        && (key_span == OidKeySpan::Narrow || near_complete);
     if requested_objects >= FULL_SCAN_MIN_LOOKUP_OBJECTS
-        && requested.saturating_mul(FULL_SCAN_REQUEST_RATIO) >= inventory_objects
-        && (key_span == OidKeySpan::Narrow || near_complete)
+        && (ordinary_full_scan_dense || broad_multi_sst_dense)
     {
         return LookupStrategy::FullScan {
             row_limit: usize::try_from(inventory_objects).unwrap_or(usize::MAX),
@@ -1263,6 +1274,30 @@ mod tests {
         assert_eq!(
             lookup_strategy(12, 52, 14, OidKeySpan::Broad),
             LookupStrategy::FullScan { row_limit: 52 }
+        );
+    }
+
+    #[test]
+    fn compacted_large_catalogs_scan_broad_multiwave_requests() {
+        assert_eq!(
+            lookup_strategy(30_031, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_643_226,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(6_900, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_643_226,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(4_279, 1_643_226, 6, OidKeySpan::Broad),
+            LookupStrategy::Exact
+        );
+        assert_eq!(
+            lookup_strategy(30_031, 1_643_226, 3, OidKeySpan::Broad),
+            LookupStrategy::Exact
         );
     }
 
