@@ -1410,22 +1410,59 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Inventory,
             })?;
         let path = repo_pack_index_path(&self.repo_prefix, &pack_id);
-        let origin_permit = self.runtime.origin_permit(cancellation).await?;
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        let metadata = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            metadata = self.store.head(&path) => metadata?,
+        let source_size = if let Some(source_size) =
+            self.runtime.cached_pack_index_source_size(&cache_key).await
+        {
+            source_size
+        } else {
+            // HEAD is immutable metadata, but it still consumes an origin
+            // request. Coalesce concurrent misses before reading the index so
+            // a fanout of delta-base lookups does not multiply HEAD traffic.
+            budget.charge(BudgetDimension::StorageRequests, 1).await?;
+            let store = self.store.clone();
+            let path = path.clone();
+            let work_runtime = Arc::clone(&self.runtime);
+            let source_size = self
+                .runtime
+                .load_pack_index_size_singleflight(
+                    cache_key.clone(),
+                    cancellation,
+                    move |shared_cancellation| async move {
+                        let origin_permit =
+                            work_runtime.origin_permit(&shared_cancellation).await?;
+                        let metadata = tokio::select! {
+                            biased;
+                            () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
+                            metadata = store.head(&path) => metadata?,
+                        };
+                        drop(origin_permit);
+                        Ok(metadata.size)
+                    },
+                )
+                .await?;
+            self.runtime
+                .insert_pack_index_source_size(cache_key.clone(), source_size)
+                .await;
+            source_size
         };
-        drop(origin_permit);
         check_limit(
             "pack index bytes",
-            metadata.size,
+            source_size,
             self.limits.max_pack_index_bytes,
         )?;
-        charge_origin_range(budget, metadata.size).await?;
+        // A concurrent producer may have populated the parsed cache while this
+        // caller waited for the size flight. Avoid charging or loading it
+        // again when the verified index is already available.
+        if let Some(index) = self
+            .runtime
+            .cached_pack_index(&cache_key, self.limits.max_pack_index_bytes)
+            .await
+        {
+            return Ok(index);
+        }
+        charge_origin_range(budget, source_size).await?;
         let store = self.store.clone();
-        let size = metadata.size;
+        let size = source_size;
         let flight_runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let index = flight_runtime

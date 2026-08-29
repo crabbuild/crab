@@ -358,26 +358,27 @@ impl GitObjectLocatorSession {
         inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
     ) -> Result<Vec<GitObjectLookup>> {
         let bindings = &self.bindings;
-        let fetched: Vec<(usize, GitObjectLookup)> =
-            stream::iter(object_ids.iter().copied().enumerate().map(|(index, oid)| {
+        let unique_object_ids = object_ids.iter().copied().collect::<HashSet<_>>();
+        let fetched: Vec<([u8; 20], GitObjectLookup)> =
+            stream::iter(unique_object_ids.into_iter().map(|oid| {
                 let reader = Arc::clone(reader);
                 async move {
                     let value = reader.get(object_key(&oid)).await.map_err(read_error)?;
                     let lookup = value.map_or(GitObjectLookup::Miss, |value| {
                         classify_location(&value, bindings, inventory)
                     });
-                    Ok::<_, MetadataError>((index, lookup))
+                    Ok::<_, MetadataError>((oid, lookup))
                 }
             }))
             .buffer_unordered(LOOKUP_CONCURRENCY.min(object_ids.len()).max(1))
             .try_collect()
             .await?;
 
-        let mut lookups = vec![GitObjectLookup::Miss; object_ids.len()];
-        for (index, lookup) in fetched {
-            lookups[index] = lookup;
-        }
-        Ok(lookups)
+        let fetched = fetched.into_iter().collect::<HashMap<_, _>>();
+        Ok(object_ids
+            .iter()
+            .map(|oid| fetched.get(oid).copied().unwrap_or(GitObjectLookup::Miss))
+            .collect())
     }
 
     async fn lookup_batch_by_scan(
@@ -1532,6 +1533,30 @@ mod tests {
                 GitObjectLookup::Miss
             ]
         ));
+        session.close().await.expect("close reader");
+    }
+
+    #[tokio::test]
+    async fn exact_batch_reuses_one_lookup_for_repeated_oids() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let fixture = publish(Arc::clone(&store), pack(1), [6; 20], None).await;
+        let inventory = HashMap::from([(fixture.pack.pack_id, fixture.inventory)]);
+        let session = GitObjectLocatorSession::open(store, "org/repo")
+            .await
+            .expect("open reader");
+
+        let lookups = session
+            .lookup_batch(
+                &[fixture.oid, fixture.oid, [7; 20], fixture.oid],
+                &inventory,
+            )
+            .await
+            .expect("duplicate batch lookup");
+        assert_eq!(lookups.len(), 4);
+        assert!(matches!(lookups[0], GitObjectLookup::Hit(_)));
+        assert_eq!(lookups[0], lookups[1]);
+        assert_eq!(lookups[0], lookups[3]);
+        assert_eq!(lookups[2], GitObjectLookup::Miss);
         session.close().await.expect("close reader");
     }
 
