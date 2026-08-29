@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
@@ -162,8 +162,18 @@ impl crab_remote_git::GeneratedPackLeaseProvider for ObjectStoreGeneratedPackLea
                         }
                     }
                 }
-                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
-                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held)
+                Err(crab_coordination::CoordinationError::PushLockHeld {
+                    expires_at_unix, ..
+                }) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let retry_after = expires_at_unix
+                        .map(|expires_at| Duration::from_secs(expires_at.saturating_sub(now)))
+                        .unwrap_or(ttl)
+                        .min(ttl);
+                    Ok(crab_remote_git::GeneratedPackLeaseAttempt::Held { retry_after })
                 }
                 Err(error) => Err(crab_remote_git::GeneratedPackLeaseError::new(error)),
             }
@@ -2215,7 +2225,7 @@ mod tests {
         .expect("first lease acquisition")
         {
             crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
                 panic!("first lease must be available")
             }
         };
@@ -2226,10 +2236,14 @@ mod tests {
         )
         .await
         .expect("contending lease acquisition");
-        assert!(matches!(
-            blocked,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held
-        ));
+        let retry_after = match blocked {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { retry_after } => retry_after,
+            crab_remote_git::GeneratedPackLeaseAttempt::Acquired(_) => {
+                panic!("contending lease must remain held")
+            }
+        };
+        assert!(!retry_after.is_zero());
+        assert!(retry_after <= Duration::from_secs(5));
 
         first.release().await.expect("release first lease");
         let replacement = match crab_remote_git::GeneratedPackLeaseProvider::try_acquire(
@@ -2241,7 +2255,7 @@ mod tests {
         .expect("replacement lease acquisition")
         {
             crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
                 panic!("released lease must be acquirable")
             }
         };
@@ -2265,7 +2279,7 @@ mod tests {
         .expect("lease acquisition")
         {
             crab_remote_git::GeneratedPackLeaseAttempt::Acquired(lease) => lease,
-            crab_remote_git::GeneratedPackLeaseAttempt::Held => {
+            crab_remote_git::GeneratedPackLeaseAttempt::Held { .. } => {
                 panic!("lease must be available")
             }
         };

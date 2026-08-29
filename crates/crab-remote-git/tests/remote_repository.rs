@@ -1747,17 +1747,22 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
         .repository
         .generated_pack_request_cache_key([11; 32], [12; 32]);
     let producer_polls = Arc::new(AtomicUsize::new(0));
+    let producer_started = Arc::new(Notify::new());
+    let release_producer = Arc::new(Notify::new());
 
-    fixture.backend.block_next_pack_get();
     let first_objects = object_ids.clone();
     let first_polls = Arc::clone(&producer_polls);
     let first_producer_repository = first_repository.clone();
+    let first_started = Arc::clone(&producer_started);
+    let first_release = Arc::clone(&release_producer);
     let first = tokio::spawn(async move {
         first_repository
             .generate_pack_request_cached(
                 key,
                 async move {
                     first_polls.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
                     first_producer_repository
                         .generate_pack(&first_objects, &CancellationToken::new())
                         .await
@@ -1766,7 +1771,7 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
             )
             .await
     });
-    fixture.backend.wait_for_blocked_pack_get().await;
+    producer_started.notified().await;
 
     let second_objects = object_ids.clone();
     let second_polls = Arc::clone(&producer_polls);
@@ -1787,8 +1792,10 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
     });
     lease_provider.wait_for_held_attempt().await;
     assert_eq!(producer_polls.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lease_provider.held_attempts.load(Ordering::SeqCst), 1);
 
-    fixture.backend.release_blocked_pack_get();
+    release_producer.notify_one();
     let first_pack = first
         .await
         .expect("first request joins")
@@ -1852,7 +1859,9 @@ impl GeneratedPackLeaseProvider for TestGeneratedPackLeaseProvider {
                 Err(_) => {
                     self.held_attempts.fetch_add(1, Ordering::SeqCst);
                     self.held_notify.notify_waiters();
-                    GeneratedPackLeaseAttempt::Held
+                    GeneratedPackLeaseAttempt::Held {
+                        retry_after: Duration::from_secs(1),
+                    }
                 }
             })
         })

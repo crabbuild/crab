@@ -33,8 +33,10 @@ const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // expiry so a short object-store stall cannot create duplicate producers.
 const GENERATED_PACK_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 const GENERATED_PACK_LEASE_RENEWAL: Duration = Duration::from_secs(60);
-const GENERATED_PACK_LEASE_POLL_INITIAL: Duration = Duration::from_millis(250);
-const GENERATED_PACK_LEASE_POLL_MAX: Duration = Duration::from_secs(5);
+const GENERATED_PACK_CACHE_POLL_INITIAL: Duration = Duration::from_secs(1);
+const GENERATED_PACK_CACHE_POLL_MAX: Duration = Duration::from_secs(30);
+const GENERATED_PACK_LEASE_PROBE_MAX: Duration = Duration::from_secs(60);
+const GENERATED_PACK_TAKEOVER_JITTER_MAX: Duration = Duration::from_secs(30);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
@@ -121,8 +123,10 @@ pub trait GeneratedPackLease: Send {
 
 /// Result of one non-blocking generated-pack lease acquisition attempt.
 pub enum GeneratedPackLeaseAttempt {
+    /// The caller owns response-pack production until release or expiry.
     Acquired(Box<dyn GeneratedPackLease>),
-    Held,
+    /// Another producer owns the lease for at most `retry_after` longer.
+    Held { retry_after: Duration },
 }
 
 /// Product-owned cross-process coordination for generated pack production.
@@ -1010,7 +1014,9 @@ async fn produce_cached_pack(
         tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
     let resource = format!("generated-pack-{}", cache_key.hex());
     let mut recorded_waiter = false;
-    let mut lease_wait_attempt = 0_usize;
+    let mut cache_wait_attempt = 0_usize;
+    let wait_seed = generated_pack_wait_seed(cache_key.hex());
+    let mut lease_retry_at = None;
     loop {
         if let Some(pack) = load_cached_pack(
             repository,
@@ -1022,6 +1028,19 @@ async fn produce_cached_pack(
         {
             return Ok(pack);
         }
+        if lease_retry_at.is_some_and(|retry_at| tokio::time::Instant::now() < retry_at) {
+            let delay = generated_pack_cache_poll(cache_wait_attempt, wait_seed);
+            cache_wait_attempt = cache_wait_attempt.saturating_add(1);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(Error::Timeout { operation: "upload-pack" });
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
+            continue;
+        }
         let acquire = provider.try_acquire(&resource, GENERATED_PACK_LEASE_TTL);
         let lock = tokio::select! {
             biased;
@@ -1031,21 +1050,18 @@ async fn produce_cached_pack(
             }
             result = acquire => match result {
                 Ok(GeneratedPackLeaseAttempt::Acquired(lock)) => lock,
-                Ok(GeneratedPackLeaseAttempt::Held) => {
+                Ok(GeneratedPackLeaseAttempt::Held { retry_after }) => {
                     if !recorded_waiter {
                         record_generated_pack_cache(repository, crate::CacheOutcome::Coalesced, 1);
                         recorded_waiter = true;
                     }
-                    let delay = generated_pack_lease_poll(lease_wait_attempt);
-                    lease_wait_attempt = lease_wait_attempt.saturating_add(1);
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => return Err(Error::Cancelled),
-                        () = tokio::time::sleep_until(deadline) => {
-                            return Err(Error::Timeout { operation: "upload-pack" });
-                        }
-                        () = tokio::time::sleep(delay) => {}
-                    }
+                    // A held lease proves another producer is alive. Poll only the
+                    // immutable descriptor until that lease can actually expire;
+                    // probing coordination on every poll creates a storage herd.
+                    lease_retry_at = Some(
+                        tokio::time::Instant::now()
+                            + generated_pack_takeover_delay(retry_after, wait_seed),
+                    );
                     continue;
                 }
                 Err(source) => {
@@ -1055,6 +1071,13 @@ async fn produce_cached_pack(
                         error_debug = ?source,
                         "generated response-pack lease attempt failed"
                     );
+                    if recorded_waiter {
+                        lease_retry_at = Some(
+                            tokio::time::Instant::now()
+                                + generated_pack_retry_delay(wait_seed, cache_wait_attempt),
+                        );
+                        continue;
+                    }
                     return Err(Error::GeneratedPackLease { source });
                 }
             }
@@ -1071,15 +1094,53 @@ async fn produce_cached_pack(
     }
 }
 
-fn generated_pack_lease_poll(attempt: usize) -> Duration {
-    // A long response-pack build must not turn every waiting client into a
-    // descriptor/lease poller, while the five-second cap keeps completion
-    // detection responsive after the producer publishes its artifact.
+fn generated_pack_cache_poll(attempt: usize, seed: u64) -> Duration {
+    // Jitter keeps independent helper processes from polling the same descriptor
+    // at once while preserving a bounded publication-detection delay.
     let exponent = attempt.min(5) as u32;
     let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
-    GENERATED_PACK_LEASE_POLL_INITIAL
+    let ceiling = GENERATED_PACK_CACHE_POLL_INITIAL
         .saturating_mul(multiplier)
-        .min(GENERATED_PACK_LEASE_POLL_MAX)
+        .min(GENERATED_PACK_CACHE_POLL_MAX);
+    let floor = ceiling / 2;
+    let jitter_span = ceiling.saturating_sub(floor).as_millis() as u64;
+    floor
+        + Duration::from_millis(
+            generated_pack_wait_mix(seed, attempt) % jitter_span.saturating_add(1),
+        )
+}
+
+fn generated_pack_takeover_delay(retry_after: Duration, seed: u64) -> Duration {
+    let retry_after = retry_after.min(GENERATED_PACK_LEASE_PROBE_MAX);
+    let jitter_max = (retry_after / 4).min(GENERATED_PACK_TAKEOVER_JITTER_MAX);
+    retry_after
+        + Duration::from_millis(
+            generated_pack_wait_mix(seed, usize::MAX) % (jitter_max.as_millis() as u64 + 1),
+        )
+}
+
+fn generated_pack_retry_delay(seed: u64, attempt: usize) -> Duration {
+    GENERATED_PACK_CACHE_POLL_MAX
+        + Duration::from_millis(
+            generated_pack_wait_mix(seed, attempt)
+                % (GENERATED_PACK_CACHE_POLL_MAX.as_millis() as u64 + 1),
+        )
+}
+
+fn generated_pack_wait_seed(request_hash: String) -> u64 {
+    request_hash.bytes().fold(
+        0xcbf2_9ce4_8422_2325_u64 ^ u64::from(std::process::id()),
+        |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3),
+    )
+}
+
+fn generated_pack_wait_mix(seed: u64, attempt: usize) -> u64 {
+    let mut value = seed ^ (attempt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 async fn produce_cached_pack_under_lease(
@@ -1214,7 +1275,9 @@ where
         tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
     let resource = format!("generated-pack-{}", cache_key.hex());
     let mut recorded_waiter = false;
-    let mut lease_wait_attempt = 0_usize;
+    let mut cache_wait_attempt = 0_usize;
+    let wait_seed = generated_pack_wait_seed(cache_key.hex());
+    let mut lease_retry_at = None;
     let mut producer = Some(producer);
     loop {
         if let Some(pack) = load_cached_pack(repository, cache_key.hex(), None, cancellation)
@@ -1223,6 +1286,23 @@ where
         {
             record_generated_pack_cache(repository, crate::CacheOutcome::Hit, 1);
             return Ok(pack);
+        }
+        if lease_retry_at.is_some_and(|retry_at| tokio::time::Instant::now() < retry_at) {
+            let delay = generated_pack_cache_poll(cache_wait_attempt, wait_seed);
+            cache_wait_attempt = cache_wait_attempt.saturating_add(1);
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    return Err(GeneratedPackRequestCacheError::Cache(Error::Cancelled));
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(GeneratedPackRequestCacheError::Cache(Error::Timeout {
+                        operation: "upload-pack",
+                    }));
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
+            continue;
         }
         let acquire = provider.try_acquire(&resource, GENERATED_PACK_LEASE_TTL);
         let lock = tokio::select! {
@@ -1237,28 +1317,32 @@ where
             }
             result = acquire => match result {
                 Ok(GeneratedPackLeaseAttempt::Acquired(lock)) => lock,
-                Ok(GeneratedPackLeaseAttempt::Held) => {
+                Ok(GeneratedPackLeaseAttempt::Held { retry_after }) => {
                     if !recorded_waiter {
                         record_generated_pack_cache(repository, crate::CacheOutcome::Coalesced, 1);
                         recorded_waiter = true;
                     }
-                    let delay = generated_pack_lease_poll(lease_wait_attempt);
-                    lease_wait_attempt = lease_wait_attempt.saturating_add(1);
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {
-                            return Err(GeneratedPackRequestCacheError::Cache(Error::Cancelled));
-                        }
-                        () = tokio::time::sleep_until(deadline) => {
-                            return Err(GeneratedPackRequestCacheError::Cache(Error::Timeout {
-                                operation: "upload-pack",
-                            }));
-                        }
-                        () = tokio::time::sleep(delay) => {}
-                    }
+                    // Request-bound coalescing obeys the same lease lifecycle as
+                    // selection-bound caching; only immutable publication is polled.
+                    lease_retry_at = Some(
+                        tokio::time::Instant::now()
+                            + generated_pack_takeover_delay(retry_after, wait_seed),
+                    );
                     continue;
                 }
                 Err(source) => {
+                    if recorded_waiter {
+                        tracing::warn!(
+                            generated_pack_resource = %resource,
+                            error = %source,
+                            "generated response-pack takeover probe failed; continuing publication wait"
+                        );
+                        lease_retry_at = Some(
+                            tokio::time::Instant::now()
+                                + generated_pack_retry_delay(wait_seed, cache_wait_attempt),
+                        );
+                        continue;
+                    }
                     return Err(GeneratedPackRequestCacheError::Cache(
                         Error::GeneratedPackLease { source },
                     ));
@@ -2328,18 +2412,26 @@ mod tests {
     }
 
     #[test]
-    fn generated_pack_lease_poll_backoff_is_bounded() {
-        assert_eq!(
-            generated_pack_lease_poll(0),
-            GENERATED_PACK_LEASE_POLL_INITIAL
-        );
-        assert_eq!(generated_pack_lease_poll(1), Duration::from_millis(500));
-        assert_eq!(generated_pack_lease_poll(4), Duration::from_secs(4));
-        assert_eq!(generated_pack_lease_poll(5), GENERATED_PACK_LEASE_POLL_MAX);
-        assert_eq!(
-            generated_pack_lease_poll(usize::MAX),
-            GENERATED_PACK_LEASE_POLL_MAX
-        );
+    fn generated_pack_wait_delays_are_jittered_and_bounded() {
+        for (attempt, ceiling) in [1_u64, 2, 4, 8, 16, 30, 30].into_iter().enumerate() {
+            let ceiling = Duration::from_secs(ceiling);
+            for seed in [0, 1, 0xfeed_beef] {
+                let delay = generated_pack_cache_poll(attempt, seed);
+                assert!(delay >= ceiling / 2);
+                assert!(delay <= ceiling);
+            }
+        }
+
+        for seed in [0, 1, 0xfeed_beef] {
+            let retry_after = Duration::from_secs(5 * 60);
+            let takeover = generated_pack_takeover_delay(retry_after, seed);
+            assert!(takeover >= GENERATED_PACK_LEASE_PROBE_MAX);
+            assert!(takeover <= GENERATED_PACK_LEASE_PROBE_MAX * 5 / 4);
+
+            let retry = generated_pack_retry_delay(seed, 7);
+            assert!(retry >= GENERATED_PACK_CACHE_POLL_MAX);
+            assert!(retry <= GENERATED_PACK_CACHE_POLL_MAX * 2);
+        }
     }
 
     #[test]
