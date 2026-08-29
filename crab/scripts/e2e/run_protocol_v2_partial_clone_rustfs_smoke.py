@@ -1339,6 +1339,8 @@ class ProtocolV2PartialCloneSmoke:
         lfs_clone = self.run_git(
             self.run_root,
             [
+                "-c",
+                "protocol.version=2",
                 "clone",
                 "--filter=blob:limit=1k",
                 "--no-checkout",
@@ -1423,7 +1425,7 @@ class ProtocolV2PartialCloneSmoke:
     def clone_full(self, telemetry_before: dict[str, int]) -> dict[str, int]:
         record = self.run_git(
             self.run_root,
-            ["clone", self.remote_url, str(self.full)],
+            ["-c", "protocol.version=2", "clone", self.remote_url, str(self.full)],
             name="full clone",
             extra_env=self.trace_env(self.artifacts / "full-clone.trace2.json"),
         )
@@ -1484,6 +1486,8 @@ class ProtocolV2PartialCloneSmoke:
             full_record = self.run_git(
                 self.run_root,
                 [
+                    "-c",
+                    "protocol.version=2",
                     "clone",
                     "--no-checkout",
                     "--single-branch",
@@ -1499,6 +1503,8 @@ class ProtocolV2PartialCloneSmoke:
             filtered_record = self.run_git(
                 self.run_root,
                 [
+                    "-c",
+                    "protocol.version=2",
                     "clone",
                     "--filter=blob:none",
                     "--no-checkout",
@@ -1627,17 +1633,33 @@ class ProtocolV2PartialCloneSmoke:
     def clone_shallow(self) -> None:
         self.run_git(
             self.run_root,
-            ["clone", "--depth", "1", self.remote_url, str(self.shallow)],
+            [
+                "-c",
+                "protocol.version=2",
+                "clone",
+                "--depth",
+                "1",
+                self.remote_url,
+                str(self.shallow),
+            ],
             name="shallow clone",
             extra_env=self.trace_env(self.artifacts / "shallow-clone.trace2.json"),
         )
         count = int(self.git_value(self.shallow, ["rev-list", "--count", "HEAD"], name="shallow count"))
         shallow = self.git_value(self.shallow, ["rev-parse", "--is-shallow-repository"], name="shallow state")
         self.check("shallow-clone-boundary", count == 1 and shallow == "true", {"count": count, "is_shallow": shallow})
-        self.run_git(self.shallow, ["fetch", "--deepen=1", "origin"], name="deepen shallow clone")
+        self.run_git(
+            self.shallow,
+            ["-c", "protocol.version=2", "fetch", "--deepen=1", "origin"],
+            name="deepen shallow clone",
+        )
         deepened = int(self.git_value(self.shallow, ["rev-list", "--count", "HEAD"], name="deepened count"))
         self.check("shallow-clone-deepen", deepened >= 2, {"count": deepened})
-        self.run_git(self.shallow, ["fetch", "--unshallow", "origin"], name="unshallow clone")
+        self.run_git(
+            self.shallow,
+            ["-c", "protocol.version=2", "fetch", "--unshallow", "origin"],
+            name="unshallow clone",
+        )
         unshallowed = self.git_value(
             self.shallow, ["rev-parse", "--is-shallow-repository"], name="unshallowed state"
         )
@@ -1677,7 +1699,15 @@ class ProtocolV2PartialCloneSmoke:
         trace_path = self.artifacts / "filtered-clone.trace2.json"
         clone_record = self.run_git(
             self.run_root,
-            ["clone", "--filter=blob:none", "--no-checkout", self.remote_url, str(self.filtered)],
+            [
+                "-c",
+                "protocol.version=2",
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                self.remote_url,
+                str(self.filtered),
+            ],
             name="filtered blobless clone",
             extra_env=self.trace_env(trace_path),
         )
@@ -1839,6 +1869,8 @@ class ProtocolV2PartialCloneSmoke:
         admission_fetch = self.run_git(
             self.filtered,
             [
+                "-c",
+                "protocol.version=2",
                 "fetch",
                 "origin",
                 "refs/heads/partial-clone-push:refs/remotes/origin/partial-clone-push",
@@ -2021,7 +2053,13 @@ class ProtocolV2PartialCloneSmoke:
         before = self.storage_telemetry()
         fetch = self.run_git(
             self.filtered,
-            ["fetch", "origin", "refs/heads/main:refs/remotes/origin/main"],
+            [
+                "-c",
+                "protocol.version=2",
+                "fetch",
+                "origin",
+                "refs/heads/main:refs/remotes/origin/main",
+            ],
             name="filtered incremental fetch",
         )
         telemetry = self.record_telemetry_delta("filtered_incremental_fetch", before)

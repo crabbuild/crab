@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::stage::OutKind;
 use crate::stage_cache_entry::{
     MAX_STAGE_CACHE_ARTIFACT_BYTES, MAX_STAGE_CACHE_ENTRY_BYTES, decode_b3_hash,
-    validate_stage_cache_entry,
+    validate_stage_cache_entry, validate_stage_cache_entry_at,
 };
 pub use crate::{
     CachedCmd, CachedOut, ENTRY_SCHEMA_MAX_SUPPORTED, ENTRY_SCHEMA_VERSION, StageCacheEntry,
@@ -184,7 +184,7 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
             local_hash: hash.as_hex(),
         });
     }
-    validate_stage_cache_entry(&entry)?;
+    validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root))?;
     Ok(Some(entry))
 }
 
@@ -198,7 +198,7 @@ pub fn write_local(cache_root: &Path, entry: &StageCacheEntry) -> Result<()> {
     if is_cache_disabled() {
         return Ok(());
     }
-    validate_stage_cache_entry(entry)?;
+    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
     let path = entry_path(cache_root, &entry.stage_hash);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -263,7 +263,11 @@ pub fn store_local_xorbs<'a>(
     for out in outs {
         match out.kind {
             OutKind::File | OutKind::Stdout => {
-                let source = base.join(&out.path);
+                let source = if out.path.is_absolute() {
+                    out.path.clone()
+                } else {
+                    base.join(&out.path)
+                };
                 let bytes = read_artifact_file_bounded(&source, &out.file_hash)?;
                 write_local_xorb(cache_root, &out.file_hash, &bytes)?;
             }
@@ -271,7 +275,11 @@ pub fn store_local_xorbs<'a>(
                 let Some(manifest) = out.tree_manifest.as_ref() else {
                     continue;
                 };
-                let root = base.join(&out.path);
+                let root = if out.path.is_absolute() {
+                    out.path.clone()
+                } else {
+                    base.join(&out.path)
+                };
                 for entry in manifest {
                     if entry.kind == "dir" {
                         continue;
@@ -1006,6 +1014,14 @@ fn cache_worktree_root(cache_root: &Path) -> &Path {
         .unwrap_or(cache_root)
 }
 
+fn cache_validation_root(cache_root: &Path) -> Option<&Path> {
+    let crab_root = cache_root.parent()?;
+    if crab_root.file_name().is_some_and(|name| name == ".crab") {
+        return crab_root.parent();
+    }
+    None
+}
+
 fn xorb_bytes_for_remote_push(
     cache_root: &Path,
     stage_hash: &StageHash,
@@ -1418,7 +1434,9 @@ pub async fn push_all_local_with_artifact_stores_and_cancel(
                 }
             };
 
-            if let Err(error) = validate_stage_cache_entry(&entry) {
+            if let Err(error) =
+                validate_stage_cache_entry_at(&entry, cache_validation_root(cache_root))
+            {
                 warn!(path = %file_path.display(), error = %error, "local stage cache entry failed validation");
                 errors = errors.saturating_add(1);
                 continue;

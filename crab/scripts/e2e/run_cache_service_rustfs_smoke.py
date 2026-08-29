@@ -4343,6 +4343,14 @@ class CacheServiceRustfsSmoke:
             )
 
         (repo / "model.bin").write_bytes(data)
+        # Deduplication now happens while `crab add` prepares the staged xorb.
+        # Measure the complete add-to-push pipeline so this qualification proves
+        # both the cache-service classification and push-time proof reuse.
+        before_stats = self.cache_admin_stats()
+        before_gets = state.total_get_count()
+        before_get_counts = state.counts_snapshot()
+        before_puts = state.total_put_count()
+        before_put_counts = state.put_counts_snapshot()
         self.run_cmd(
             "cli dedup crab add model",
             [self.crab_bin, "add", "--jobs", "0", "model.bin"],
@@ -4357,11 +4365,6 @@ class CacheServiceRustfsSmoke:
             env=env,
         )
 
-        before_stats = self.cache_admin_stats()
-        before_gets = state.total_get_count()
-        before_get_counts = state.counts_snapshot()
-        before_puts = state.total_put_count()
-        before_put_counts = state.put_counts_snapshot()
         self.run_cmd(
             "cli dedup crab push",
             [

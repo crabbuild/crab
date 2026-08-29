@@ -89,8 +89,8 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-s3
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ runner.temp }}/provider-qualification/s3/report.json
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target-provider-qualification-s3
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/s3/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-s3
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -160,7 +160,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-s3-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/provider-qualification/s3/**
+          path: ${{ github.workspace }}/.ci/provider-qualification/s3/**
           if-no-files-found: error
           retention-days: 90
 
@@ -184,8 +184,8 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-gcs
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ runner.temp }}/provider-qualification/gcs/report.json
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target-provider-qualification-gcs
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/gcs/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-gcs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -212,7 +212,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-gcs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/provider-qualification/gcs/**
+          path: ${{ github.workspace }}/.ci/provider-qualification/gcs/**
           if-no-files-found: error
           retention-days: 90
 
@@ -237,8 +237,8 @@ jobs:
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
       CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-azure
-      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ runner.temp }}/provider-qualification/azure/report.json
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target-provider-qualification-azure
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/azure/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-azure
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -266,6 +266,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provider-qualification-azure-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/provider-qualification/azure/**
+          path: ${{ github.workspace }}/.ci/provider-qualification/azure/**
           if-no-files-found: error
           retention-days: 90
