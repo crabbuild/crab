@@ -39,6 +39,7 @@ const FULL_SCAN_REQUEST_RATIO: u64 = 64;
 const SMALL_CATALOG_MAX_OBJECTS: u64 = 4_096;
 const SMALL_CATALOG_REQUEST_RATIO: u64 = 4;
 const MIN_AMPLIFIED_SCAN_SSTS: u64 = 4;
+const MIN_LAYERED_SCAN_SSTS: u64 = 3;
 const AMPLIFIED_SCAN_COST_RATIO: u64 = 2;
 // Git SHA-1 object IDs are uniformly distributed in their key space. A
 // min/max range spanning most of that space turns a scan into a catalog-wide
@@ -845,7 +846,7 @@ fn lookup_strategy(
     // spans several SSTs, each exact OID probes every layer, so scale the
     // existing 1/64 crossover by that layer fan-out.
     let broad_multi_sst_dense = key_span == OidKeySpan::Broad
-        && active_ssts >= MIN_AMPLIFIED_SCAN_SSTS
+        && active_ssts >= MIN_LAYERED_SCAN_SSTS
         && requested
             .saturating_mul(FULL_SCAN_REQUEST_RATIO)
             .saturating_mul(active_ssts)
@@ -1296,7 +1297,13 @@ mod tests {
             LookupStrategy::Exact
         );
         assert_eq!(
-            lookup_strategy(30_031, 1_643_226, 3, OidKeySpan::Broad),
+            lookup_strategy(28_929, 1_611_847, 3, OidKeySpan::Broad),
+            LookupStrategy::FullScan {
+                row_limit: 1_611_847,
+            }
+        );
+        assert_eq!(
+            lookup_strategy(28_929, 1_611_847, 2, OidKeySpan::Broad),
             LookupStrategy::Exact
         );
     }
