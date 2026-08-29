@@ -805,19 +805,8 @@ async fn run_remote_helper_with_context(
                 // Bind the cache facade to the selected primary or replica.
                 // Reusing the primary facade after replica routing would read
                 // a different repository view than the pinned layout.
-                let stateless_store = match crab_cache_store::CachingStore::new(
-                    read_store.clone(),
-                    &cache.config().cache,
-                ) {
-                    Ok(cache) => cache.cache_aware_storage(),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "failed to build selected-read cache facade, using selected store directly"
-                        );
-                        read_store.as_storage().clone()
-                    }
-                };
+                let stateless_store =
+                    cache_aware_storage_for_selected_read(&read_store, &cache.config().cache);
                 crate::git::upload_pack_wire::serve(
                     &mut reader,
                     &mut writer,
@@ -1935,6 +1924,22 @@ where
     .await;
     *pinned = Some(selected.clone());
     selected
+}
+
+fn cache_aware_storage_for_selected_read(
+    read_store: &crate::storage::store::Store,
+    config: &crate::core::config::CacheConfig,
+) -> crab_storage::Store {
+    match crab_cache_store::CachingStore::new(read_store.clone(), config) {
+        Ok(cache) => cache.cache_aware_storage(),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to build selected-read cache facade, using selected store directly"
+            );
+            read_store.as_storage().clone()
+        }
+    }
 }
 
 /// Check whether the committed manifest pins a split commit graph.
@@ -3460,6 +3465,40 @@ mod tests {
         }
 
         assert_eq!(selector_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn protocol_v2_cache_facade_reads_from_selected_store() {
+        let (selected_store, _) = memory_store_with_manifest(
+            "refs/heads/main",
+            "2222222222222222222222222222222222222222",
+        )
+        .await;
+        let unique = tempfile::tempdir().expect("temporary path");
+        let suffix = unique
+            .path()
+            .file_name()
+            .expect("temporary path name")
+            .to_string_lossy();
+        let path = object_store::path::Path::from(format!(
+            "org/repo/.crab/git/packs/selected-read-{suffix}.pack"
+        ));
+        let expected = bytes::Bytes::from_static(b"selected replica pack");
+        selected_store
+            .put(&path, expected.clone())
+            .await
+            .expect("write selected replica pack");
+
+        let facade = cache_aware_storage_for_selected_read(
+            &selected_store,
+            &crate::core::config::CacheConfig::default(),
+        );
+        let (actual, _) = facade
+            .get_with_etag(&path)
+            .await
+            .expect("read selected replica pack through cache facade");
+
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
