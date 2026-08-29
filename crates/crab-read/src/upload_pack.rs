@@ -731,8 +731,7 @@ async fn plan_with_operation(
         .filter_map(|(visible, oid)| visible.then_some(*oid))
         .collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
-    let deduplicate_by_oid =
-        should_deduplicate_by_oid(request) && !filter_requires_traversal_context(&request.filter);
+    let deduplicate_by_oid = should_deduplicate_by_oid(request);
     let sparse_matchers =
         prepare_sparse_matchers(operation, visibility, visible_ref_names, &request.filter).await?;
     let mut queue = VecDeque::new();
@@ -1757,7 +1756,11 @@ fn filter_requires_traversal_context(filter: &UploadPackFilter) -> bool {
 }
 
 fn should_deduplicate_by_oid(request: &UploadPackRequest) -> bool {
-    !request.deepen_relative && request.shallow.is_empty()
+    // A shallow boundary without a depth update is OID-defined, so revisiting an unchanged
+    // tree cannot change selection unless the filter depends on its traversal context.
+    !request.deepen_relative
+        && !filter_requires_traversal_context(&request.filter)
+        && (request.shallow.is_empty() || request.deepen.is_none())
 }
 
 async fn ensure_visible_objects(
@@ -2252,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_absolute_depth_traversal_deduplicates_shared_objects() {
+    fn traversal_deduplicates_only_when_depth_and_filter_context_cannot_change_semantics() {
         let mut request = UploadPackRequest {
             deepen: Some(100),
             ..UploadPackRequest::default()
@@ -2265,6 +2268,21 @@ mod tests {
         request.shallow.clear();
         request.deepen_relative = true;
         assert!(!should_deduplicate_by_oid(&request));
+
+        request.deepen_relative = false;
+        request.deepen = None;
+        request.shallow.push(oid('1'));
+        assert!(should_deduplicate_by_oid(&request));
+
+        request.filter = UploadPackFilter::TreeDepth(1);
+        assert!(!should_deduplicate_by_oid(&request));
+
+        request.shallow.clear();
+        assert!(!should_deduplicate_by_oid(&request));
+
+        request.filter = UploadPackFilter::BlobNone;
+        request.shallow.push(oid('1'));
+        assert!(should_deduplicate_by_oid(&request));
     }
 
     #[test]
