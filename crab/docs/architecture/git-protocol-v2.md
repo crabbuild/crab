@@ -179,3 +179,8 @@ locator and visibility coverage separately. `crab fsck --store` checks current
 and historical proof roots; `crab fsck --store --repair` verifies the historical
 pack closure and idempotently backfills missing roots. Until repair completes,
 v2 stays disabled for that repository.
+
+When replication is configured, protocol-v2 capability admission and the
+terminal `stateless-connect` upload-pack session bind to the same selected
+store and repository prefix. The helper does not reselect between advertising
+and serving the immutable repository view.

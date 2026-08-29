@@ -170,6 +170,12 @@ impl<S> StoreLayout<S> {
         self.repo_path("manifest")
     }
 
+    /// Path to the fresh-clone replica discovery document.
+    #[must_use]
+    pub fn replica_discovery_path(&self) -> ObjectPath {
+        self.repo_path("metadata/replica-discovery.json")
+    }
+
     /// Prefix containing immutable historical manifest roots.
     #[must_use]
     pub fn manifest_history_prefix(&self) -> ObjectPath {
@@ -536,6 +542,15 @@ mod tests {
     fn manifest_path_is_per_repo() {
         let layout = test_layout();
         assert_eq!(layout.manifest_path().as_ref(), "org/models/manifest");
+    }
+
+    #[test]
+    fn replica_discovery_path_is_per_repo() {
+        let layout = test_layout();
+        assert_eq!(
+            layout.replica_discovery_path().as_ref(),
+            "org/models/metadata/replica-discovery.json"
+        );
     }
 
     #[test]

@@ -117,6 +117,21 @@ verified. Use `crab replica backfill status` to inspect that gate directly.
 In read-replica mode, the `[remote]` URL remains the write authority.
 `[replication]` only augments read routing.
 
+Git protocol v2 clone and fetch select a ready replica before capability
+advertisement, then pin that replica's store and repository prefix for the
+upload-pack session. `crab replica add`, read enable/disable, removal, and
+primary-change operations publish the read-routing subset to
+`{repo}/metadata/replica-discovery.json` in the primary object store. A fresh
+direct-bucket clone reads this bounded, versioned document before its initial
+fetch, so the clone directory does not need an ancestor `.crab.toml`. Explicit
+local replication config wins when both sources exist.
+
+Discovery still needs the primary endpoint. The metadata object can remain
+available while missing Git packs or Crab payloads are served from a verified
+replica, but Crab cannot infer an unknown replica when the entire primary
+object-store endpoint is unreachable. That case requires an external service
+or preconfigured local routing.
+
 Active-active mode adds coordinator and writer-region config:
 
 ```toml
