@@ -807,6 +807,14 @@ immutable artifact verification remain unchanged. The backoff bounds and
 cross-runtime waiter-cancellation regression pass; fanout and provider SLO
 qualification remain open.
 
+Cache-service per-object miss registration is now cancellation-safe. The
+registration count is held independently from the async fill lock and released
+by a synchronous drop guard, so a disconnected client cannot leave one key in
+the in-memory miss map forever. Waiters still share the same origin fill, and
+the inflight-miss metric is updated when the final registration leaves. The
+cancelled-fill and waiter-lifecycle regressions pass; cache fanout and
+provider-range SLO qualification remain open.
+
 The assembled-pack follow-up is committed as `d50cbd89`. `PackWriter` already
 updates the Git SHA-1 and content hash on every bounded write, so its finish
 path no longer rereads the complete temporary response solely to recompute
@@ -1017,6 +1025,9 @@ fallback at `1de8e528`):
   runtime single-flight/cache before fetching the index body.
 - cross-process generated-pack waiters back off their descriptor/lease polls
   from 250 ms to a bounded 5 s cap while one producer builds a large artifact.
+- cache-service per-object miss registrations release on cancellation, so
+  disconnected fanout callers cannot leak one coalescing entry per object;
+  active waiters still share one origin fill.
 
 ### PR #87 push-admission follow-up
 
@@ -1967,7 +1978,7 @@ environment dumps, or credentials.
 | 3 | IMPLEMENTED; CURRENT OWNER EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985` | The e01 owner processed an inventory of 992 packs, swept 991 stale membership rows, and left 2 active serving packs, but took 471.1 s across ten passes; source-index elimination is correctness/IO hardening, not a measured repack wall-time win. The 10,000-push latency, memory, and interruption budgets remain open |
 | 4 | IMPLEMENTED; POST-LAZY FETCH PASS; SHALLOW/DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528` | The e01 full run passes incremental and depth-1/10/100/1,000 correctness; its valid comparison against 0bcd2f41 stayed within 20% for clone/fetch/push medians. The b8 same-ref run passes protocol-v2 visibility and the locator request budget. Empty pack hints now remain unconditional in shallow filtering, and current generation-bound large batches avoid reopening every pack index; duplicate exact probes and concurrent index `HEAD` traffic are now bounded too. The 10,000-push shallow differential, response-pack SLO, concurrency, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; pack-sidecar intake, repack publication, and recovery restore are bounded, but grace-aware retention, interruption, receipt/registry completeness, 10,000-push, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar/intake plus remote-read/generated-pack coalescing pass. Generated-pack lease waiters now use bounded 250 ms-to-5 s polling backoff. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
+| 6 | PARTIAL | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3` | Current single-client correctness, the e01 1,000-replay pack-source qualification, the b8 same-ref startup budget, and bounded pack-sidecar/intake plus remote-read/generated-pack coalescing pass. Generated-pack lease waiters now use bounded 250 ms-to-5 s polling backoff, and cache-service miss registrations release on cancellation while active waiters retain coalescing. Full-profile repeatability, 100-client fanout, fault, cache-server, provider, owner-failover, retention, and canary gates remain pending |
 
 ### Current branch verification evidence
 
@@ -2010,6 +2021,16 @@ The remote-helper transcript suite also passes all 42 tests with the bounded
 pack-index probe path.
 The full workspace and real-repository qualification gates remain open as
 recorded in the evidence table.
+
+The cancellation-safe cache fanout follow-up (`4232bdc3`) additionally passes
+the complete `crab-cache-server` package suite (180 unit, 3 binary, 39
+preflight, and 43 integration tests), the remote-client `crab-cache-store`
+library suite (40 tests), and strict library clippy. The cancelled-fill
+regression proves that dropping an in-flight request removes its miss-map
+registration and resets the inflight gauge; the existing concurrent cold-miss
+integration test still proves that active waiters share one origin fill. The
+all-target local clippy command reports unrelated baseline test/style lints in
+untouched cache-service files, so this change does not claim that broader gate.
 
 The locator-startup follow-up (`b8c51985`) additionally passes
 `cargo fmt --all -- --check`, the metadata locator module (`54` passed, `1`
