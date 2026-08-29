@@ -54,7 +54,10 @@ The primary endpoint remains the discovery trust anchor. Its discovery object
 must be reachable even when Git packs or Crab payloads are unavailable there;
 if the entire primary endpoint is unreachable, a client that knows only the
 primary URL cannot discover an unknown replica without an external registry.
-An explicit local replication config takes precedence over discovered routing.
+When the optional discovery read is unavailable, Crab continues against the
+primary; a discovery object that is readable but malformed or incompatible
+still fails closed. An explicit local replication config takes precedence over
+discovered routing.
 
 Run `crab replica <subcommand> --help` for the exact provider, active-active,
 failover, and evidence options available in the installed CLI.

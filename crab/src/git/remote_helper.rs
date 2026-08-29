@@ -512,7 +512,7 @@ fn finalize_batch(
 /// fetches, and commit-graph probes within a single `run_remote_helper`
 /// invocation.
 struct SessionCache {
-    /// Config resolved before any remote operation starts.
+    /// Session config, augmented once by replica discovery before the first read operation.
     config: crate::core::config::Config,
     /// PackList from the most recent fetch, reused by `check_repack_threshold`.
     pack_list: Option<crab_metadata::manifests::PackList>,
@@ -662,7 +662,7 @@ pub async fn run_remote_helper(
         };
 
     // Resolve config early — needed for store construction and CachingStore.
-    let mut config = resolve_remote_helper_config()?;
+    let config = resolve_remote_helper_config()?;
 
     // Classify before constructing any store. A corrupt configured profile is
     // an error, never a reason to reinterpret a logical authority as a bucket.
@@ -682,17 +682,9 @@ pub async fn run_remote_helper(
     )
     .await?;
 
-    if managed_repository.is_none() && config.replication.is_none() {
-        let layout = StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone());
-        let discovered =
-            crate::replication::discovery::load(&resolved.store, &layout, &invocation_url).await?;
-        if crate::replication::discovery::apply_if_unconfigured(&mut config, discovered) {
-            tracing::debug!(
-                discovery_path = %layout.replica_discovery_path(),
-                "loaded replica routing from primary discovery"
-            );
-        }
-    }
+    // Protocol parsing and option handling do not depend on storage. Defer the
+    // optional discovery read until Git requests repository data.
+    let replica_discovery_pending = managed_repository.is_none() && config.replication.is_none();
 
     // Wrap with CachingStore when a cache service is configured.
     // The caching store routes immutable reads (packs, shards) through
@@ -723,6 +715,7 @@ pub async fn run_remote_helper(
         invocation_url,
         managed_repository,
         caching_store,
+        replica_discovery_pending,
     };
 
     run_remote_helper_with_context(remote_name, io, context, cancel).await
@@ -740,6 +733,7 @@ struct RemoteHelperContext {
     invocation_url: String,
     managed_repository: Option<crab_git::ManagedRepository>,
     caching_store: Option<crab_cache_store::CachingStore>,
+    replica_discovery_pending: bool,
 }
 
 async fn run_remote_helper_with_context(
@@ -763,6 +757,7 @@ async fn run_remote_helper_with_context(
         invocation_url,
         managed_repository,
         caching_store,
+        mut replica_discovery_pending,
     } = context;
     // Protocol v2 advertises and serves one immutable repository view. Keep
     // the selected store and layout together so the handoff cannot drift.
@@ -784,6 +779,16 @@ async fn run_remote_helper_with_context(
             }
             return Ok(());
         };
+        let uses_read_routing = match &batch {
+            Batch::Capabilities | Batch::List { for_push: false } | Batch::Fetch(_) => true,
+            Batch::StatelessConnect { service } => service == "git-upload-pack",
+            Batch::List { for_push: true } | Batch::Push(_) => false,
+        };
+        if replica_discovery_pending && uses_read_routing {
+            replica_discovery_pending = false;
+            load_replica_discovery_for_session(&store, &prefix, &invocation_url, &mut cache.config)
+                .await?;
+        }
         if let Batch::StatelessConnect { service } = &batch {
             let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
             let fetch_policy = fetch_admission_policy(cache.config());
@@ -854,6 +859,44 @@ async fn run_remote_helper_with_context(
         )
         .await?;
     }
+}
+
+async fn load_replica_discovery_for_session(
+    store: &crate::storage::store::Store,
+    prefix: &str,
+    invocation_url: &str,
+    config: &mut crate::core::config::Config,
+) -> Result<()> {
+    let layout = StoreLayout::new(store.clone(), prefix.to_owned());
+    let discovered = match crate::replication::discovery::load(store, &layout, invocation_url).await
+    {
+        Ok(discovered) => discovered,
+        Err(
+            error @ (CrabError::NetworkTransient(_)
+            | CrabError::Throttled { .. }
+            | CrabError::Forbidden { .. }
+            | CrabError::NoCredentials
+            | CrabError::AuthFailed { .. }
+            | CrabError::AuthExpired { .. }
+            | CrabError::Io(_)
+            | CrabError::Storage(_)),
+        ) => {
+            tracing::debug!(
+                error = %error,
+                discovery_path = %layout.replica_discovery_path(),
+                "replica discovery unavailable; using primary"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if crate::replication::discovery::apply_if_unconfigured(config, discovered) {
+        tracing::debug!(
+            discovery_path = %layout.replica_discovery_path(),
+            "loaded replica routing from primary discovery"
+        );
+    }
+    Ok(())
 }
 
 /// Open the staging area for the push pipeline (read-only).
@@ -3043,6 +3086,7 @@ mod tests {
             invocation_url: format!("crab://bucket/{prefix}"),
             managed_repository: None,
             caching_store: None,
+            replica_discovery_pending: false,
         }
     }
 
