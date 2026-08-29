@@ -8,7 +8,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
-    GarbageCollectorOptions, Settings, WriteOptions,
+    GarbageCollectorOptions, ScanOptions, Settings, WriteOptions,
 };
 use tracing::{debug, warn};
 
@@ -1021,7 +1021,14 @@ impl GitObjectLocatorWriter {
             let prefix = pack_object_prefix(*slot).ok_or_else(|| {
                 corrupt("pack-object-index", "stale locator pack slot is invalid")
             })?;
-            let mut rows = self.db.scan_prefix(prefix, ..).await.map_err(read_error)?;
+            let options = ScanOptions::default()
+                .with_read_ahead_bytes(LOCATOR_SCAN_READ_AHEAD_BYTES)
+                .with_max_fetch_tasks(LOCATOR_SCAN_FETCH_TASKS);
+            let mut rows = self
+                .db
+                .scan_prefix_with_options(prefix, .., &options)
+                .await
+                .map_err(read_error)?;
             while let Some(row) = rows.next().await.map_err(read_error)? {
                 stats.object_rows_scanned = stats.object_rows_scanned.saturating_add(1);
                 let (row_slot, oid) = decode_pack_object_key(&row.key).ok_or_else(|| {
