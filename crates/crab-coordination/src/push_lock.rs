@@ -629,7 +629,13 @@ async fn renew_one(
     holder: &str,
     ttl: Duration,
 ) -> Result<UpdateVersion> {
-    retry_coordination_operation(path, holder, || renew_one_once(store, path, holder, ttl)).await
+    // Renewal retries must finish before the next lease window expires. A
+    // late retry could let a slow owner outlive a legitimate reclamation.
+    let deadline = Instant::now() + (ttl / 3).max(Duration::from_secs(1));
+    retry_coordination_operation_until(path, holder, deadline, || {
+        renew_one_once(store, path, holder, ttl)
+    })
+    .await
 }
 
 async fn renew_one_once(
@@ -887,6 +893,32 @@ pub(crate) async fn release_if_holder(
 async fn retry_coordination_operation<T, F, Fut>(
     path: &str,
     holder: &str,
+    operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_coordination_operation_with_deadline(path, holder, None, operation).await
+}
+
+async fn retry_coordination_operation_until<T, F, Fut>(
+    path: &str,
+    holder: &str,
+    deadline: Instant,
+    operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    retry_coordination_operation_with_deadline(path, holder, Some(deadline), operation).await
+}
+
+async fn retry_coordination_operation_with_deadline<T, F, Fut>(
+    path: &str,
+    holder: &str,
+    deadline: Option<Instant>,
     mut operation: F,
 ) -> Result<T>
 where
@@ -895,7 +927,20 @@ where
 {
     let mut attempt = 0_u32;
     loop {
-        match operation().await {
+        let result = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(coordination_renewal_deadline(path));
+                }
+                match tokio::time::timeout(remaining, operation()).await {
+                    Ok(result) => result,
+                    Err(_) => return Err(coordination_renewal_deadline(path)),
+                }
+            }
+            None => operation().await,
+        };
+        match result {
             Ok(value) => return Ok(value),
             Err(error)
                 if coordination_error_is_retryable(&error)
@@ -909,11 +954,24 @@ where
                     delay_ms = delay.as_millis(),
                     "retrying transient coordination operation"
                 );
+                if let Some(deadline) = deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if delay >= remaining {
+                        return Err(error);
+                    }
+                }
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn coordination_renewal_deadline(path: &str) -> CoordinationError {
+    CoordinationError::Configuration {
+        key: path.to_owned(),
+        origin: "coordination lease renewal exceeded its retry budget".to_owned(),
     }
 }
 
@@ -1099,7 +1157,7 @@ mod tests {
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn memory_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
@@ -1283,6 +1341,30 @@ mod tests {
         lock.release().await.unwrap();
 
         assert!(requests.load(Ordering::Relaxed) >= 4);
+    }
+
+    #[tokio::test]
+    async fn lock_renewal_retry_budget_cancels_slow_operation() {
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let result: Result<()> = retry_coordination_operation_until(
+            "org/repo/locks/internal/git-object-locator/lock",
+            "holder",
+            deadline,
+            || async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Err(CoordinationError::Configuration {
+                    key: "test".to_owned(),
+                    origin: "operation should have timed out".to_owned(),
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(CoordinationError::Configuration { origin, .. })
+                if origin.contains("renewal")
+        ));
     }
 
     #[tokio::test]
