@@ -6,6 +6,7 @@ import {
   Briefcase,
   Clock,
   GitBranch,
+  FlaskConical,
   Layers,
   Network,
   Package,
@@ -48,6 +49,7 @@ const CATEGORIES: LibraryGuideMeta["category"][] = [
 const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
+  "ml-workflows": FlaskConical,
   "core-internals": Network,
   "advanced-operations": Layers,
 }

@@ -1,0 +1,237 @@
+---
+title: "Build a real fraud detection workflow with Crab"
+description: "Turn raw transactions into features, a trained model, and evaluation evidence in one reproducible four-stage DAG."
+date: "2026-08-29"
+author: "Crab Team"
+category: "tutorial"
+tags: ["ml", "workflow", "fraud-detection", "crab-run", "dag"]
+excerpt: "Start a seven-part ML series with a realistic fraud detection pipeline and the exact Crab CLI used to validate, run, inspect, and share it."
+level: "beginner"
+path: "ml-workflows"
+order: 1
+concepts:
+  [
+    "workflow DAG",
+    "declared dependencies",
+    "stage outputs",
+    "content-addressed cache",
+  ]
+prerequisites: ["How do you set up a Crab repository?"]
+outcome: "Declare and run an end-to-end ML pipeline whose data, model, metrics, and cache can be reproduced by another clone."
+diagramType: "Interactive DAG simulator"
+knowledgeCheck:
+  question: "If only `src/train.py` changes, which stages should Crab need to execute?"
+  options:
+    - "Only ingest"
+    - "Train and its downstream evaluate stage"
+    - "Every stage, including ingest and features"
+  answer: 1
+  explanation: "The ingest and feature stage keys still match. Training code changes the train key, and evaluate consumes the model produced by train."
+meta:
+  contentType: "Tutorial"
+  goal: "Teach the complete Crab ML workflow through one realistic project."
+  audience: "ML engineers evaluating Crab Workflow and artifact management."
+---
+
+Imagine a payments team retrains a fraud classifier every week. The source code is small, but the transaction snapshot, feature table, and model are large. Reviewers need to know which data and parameters produced a model, while CI should avoid repeating an unchanged two-hour training job.
+
+This series uses that same system from first pipeline run through production promotion:
+
+```text
+transactions.csv → features.parquet → fraud-model.pkl → metrics.json
+```
+
+Crab keeps the workflow declaration and small evidence in Git, large bytes in object storage, and reusable stage results in a content-addressed cache. No separate Crab data server sits between the team and its bucket.
+
+<MlWorkflowCacheExplorer />
+
+## 1. Create the project boundary
+
+Start with a Git repository connected to a Crab remote you control:
+
+```bash
+mkdir fraud-detection && cd fraud-detection
+git init
+crab init crab://ml-platform/fraud-detection
+mkdir -p data models metrics plots src
+```
+
+Track the file families that will become large. The patterns are committed policy, so another clone uses the same representation:
+
+```bash
+crab track "data/**/*.csv"
+crab track "data/**/*.parquet"
+crab track "models/**/*.pkl"
+git add .gitattributes .crab.toml
+```
+
+Use a small `params.yaml` for reviewable training inputs:
+
+```yaml title="params.yaml"
+features:
+  lookback_days: 30
+train:
+  algorithm: hist_gradient_boosting
+  learning_rate: 0.05
+  max_depth: 8
+  max_iter: 200
+  seed: 42
+evaluate:
+  minimum_recall: 0.82
+```
+
+## 2. Declare the complete DAG
+
+Each stage names its command, dependencies, parameter keys, and outputs. An output consumed by another stage creates a producer-to-consumer edge.
+
+```yaml title="crab.yaml"
+params:
+  - params.yaml
+
+metrics:
+  - metrics/evaluation.json
+
+plots:
+  - plots/precision_recall.csv:
+      x: recall
+      y: precision
+
+artifacts:
+  fraud-model:
+    path: models/fraud-model.pkl
+    type: model
+    desc: Weekly card-not-present fraud classifier
+    labels: [fraud, payments]
+
+stages:
+  ingest:
+    cmd: python src/ingest.py
+    deps:
+      - src/ingest.py
+      - data/transactions.csv
+    outs:
+      - data/raw.parquet
+
+  features:
+    cmd: python src/features.py --config params.yaml
+    deps:
+      - src/features.py
+      - data/raw.parquet
+    params:
+      - features.lookback_days
+    outs:
+      - data/features.parquet
+
+  train:
+    cmd: python src/train.py --config params.yaml
+    deps:
+      - src/train.py
+      - data/features.parquet
+    params:
+      - train.algorithm
+      - train.learning_rate
+      - train.max_depth
+      - train.max_iter
+      - train.seed
+    outs:
+      - models/fraud-model.pkl
+
+  evaluate:
+    cmd: python src/evaluate.py
+    deps:
+      - src/evaluate.py
+      - models/fraud-model.pkl
+      - data/features.parquet
+    params:
+      - evaluate.minimum_recall
+    metrics:
+      - metrics/evaluation.json
+    plots:
+      - plots/precision_recall.csv:
+          x: recall
+          y: precision
+```
+
+The `artifacts` declaration names the model the organization cares about. The `train` stage remains responsible for producing its bytes. Artifact versioning comes later, after the workflow output is clean and recorded.
+
+## 3. Validate before spending compute
+
+Check the schema and graph without executing Python:
+
+```bash
+crab run --validate
+crab workflow dag
+crab workflow dag --format mermaid
+crab stage list
+```
+
+Validation catches cycles, duplicate outputs, invalid names, and malformed stage fields. The DAG should be a straight four-node path from `ingest` to `evaluate`.
+
+You can also author simpler stages from the CLI:
+
+```bash
+crab stage add -n ingest \
+  -d src/ingest.py \
+  -d data/transactions.csv \
+  -o data/raw.parquet \
+  python src/ingest.py
+```
+
+Editing YAML directly is clearer for this example because it also declares params, metrics, plots, and the artifact catalog.
+
+## 4. Preview, execute, and inspect
+
+Preview the execution decision first:
+
+```bash
+crab run --dry --explain-miss
+```
+
+Then run the DAG and publish each new stage-cache entry after it commits:
+
+```bash
+crab run --parallelism 2 --cache-push
+crab workflow status
+crab metrics show
+```
+
+The first run writes `crab.lock`. That lockfile records the exact successful stage state. A second unchanged run should reuse matching results:
+
+```bash
+crab run --dry
+```
+
+Use the interactive diagram above to see why a training-code change reuses ingest and features but invalidates train and evaluate. Crab calculates each stage key from the declared command, dependencies, parameter values, and selected environment—not from timestamps or stage names alone.
+
+## 5. Commit reproducible state, then prove sharing
+
+Commit declarations, scripts, params, the lockfile, and small review evidence:
+
+```bash
+git add crab.yaml crab.lock params.yaml src/ metrics/ plots/
+git commit -m "add fraud detection workflow"
+crab push
+crab workflow push-cache --all
+```
+
+The decisive proof uses a clean clone, because the producer workspace already has local outputs and cache entries:
+
+```bash
+cd ..
+crab clone crab://ml-platform/fraud-detection fraud-review
+cd fraud-review
+crab run --cache-only
+crab workflow status
+crab metrics show
+```
+
+`--cache-only` exits with code 3 if a required result is absent. That makes it useful in CI: a normal run could silently recompute and hide an incomplete cache publication.
+
+<TakeawayBox title="One model, three kinds of state">
+  Git records the workflow, parameters, lockfile, and small evidence. Crab file
+  storage owns large declared paths. Workflow cache entries make matching stage
+  results reusable. The next guide shows exactly how Crab decides between
+  execution and replay.
+</TakeawayBox>
+
+Continue with [How Crab decides what to rerun](/library/ml-workflow-cache-invalidation).

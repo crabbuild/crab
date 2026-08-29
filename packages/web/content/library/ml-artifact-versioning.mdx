@@ -1,0 +1,143 @@
+---
+title: "Version and retrieve an immutable ML artifact"
+description: "Capture clean fraud-model bytes as a BLAKE3-addressed version, inspect its manifest, and verify retrieval into a new destination."
+date: "2026-08-29"
+author: "Crab Team"
+category: "tutorial"
+tags: ["ml", "artifacts", "model-registry", "blake3", "retrieval"]
+excerpt: "Move from a successful workflow output to an immutable model version with exact `crab artifacts` commands and clean-client verification."
+level: "intermediate"
+path: "ml-workflows"
+order: 5
+concepts:
+  [
+    "artifact declaration",
+    "immutable version",
+    "content identity",
+    "verified retrieval",
+  ]
+prerequisites:
+  ["Review ML parameters, metrics, and plots as one evidence chain"]
+outcome: "Create, inspect, and retrieve a content-addressed model version without confusing its identity with a mutable environment label."
+diagramType: "Interactive registry model"
+knowledgeCheck:
+  question: "What does an artifact version ID identify?"
+  options:
+    - "The current production label"
+    - "Immutable content-addressed model bytes and their manifest"
+    - "The newest experiment name"
+  answer: 1
+  explanation: "Versions are immutable content identities. Stages such as production are mutable labels that can point to a version."
+meta:
+  contentType: "Tutorial"
+  goal: "Teach the artifact create, list, show, get, and verification lifecycle."
+  audience: "ML engineers turning reviewed workflow outputs into durable model versions."
+---
+
+A successful `train` stage proves reproducible production of `models/fraud-model.pkl`. Artifact versioning adds another boundary: it captures those clean bytes under an immutable content-addressed manifest that consumers can retrieve later.
+
+<ArtifactPromotionLab />
+
+Use the lab to inspect the separation now; the next guide performs the promotion step.
+
+## Declare the model once
+
+The catalog lives at the top level of `crab.yaml`:
+
+```yaml title="crab.yaml"
+artifacts:
+  fraud-model:
+    path: models/fraud-model.pkl
+    type: model
+    desc: Weekly card-not-present fraud classifier
+    labels: [fraud, payments]
+```
+
+The declaration is metadata. It neither trains the model nor creates a version. The `train` stage must still declare the same path as an output.
+
+Inspect the catalog:
+
+```bash
+crab artifacts list
+crab artifacts show fraud-model --json
+```
+
+## Produce and record clean bytes
+
+Run the selected workflow, review it, and commit reproducible state:
+
+```bash
+crab run train --downstream
+crab workflow status
+crab metrics show
+
+git add models/fraud-model.pkl crab.lock metrics/ plots/
+git commit -m "record reviewed fraud model candidate"
+```
+
+Version creation rejects a missing or dirty output. It also checks that the path is a declared stage output or a tracked file and that its content matches the successful lockfile. Those guards prevent accidentally registering an unrecorded local model.
+
+## Create the immutable version
+
+```bash
+crab artifacts version create fraud-model --json
+```
+
+Record the returned version ID. Its `b3:` identity is derived from content; it is not a release number and does not change when a label moves.
+
+When a primary `crab://` remote is configured, the remote registry is canonical and the payload uploads content-addressably. Without one, commands use local Crab-owned state.
+
+## Inspect before retrieval
+
+```bash
+crab artifacts list --json
+crab artifacts show fraud-model --json
+crab artifacts history fraud-model --json
+```
+
+`show` exposes the declaration, immutable versions, and stage mappings without hydrating every payload. `history` is initially empty until a stage label moves.
+
+## Retrieve an exact version
+
+Use the version ID rather than a mutable label when reproducibility matters:
+
+```bash
+crab artifacts get \
+  fraud-model \
+  --version <version-id> \
+  --output validation/fraud-model.pkl \
+  --json
+```
+
+Retrieval verifies the content while streaming and writes a new destination only. If the destination already exists, choose a new path or inspect the existing file; do not expect the command to overwrite it.
+
+Run an application-level smoke test after registry verification:
+
+```bash
+python src/smoke_model.py validation/fraud-model.pkl
+```
+
+The registry proves payload identity. It cannot prove the pickle loads in the intended runtime, the feature schema matches, or the fraud policy gates pass.
+
+## Prove the remote boundary from a clean client
+
+```bash
+cd ..
+crab clone crab://ml-platform/fraud-detection artifact-review
+cd artifact-review
+crab artifacts show fraud-model --json
+crab artifacts get fraud-model \
+  --version <version-id> \
+  --output /tmp/fraud-model-review.pkl
+python src/smoke_model.py /tmp/fraud-model-review.pkl
+```
+
+Use an isolated destination appropriate to your environment. The clean client proves registry visibility, payload availability, hash verification, and the no-overwrite boundary.
+
+<TakeawayBox title="Creation captures bytes; it does not deploy them">
+  A version is an immutable model identity tied to a manifest and source state.
+  Creating it copies no environment label. Promotion is a separate, auditable
+  compare-and-swap decision.
+</TakeawayBox>
+
+Finish the series by [promoting and rolling back model labels safely](/library/ml-artifact-promotion).

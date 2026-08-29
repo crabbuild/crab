@@ -1,0 +1,233 @@
+---
+title: "The complete Crab ML workflow CLI cookbook"
+description: "See and demo every public workflow, experiment, queue, params, metrics, plots, and artifacts command in one operator-oriented reference."
+date: "2026-08-29"
+author: "Crab Team"
+category: "tutorial"
+tags: ["ml", "workflow", "cli", "reference", "operations"]
+excerpt: "A source-audited command atlas and copyable demos for every public Crab ML workflow command family."
+level: "deep-dive"
+path: "ml-workflows"
+order: 7
+concepts:
+  [
+    "workflow CLI",
+    "experiment lifecycle",
+    "queue operations",
+    "artifact lifecycle",
+  ]
+prerequisites: ["Promote and roll back ML artifacts safely"]
+outcome: "Locate and safely demo every public Crab command that participates in the ML workflow and artifact lifecycle."
+diagramType: "Interactive command atlas"
+knowledgeCheck:
+  question: "Which command is intentionally absent from the public command atlas?"
+  options:
+    - "`crab workflow checkpoint`, because it is an internal stage-to-supervisor protocol"
+    - "`crab metrics diff`, because metrics are not workflow evidence"
+    - "`crab artifacts promote`, because labels cannot move"
+  answer: 0
+  explanation: "The checkpoint command is hidden and used internally by running stages. Every public command family is included."
+meta:
+  contentType: "Reference"
+  goal: "Provide complete, source-backed CLI coverage for the ML learning series."
+  audience: "ML engineers and platform operators who need a command-level checklist."
+---
+
+This cookbook closes the loop on the fraud-detection series. It covers every **public** command form exposed by the current Rust CLI under `run`, `repro`, `stage`, `freeze`, `unfreeze`, `workflow`, `exp`, `queue`, `params`, `metrics`, `plots`, and `artifacts`.
+
+<WorkflowCommandAtlas />
+
+`crab workflow checkpoint` is deliberately absent. It is a hidden stage-to-supervisor control protocol, not a user command. Aliases such as `crab exp list` → `crab exp ls` and `crab exp branch` → `crab exp promote` do not add a second behavior boundary.
+
+## Run and author stages
+
+```bash
+# Declarative DAG
+crab run --validate
+crab run --dry --explain-miss
+crab run --cache-push
+crab repro train --downstream
+
+# Inline cached stage
+crab run --name smoke-model \
+  --deps models/fraud-model.pkl \
+  --outs metrics/smoke.json \
+  -- python src/smoke_model.py
+
+# Authoring helpers
+crab stage add -n prepare \
+  -d src/prepare.py \
+  -d data/transactions.csv \
+  -o data/prepared.parquet \
+  python src/prepare.py
+crab stage list --json
+
+# Shared stage policy
+crab freeze ingest train
+crab run
+crab unfreeze ingest train
+```
+
+Freeze changes the workflow declaration. Review and commit that YAML change when collaborators and CI should share it.
+
+## Inspect workflow state and lockfiles
+
+```bash
+crab workflow status --json
+crab workflow dag
+crab workflow dag --format mermaid
+
+crab workflow journal ls
+crab workflow journal show <run-id>
+crab workflow journal gc --keep 50
+
+crab workflow push-cache --all --json
+```
+
+For a multi-team repository, preview and apply split lockfiles:
+
+```bash
+crab workflow lockfile split --dry-run
+crab workflow lockfile split --update-config
+crab run --recursive --dry
+```
+
+Resolve a Git conflict in one lockfile, then rerun affected stages:
+
+```bash
+crab workflow lockfile resolve --path crab.lock
+crab run --dry --explain-miss
+```
+
+The top-level status surface can inspect the same workflow state:
+
+```bash
+crab status --workflow --json
+crab status --workflow --why train
+```
+
+## Run the complete experiment lifecycle
+
+```bash
+# Create and inspect
+crab exp save -n baseline
+crab exp run -S train.learning_rate=0.05 -n candidate --json
+crab exp show candidate --json
+crab exp ls
+crab exp diff baseline candidate --json
+
+# Organize and materialize
+crab exp rename candidate weekly-candidate
+crab exp apply weekly-candidate
+crab exp promote weekly-candidate --branch experiments/weekly-candidate
+
+# Checkpoint lineage
+crab exp run --resume <checkpoint-experiment>
+crab exp reset <checkpoint-experiment> --checkpoint <checkpoint-id>
+
+# Share
+crab exp push weekly-candidate
+crab exp pull weekly-candidate
+
+# Maintain local state
+crab exp remove old-candidate
+crab exp gc --keep 100 --dry-run
+crab exp clean
+```
+
+`apply` changes current workspace files. `promote` creates a Git branch. `reset` changes an experiment checkpoint lineage. Inspect the experiment before choosing among them.
+
+## Submit and operate queued experiments
+
+The `crab exp` family provides submission plus short worker aliases:
+
+```bash
+crab exp queue \
+  -S train.learning_rate=0.01,0.05,0.10 \
+  -S train.max_depth=4,8,12 \
+  --json
+crab exp start --jobs 2
+crab exp status --json
+crab exp stop
+```
+
+The dedicated queue family adds task-level operations:
+
+```bash
+crab queue start --jobs 2
+crab queue status --json
+crab queue logs <task-id>
+crab queue kill <task-id>
+crab queue remove --failed
+crab queue stop
+```
+
+Use graceful `stop` for planned shutdown. Preserve logs before killing or removing failed tasks.
+
+## Read params, metrics, and plots
+
+```bash
+crab params show --json
+crab params diff origin/main HEAD --json
+
+crab metrics show --json
+crab metrics diff origin/main HEAD --json
+crab metrics plot --format html --output metrics-plots/index.html
+
+crab plots show --format html --output plots/index.html
+crab plots diff origin/main HEAD --format html --output plot-diff.html
+crab plots templates
+```
+
+These commands read recorded evidence. They do not execute a missing stage. Generate missing metrics or plot sources with `crab run` first.
+
+## Manage immutable artifacts and mutable labels
+
+```bash
+# Inspect
+crab artifacts list --json
+crab artifacts show fraud-model --json
+
+# Capture and retrieve immutable bytes
+crab artifacts version create fraud-model --json
+crab artifacts get fraud-model \
+  --version <version-id> \
+  --output validation/fraud-model.pkl \
+  --json
+
+# Move and audit a mutable label
+crab artifacts promote \
+  fraud-model \
+  <candidate-version> \
+  production \
+  --expected <current-production-version> \
+  --json
+crab artifacts history fraud-model --json
+
+# Consumer resolution
+crab artifacts get fraud-model \
+  --stage production \
+  --output runtime/fraud-model.pkl
+```
+
+Creation captures clean output bytes. Promotion copies no payload and should use `--expected` in automation. Retrieval by version is immutable; retrieval by stage first resolves a mutable label.
+
+## Alternate operational surfaces
+
+Two optimization commands expose the same cache and journal maintenance boundaries for operators already using `crab optimize`:
+
+```bash
+crab optimize workflow-cache push --all
+crab optimize workflow-cache journal-gc
+```
+
+Prefer the direct workflow spelling in pipeline documentation. Use the optimize surface when composing broader storage and repository maintenance.
+
+<TakeawayBox title="Complete public surface, bounded by intent">
+  The atlas covers all 52 public command forms in the core ML workflow families.
+  That does not mean every pipeline should run every mutation. Inspect first,
+  use structured output in automation, and keep execution, experiment selection,
+  artifact creation, and environment promotion as separate reviewable decisions.
+</TakeawayBox>
+
+Keep the exact option tables nearby in the [`crab run`](/docs/cli/reference/crab-run), [`crab exp`](/docs/cli/reference/crab-exp), [`crab queue`](/docs/cli/reference/crab-queue), [`crab workflow`](/docs/cli/reference/crab-workflow), [`crab metrics`](/docs/cli/reference/crab-metrics), and [`crab plots`](/docs/cli/reference/crab-plots) references.

@@ -49,6 +49,7 @@ const guideSchema = pageSchema.extend({
     .enum([
       "start-here",
       "first-workflow",
+      "ml-workflows",
       "core-internals",
       "advanced-operations",
       "migration",

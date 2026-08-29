@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   Clock,
   GitBranch,
+  FlaskConical,
   Layers,
   Network,
   Package,
@@ -49,6 +50,7 @@ const categoryIcons: Record<LibraryGuideMeta["category"], typeof Package> = {
 const pathIcons: Record<LibraryPathKey, typeof BookOpen> = {
   "start-here": BookOpen,
   "first-workflow": GitBranch,
+  "ml-workflows": FlaskConical,
   "core-internals": Network,
   "advanced-operations": Layers,
 }
