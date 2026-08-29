@@ -124,6 +124,18 @@ def resolve_executable(value: str, label: str) -> Path:
     return candidate
 
 
+def snapshot_executable(source: Path, destination: Path, label: str) -> Path:
+    """Copy an executable into a run-owned path and return the verified copy."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return resolve_executable(str(destination), label)
+
+
 class LargeRepositoryQualification:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -140,7 +152,8 @@ class LargeRepositoryQualification:
         self.fetch_root = self.run_root / "fetch-clients"
         self.team_root = self.run_root / "team-clients"
         self.source = args.source.resolve()
-        self.crab_bin = resolve_executable(args.crab_bin, "Crab binary")
+        self.crab_source_bin = resolve_executable(args.crab_bin, "Crab binary")
+        self.crab_bin = self.bin_root / "crab"
         self.git_bin = resolve_executable(args.git_bin, "Git binary")
         self.aws_bin = resolve_executable(args.aws_bin, "AWS CLI")
         self.cache_service_url = os.environ.get(CACHE_SERVICE_URL_ENV, "").strip()
@@ -568,6 +581,13 @@ class LargeRepositoryQualification:
         if self.args.team_load:
             self.fetch_root.mkdir()
             self.team_root.mkdir()
+        # Long qualifications must not observe an unrelated `make install`
+        # replacing the shared binary midway through the command sequence.
+        self.crab_bin = snapshot_executable(
+            self.crab_source_bin,
+            self.crab_bin,
+            "run-local Crab binary",
+        )
         self.install_helper_alias()
         self.write_report()
 

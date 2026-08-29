@@ -47,6 +47,25 @@ BASE = "b" * 40
 DIGEST = "c" * 64
 
 
+class QualificationHarnessTests(unittest.TestCase):
+    def test_snapshot_executable_is_immune_to_source_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "shared-crab"
+            snapshot = root / "run" / "bin" / "crab"
+            source.write_text("first build", encoding="utf-8")
+            source.chmod(0o755)
+
+            resolved = QUALIFICATION.snapshot_executable(
+                source,
+                snapshot,
+                "run-local Crab binary",
+            )
+            source.write_text("replacement build", encoding="utf-8")
+
+            self.assertEqual(resolved.read_text(encoding="utf-8"), "first build")
+
+
 def resources() -> dict[str, Any]:
     return {
         "user_cpu_ms": 1,
