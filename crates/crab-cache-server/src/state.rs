@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 
 use axum::Router;
@@ -26,6 +26,21 @@ use crate::origin_client::OriginClient;
 
 pub const MAX_CACHE_OBJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_CONCURRENT_PUSH_WARMING_BODIES: usize = 8;
+
+/// Per-object state shared by callers waiting for one origin fill.
+pub struct CacheMissEntry {
+    pub(crate) lock: tokio::sync::Mutex<()>,
+    pub(crate) users: AtomicUsize,
+}
+
+impl CacheMissEntry {
+    pub(crate) fn new() -> Self {
+        Self {
+            lock: tokio::sync::Mutex::new(()),
+            users: AtomicUsize::new(0),
+        }
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DedupIndexRebuildStats {
@@ -56,9 +71,11 @@ pub struct AppState {
     /// Timestamp of the last origin health probe. Initialized in the past
     /// to force the first `/v1/health` request to actually probe the origin.
     pub origin_health_checked_at: tokio::sync::Mutex<Instant>,
-    /// Per-object cold-miss locks. Coalesces concurrent misses so a single
-    /// origin GET warms an immutable object while duplicate callers wait.
-    pub cache_miss_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-object cold-miss registrations. Coalesces concurrent misses so a
+    /// single origin GET warms an immutable object while duplicate callers
+    /// wait. The registry mutex is synchronous because its drop guard must
+    /// remove a registration when an async request is cancelled.
+    pub cache_miss_locks: std::sync::Mutex<HashMap<String, Arc<CacheMissEntry>>>,
     /// Bounds concurrent streamed bodies for push-warming PUT requests.
     pub push_warming_body_permits: tokio::sync::Semaphore,
     pub dedup_index_rebuild: DedupIndexRebuildStats,

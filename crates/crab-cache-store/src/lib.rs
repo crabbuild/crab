@@ -2416,7 +2416,7 @@ mod tests {
             evictor_notify,
             origin_healthy: AtomicBool::new(true),
             origin_health_checked_at: tokio::sync::Mutex::new(Instant::now()),
-            cache_miss_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            cache_miss_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             push_warming_body_permits: tokio::sync::Semaphore::new(8),
             dedup_index_rebuild: DedupIndexRebuildStats {
                 status: "not_run".to_string(),

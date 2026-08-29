@@ -6,7 +6,7 @@ use std::io::SeekFrom;
 use std::io::Write as _;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{Ordering, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -42,7 +42,8 @@ use super::error::CacheServiceError;
 use super::metrics::TrafficStats;
 use super::origin_client::{ORIGIN_HEALTH_PROBE_PATH, origin_probe_reached_origin};
 use super::state::{
-    AppState, DedupIndexIngestionError, DedupIndexRebuildStats, MAX_CACHE_OBJECT_BYTES,
+    AppState, CacheMissEntry, DedupIndexIngestionError, DedupIndexRebuildStats,
+    MAX_CACHE_OBJECT_BYTES,
 };
 
 use crate::auth::ClientIdentity;
@@ -1078,7 +1079,7 @@ pub async fn admin_stats(
     }
     match state.cache_store.stats() {
         Ok(cache) => {
-            let inflight_misses = state.cache_miss_locks.lock().await.len() as u64;
+            let inflight_misses = cache_miss_lock_count(&state);
             state.metrics.set_inflight_misses(inflight_misses);
             let indexed_chunks = match state.chunk_index.len() {
                 Ok(count) => count,
@@ -1534,19 +1535,11 @@ async fn fetch_and_cache_data(
     start: Instant,
 ) -> std::result::Result<CachedFetch, Response> {
     let miss_key = cache_miss_lock_key(key);
-    let (miss_lock, joined_existing_fill, inflight_misses) = {
-        let mut locks = state.cache_miss_locks.lock().await;
-        let joined_existing_fill = locks.contains_key(&miss_key);
-        let miss_lock = Arc::clone(
-            locks
-                .entry(miss_key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        );
-        (miss_lock, joined_existing_fill, locks.len() as u64)
-    };
+    let (miss_registration, joined_existing_fill, inflight_misses) =
+        CacheMissRegistration::new(state, miss_key);
     state.metrics.set_inflight_misses(inflight_misses);
 
-    let miss_guard = miss_lock.lock().await;
+    let miss_guard = miss_registration.entry.lock.lock().await;
     let result = fetch_and_cache_data_locked(
         state,
         key,
@@ -1558,17 +1551,7 @@ async fn fetch_and_cache_data(
     .await;
 
     drop(miss_guard);
-    let inflight_misses = {
-        let mut locks = state.cache_miss_locks.lock().await;
-        if locks
-            .get(&miss_key)
-            .is_some_and(|current| Arc::ptr_eq(current, &miss_lock))
-        {
-            locks.remove(&miss_key);
-        }
-        locks.len() as u64
-    };
-    state.metrics.set_inflight_misses(inflight_misses);
+    drop(miss_registration);
 
     result
 }
@@ -2101,6 +2084,69 @@ fn cache_miss_lock_key(key: &ServerObjectKey) -> String {
     )
 }
 
+struct CacheMissRegistration<'a> {
+    locks: &'a std::sync::Mutex<HashMap<String, Arc<CacheMissEntry>>>,
+    metrics: &'a super::metrics::CacheMetrics,
+    key: String,
+    entry: Arc<CacheMissEntry>,
+}
+
+impl<'a> CacheMissRegistration<'a> {
+    fn new(state: &'a AppState, key: String) -> (Self, bool, u64) {
+        let (entry, joined_existing_fill, inflight_misses) = {
+            let mut locks = lock_cache_miss_registry(&state.cache_miss_locks);
+            let entry = Arc::clone(
+                locks
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(CacheMissEntry::new())),
+            );
+            let joined_existing_fill = entry.users.fetch_add(1, Ordering::AcqRel) != 0;
+            let inflight_misses = u64::try_from(locks.len()).unwrap_or(u64::MAX);
+            (entry, joined_existing_fill, inflight_misses)
+        };
+        (
+            Self {
+                locks: &state.cache_miss_locks,
+                metrics: &state.metrics,
+                key,
+                entry,
+            },
+            joined_existing_fill,
+            inflight_misses,
+        )
+    }
+}
+
+impl Drop for CacheMissRegistration<'_> {
+    fn drop(&mut self) {
+        let mut locks = lock_cache_miss_registry(self.locks);
+        let previous_users = self.entry.users.fetch_sub(1, Ordering::AcqRel);
+        if previous_users == 1
+            && locks
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.entry))
+        {
+            locks.remove(&self.key);
+        }
+        self.metrics
+            .set_inflight_misses(u64::try_from(locks.len()).unwrap_or(u64::MAX));
+    }
+}
+
+fn lock_cache_miss_registry(
+    locks: &std::sync::Mutex<HashMap<String, Arc<CacheMissEntry>>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, Arc<CacheMissEntry>>> {
+    match locks.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn cache_miss_lock_count(state: &AppState) -> u64 {
+    let locks = lock_cache_miss_registry(&state.cache_miss_locks);
+    u64::try_from(locks.len()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -2190,7 +2236,7 @@ mod tests {
                 evictor_notify: Arc::new(tokio::sync::Notify::new()),
                 origin_healthy: AtomicBool::new(true),
                 origin_health_checked_at: tokio::sync::Mutex::new(tokio::time::Instant::now()),
-                cache_miss_locks: tokio::sync::Mutex::new(HashMap::new()),
+                cache_miss_locks: std::sync::Mutex::new(HashMap::new()),
                 push_warming_body_permits: tokio::sync::Semaphore::new(8),
                 dedup_index_rebuild: DedupIndexRebuildStats {
                     status: "not_run".to_string(),
@@ -2236,6 +2282,55 @@ mod tests {
         ClientIdentity {
             principal: "test-client".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_cache_miss_fill_releases_registration() {
+        let TestDedupState { state, _tempdir } = test_dedup_state();
+        let state = Arc::new(state);
+        let key = cache_miss_lock_key(&ServerObjectKey {
+            bucket: String::new(),
+            repo_path: ".crab".to_owned(),
+            object_type: ObjectType::Pack,
+            hash: hex_hash('a'),
+        });
+        let state_for_fill = Arc::clone(&state);
+
+        let result = tokio::time::timeout(Duration::from_millis(10), async move {
+            let (registration, joined_existing_fill, inflight_misses) =
+                CacheMissRegistration::new(&state_for_fill, key);
+            assert!(!joined_existing_fill);
+            assert_eq!(inflight_misses, 1);
+            let _guard = registration.entry.lock.lock().await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(cache_miss_lock_count(&state), 0);
+        assert_eq!(state.metrics.snapshot().inflight_misses, 0);
+    }
+
+    #[test]
+    fn cache_miss_waiter_release_keeps_active_fill_registered() {
+        let TestDedupState { state, _tempdir } = test_dedup_state();
+        let key = cache_miss_lock_key(&ServerObjectKey {
+            bucket: String::new(),
+            repo_path: ".crab".to_owned(),
+            object_type: ObjectType::Pack,
+            hash: hex_hash('b'),
+        });
+
+        let (first, first_joined, _) = CacheMissRegistration::new(&state, key.clone());
+        let (second, second_joined, _) = CacheMissRegistration::new(&state, key);
+        assert!(!first_joined);
+        assert!(second_joined);
+        assert_eq!(cache_miss_lock_count(&state), 1);
+
+        drop(second);
+        assert_eq!(cache_miss_lock_count(&state), 1);
+        drop(first);
+        assert_eq!(cache_miss_lock_count(&state), 0);
     }
 
     fn read_policy_for(repos: &[&str]) -> AuthPolicy {
