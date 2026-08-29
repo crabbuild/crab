@@ -4,8 +4,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crab_xet::hash::MerkleHash;
 use futures_util::stream::{self, StreamExt, TryStreamExt};
+use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt};
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CompactorOptions, CompressionCodec,
     GarbageCollectorOptions, ScanOptions, Settings, WriteOptions,
@@ -1340,10 +1340,10 @@ impl GitObjectLocatorWriter {
                             "catalog checkpoint marker serialize: {error}"
                         ))
                     })?;
-            self.store
-                .put(&marker_path, Bytes::from(marker_body).into())
+            crab_storage::Store::new(Arc::clone(&self.store))
+                .put(&marker_path, Bytes::from(marker_body))
                 .await
-                .map_err(|source| MetadataError::ObjectStore { source })?;
+                .map_err(|source| MetadataError::Storage { source })?;
         }
         self.checkpoint_required = false;
         if let Err(error) =
@@ -1404,10 +1404,13 @@ async fn catalog_checkpoint_marker_exists(
         repo_prefix,
         identity.catalog_digest,
     ));
-    match store.head(&path).await {
+    match crab_storage::Store::new(Arc::clone(store))
+        .head(&path)
+        .await
+    {
         Ok(_) => Ok(true),
-        Err(object_store::Error::NotFound { .. }) => Ok(false),
-        Err(source) => Err(MetadataError::ObjectStore { source }),
+        Err(crab_storage::StorageError::NotFound { .. }) => Ok(false),
+        Err(source) => Err(MetadataError::Storage { source }),
     }
 }
 
@@ -1417,6 +1420,7 @@ async fn retire_old_catalog_checkpoints(
     current: &slatedb::CheckpointCreateResult,
     current_name: &str,
 ) -> Result<()> {
+    let storage = crab_storage::Store::new(Arc::clone(&store));
     let admin =
         slatedb::admin::AdminBuilder::new(ObjectPath::from(path), Arc::clone(&store)).build();
     let checkpoints =
@@ -1450,9 +1454,9 @@ async fn retire_old_catalog_checkpoints(
         {
             let marker_path =
                 ObjectPath::from(format!("{}checkpoints/{}.json", path, digest.hex()));
-            match store.delete(&marker_path).await {
-                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                Err(source) => return Err(MetadataError::ObjectStore { source }),
+            match storage.delete(&marker_path).await {
+                Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => {}
+                Err(source) => return Err(MetadataError::Storage { source }),
             }
         }
     }
@@ -1757,18 +1761,118 @@ fn should_load_existing_ordinals(current_objects: u64, candidate_objects: u64) -
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
+    use async_trait::async_trait;
     use futures_util::TryStreamExt;
-    use object_store::ObjectStore;
     use object_store::memory::InMemory;
     use object_store::path::Path as ObjectPath;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+        ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    };
 
     use super::*;
     use crate::git_object_locator::{
         GitObjectKind, GitObjectLocation, GitObjectLookup, GitObjectMetadata, GitPackInventoryEntry,
     };
     use crab_xet::hash::MerkleHash;
+
+    #[derive(Debug)]
+    struct FailFirstPutStore {
+        inner: Arc<InMemory>,
+        fail_path: Mutex<Option<String>>,
+        fail_next_put: AtomicBool,
+    }
+
+    impl FailFirstPutStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(InMemory::new()),
+                fail_path: Mutex::new(None),
+                fail_next_put: AtomicBool::new(false),
+            }
+        }
+
+        fn fail_next_put_at(&self, path: &ObjectPath) {
+            *self.fail_path.lock().expect("test lock") = Some(path.to_string());
+            self.fail_next_put.store(true, Ordering::Release);
+        }
+    }
+
+    impl std::fmt::Display for FailFirstPutStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("FailFirstPutStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for FailFirstPutStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            let should_fail = self.fail_path.lock().expect("test lock").as_deref()
+                == Some(location.as_ref())
+                && self.fail_next_put.swap(false, Ordering::AcqRel);
+            if should_fail {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "service unavailable: slow down".into(),
+                });
+            }
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     fn hash(seed: u64) -> MerkleHash {
         MerkleHash::from([seed, seed + 1, seed + 2, seed + 3])
@@ -2027,6 +2131,38 @@ mod tests {
 
         assert!(writer.existing_ordinals.is_some());
         writer.close().await.expect("close planned writer");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_marker_put_retries_throttling() {
+        let store = Arc::new(FailFirstPutStore::new());
+        let store_handle: Arc<dyn ObjectStore> = store.clone();
+        let mut writer = GitObjectLocatorWriter::open(store_handle, "org/repo")
+            .await
+            .expect("open writer");
+        let pack = pack(1);
+        let binding = writer.bind_packs(&[pack]).await.expect("bind pack")[0];
+        writer
+            .write_locations(binding, &[entry(1)])
+            .await
+            .expect("write object");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash: pack.pack_index_hash,
+            })
+            .await
+            .expect("set coverage");
+        let identity = writer.catalog_identity().expect("catalog identity");
+        let marker_path = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            identity.catalog_digest,
+        ));
+        store.fail_next_put_at(&marker_path);
+
+        writer.close().await.expect("close writer after retry");
+        assert!(!store.fail_next_put.load(Ordering::Acquire));
+        assert!(store.inner.head(&marker_path).await.is_ok());
     }
 
     #[test]

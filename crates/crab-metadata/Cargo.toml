@@ -14,7 +14,7 @@ path = "src/lib.rs"
 default = []
 file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
 local-index = ["dep:rusqlite"]
-remote-index = ["dep:futures-util", "dep:object_store", "dep:slatedb"]
+remote-index = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb"]
 storage = ["dep:base64", "dep:crab-storage", "dep:futures-util", "dep:object_store"]
 
 [dependencies]
