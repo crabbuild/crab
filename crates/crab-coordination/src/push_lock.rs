@@ -453,7 +453,16 @@ impl PushLock {
 
     /// Extends the lease using a holder-checked compare-and-swap update.
     pub async fn renew(&mut self) -> Result<()> {
-        self.etag = Some(renew_one(&self.store, &self.path, &self.holder, self.ttl).await?);
+        self.etag = Some(
+            renew_one(
+                &self.store,
+                &self.path,
+                &self.holder,
+                self.ttl,
+                self.etag.clone(),
+            )
+            .await?,
+        );
         Ok(())
     }
 
@@ -660,17 +669,44 @@ async fn renew_one(
     path: &str,
     holder: &str,
     ttl: Duration,
+    etag: Option<UpdateVersion>,
 ) -> Result<UpdateVersion> {
     // Renewal retries must finish before the next lease window expires. A
     // late retry could let a slow owner outlive a legitimate reclamation.
     let deadline = Instant::now() + (ttl / 3).max(Duration::from_secs(1));
     retry_coordination_operation_until(path, holder, deadline, || {
-        renew_one_once(store, path, holder, ttl)
+        renew_one_once(store, path, holder, ttl, etag.clone())
     })
     .await
 }
 
 async fn renew_one_once(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+    ttl: Duration,
+    etag: Option<UpdateVersion>,
+) -> Result<UpdateVersion> {
+    if let Some(etag) = etag.filter(has_cas_token) {
+        let object_path = Path::from(path);
+        let body = serialize_payload(
+            path,
+            &PushLockPayload::new(holder, unix_now() + ttl.as_secs(), ttl.as_secs()),
+        )?;
+        return match update(store, &object_path, body, etag).await {
+            Ok(etag) => Ok(etag),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => {
+                renew_one_after_cas_conflict(store, path, holder, ttl).await
+            }
+            Err(source) => Err(store_error(path, source)),
+        };
+    }
+
+    renew_one_after_cas_conflict(store, path, holder, ttl).await
+}
+
+async fn renew_one_after_cas_conflict(
     store: &Arc<dyn ObjectStore>,
     path: &str,
     holder: &str,
@@ -958,16 +994,17 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let mut attempt = 0_u32;
+    let mut last_error = None;
     loop {
         let result = match deadline {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(coordination_renewal_deadline(path));
+                    return Err(coordination_retry_deadline(path, last_error.take()));
                 }
                 match tokio::time::timeout(remaining, operation()).await {
                     Ok(result) => result,
-                    Err(_) => return Err(coordination_renewal_deadline(path)),
+                    Err(_) => return Err(coordination_retry_deadline(path, last_error.take())),
                 }
             }
             None => operation().await,
@@ -989,9 +1026,10 @@ where
                 if let Some(deadline) = deadline {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if delay >= remaining {
-                        return Err(error);
+                        return Err(coordination_retry_deadline(path, Some(error)));
                     }
                 }
+                last_error = Some(error);
                 tokio::time::sleep(delay).await;
                 attempt += 1;
             }
@@ -1000,10 +1038,14 @@ where
     }
 }
 
-fn coordination_renewal_deadline(path: &str) -> CoordinationError {
-    CoordinationError::Configuration {
+fn coordination_retry_deadline(path: &str, source: Option<CoordinationError>) -> CoordinationError {
+    let source = source.unwrap_or_else(|| CoordinationError::Configuration {
         key: path.to_owned(),
-        origin: "coordination lease renewal exceeded its retry budget".to_owned(),
+        origin: "coordination operation timed out before completion".to_owned(),
+    });
+    CoordinationError::RetryDeadline {
+        path: path.to_owned(),
+        source: Box::new(source),
     }
 }
 
@@ -1404,6 +1446,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lock_renew_reuses_known_version_without_a_read() {
+        let inner = Arc::new(InMemory::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let metered = Arc::new(RequestCountingStore {
+            inner,
+            requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let store: Arc<dyn ObjectStore> = metered.clone();
+        let mut lock = PushLock::acquire_internal(
+            &store,
+            "org/repo",
+            GIT_OBJECT_LOCATOR_RESOURCE,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        metered.fail_next_get();
+
+        lock.renew().await.unwrap();
+
+        assert!(metered.fail_next_get.swap(false, Ordering::AcqRel));
+        lock.release().await.unwrap();
+        assert!(requests.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[tokio::test]
     async fn lock_renewal_retry_budget_cancels_slow_operation() {
         let deadline = Instant::now() + Duration::from_millis(20);
         let result: Result<()> = retry_coordination_operation_until(
@@ -1422,8 +1493,51 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(CoordinationError::Configuration { origin, .. })
-                if origin.contains("renewal")
+            Err(CoordinationError::RetryDeadline { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn lock_renewal_deadline_preserves_last_transient_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = Arc::clone(&calls);
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let result: Result<()> = retry_coordination_operation_until(
+            "org/repo/locks/internal/git-object-locator/lock",
+            "holder",
+            deadline,
+            move || {
+                let calls = Arc::clone(&calls_ref);
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(CoordinationError::ObjectStore {
+                            path: "org/repo/lock".to_owned(),
+                            source: object_store::Error::Generic {
+                                store: "test",
+                                source: "connection reset".into(),
+                            },
+                        })
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        Err(CoordinationError::Configuration {
+                            key: "test".to_owned(),
+                            origin: "operation should have timed out".to_owned(),
+                        })
+                    }
+                }
+            },
+        )
+        .await;
+
+        let Err(CoordinationError::RetryDeadline { source, .. }) = result else {
+            panic!("expected retry deadline with the last transient source");
+        };
+        assert!(matches!(
+            *source,
+            CoordinationError::ObjectStore {
+                source: object_store::Error::Generic { .. },
+                ..
+            }
         ));
     }
 

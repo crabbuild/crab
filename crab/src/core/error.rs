@@ -1922,6 +1922,12 @@ impl From<crab_coordination::error::CoordinationError> for CrabError {
             crab_coordination::error::CoordinationError::Configuration { key, origin } => {
                 Self::Configuration { key, origin }
             }
+            crab_coordination::error::CoordinationError::RetryDeadline { path, source } => {
+                Self::Configuration {
+                    key: path,
+                    origin: format!("coordination retry deadline exceeded: {source}"),
+                }
+            }
             crab_coordination::error::CoordinationError::Serialize {
                 key,
                 context,
