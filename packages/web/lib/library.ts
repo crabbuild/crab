@@ -60,7 +60,7 @@ export const LIBRARY_PATHS: LibraryPath[] = [
     label: "First Workflow",
     shortLabel: "Workflow",
     description:
-      "Install Crab, push large files, and understand how it fits Git.",
+      "Install Crab, publish and retrieve large files, understand its Git integration, and choose what to use next.",
     audience: "Hands-on users",
     order: 2,
   },

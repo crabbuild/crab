@@ -42,20 +42,53 @@ This tutorial connects an existing Git repository to an S3 path and tracks model
 
 ## Before you begin
 
-You need Git, an existing repository, and credentials that can read and write the target bucket path. Crab supports S3, Google Cloud Storage, and Azure Blob Storage; the example uses S3.
-
-Install the CLI and confirm its version:
-
-```bash
-curl -fsSL https://crab.build/install.sh | bash
-crab --version
-```
+You need Git, an existing repository, and credentials that can read and write the target bucket path. Crab supports Amazon S3, Google Cloud Storage, and Azure Blob Storage. This tutorial uses S3.
 
 Run the setup first in a disposable repository or a non-production object-store prefix. The first pass should prove installation, credentials, tracking, publication, and reconstruction without changing a branch used by other contributors.
 
 Choose a representative file that you are allowed to copy into the test repository. Avoid confidential production data for the tutorial. A deterministic sample helps with hash verification, while a real producer output gives better deduplication evidence during the second push.
 
 Record the CLI version, Git version, provider region, and destination prefix. These details make an access or behavior difference reproducible on another machine.
+
+## Install Crab on your platform
+
+Install Crab with the package or installer that matches your development environment. Each release includes the `crab` command and the `git-remote-crab` executable that Git needs for `crab://` remotes.
+
+On macOS or Linux, install Crab with Homebrew:
+
+```bash
+brew install crabbuild/tap/crab
+```
+
+You can instead use Crab's checksum-verifying installer on macOS or Linux:
+
+```bash
+curl -fsSL https://crab.build/install.sh | bash
+```
+
+On Windows, run the PowerShell installer:
+
+```powershell
+irm https://crab.build/install.ps1 | iex
+```
+
+On macOS or Linux, open a new shell if the installer changed your `PATH`, then verify both entry points:
+
+```bash
+crab version
+command -v git-remote-crab
+```
+
+On Windows, run the equivalent checks in PowerShell:
+
+```powershell
+crab version
+Get-Command git-remote-crab
+```
+
+The version command proves that the CLI runs. The helper lookup proves that Git can find the remote helper executable. Repository setup installs the filter configuration later.
+
+Pin `CRAB_VERSION` in continuous integration and build images when you need repeatable automation. Read [Installation & Setup](/docs/cli/getting-started/installation) for custom install directories, global filter registration, mount helpers, and platform requirements.
 
 ## Configure the repository
 

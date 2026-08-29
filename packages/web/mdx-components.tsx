@@ -61,6 +61,10 @@ import {
 } from "@/components/blog/lfs-compatibility-visuals"
 import { CrabLfsDirectStorageLab } from "@/components/library/crab-lfs-direct-storage-lab"
 import {
+  CrabCapabilityNavigator,
+  DailyWorkflowStateLab,
+} from "@/components/library/first-workflow-learning-labs"
+import {
   PushDataLanesDiagram,
   PushPipelineBoard,
   PushVisibilityLab,
@@ -203,6 +207,8 @@ export function getMDXComponents(components?: MDXComponents) {
     LfsRehearsalConsole,
     LfsRewriteMap,
     CrabLfsDirectStorageLab,
+    CrabCapabilityNavigator,
+    DailyWorkflowStateLab,
     PushDataLanesDiagram,
     PushPipelineBoard,
     PushVisibilityLab,
