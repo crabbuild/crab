@@ -92,6 +92,7 @@ pub async fn run_configure_at(
         plan.gc_list_profile,
     )
     .await?;
+    crate::cmd::init::initialize_remote_repository(&plan.remote, root, cancel).await?;
 
     crate::cmd::setup::run_setup_at(
         root,

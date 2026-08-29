@@ -2010,11 +2010,13 @@ pub enum MetaDbError {
     },
 
     // CRAB-E0504 — reserved. Formerly `NotBootstrapped`, removed because
-    // the SlateDB metadata layer does not have a bootstrap step: fresh
-    // repos auto-initialize on first push via `slatedb::Db::open`
-    // (create-if-missing). Do not reuse this code for a different error.
-    #[error("metadb format version {version} unsupported [CRAB-E0505] for {db}; upgrade crab")]
-    UnsupportedFormat { db: String, version: u32 },
+    // the SlateDB metadata layer does not have a separate table bootstrap
+    // step: after canonical repository init, fresh databases are created by
+    // `slatedb::Db::open`. Do not reuse this code for a different error.
+    #[error(
+        "metadb {db} is not canonical v1 [CRAB-E0505] (found {found:?}); reset this isolated development repository and rebuild metadata"
+    )]
+    UnsupportedFormat { db: String, found: Option<u32> },
 
     #[error("file {file_hash} not found in file_index_db [CRAB-E0506]")]
     FileNotFoundInFileIndexDb { file_hash: String },
@@ -3574,9 +3576,10 @@ impl CrabError {
                     "prefix": prefix,
                     "source": source.to_string(),
                 }),
-                MetaDbError::UnsupportedFormat { db, version } => serde_json::json!({
+                MetaDbError::UnsupportedFormat { db, found } => serde_json::json!({
                     "db": db,
-                    "version": version,
+                    "found": found,
+                    "required": 1,
                 }),
                 MetaDbError::FileNotFoundInFileIndexDb { file_hash } => serde_json::json!({
                     "file_hash": file_hash,

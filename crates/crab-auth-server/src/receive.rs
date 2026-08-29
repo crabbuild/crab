@@ -63,8 +63,8 @@ pub const MAX_PUSH_REF_UPDATES: usize = 32;
 const MAX_PUSH_STAGED_OBJECTS: usize = 100_000;
 #[cfg(test)]
 const MAX_PUSH_STAGED_OBJECTS: usize = 16;
-const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
-const SHARD_V2_TRAILER_SIZE: usize = 12;
+const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
+const SHARD_V1_TRAILER_SIZE: usize = 12;
 const SHARD_CLOSURE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -136,8 +136,8 @@ pub struct PushPrepareRecord {
     pub schema_version: u32,
     pub repo_prefix: String,
     pub push_id: String,
-    pub source_manifest_generation: Option<u64>,
-    pub source_manifest_etag: Option<String>,
+    pub source_manifest_generation: u64,
+    pub source_manifest_etag: String,
     pub view_ref_updates: Vec<PushRefUpdate>,
     pub source_ref_updates: Vec<PushRefUpdate>,
     pub view_scope: Option<PreparedViewScope>,
@@ -763,7 +763,7 @@ pub async fn read_optional_staged_object_bytes(
 pub fn strict_xorb_references_from_shard(
     bytes: &[u8],
 ) -> Result<BTreeMap<String, Vec<ExpectedXorbChunk>>> {
-    let shard_bytes = strip_shard_v2_trailer(bytes);
+    let shard_bytes = strip_shard_bloom_trailer(bytes);
     let mut cursor = Cursor::new(shard_bytes);
     let shard = MDBShardInfo::load_from_reader(&mut cursor)
         .map_err(|e| invalid(format!("invalid staged shard object: {e}")))?;
@@ -796,11 +796,11 @@ pub fn strict_xorb_references_from_shard(
     Ok(refs)
 }
 
-/// Removes the optional shard v2 bloom-filter trailer before legacy MDB parsing.
+/// Removes the optional canonical v1 bloom trailer before xet MDB parsing.
 #[must_use]
-pub fn strip_shard_v2_trailer(data: &[u8]) -> &[u8] {
-    if data.len() >= SHARD_V2_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V2_MAGIC {
-        let offset_start = data.len() - SHARD_V2_TRAILER_SIZE;
+pub fn strip_shard_bloom_trailer(data: &[u8]) -> &[u8] {
+    if data.len() >= SHARD_V1_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V1_MAGIC {
+        let offset_start = data.len() - SHARD_V1_TRAILER_SIZE;
         if let Ok(bytes) = data[offset_start..offset_start + 8].try_into() {
             let bloom_offset = u64::from_le_bytes(bytes) as usize;
             if bloom_offset <= data.len() {
@@ -815,7 +815,7 @@ pub fn strip_shard_v2_trailer(data: &[u8]) -> &[u8] {
 pub fn build_prepare_record(
     repo_prefix: &str,
     push_id: &str,
-    base: Option<(&Manifest, &str)>,
+    base: (&Manifest, &str),
     view_ref_updates: Vec<PushRefUpdate>,
     view_scope: Option<PreparedViewScope>,
 ) -> Result<PushPrepareRecord> {
@@ -823,14 +823,13 @@ pub fn build_prepare_record(
     if let Some(scope) = view_scope.as_ref() {
         validate_prepared_view_scope(scope, repo_prefix)?;
     }
-    let source_ref_updates =
-        source_ref_updates_for(base.map(|(manifest, _)| manifest), &view_ref_updates)?;
+    let source_ref_updates = source_ref_updates_for(base.0, &view_ref_updates)?;
     Ok(PushPrepareRecord {
         schema_version: 1,
         repo_prefix: repo_prefix.to_owned(),
         push_id: push_id.to_owned(),
-        source_manifest_generation: base.map(|(manifest, _)| manifest.generation),
-        source_manifest_etag: base.map(|(_, etag)| etag.to_owned()),
+        source_manifest_generation: base.0.generation,
+        source_manifest_etag: base.1.to_owned(),
         view_ref_updates,
         source_ref_updates,
         view_scope,
@@ -853,6 +852,9 @@ pub fn validate_prepare_record_shape(
     }
     if record.push_id != push_id {
         return Err(invalid("prepare record push_id does not match request"));
+    }
+    if record.source_manifest_etag.trim().is_empty() {
+        return Err(invalid("prepare record source_manifest_etag is empty"));
     }
     validate_prepared_ref_updates(&record.view_ref_updates)?;
     validate_prepared_ref_updates(&record.source_ref_updates)?;
@@ -894,12 +896,12 @@ pub fn validate_prepared_view_scope(
 
 /// Maps authorized view ref updates onto source-repository ref updates.
 pub fn source_ref_updates_for(
-    base: Option<&Manifest>,
+    base: &Manifest,
     ref_updates: &[PushRefUpdate],
 ) -> Result<Vec<PushRefUpdate>> {
     let mut updates = Vec::with_capacity(ref_updates.len());
     for update in ref_updates {
-        let current = base.and_then(|manifest| manifest.refs.get(&update.ref_name));
+        let current = base.refs.get(&update.ref_name);
         if let Some(current) = current {
             validate_sha1(current, "source ref oid")?;
         }
@@ -920,14 +922,14 @@ pub fn source_ref_updates_for(
 /// Replays a prepared source-ref mapping against a candidate push plan.
 pub fn source_ref_updates_from_prepare(
     record: &PushPrepareRecord,
-    base: Option<&Manifest>,
+    base: &Manifest,
     plan_ref_updates: &[PushRefUpdate],
 ) -> Result<Vec<PushRefUpdate>> {
     if record.view_ref_updates != plan_ref_updates {
         return Err(conflict("staged ref updates do not match prepare record"));
     }
     for update in &record.source_ref_updates {
-        let current = base.and_then(|manifest| manifest.refs.get(&update.ref_name));
+        let current = base.refs.get(&update.ref_name);
         if let Some(current) = current {
             validate_sha1(current, "source ref oid")?;
         }
@@ -1289,23 +1291,6 @@ async fn download_service_locator_evidence(
     router: &StoreLayout<Store>,
     pack: &PackManifestEntry,
 ) -> Result<ServiceLocatorEvidence> {
-    download_service_locator_evidence_with_legacy_repair(store, router, pack, true).await
-}
-
-async fn download_verified_service_locator_evidence(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    pack: &PackManifestEntry,
-) -> Result<ServiceLocatorEvidence> {
-    download_service_locator_evidence_with_legacy_repair(store, router, pack, false).await
-}
-
-async fn download_service_locator_evidence_with_legacy_repair(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    pack: &PackManifestEntry,
-    repair_legacy_reverse_index: bool,
-) -> Result<ServiceLocatorEvidence> {
     if pack.size < 20 {
         return Err(invalid("committed Git pack is too short for its trailer"));
     }
@@ -1331,49 +1316,13 @@ async fn download_service_locator_evidence_with_legacy_repair(
             index_maximum,
         )
         .await?;
-    match store
+    store
         .download_to_path_bounded(
             &router.pack_reverse_index_path(&pack.pack_id),
             &rev_path,
             reverse_maximum,
         )
-        .await
-    {
-        Ok(_) => {}
-        // v1.0.14 and earlier direct pushes did not persist `.rev` evidence.
-        Err(StorageError::NotFound { .. }) if repair_legacy_reverse_index => {
-            let index = idx_path.clone();
-            let reverse = rev_path.clone();
-            let (reverse_size, reverse_hash) = tokio::task::spawn_blocking(move || {
-                crab_git::pack_locator::write_pack_reverse_index(&index, &reverse)
-                    .map_err(crab_git::pack::PackError::from)
-                    .map_err(AuthServerError::from)?;
-                let mut file = std::fs::File::open(&reverse)?;
-                let size = file.metadata()?.len();
-                let mut hasher = blake3::Hasher::new();
-                std::io::copy(&mut file, &mut hasher)?;
-                Ok::<_, AuthServerError>((size, *hasher.finalize().as_bytes()))
-            })
-            .await
-            .map_err(|error| {
-                AuthServerError::Internal(format!(
-                    "legacy reverse-index generation worker failed: {error}"
-                ))
-            })??;
-            store
-                .put_multipart_file_retry(
-                    &router.pack_reverse_index_path(&pack.pack_id),
-                    &rev_path,
-                    reverse_size,
-                    reverse_hash,
-                    8 * 1024 * 1024,
-                    &tokio_util::sync::CancellationToken::new(),
-                    None,
-                )
-                .await?;
-        }
-        Err(error) => return Err(error.into()),
-    }
+        .await?;
     validate_service_locator_evidence(pack, &idx_path, &rev_path, &git_sha1)?;
     let kind_by_oid =
         load_service_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?;
@@ -1737,7 +1686,7 @@ async fn commit_service_git_locators_with_source(
                 derive_service_locator_evidence(store, router, pack).await?
             }
             NewPackLocatorSource::VerifiedIndexes => {
-                download_verified_service_locator_evidence(store, router, pack).await?
+                download_service_locator_evidence(store, router, pack).await?
             }
         });
     }
@@ -3832,13 +3781,13 @@ mod tests {
         let record = build_prepare_record(
             "org/repo",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Some((&base, "etag-12")),
+            (&base, "etag-12"),
             view_updates.clone(),
             None,
         )?;
 
-        assert_eq!(record.source_manifest_generation, Some(12));
-        assert_eq!(record.source_manifest_etag.as_deref(), Some("etag-12"));
+        assert_eq!(record.source_manifest_generation, 12);
+        assert_eq!(record.source_manifest_etag, "etag-12");
         assert_eq!(record.view_ref_updates, view_updates);
         assert_eq!(
             record.source_ref_updates,
@@ -3854,7 +3803,7 @@ mod tests {
         base.refs.insert("refs/heads/main".to_owned(), oid('1'));
         let updates = vec![ref_update(Some(oid('1').to_ascii_uppercase()), oid('2'))];
 
-        let source_updates = source_ref_updates_for(Some(&base), &updates)?;
+        let source_updates = source_ref_updates_for(&base, &updates)?;
 
         assert_eq!(
             source_updates[0].old_oid.as_deref(),
@@ -3871,14 +3820,14 @@ mod tests {
         let record = build_prepare_record(
             "org/repo",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Some((&base, "etag-1")),
+            (&base, "etag-1"),
             view_updates.clone(),
             None,
         )?;
 
         let mut moved = base;
         moved.refs.insert("refs/heads/main".to_owned(), oid('3'));
-        let err = source_ref_updates_from_prepare(&record, Some(&moved), &view_updates)
+        let err = source_ref_updates_from_prepare(&record, &moved, &view_updates)
             .expect_err("moved source ref should reject prepare replay");
 
         assert!(

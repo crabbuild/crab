@@ -63,8 +63,13 @@ async fn try_build_store(
         ),
     })?;
     let parsed = crate::git::url::CrabUrl::parse(url.trim())?;
-    let store =
-        crate::auth::build_store(cfg, &parsed, OPTIMIZE_XORBS_AUTH_OPERATION, cancel).await?;
+    let store = crate::auth::build_repository_url_store(
+        cfg,
+        &parsed,
+        OPTIMIZE_XORBS_AUTH_OPERATION,
+        cancel,
+    )
+    .await?;
     Ok((store, parsed))
 }
 

@@ -23,16 +23,26 @@ pub struct StagingStats {
     pub file_count: u64,
 }
 
-/// Recipe/lease migration and push-snapshot health for diagnostics.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Recipe/lease publication and push-snapshot health for diagnostics.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct StagingLifecycleHealth {
     pub layout_version: String,
     pub quarantined_entries: u64,
+    pub unresolved_publications: u64,
+    pub open_batches_without_publication: u64,
     pub open_push_snapshots: u64,
     pub committed_push_snapshots: u64,
     pub recipes: u64,
+    pub path_heads: u64,
     pub path_leases: u64,
+    pub snapshot_pinned_superseded_leases: u64,
+    pub reclaimable_superseded_leases: u64,
+    pub reclaimable_files: u64,
     pub payloads: u64,
+    pub current_head_segment_bytes: u64,
+    pub snapshot_pinned_segment_bytes: u64,
+    pub current_head_prepared_bytes: u64,
+    pub snapshot_pinned_prepared_bytes: u64,
 }
 
 /// Statistics returned by [`super::StagingArea::compact`].

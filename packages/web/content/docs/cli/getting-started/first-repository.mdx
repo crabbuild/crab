@@ -11,6 +11,13 @@ meta:
 
 A Crab repository is a standard git repository with a cloud storage backend for large files. Crab handles the wiring between git and your bucket in a short setup flow.
 
+<Callout type="warning" title="Use a qualified provider for release deployments">
+  The S3, GCS, and Azure adapters can be configured below, but Amazon S3, GCS,
+  and Azure are currently unqualified for release use. RustFS is
+  development-qualified. Check the retained evidence status in [Provider
+  Qualification](/docs/cli/storage/provider-qualification).
+</Callout>
+
 ## Create the repository
 
 ```bash
@@ -107,7 +114,7 @@ crab://us-west-2-storage/repos/frontend-assets
 
 The `<repo-path>` isolates this repository's data within the bucket. Multiple repositories can share a single bucket with different paths.
 
-## Supported Cloud Providers
+## Available provider adapters
 
 | Provider | URL Format | Example |
 |----------|-----------|---------|
@@ -115,6 +122,9 @@ The `<repo-path>` isolates this repository's data within the bucket. Multiple re
 | Google Cloud Storage | `gs://<bucket>/<path>` | `crab configure gs://ml-data/models` |
 | Azure Blob Storage | `az://<container>/<path>` or `azure://<container>/<path>` | `crab configure azure://ml-data/models` |
 | S3-compatible (MinIO, R2, Ceph) | `crab://<bucket>/<path>` | `crab configure crab://my-minio-bucket/data --provider s3` |
+
+This table documents accepted configuration syntax. It does not mark those
+services as release-qualified.
 
 ### How Provider Detection Works
 

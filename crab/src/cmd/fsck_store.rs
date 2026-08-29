@@ -64,7 +64,7 @@ impl StoreChecker {
                 .journal
                 .packs
                 .into_iter()
-                .map(|entry| PackEntry::with_ref_tips(entry.pack_id, entry.size, entry.ref_tips))
+                .map(|entry| PackEntry::new(entry.pack_id, entry.size, entry.ref_tips))
                 .collect(),
         })
     }

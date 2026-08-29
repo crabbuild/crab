@@ -758,7 +758,7 @@ fn lockfile_written_after_inline_single_stage_run() {
 
     // 2. String values are double-quoted (canonical form per R5)
     assert!(
-        content.contains("\"crab.stage.v3\""),
+        content.contains("\"crab.stage.v1\""),
         "lockfile must use double-quoted strings for hash algo: {content}"
     );
 

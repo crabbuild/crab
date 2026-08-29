@@ -18,7 +18,7 @@ each subsystem, and how the components fit together.
 | [Caching Architecture](caching-architecture.md) | Local cache, remote cache service, `.crab/*` path contract, service dedup, eviction |
 | [Cache Service Implementation](cache-service-implementation.md) | Internal source map, HTTP contract, storage layout, dedup index, and implementation gaps |
 | [Managed Service Decisions](decisions/README.md) | Accepted identity, storage-isolation, durable-job, and portable-transfer boundaries |
-| [PB-Scale Repository Technical Design](pb-scale-repositories.md) | v2 layout for PB repos, partitioned metadata, recipe trees, authoritative add-stage, inventory GC |
+| [PB-Scale Repository Technical Design](pb-scale-repositories.md) | Canonical v1 PB layout, partitioned metadata, paged recipes, authoritative add-stage, inventory GC |
 | [Virtual Filesystem](virtual-filesystem.md) | NFS/FUSE mount, overlay, snapshot, on-demand hydration, daemon |
 | [Chunk-Level Diff Engine](diff-engine.md) | Term resolution, chunk comparison, format hints, output modes |
 | [LFS Compatibility Layer](lfs-compatibility.md) | Dual pointer system, transfer agent, batch resolver, lock manager |

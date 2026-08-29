@@ -42,8 +42,8 @@ pub fn compute_shallow_boundary(
 ///
 /// Uses BFS from `ref_tips` through the commit graph (bounded by `boundary`)
 /// to determine which commits are reachable. Packs whose `ref_tips` metadata
-/// intersects the reachable set are included. Legacy packs without metadata
-/// are always included to preserve the superset guarantee.
+/// intersects the reachable set are included. An empty tip set carries no
+/// filtering proof, so that pack is included to preserve the superset guarantee.
 pub fn filter_packs_by_depth(
     pack_list: &PackList,
     graph: &dyn CommitGraphTraversal,
@@ -60,20 +60,13 @@ pub fn filter_packs_by_depth(
 
     let mut result = Vec::new();
     for entry in &pack_list.entries {
-        match &entry.ref_tips {
-            None => {
-                // Legacy pack without metadata — include unconditionally.
-                result.push(entry.pack_id.clone());
-            }
-            Some(tips) if tips.is_empty() => {
-                // An empty hint cannot prove that a pack is irrelevant.
-                result.push(entry.pack_id.clone());
-            }
-            Some(tips) => {
-                if tips.iter().any(|t| reachable.contains(t.as_str())) {
-                    result.push(entry.pack_id.clone());
-                }
-            }
+        if entry.ref_tips.is_empty()
+            || entry
+                .ref_tips
+                .iter()
+                .any(|tip| reachable.contains(tip.as_str()))
+        {
+            result.push(entry.pack_id.clone());
         }
     }
 
@@ -484,14 +477,14 @@ mod tests {
     // --- filter_packs_by_depth ---
 
     #[test]
-    fn filter_packs_includes_legacy_packs_unconditionally() {
-        // Legacy packs (no ref_tips) are always included regardless of
-        // the commit graph or boundary — preserves the superset guarantee.
+    fn filter_packs_includes_unproven_packs_unconditionally() {
+        // Empty tip proofs are always included regardless of the commit graph
+        // or boundary, preserving the superset guarantee.
         let pack_list = PackList {
             generation: 1,
             entries: vec![
-                PackEntry::legacy("pack_a", 100),
-                PackEntry::legacy("pack_b", 200),
+                PackEntry::new("pack_a", 100, Vec::new()),
+                PackEntry::new("pack_b", 200, Vec::new()),
             ],
         };
         let summary = make_summary(vec![]);
@@ -538,16 +531,16 @@ mod tests {
         let pack_list = PackList {
             generation: 1,
             entries: vec![
-                PackEntry::with_ref_tips("reachable_pack", 100, vec!["c2".to_string()]),
-                PackEntry::with_ref_tips("unreachable_pack", 200, vec!["c0".to_string()]),
-                PackEntry::legacy("legacy_pack", 300),
+                PackEntry::new("reachable_pack", 100, vec!["c2".to_string()]),
+                PackEntry::new("unreachable_pack", 200, vec!["c0".to_string()]),
+                PackEntry::new("unproven_pack", 300, Vec::new()),
             ],
         };
 
         let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
         assert_eq!(
             ids,
-            vec!["reachable_pack".to_string(), "legacy_pack".to_string()]
+            vec!["reachable_pack".to_string(), "unproven_pack".to_string()]
         );
     }
 
@@ -560,11 +553,7 @@ mod tests {
 
         let pack_list = PackList {
             generation: 1,
-            entries: vec![PackEntry::with_ref_tips(
-                "boundary_pack",
-                100,
-                vec!["c1".to_string()],
-            )],
+            entries: vec![PackEntry::new("boundary_pack", 100, vec!["c1".to_string()])],
         };
 
         let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
@@ -581,15 +570,15 @@ mod tests {
         let pack_list = PackList {
             generation: 1,
             entries: vec![
-                PackEntry::with_ref_tips("metadata_pack", 100, vec!["c0".to_string()]),
-                PackEntry::legacy("legacy_pack", 200),
+                PackEntry::new("metadata_pack", 100, vec!["c0".to_string()]),
+                PackEntry::new("unproven_pack", 200, Vec::new()),
             ],
         };
 
         let ids = filter_packs_by_depth(&pack_list, &summary, &boundary, &ref_tips);
         assert_eq!(
             ids,
-            vec!["metadata_pack".to_string(), "legacy_pack".to_string()]
+            vec!["metadata_pack".to_string(), "unproven_pack".to_string()]
         );
     }
 

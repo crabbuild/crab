@@ -105,7 +105,7 @@ pub async fn build_report(
     let price_table = override_file::load_resolved_table(pricing_path.as_deref())?;
     validate_price_table_version(config, &price_table)?;
 
-    let provider = runtime::resolve_provider(config);
+    let provider = runtime::resolve_provider(config)?;
     let inventory = live::walk_live(
         Arc::clone(store.inner()),
         LiveWalkConfig {

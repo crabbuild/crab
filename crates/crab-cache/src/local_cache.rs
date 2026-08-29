@@ -49,7 +49,7 @@ const HASH_BYTES: usize = 32;
 const XORB_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const XORB_INDEX_OPEN_RETRY_DELAYS_MS: [u64; 4] = [5, 20, 50, 100];
 const CACHE_FILL_LOCK_STRIPES: usize = 256;
-const XORB_INDEX_SCHEMA_VERSION: i64 = 2;
+pub const XORB_INDEX_SCHEMA_VERSION: i64 = 1;
 const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 fn new_fill_locks() -> Box<[tokio::sync::Mutex<()>]> {
@@ -2292,6 +2292,15 @@ fn open_xorb_index(index_path: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
 
+    if index_path.exists() {
+        let conn = Connection::open_with_flags(
+            index_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|source| cache_index_error(index_path, source))?;
+        validate_xorb_index_schema(&conn, index_path)?;
+    }
+
     let mut last_error = None;
     for delay_ms in [0].into_iter().chain(XORB_INDEX_OPEN_RETRY_DELAYS_MS) {
         if delay_ms > 0 {
@@ -2338,10 +2347,7 @@ fn open_xorb_index_once(index_path: &Path) -> std::result::Result<Connection, ru
         return Ok(conn);
     }
     conn.execute_batch(
-        "DROP TABLE IF EXISTS xorb_index;
-        DROP TABLE IF EXISTS remote_xorb_proof;
-        DROP TABLE IF EXISTS remote_xorb_index;
-        CREATE TABLE xorb_index (
+        "CREATE TABLE xorb_index (
             chunk_hash BLOB PRIMARY KEY NOT NULL,
             xorb_hash BLOB NOT NULL,
             chunk_index INTEGER NOT NULL,
@@ -2372,10 +2378,44 @@ fn open_xorb_index_once(index_path: &Path) -> std::result::Result<Connection, ru
             scheme INTEGER NOT NULL,
             PRIMARY KEY (xorb_hash, chunk_index)
         );
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 1;
         COMMIT;",
     )?;
     Ok(conn)
+}
+
+fn validate_xorb_index_schema(conn: &Connection, index_path: &Path) -> Result<()> {
+    let version = conn
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|source| cache_index_error(index_path, source))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .map_err(|source| cache_index_error(index_path, source))?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|source| cache_index_error(index_path, source))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|source| cache_index_error(index_path, source))?;
+    let expected = vec![
+        ("index".to_owned(), "idx_xorb_index_xorb_hash".to_owned()),
+        ("table".to_owned(), "remote_xorb_index".to_owned()),
+        ("table".to_owned(), "remote_xorb_proof".to_owned()),
+        ("table".to_owned(), "xorb_index".to_owned()),
+    ];
+    if version != XORB_INDEX_SCHEMA_VERSION || objects != expected {
+        return Err(CacheError::CorruptObject {
+            path: index_path.display().to_string(),
+            reason: format!(
+                "xorb index is not canonical v1; delete this cache file and retry (version={version})"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn is_retryable_xorb_index_error(source: &rusqlite::Error) -> bool {
@@ -3453,21 +3493,43 @@ mod tests {
              END;",
         )
         .expect("install xorb index audit");
-        drop(conn);
-
         let fetched = cache
             .get_or_fetch(&key, || async { panic!("warm xorb should not fetch") })
             .await
             .expect("read warm xorb");
 
         assert_eq!(fetched, data);
-        let conn = open_xorb_index(&index_path).expect("reopen xorb index");
         let writes: i64 = conn
             .query_row("SELECT writes FROM xorb_index_write_audit", [], |row| {
                 row.get(0)
             })
             .expect("read xorb index audit");
         assert_eq!(writes, 0);
+    }
+
+    #[tokio::test]
+    async fn xorb_index_rejects_non_v1_schema_without_mutation() {
+        let (_dir, cache) = temp_cache();
+        let (hash, data) = test_xorb(b"strict v1 xorb index");
+        cache
+            .put(&CacheKey::Xorb(hash), data.as_ref())
+            .await
+            .unwrap();
+        let index_path = cache.xorb_index_path();
+        let conn = Connection::open(&index_path).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        drop(conn);
+
+        assert!(open_xorb_index(&index_path).is_err());
+        let conn = Connection::open(&index_path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(1) FROM xorb_index", [], |row| row.get(0))
+            .unwrap();
+        assert!(rows > 0);
     }
 
     #[tokio::test]

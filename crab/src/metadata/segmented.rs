@@ -1,4 +1,4 @@
-//! Compatibility Adapter for storage-backed segmented metadata helpers.
+//! Test composition helpers for storage-backed segmented metadata.
 
 use serde::Deserialize;
 

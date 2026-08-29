@@ -3,10 +3,10 @@
 
 Each sample creates a fresh local Git repository, runs ``crab init`` against a
 unique remote prefix, commits a small deterministic file set, and performs the
-first native ``crab push``. Pass ``--remote-init`` to include generation-0
-manifest provisioning in the init sample. Cohorts vary file count, repository
-count, and parallelism while sharing one isolated bucket so bucket cardinality
-is visible in the report.
+first native ``crab push``. Init always includes canonical layout and
+generation-0 manifest publication. Cohorts vary file count, repository count,
+and parallelism while sharing one isolated bucket so bucket cardinality is
+visible in the report.
 
 The benchmark intentionally does not delete its bucket or local run directory.
 Use the reported AWS CLI commands to inspect or remove the isolated data after
@@ -427,10 +427,7 @@ class RepoCreationBenchmark:
         started = time.perf_counter_ns()
 
         try:
-            init_args = [self.crab_bin, "init", "--json"]
-            if self.args.remote_init:
-                init_args.append("--remote")
-            init_args.append(remote_url)
+            init_args = [self.crab_bin, "init", "--json", remote_url]
             code, result.init_ms, stdout, stderr = self.run_command(
                 init_args,
                 repo,
@@ -655,11 +652,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--push-timeout", type=int, default=300)
     parser.add_argument("--allow-existing-bucket", action="store_true")
-    parser.add_argument(
-        "--remote-init",
-        action="store_true",
-        help="create each repository's generation-0 manifest during crab init",
-    )
     parser.add_argument("--skip-latency", action="store_true")
     parser.add_argument("--skip-throughput", action="store_true")
     args = parser.parse_args()

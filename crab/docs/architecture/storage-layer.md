@@ -2,168 +2,161 @@
 
 ## Overview
 
-The storage layer provides a unified abstraction over cloud object stores
-(S3, GCS, Azure, R2, MinIO) and implements the binary formats, retry logic,
-and upload strategies that all higher-level modules depend on.
+`crab-storage` owns provider construction, canonical object-key routing,
+conditional writes, bounded reads, retry classification, staged writes, and
+multipart upload. Higher layers own Git, Xet, metadata, and publication policy.
 
-Source: `crab/src/storage/`
+Primary sources:
 
-## Store Abstraction
+- `crates/crab-storage/src/provider_store.rs`
+- `crates/crab-storage/src/store.rs`
+- `crates/crab-storage/src/layout.rs`
+- `crates/crab-storage/src/retry.rs`
+- `crates/crab-storage/src/error_map.rs`
 
-The `Store` struct wraps the `object_store` crate's trait object, adding
-crab-specific conveniences:
+## Provider boundary
 
-```
+The provider builder selects exactly one S3-compatible, Google Cloud Storage,
+or Azure Blob Storage adapter. `crab://` is the Git remote-helper scheme; the
+project's stored provider selection determines which object-store builder
+opens its bucket or container. Raw `s3://`, `gs://`, and `az://` forms are
+normalized once at the composition boundary.
+
+An implemented adapter is not automatically release-supported. The retained
+[provider qualification matrix](../guides/provider-qualification.md) is the
+support authority. It independently proves the conditional-write, multipart,
+range, pagination, cancellation, and receipt contracts for the exact release
+candidate.
+
+## Store contract
+
+`Store` wraps `Arc<dyn ObjectStore>` and gives every caller the same semantics:
+
+```text
 Store
-├── inner: Arc<dyn ObjectStore>     ← S3/GCS/Azure backend
-├── get(path) → Bytes               ← download object
-├── get_with_etag(path) → (Bytes, ETag)
-├── put(path, bytes)                 ← upload object
-├── put_opts(path, bytes, PutMode)   ← conditional write (CAS)
-├── head(path) → ObjectMeta          ← existence + metadata check
-├── list(prefix) → Stream<ObjectMeta> ← enumerate objects
-└── delete(path)                     ← remove object
+├── put                  content-addressed create; identical conflict reuses
+├── create_strict        create-only; every existing object conflicts
+├── update               compare-and-swap with the complete ETag/version pair
+├── get_with_etag        complete body plus provider identity
+├── get_stream           backpressured full or bounded-range stream
+├── range_get            exact [start, end) body
+├── head                 metadata-only identity and size
+├── list_prefix          provider-paginated listing
+├── list_prefix_bounded  fail-closed bounded listing probe
+├── put_multipart_retry  bounded multipart from shared bytes
+├── put_multipart_file_retry
+│                        bounded multipart directly from a local file
+└── staged writes        upload under an isolated prefix, then verify durability
 ```
 
-The `Store` is created once per CLI invocation from the parsed
-`crab://bucket/repo` URL and reused for all operations.
+The CAS token retains both `e_tag` and `version`. Providers use different
+combinations; discarding either can turn a valid match-token update into an
+unconditional or permanently conflicting write.
 
-## Remote Bucket Layout
+Content-addressed `put` uses create-only semantics. If another writer wins,
+Crab streams and hashes the current object and treats the conflict as success
+only when the bytes match. Mutable coordination objects use `create_strict`
+and `update`; they never fall back to an overwrite.
 
-The normative object-key contract, including cross-language construction
-rules, is [Object Storage Layout V2](object-storage-layout.md). This page
-describes storage mechanics and does not redefine that contract.
+## Canonical layout
 
-```
-s3://{bucket}/
-├── .crab/                              Bucket-global core
-│   ├── xorbs/{first-two}/{hash}        Immutable chunk aggregates
-│   ├── shards/{first-two}/{hash}       Immutable reconstruction metadata
-│   ├── chunk_index_db/                 Shared chunk → xorb SlateDB
-│   ├── ref-registry/                   Partitioned cross-repo GC roots
-│   └── gc/                             Closures and resumable run state
-└── {repo-path}/
-    ├── manifest                        Authoritative mutable pointer
-    ├── manifests/                      Immutable bulk and historical roots
-    ├── metadata/{pack,shard}/          Immutable segmented inventories
-    ├── packs/                          Immutable Git pack family
-    ├── file_index_db/                  Per-repo file → shard SlateDB
-    ├── git_object_catalog_db/          Derived Git object-catalog SlateDB
-    ├── locks/                          Push and native file locks
-    └── lfs/                            LFS objects and protocol locks
-```
+The normative key contract is
+[Canonical Object Storage Layout V1](object-storage-layout.md). The important
+ownership split is:
 
-### Path Layout Notes
+```text
+{global_prefix}/
+├── xorbs/{first-two}/{blake3}
+├── shards/{first-two}/{blake3}
+├── chunk_index_db/...
+└── ref-registry/...
 
-Xorbs and shards live under the placement's `global_prefix` (normally the
-bucket-root `.crab`) without a `xet/` prefix or filename extension. Both use
-the first two hash characters for fan-out. File-index records live inside the opaque per-repository
-`file_index_db/` SlateDB; callers do not construct record object keys.
-
-The single `{repo-path}/manifest` owns refs and points at content-addressed
-segmented pack and shard inventories. The object catalog is derived
-acceleration; the manifest plus canonical `.pack`/`.idx` files remain the
-correctness boundary. Catalog checkpoints are named by a digest of their exact
-generation and pack inventory so readers can pin one immutable catalog.
-
-LFS objects use two-level sharding: `{oid[:2]}/{oid[2:4]}/{oid}` for
-compatibility with the standard LFS layout.
-
-### Object Mutability
-
-| Object | Mutable | Update Mechanism |
-|--------|---------|------------------|
-| xorbs, shards, packs | No | Content-addressed, write-once |
-| closure manifests and segments | No | Content-addressed, write-once |
-| ref-registry records and shard-root partitions | Yes | Per-repo/per-partition CAS |
-| file/chunk index databases | Mixed | SlateDB-owned protocol |
-| manifest | Yes | CAS via `If-Match` ETag |
-| segmented inventory objects, locator SSTs | No | Content-addressed/SlateDB publication |
-| push locks | Yes | CAS create + TTL expiry |
-| LFS locks | Yes | CAS create/delete |
-| config | Yes (rarely) | CAS |
-
-## Xorb Binary Format
-
-Xorbs aggregate chunks into ~64 MiB content-addressed blobs:
-
-```
-┌──────────────────────────────────────────────────┐
-│ Header                                           │
-│   magic: "XORB" (4 bytes)                        │
-│   version: u16                                   │
-│   chunk_count: u32                               │
-│   metadata_offset: u64                           │
-├──────────────────────────────────────────────────┤
-│ Chunk Data                                       │
-│   for each chunk:                                │
-│     length: u32                                  │
-│     compressed_bytes: [u8; length]  (zstd)       │
-├──────────────────────────────────────────────────┤
-│ Metadata                                         │
-│   for each chunk:                                │
-│     hash: MerkleHash (32 bytes)                  │
-│     uncompressed_length: u32                     │
-│     offset_in_xorb: u64                          │
-├──────────────────────────────────────────────────┤
-│ Footer                                           │
-│   hash_of_metadata: MerkleHash                   │
-│   hash_of_xorb: MerkleHash  (content address)    │
-└──────────────────────────────────────────────────┘
+{repo_prefix}/
+├── layout
+├── manifest
+├── manifests/...
+├── metadata/...
+├── packs/...
+├── file_index_db/...
+├── git_object_catalog_db/...
+└── locks/...
 ```
 
-Key properties:
-- Chunks are compressed individually with zstd (level 3 default), enabling
-  Range GETs to extract specific chunks without decompressing the whole xorb.
-- The xorb's content address is a MerkleHash over chunk hashes, not over
-  compressed bytes. Same logical content → same hash regardless of compression
-  level.
-- Compatible with xet-core's xorb format.
+Callers do not construct SlateDB child keys. They also do not probe retired
+paths to infer a layout. The canonical v1 descriptor and manifest are the only
+repository-open authority.
 
-Source: `crab/src/storage/xorb/`
+## Bounded reads
 
-## Retry Policy
+- Large immutable bodies are streamed with backpressure.
+- Small control objects use explicit maximum body sizes before allocation.
+- Range reads verify exact response bounds and byte count.
+- Read observers count logical request kinds and delivered bytes without
+  receiving keys, endpoints, or credentials.
+- Prefix probes can stop at a fixed limit rather than materializing an
+  unbounded namespace.
 
-The retry module classifies errors and applies exponential backoff:
+Xet reconstruction coalesces adjacent chunk ranges before it reaches the
+store. The storage layer does not reinterpret shard terms or recipe pages.
 
-| Error Class | Retry? | Examples |
-|-------------|--------|----------|
-| Transient | Yes | Network timeout, 5xx, throttle (429) |
-| Permanent | No | 404 Not Found, 403 Access Denied |
-| CAS conflict | Caller decides | 412 Precondition Failed |
+## Multipart uploads
 
-Retry parameters:
-- Base delay: 50ms
-- Max delay: 500ms (capped)
-- Max attempts: configurable (default 10 for CAS, 3 for data operations)
-- Jitter: randomized to avoid thundering herd
+Multipart retries restart the complete upload attempt. `object_store` assigns
+part indexes by call order, so retrying one failed part through the high-level
+API could shift indexes and corrupt completion. Crab aborts the failed attempt,
+creates a new upload, and sends every part again from index zero.
 
-Source: `crab/src/storage/retry.rs`
+The progress-aware path keeps at most four part futures in flight. The
+file-backed path reads one fixed-size buffer per scheduled part and never
+materializes the complete xorb body. Before completion it verifies:
 
-## Multipart Upload
+- the file size before and after upload;
+- the streaming BLAKE3 digest;
+- cancellation at part boundaries;
+- successful completion of every scheduled part.
 
-Objects larger than 8 MiB use S3 multipart upload:
-- Part size: 8 MiB
-- Concurrent part uploads via `put_multipart` from `object_store`
-- Partial state persisted in `MultipartRegistry` (SQLite) for resume across
-  process restarts
-- Abandoned multipart uploads detected by `crab fsck` and aborted
+Any failure or cancellation aborts the provider upload. Successful immutable
+parts from an abandoned higher-level push are harmless; future content-addressed
+writes verify and reuse them.
 
-Source: `crab/src/storage/multipart_resume.rs`
+Protected pushes use a staging-write store. Canonical keys map to generated
+staging keys, and `flush_staged_writes` verifies every recorded staged size
+before the receive service may promote or publish metadata. Flush is a
+durability barrier, not a client-side canonical promotion.
 
-## Batched HEAD Requests
+## Retry and error mapping
 
-The `head_batch` module provides concurrent HEAD requests for existence
-checking. Used during push (step 6) to skip already-uploaded xorbs and
-during LFS push to identify missing objects.
+Provider errors are mapped once at the storage boundary:
 
-Source: `crab/src/storage/head_batch.rs`
+| Storage error | Retry behavior |
+| --- | --- |
+| Network transient | Exponential backoff with jitter, bounded attempts |
+| Throttled | Provider delay hint plus bounded jitter |
+| State conflict | Higher state-dependent budget or caller CAS replan |
+| Corrupt response | One retry, then fail closed |
+| Missing, forbidden, credentials, cancellation, invalid input | No retry |
 
-## Error Mapping
+`update` itself does not retry. A network failure after a CAS request is
+ambiguous—the provider may have committed it—so the owner must re-read state
+and decide with a fresh token. Retrying the stale token blindly cannot restore
+correctness.
 
-The `error_map` module translates `object_store::Error` variants into
-`CrabError` variants, preserving the original error as a source chain.
-It also classifies authentication errors separately for better user-facing
-messages.
+## Durability receipts
 
-Source: `crab/src/storage/error_map.rs`
+`crab-metadata` records origin receipts after verifying canonical immutable
+bodies. A receipt binds namespace, object key, content digest, size, and the
+provider's ETag/version identity. A later check avoids rehashing the body only
+when the current provider identity matches the receipt exactly. Backends that
+do not expose either identity are rehashed every time and cannot pass provider
+qualification.
+
+## Safety rules
+
+- Never turn a create/CAS failure into an unconditional overwrite.
+- Never log credentials, signed URLs, bearer tokens, or secret environment
+  values.
+- Never run bucket-wide cleanup as part of qualification.
+- Keep provider qualification under one generated prefix and verify it is
+  empty before and after the run.
+- Keep old-layout deletion explicit and operator-scoped; normal open fails
+  closed instead of translating or deleting state.

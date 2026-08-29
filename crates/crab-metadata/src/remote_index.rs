@@ -13,15 +13,13 @@ use object_store::path::Path as ObjectPath;
 use crate::error::{MetadataError, Result};
 use crate::key_codec::{
     decode_committed_chunk_key, encode_committed_chunk_head_key, encode_committed_chunk_key,
-    encode_committed_content_prefix, encode_committed_file_key, encode_content_key,
-    encode_origin_proof_key, encode_source_anchor_key,
+    encode_committed_content_prefix, encode_committed_file_key, encode_origin_proof_key,
+    encode_source_anchor_key,
 };
 use crate::receipts::{
     CommittedChunkPlacement, CommittedChunkReceipt, OriginReceipt, SourceAnchor,
 };
-use crate::value_codec::{
-    CommittedFileRecord, decode_chunk_index_value, encode_committed_file_record,
-};
+use crate::value_codec::{CommittedFileRecord, encode_committed_file_record};
 use crab_xet::xorb::format::{MerkleHash, XorbRef};
 
 const FILE_INDEX_DB_LABEL: &str = "file_index_db";
@@ -136,19 +134,7 @@ pub async fn read_chunk_index_entry(
         Some(reader) => reader,
         None => return Ok(None),
     };
-    let key = encode_content_key(chunk_hash);
     let result = async {
-        let raw = reader
-            .get(&key)
-            .await
-            .map_err(|source| MetadataError::SlateDbRead {
-                db: CHUNK_INDEX_DB_LABEL.to_owned(),
-                source,
-            })?;
-        if let Some(bytes) = raw.as_deref() {
-            return decode_chunk_index_value(bytes).map(Some);
-        }
-
         let head_key = encode_committed_chunk_head_key(chunk_hash);
         let head = reader
             .get(&head_key)
@@ -230,7 +216,6 @@ async fn write_opened_entries(
     if let Some(db) = file_db {
         let mut batch = slatedb::WriteBatch::new();
         for (file_hash, record) in file_entries {
-            batch.delete(encode_content_key(file_hash).as_slice());
             batch.put(
                 encode_committed_file_key(file_hash, record.committed_generation).as_slice(),
                 encode_committed_file_record(record).as_slice(),
@@ -284,7 +269,6 @@ async fn write_opened_entries(
                 encode_committed_chunk_key(chunk_hash, &placement.placement_id()).as_slice(),
                 value.as_slice(),
             );
-            batch.delete(encode_content_key(chunk_hash).as_slice());
             let replace = heads.get(chunk_hash).is_none_or(|(generation, prior)| {
                 receipt
                     .committed_generation
@@ -465,7 +449,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_index_entries_retires_legacy_and_reads_committed_entry() {
+    async fn write_index_entries_reads_committed_entry() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let config = RemoteIndexConfig::for_repo_with_global_prefix("org/repo", ".crab");
         let chunk_hash = hash_from_seed(1);
@@ -474,22 +458,6 @@ mod tests {
             chunk_index: 7,
             uncompressed_size: 4096,
         };
-
-        let writer = open_writer(
-            Arc::clone(&store),
-            &config.chunk_index_path,
-            CHUNK_INDEX_DB_LABEL,
-        )
-        .await
-        .expect("open legacy writer");
-        writer
-            .put(
-                encode_content_key(&chunk_hash).as_slice(),
-                crate::value_codec::encode_chunk_index_value(&xorb_ref).as_slice(),
-            )
-            .await
-            .expect("write legacy entry");
-        writer.close().await.expect("close legacy writer");
 
         let receipt = CommittedChunkReceipt {
             schema_version: crate::receipts::RECEIPT_SCHEMA_VERSION,

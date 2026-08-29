@@ -1125,7 +1125,7 @@ Step 12 ◄── specs[] (from remote helper batch)
 ### Push Lock Protocol
 
 Push locks prevent concurrent pushers from racing on overlapping destination
-refs. [Object Storage Layout V2](../architecture/object-storage-layout.md#lock-namespaces)
+refs. [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md#lock-namespaces)
 defines the normative key and hard-cutover protocol. Each lock is a short-TTL
 lease stored as a JSON object in the configured object store:
 

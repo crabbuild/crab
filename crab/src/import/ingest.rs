@@ -669,14 +669,14 @@ async fn stage_large_object(
     check_cancelled(cancel)?;
 
     if let Some(recipe) = staging.published_recipe_for_file(&file_hash)? {
-        if recipe.sequence().file_size != total_bytes {
+        if recipe.file_size() != total_bytes {
             return Err(CrabError::StagingCorrupt(format!(
                 "published recipe for {} has size {}, expected {total_bytes}",
                 file_hash.hex(),
-                recipe.sequence().file_size
+                recipe.file_size()
             )));
         }
-        staging.publish_verified_recipe_lease(Path::new(&entry.relative_path), &recipe)?;
+        staging.publish_verified_history_recipe(&recipe)?;
         return Ok(Outcome::Staged {
             file_hash: file_hash.into(),
             bytes_source: total_bytes,
@@ -699,7 +699,7 @@ async fn stage_large_object(
         cancel,
     )
     .await?;
-    staging.publish_verified_recipe_lease(Path::new(&entry.relative_path), &recipe)?;
+    staging.publish_verified_history_recipe(&recipe)?;
 
     let file_hash_bytes: [u8; 32] = file_hash.into();
 
@@ -1146,7 +1146,7 @@ async fn stage_chunk_result(
                 chunk_result.file_hash.hex()
             )));
         }
-        staging.publish_verified_recipe_lease(Path::new(&entry.relative_path), &recipe)?;
+        staging.publish_verified_history_recipe(&recipe)?;
         return Ok(Outcome::Staged {
             file_hash: chunk_result.file_hash.into(),
             bytes_source: chunk_result.total_bytes,
@@ -1171,7 +1171,7 @@ async fn stage_chunk_result(
     staging
         .stage_chunks_batch(&refs, &chunk_result.file_hash, 0)
         .await?;
-    staging.publish_verified_recipe_lease(Path::new(&entry.relative_path), &recipe)?;
+    staging.publish_verified_history_recipe(&recipe)?;
 
     let file_hash_bytes: [u8; 32] = chunk_result.file_hash.into();
 

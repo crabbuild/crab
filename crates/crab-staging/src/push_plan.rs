@@ -19,40 +19,47 @@ pub use crate::add_push_plan::{
     prepare_file_push_plans, prepare_file_push_plans_with_progress,
 };
 
-pub const FILE_PUSH_PLAN_VERSION: u32 = 4;
+pub const FILE_PUSH_PLAN_VERSION: u32 = 1;
 
 const PLAN_DIR: &str = "push-plans";
 const FILE_DIR: &str = "files";
 const XORB_DIR: &str = "xorbs";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilePushPlan {
     pub version: u32,
     pub staged_chunk_sequence_verified: bool,
     pub file_hash: String,
     pub file_size: u64,
-    pub chunks: Vec<PlannedChunk>,
-    #[serde(default)]
+    pub chunk_count: u64,
+    pub chunk_sequence_hash: String,
+    #[serde(skip)]
     pub existing: Vec<PlannedExistingChunk>,
-    #[serde(default)]
     pub prepared_xorbs: Vec<PlannedXorb>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannedChunk {
-    pub hash: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlannedExistingChunk {
     pub chunk_hash: String,
     pub xorb_hash: String,
     pub chunk_index: u32,
     pub uncompressed_size: u32,
+    pub placement_id: String,
+    pub origin_proof_id: String,
+}
+
+/// Remote chunk placement whose committed origin proof was revalidated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExistingChunkCandidate {
+    pub xorb_ref: XorbRef,
+    pub placement_id: [u8; 32],
+    pub origin_proof_id: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlannedXorb {
     pub hash: String,
     pub payload_hash: String,
@@ -64,6 +71,7 @@ pub struct PlannedXorb {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlannedPlacement {
     pub chunk_hash: String,
     pub xorb_hash: String,
@@ -264,13 +272,10 @@ impl FilePushPlan {
             staged_chunk_sequence_verified: false,
             file_hash: file_hash.hex(),
             file_size,
-            chunks: chunks
-                .iter()
-                .map(|(hash, size)| PlannedChunk {
-                    hash: hash.hex(),
-                    size: *size,
-                })
-                .collect(),
+            chunk_count: chunks.len() as u64,
+            chunk_sequence_hash: blake3::Hash::from(chunk_sequence_hash(chunks))
+                .to_hex()
+                .to_string(),
             existing: Vec::new(),
             prepared_xorbs: Vec::new(),
         }
@@ -286,28 +291,52 @@ impl FilePushPlan {
         plan
     }
 
+    #[must_use]
+    pub fn new_verified_recipe(recipe: &crate::recipe::FileRecipe) -> Self {
+        Self {
+            version: FILE_PUSH_PLAN_VERSION,
+            staged_chunk_sequence_verified: true,
+            file_hash: recipe.file_hash().hex(),
+            file_size: recipe.file_size(),
+            chunk_count: recipe.chunk_count(),
+            chunk_sequence_hash: blake3::Hash::from(recipe.sequence_hash())
+                .to_hex()
+                .to_string(),
+            existing: Vec::new(),
+            prepared_xorbs: Vec::new(),
+        }
+    }
+
     pub fn file_hash(&self) -> Result<MerkleHash> {
         parse_hash(&self.file_hash, "file_hash")
     }
 
-    pub fn chunk_pairs(&self) -> Result<Vec<(MerkleHash, u64)>> {
-        self.chunks
-            .iter()
-            .map(|chunk| Ok((parse_hash(&chunk.hash, "chunk hash")?, chunk.size)))
-            .collect()
+    pub fn sequence_hash(&self) -> Result<[u8; 32]> {
+        let bytes = blake3::Hash::from_hex(&self.chunk_sequence_hash).map_err(|e| {
+            StagingError::StagingCorrupt(format!(
+                "invalid push-plan chunk sequence hash {}: {e}",
+                self.chunk_sequence_hash
+            ))
+        })?;
+        Ok(*bytes.as_bytes())
     }
 
     pub fn existing_refs(&self) -> Result<Vec<(MerkleHash, XorbRef)>> {
+        self.existing_candidates().map(|candidates| {
+            candidates
+                .into_iter()
+                .map(|(chunk_hash, candidate)| (chunk_hash, candidate.xorb_ref))
+                .collect()
+        })
+    }
+
+    pub fn existing_candidates(&self) -> Result<Vec<(MerkleHash, ExistingChunkCandidate)>> {
         self.existing
             .iter()
             .map(|existing| {
                 Ok((
                     parse_hash(&existing.chunk_hash, "existing chunk hash")?,
-                    XorbRef {
-                        xorb_hash: parse_hash(&existing.xorb_hash, "existing xorb hash")?,
-                        chunk_index: existing.chunk_index,
-                        uncompressed_size: existing.uncompressed_size,
-                    },
+                    existing.candidate()?,
                 ))
             })
             .collect()
@@ -315,13 +344,28 @@ impl FilePushPlan {
 }
 
 pub(crate) fn serialize_file_push_plan(plan: &FilePushPlan) -> Result<Vec<u8>> {
+    if plan.version != FILE_PUSH_PLAN_VERSION {
+        return Err(StagingError::StagingCorrupt(format!(
+            "add-time push plan must use canonical v{FILE_PUSH_PLAN_VERSION}; restage the file"
+        )));
+    }
     serde_json::to_vec(plan)
         .map_err(|e| StagingError::Internal(format!("failed to serialize add-time push plan: {e}")))
 }
 
 pub(crate) fn deserialize_file_push_plan(bytes: &[u8]) -> Result<FilePushPlan> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| StagingError::Internal(format!("failed to parse add-time push plan: {e}")))
+    let plan: FilePushPlan = serde_json::from_slice(bytes).map_err(|e| {
+        StagingError::StagingCorrupt(format!(
+            "add-time push plan is not canonical v{FILE_PUSH_PLAN_VERSION}: {e}; restage the file"
+        ))
+    })?;
+    if plan.version != FILE_PUSH_PLAN_VERSION {
+        return Err(StagingError::StagingCorrupt(format!(
+            "add-time push plan version {} is unsupported; restage the file for canonical v{FILE_PUSH_PLAN_VERSION}",
+            plan.version
+        )));
+    }
+    Ok(plan)
 }
 
 pub(crate) fn serialize_planned_xorb(plan: &PlannedXorb) -> Result<Vec<u8>> {
@@ -335,24 +379,39 @@ pub(crate) fn deserialize_planned_xorb(bytes: &[u8]) -> Result<PlannedXorb> {
 }
 
 pub(crate) fn chunk_sequence_hash(chunks: &[(MerkleHash, u64)]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(chunks.len() as u64).to_le_bytes());
+    let mut hasher = crate::recipe::new_sequence_hasher();
     for (chunk_hash, size) in chunks {
-        let hash_bytes: [u8; 32] = (*chunk_hash).into();
-        hasher.update(&hash_bytes);
-        hasher.update(&size.to_le_bytes());
+        crate::recipe::update_sequence_hasher(&mut hasher, *chunk_hash, *size);
     }
     *hasher.finalize().as_bytes()
 }
 
 impl PlannedExistingChunk {
-    pub fn from_ref(chunk_hash: MerkleHash, xorb_ref: XorbRef) -> Self {
+    pub fn from_candidate(chunk_hash: MerkleHash, candidate: ExistingChunkCandidate) -> Self {
         Self {
             chunk_hash: chunk_hash.hex(),
-            xorb_hash: xorb_ref.xorb_hash.hex(),
-            chunk_index: xorb_ref.chunk_index,
-            uncompressed_size: xorb_ref.uncompressed_size,
+            xorb_hash: candidate.xorb_ref.xorb_hash.hex(),
+            chunk_index: candidate.xorb_ref.chunk_index,
+            uncompressed_size: candidate.xorb_ref.uncompressed_size,
+            placement_id: blake3::Hash::from(candidate.placement_id)
+                .to_hex()
+                .to_string(),
+            origin_proof_id: blake3::Hash::from(candidate.origin_proof_id)
+                .to_hex()
+                .to_string(),
         }
+    }
+
+    pub fn candidate(&self) -> Result<ExistingChunkCandidate> {
+        Ok(ExistingChunkCandidate {
+            xorb_ref: XorbRef {
+                xorb_hash: parse_hash(&self.xorb_hash, "existing xorb hash")?,
+                chunk_index: self.chunk_index,
+                uncompressed_size: self.uncompressed_size,
+            },
+            placement_id: parse_hash_bytes(&self.placement_id, "existing placement id")?,
+            origin_proof_id: parse_hash_bytes(&self.origin_proof_id, "existing origin proof id")?,
+        })
     }
 }
 
@@ -491,10 +550,13 @@ fn planned_xorb_intersects_chunks(
 
 #[cfg(test)]
 fn file_plan_intersects_chunks(plan: &FilePushPlan, wanted_chunks: &HashSet<MerkleHash>) -> bool {
-    plan.chunks.iter().any(|chunk| {
-        parse_hash(&chunk.hash, "planned chunk hash")
+    plan.existing.iter().any(|chunk| {
+        parse_hash(&chunk.chunk_hash, "planned existing chunk hash")
             .is_ok_and(|chunk_hash| wanted_chunks.contains(&chunk_hash))
-    })
+    }) || plan
+        .prepared_xorbs
+        .iter()
+        .any(|xorb| planned_xorb_intersects_chunks(xorb, wanted_chunks))
 }
 
 pub(crate) fn prepared_xorb_file_matches_cached_plan(
@@ -980,9 +1042,9 @@ pub(crate) fn accumulate_file_plan_for_hash(
     if &plan_file_hash != file_hash {
         return Ok(false);
     }
-    let Ok(chunks) = plan.chunk_pairs() else {
+    if plan.sequence_hash().is_err() {
         return Ok(false);
-    };
+    }
     if plan.existing_refs().is_err() {
         return Ok(false);
     }
@@ -1004,15 +1066,8 @@ pub(crate) fn accumulate_file_plan_for_hash(
         .ok_or_else(|| StagingError::Internal("push-plan file byte count overflowed".to_owned()))?;
     stats.planned_chunks = stats
         .planned_chunks
-        .checked_add(chunks.len() as u64)
+        .checked_add(plan.chunk_count)
         .ok_or_else(|| StagingError::Internal("push-plan chunk count overflowed".to_owned()))?;
-    stats.existing_chunks = stats
-        .existing_chunks
-        .checked_add(plan.existing.len() as u64)
-        .ok_or_else(|| {
-            StagingError::Internal("push-plan existing chunk count overflowed".to_owned())
-        })?;
-
     for planned_xorb in &plan.prepared_xorbs {
         let xorb_hash = planned_xorb.hash()?;
         let path = prepared_xorb_path(root, file_hash, &xorb_hash);
@@ -1267,6 +1322,38 @@ mod tests {
         MerkleHash::from([byte; 32])
     }
 
+    #[test]
+    fn file_push_plan_rejects_non_v1_and_unknown_fields() {
+        let plan = FilePushPlan::new(hash(1), 0, &[]);
+        let mut value = serde_json::to_value(plan).expect("serialize plan");
+        value["version"] = serde_json::json!(2);
+        let error = deserialize_file_push_plan(
+            &serde_json::to_vec(&value).expect("serialize non-v1 fixture"),
+        )
+        .expect_err("non-v1 plan must fail");
+        assert!(error.to_string().contains("restage"));
+
+        value["version"] = serde_json::json!(FILE_PUSH_PLAN_VERSION);
+        value["retired_field"] = serde_json::json!(true);
+        assert!(
+            deserialize_file_push_plan(
+                &serde_json::to_vec(&value).expect("serialize retired fixture")
+            )
+            .is_err()
+        );
+
+        let mut value =
+            serde_json::to_value(FilePushPlan::new(hash(1), 0, &[])).expect("serialize plan");
+        value["existing"] = serde_json::json!([]);
+        assert!(
+            deserialize_file_push_plan(
+                &serde_json::to_vec(&value).expect("serialize embedded authority fixture")
+            )
+            .is_err(),
+            "canonical v1 stores remote authority only in the indexed recipe relation"
+        );
+    }
+
     fn file_hash_from_chunks(chunks: &[(MerkleHash, Vec<u8>)]) -> MerkleHash {
         let mut hasher = blake3::Hasher::new();
         for (_, data) in chunks {
@@ -1336,6 +1423,24 @@ mod tests {
     }
 
     #[test]
+    fn proof_identifiers_round_trip_as_raw_bytes() {
+        let placement_id = std::array::from_fn(|index| index as u8);
+        let origin_proof_id = std::array::from_fn(|index| (31 - index) as u8);
+        let candidate = ExistingChunkCandidate {
+            xorb_ref: XorbRef {
+                xorb_hash: hash(9),
+                chunk_index: 7,
+                uncompressed_size: 4096,
+            },
+            placement_id,
+            origin_proof_id,
+        };
+        let planned = PlannedExistingChunk::from_candidate(hash(8), candidate);
+
+        assert_eq!(planned.candidate().expect("decode candidate"), candidate);
+    }
+
+    #[test]
     fn summarize_push_plans_reports_valid_invalid_and_stale_inventory() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let file_hash = hash(1);
@@ -1358,12 +1463,16 @@ mod tests {
                 (chunk_d, 300),
             ],
         );
-        plan.existing.push(PlannedExistingChunk::from_ref(
+        plan.existing.push(PlannedExistingChunk::from_candidate(
             chunk_a,
-            XorbRef {
-                xorb_hash: hash(9),
-                chunk_index: 0,
-                uncompressed_size: 100,
+            ExistingChunkCandidate {
+                xorb_ref: XorbRef {
+                    xorb_hash: hash(9),
+                    chunk_index: 0,
+                    uncompressed_size: 100,
+                },
+                placement_id: hash(8).into(),
+                origin_proof_id: hash(10).into(),
             },
         ));
         for (xorb_hash, chunk_hash, chunk_index, bytes) in [
@@ -1415,7 +1524,7 @@ mod tests {
         assert_eq!(stats.invalid_plan_files, 1);
         assert_eq!(stats.planned_file_bytes, 900);
         assert_eq!(stats.planned_chunks, 4);
-        assert_eq!(stats.existing_chunks, 1);
+        assert_eq!(stats.existing_chunks, 0);
         assert_eq!(stats.prepared_xorbs, 3);
         assert_eq!(stats.prepared_chunks, 3);
         assert_eq!(stats.prepared_bytes, 16);

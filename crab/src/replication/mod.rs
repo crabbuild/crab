@@ -51,7 +51,7 @@ pub use crab_types::replication::{
 #[cfg(test)]
 use crab_xet::xorb::format::MerkleHash;
 
-const READINESS_CACHE_VERSION: u32 = 2;
+pub const READINESS_CACHE_VERSION: u32 = 1;
 const READINESS_CACHE_INVALIDATION_VERSION: u32 = 1;
 const READ_EVENT_VERSION: u32 = 1;
 const READ_EVENT_LOG_MAX_BYTES: u64 = 1_048_576;
@@ -8049,6 +8049,8 @@ async fn apply_active_active_repair_action(
     let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
     let source_router = StoreLayout::new(source_store.clone(), source_prefix.clone());
     let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
+    crate::core::remote_layout::open(&source_store, &source_router).await?;
+    crate::core::remote_layout::open(&target_store, &target_router).await?;
     let cancel = CancellationToken::new();
     let writer = crate::maintenance::GcWriterLeases::acquire(
         &target_store,
@@ -8123,9 +8125,7 @@ async fn replicate_git_visibility_index(
         source_router.repo_prefix().to_owned(),
     );
     // Repair can only copy an existing proof; unlike push publication it
-    // cannot reconstruct a digest-bound proof before materializing the target
-    // manifest. Treat a mismatched legacy proof as corruption instead of
-    // silently publishing a manifest without its visibility guard.
+    // cannot reconstruct one before materializing the target manifest.
     let index = match crab_metadata::git_visibility::read(
         source_store.as_storage(),
         &source_storage_router,
@@ -8418,7 +8418,9 @@ impl<'a> StoreResolver<'a> {
             return Ok(ReadStoreSelection::primary(primary_store, primary_router));
         };
 
-        select_read_store_with_replicas(
+        let primary_fallback_store = primary_store.clone();
+        let primary_fallback_router = primary_router.clone();
+        let selection = select_read_store_with_replicas(
             primary_store,
             &resolved.repository_prefix,
             replication.replicas.iter(),
@@ -8426,12 +8428,42 @@ impl<'a> StoreResolver<'a> {
             policy,
             build_replica_store,
         )
-        .await
+        .await?;
+        let ReadSource::Replica { name } = &selection.source else {
+            return Ok(selection);
+        };
+        if let Err(error) =
+            crate::core::remote_layout::open(&selection.store, &selection.router).await
+        {
+            tracing::warn!(replica = %name, error = %error, "replica does not expose canonical v1 layout; using primary");
+            if let Some(replica) = replication
+                .replicas
+                .iter()
+                .find(|replica| replica.name == *name)
+            {
+                record_replica_read_event(
+                    replica,
+                    selection.router.repo_prefix(),
+                    operation,
+                    ReplicaReadOutcome::Fallback,
+                    None,
+                    None,
+                    Some(format!(
+                        "replica canonical layout validation failed: {error}"
+                    )),
+                );
+            }
+            return Ok(ReadStoreSelection::primary(
+                primary_fallback_store,
+                primary_fallback_router,
+            ));
+        }
+        Ok(selection)
     }
 
     /// Selects the primary store for write-class operations.
     pub async fn write_store(&self, operation: &str) -> Result<WriteStoreSelection> {
-        let store = crate::auth::build_store(
+        let store = crate::auth::build_repository_url_store(
             self.config,
             self.primary_url.clone(),
             operation,
@@ -8695,7 +8727,8 @@ pub async fn replica_statuses_with_options(
     cancel: &CancellationToken,
     options: ReadinessCheckOptions,
 ) -> Result<Vec<ReplicaStatus>> {
-    let primary_store = crate::auth::build_store(config, primary_url, operation, cancel).await?;
+    let primary_store =
+        crate::auth::build_repository_url_store(config, primary_url, operation, cancel).await?;
     let primary_router = StoreLayout::new(primary_store.clone(), primary_url.repo_path.clone());
     let Some(replication) = config.replication.as_ref() else {
         return Ok(Vec::new());
@@ -8709,6 +8742,19 @@ pub async fn replica_statuses_with_options(
         match build_replica_store(replica, &primary_url.repo_path) {
             Ok((replica_store, replica_prefix)) => {
                 let replica_router = StoreLayout::new(replica_store.clone(), replica_prefix);
+                if let Err(error) =
+                    crate::core::remote_layout::open(&replica_store, &replica_router).await
+                {
+                    statuses.push(status_with_events(
+                        failed_status(
+                            replica,
+                            format!("replica canonical layout validation failed: {error}"),
+                        ),
+                        replica,
+                        replica_router.repo_prefix(),
+                    ));
+                    continue;
+                }
                 let readiness = tokio::select! {
                     result = replica_readiness(
                         &primary_store,
@@ -9495,7 +9541,7 @@ pub fn project_config_path(root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::metadata::manifest::write_manifest_cas;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fmt;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -12309,7 +12355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repair_refuses_to_replicate_mismatched_legacy_visibility() {
+    async fn repair_refuses_to_replicate_mismatched_v1_visibility() {
         let source = Store::new(Arc::new(InMemory::new()));
         let source_router = StoreLayout::new(source.clone(), "source/repo".to_owned());
         let target = Store::new(Arc::new(InMemory::new()));
@@ -12321,20 +12367,24 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "1".repeat(40));
         manifest.seal_git_validation();
-        let legacy = serde_json::json!({
-            "version": 1,
-            "generation": manifest.generation,
-            "pack_index_hash": manifest.pack_index_hash,
-            "refs": {"refs/heads/main": ["2".repeat(40)]},
-        });
-        source
-            .put(
-                &source_router
-                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
-                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
-            )
-            .await
-            .unwrap();
+        let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
+            manifest.generation,
+            &manifest.pack_index_hash,
+            &manifest.git_validation_digest,
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
+        )
+        .unwrap();
+        let source_storage_router = crab_storage::StoreLayout::new(
+            source.as_storage().clone(),
+            source_router.repo_prefix().to_owned(),
+        );
+        crab_metadata::git_visibility::upload_digest_bound_if_absent(
+            source.as_storage(),
+            &source_storage_router,
+            &index,
+        )
+        .await
+        .unwrap();
 
         let error = replicate_git_visibility_index(
             &source,
@@ -13588,59 +13638,9 @@ mod tests {
     fn direct_store_classifications() -> &'static [DirectStoreClassification] {
         &[
             DirectStoreClassification {
-                call: "src/cmd/doctor.rs::check_credentials",
-                class: "primary-diagnostic",
-                reason: "doctor validates credentials and list access for the configured primary remote",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/doctor.rs::run_cost_report",
-                class: "primary-diagnostic",
-                reason: "cost reporting inventories the configured primary remote rather than a lagging replica",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/du.rs::fetch_remote_size",
-                class: "primary-diagnostic",
-                reason: "remote size reporting must inspect the configured primary remote, not a lagging replica",
-            },
-            DirectStoreClassification {
                 call: "src/cmd/init.rs::initialize_remote_repository",
                 class: "primary-write-authority",
-                reason: "remote repository initialization creates the primary generation-zero manifest",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/lock.rs::setup",
-                class: "primary-write-authority",
-                reason: "lock operations are write coordination and must target the primary authority",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/metadb.rs::resolve_repo_store_in",
-                class: "primary-maintenance",
-                reason: "metadb diagnose and rebuild operate on durable metadata state for the configured primary remote",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/release.rs::publish_manifest",
-                class: "primary-write-authority",
-                reason: "release publication creates repository release manifest objects and must write to the primary authority",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/optimize/xorbs.rs::try_build_store",
-                class: "primary-maintenance",
-                reason: "xorb optimization reads and rewrites storage layout state and must not use a stale replica",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/workflow.rs::build_remote_store_for",
-                class: "primary-write-authority",
-                reason: "workflow cache push uploads cache artifacts and must write to the primary remote",
-            },
-            DirectStoreClassification {
-                call: "src/cmd/workflow.rs::build_workflow_artifact_stores",
-                class: "primary-write-authority",
-                reason: "workflow cache push opens explicitly configured artifact remotes as write targets",
-            },
-            DirectStoreClassification {
-                call: "src/git/protected_push.rs::protected_push_ref_updates",
-                class: "primary-write-authority",
-                reason: "protected push ref discovery is part of push admission and cannot trust stale replica refs",
+                reason: "initialization must create the descriptor before repository validation can succeed",
             },
             DirectStoreClassification {
                 call: "src/storage/resolver.rs::build_cloud_store",
@@ -13651,16 +13651,6 @@ mod tests {
                 call: "src/main.rs::create_cli_store",
                 class: "primary-maintenance",
                 reason: "bucket-level maintenance commands lack a repo read target and operate on primary storage state",
-            },
-            DirectStoreClassification {
-                call: "src/replication/mod.rs::replica_statuses_with_options",
-                class: "canonical-resolver",
-                reason: "replica status compares replicas against a primary manifest baseline",
-            },
-            DirectStoreClassification {
-                call: "src/replication/mod.rs::write_store",
-                class: "canonical-resolver",
-                reason: "write_store is the explicit primary-write resolver boundary",
             },
         ]
     }

@@ -364,7 +364,7 @@ pub async fn commit(
                 message: message.to_owned(),
                 push,
             },
-            std::time::Duration::from_secs(30 * 60),
+            std::time::Duration::from_mins(30),
         )
         .await?;
         if !response.ok {
@@ -417,7 +417,7 @@ pub async fn shutdown(path: &Path) -> Result<Option<MountControlShutdown>> {
             crate::ipc_server::IpcRequest::Unmount {
                 mountpoint: mountpoint_str.clone(),
             },
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_mins(2),
         )
         .await?;
         return Ok(Some(MountControlShutdown {

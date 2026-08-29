@@ -1,7 +1,6 @@
 //! CLI subcommand implementations.
 
 pub mod add;
-pub(crate) mod add_push_plan;
 pub mod adopt;
 pub mod artifacts;
 pub mod audit;

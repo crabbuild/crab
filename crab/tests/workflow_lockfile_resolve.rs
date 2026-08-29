@@ -39,7 +39,7 @@ fn lockfile_body(stage_hash_hex: &str) -> String {
     let fixed_hex = "ab".repeat(32);
     format!(
         concat!(
-            "crab_hash_algo: \"crab.stage.v3\"\n",
+            "crab_hash_algo: \"crab.stage.v1\"\n",
             "schema_version: 1\n",
             "stages:\n",
             "  train:\n",
@@ -62,6 +62,8 @@ fn lockfile_body(stage_hash_hex: &str) -> String {
             "        path: \"models/model.pkl\"\n",
             "        size: 4096\n",
             "    params: {{}}\n",
+            "    plots: []\n",
+            "    source: \"Local\"\n",
             "    stage_hash: \"b3:{stage_hex}\"\n",
         ),
         dep_hex = fixed_hex,

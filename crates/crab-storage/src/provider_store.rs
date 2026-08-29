@@ -193,7 +193,10 @@ pub fn static_env_target_selection(
 
     let provider = match parts.form {
         StaticEnvStoreUrlForm::Raw => parts.provider,
-        StaticEnvStoreUrlForm::Crab => crab_provider.unwrap_or_else(resolve_static_env_provider),
+        StaticEnvStoreUrlForm::Crab => match crab_provider {
+            Some(provider) => provider,
+            None => resolve_static_env_provider()?,
+        },
     };
     Ok(StaticEnvStoreTargetSelection {
         target: StaticEnvStoreTarget::bucket(provider, parts.bucket),
@@ -255,23 +258,26 @@ fn effective_repo_prefix(prefix: &str, default_repo_prefix: &str) -> String {
 
 /// Resolves the static-env provider from `CRAB_STORAGE_PROVIDER`.
 ///
-/// Unset, empty, or unrecognized values preserve the historical default to S3.
-#[must_use]
-pub fn resolve_static_env_provider() -> StorageProviderKind {
+/// An unset or empty value selects S3. An explicit value must name a cloud provider.
+pub fn resolve_static_env_provider() -> Result<StorageProviderKind> {
     let value = std::env::var(STATIC_ENV_PROVIDER_ENV).ok();
     resolve_static_env_provider_value(value.as_deref())
 }
 
 /// Resolves a static-env provider from an optional config/env value.
 ///
-/// This parser intentionally accepts only cloud aliases. `local`/`file` and
-/// unknown values fall back to S3 because the static cloud SDK chain has no
-/// local object-store backend.
-#[must_use]
-pub fn resolve_static_env_provider_value(value: Option<&str>) -> StorageProviderKind {
-    value
-        .and_then(StorageProviderKind::parse_cloud_alias)
-        .unwrap_or(StorageProviderKind::S3)
+/// This parser accepts only cloud aliases. Missing values select the canonical
+/// S3 default; invalid explicit values fail before an object-store client is built.
+pub fn resolve_static_env_provider_value(value: Option<&str>) -> Result<StorageProviderKind> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(StorageProviderKind::S3);
+    };
+    StorageProviderKind::parse_cloud_alias(value).ok_or_else(|| {
+        StorageError::InvalidStaticEnvTarget {
+            target: STATIC_ENV_PROVIDER_ENV.to_owned(),
+            reason: format!("unsupported provider {value:?}; expected s3, gcs, or azure"),
+        }
+    })
 }
 
 /// Builds an object-store backend from provider credentials.
@@ -798,42 +804,44 @@ mod tests {
     }
 
     #[test]
-    fn static_env_provider_defaults_to_s3_for_missing_empty_or_unknown() {
+    fn static_env_provider_defaults_to_s3_for_missing_or_empty() {
         assert_eq!(
-            resolve_static_env_provider_value(None),
+            resolve_static_env_provider_value(None).unwrap(),
             StorageProviderKind::S3
         );
         assert_eq!(
-            resolve_static_env_provider_value(Some("")),
+            resolve_static_env_provider_value(Some(" ")).unwrap(),
             StorageProviderKind::S3
         );
-        assert_eq!(
-            resolve_static_env_provider_value(Some("dropbox")),
-            StorageProviderKind::S3
-        );
-        assert_eq!(
-            resolve_static_env_provider_value(Some("auto")),
-            StorageProviderKind::S3
-        );
+    }
+
+    #[test]
+    fn static_env_provider_rejects_invalid_explicit_values() {
+        for value in ["dropbox", "auto", "file"] {
+            assert!(matches!(
+                resolve_static_env_provider_value(Some(value)),
+                Err(StorageError::InvalidStaticEnvTarget { .. })
+            ));
+        }
     }
 
     #[test]
     fn static_env_provider_parses_cloud_aliases() {
         for alias in ["aws", "s3"] {
             assert_eq!(
-                resolve_static_env_provider_value(Some(alias)),
+                resolve_static_env_provider_value(Some(alias)).unwrap(),
                 StorageProviderKind::S3
             );
         }
         for alias in ["gcp", "gcs", "gs", "google"] {
             assert_eq!(
-                resolve_static_env_provider_value(Some(alias)),
+                resolve_static_env_provider_value(Some(alias)).unwrap(),
                 StorageProviderKind::Gcs
             );
         }
         for alias in ["azure", "az", "abs"] {
             assert_eq!(
-                resolve_static_env_provider_value(Some(alias)),
+                resolve_static_env_provider_value(Some(alias)).unwrap(),
                 StorageProviderKind::Azure
             );
         }

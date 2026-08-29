@@ -213,11 +213,6 @@ pub(crate) fn install_verified_temp_path(
     }
 }
 
-/// Verifies materialized bytes against an LFS pointer's SHA-256 and size.
-pub(crate) fn verify_pointer(pointer: &LfsPointer, content: &[u8]) -> Result<()> {
-    verify_bytes(&pointer.oid, pointer.size, content)
-}
-
 /// Verifies materialized bytes against an expected SHA-256 and size.
 pub(crate) fn verify_bytes(oid: &[u8; 32], size: u64, content: &[u8]) -> Result<()> {
     let actual: [u8; 32] = Sha256::digest(content).into();

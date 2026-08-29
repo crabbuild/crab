@@ -4,6 +4,12 @@ Crab is a serverless git extension that stores large files in your own cloud
 bucket. This guide covers the two main workflows: setting up a new repo and
 joining an existing one.
 
+Provider adapters and release qualification are separate. RustFS is currently
+development-qualified; Amazon S3, GCS, and Azure remain unqualified until an
+exact-release real-service report passes the retained contract matrix. See
+[Provider Qualification](provider-qualification.md) before a release
+deployment.
+
 ## Prerequisites
 
 1. Install the Crab binary:

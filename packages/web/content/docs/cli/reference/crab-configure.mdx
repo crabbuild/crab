@@ -11,6 +11,13 @@ meta:
 
 Set up a new Crab repository in one guided flow.
 
+<Callout type="warning" title="Configuration support is broader than release qualification">
+  Amazon S3, GCS, and Azure adapters are available but currently unqualified
+  for release use. RustFS is development-qualified. See [Provider
+  Qualification](/docs/cli/storage/provider-qualification) before selecting a
+  production backend.
+</Callout>
+
 ```bash
 crab configure [REMOTE] [OPTIONS]
 ```

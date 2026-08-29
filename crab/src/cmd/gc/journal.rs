@@ -18,7 +18,7 @@ use crate::cmd::gc::ObjectMeta;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
-const SCHEMA_VERSION: u32 = 2;
+pub const GC_JOURNAL_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +117,7 @@ impl GcRunJournal {
         let root = format!("{root}/gc/runs/{run_id}");
         let now = unix_ms(SystemTime::now());
         let state = GcRunState {
-            schema_version: SCHEMA_VERSION,
+            schema_version: GC_JOURNAL_SCHEMA_VERSION,
             run_id,
             scope: scope.to_owned(),
             domain: domain.to_owned(),
@@ -430,7 +430,7 @@ impl GcRunJournal {
         }
         let batch_number = self.state.planned_batches;
         let batch = CandidateBatch {
-            schema_version: SCHEMA_VERSION,
+            schema_version: GC_JOURNAL_SCHEMA_VERSION,
             run_id: self.state.run_id.clone(),
             batch: batch_number,
             objects: objects.iter().map(JournalObject::from).collect(),
@@ -451,7 +451,7 @@ impl GcRunJournal {
             ) => {
                 let (body, _) = self.store.get_with_etag(&path).await?;
                 let existing: CandidateBatch = decode(&body, &path)?;
-                if existing.schema_version != SCHEMA_VERSION
+                if existing.schema_version != GC_JOURNAL_SCHEMA_VERSION
                     || existing.run_id != self.state.run_id
                     || existing.batch != batch_number
                     || existing.objects.len() != batch.objects.len()
@@ -553,7 +553,7 @@ impl GcRunJournal {
             });
         }
         let outcome = BatchOutcome {
-            schema_version: SCHEMA_VERSION,
+            schema_version: GC_JOURNAL_SCHEMA_VERSION,
             run_id: self.state.run_id.clone(),
             batch,
             deleted_keys: deleted_keys.to_vec(),
@@ -698,7 +698,7 @@ impl GcRunJournal {
         let path = batch_path(&self.root, batch);
         let (body, _) = self.store.get_with_etag(&path).await?;
         let candidate: CandidateBatch = decode(&body, &path)?;
-        if candidate.schema_version != SCHEMA_VERSION
+        if candidate.schema_version != GC_JOURNAL_SCHEMA_VERSION
             || candidate.run_id != self.state.run_id
             || candidate.batch != batch
         {
@@ -799,7 +799,7 @@ fn validate_run_id(run_id: &str) -> Result<()> {
 }
 
 fn validate_state(state: &GcRunState, run_id: &str, scope: &str, domain: &str) -> Result<()> {
-    if state.schema_version != SCHEMA_VERSION
+    if state.schema_version != GC_JOURNAL_SCHEMA_VERSION
         || state.run_id != run_id
         || state.scope != scope
         || state.domain != domain
@@ -854,7 +854,7 @@ fn validate_candidate_key(state: &GcRunState, key: &str) -> Result<()> {
 }
 
 fn validate_outcome(outcome: &BatchOutcome, run_id: &str, batch: u64) -> Result<()> {
-    if outcome.schema_version != SCHEMA_VERSION
+    if outcome.schema_version != GC_JOURNAL_SCHEMA_VERSION
         || outcome.run_id != run_id
         || outcome.batch != batch
     {

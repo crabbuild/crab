@@ -242,7 +242,11 @@ class Qualification:
         self.run_git(["init", "--initial-branch=main"], self.repo, "git init")
         self.run_git(["config", "user.name", "Crab LFS qualification"], self.repo, "git identity name")
         self.run_git(["config", "user.email", "crab-lfs-qualification@example.invalid"], self.repo, "git identity email")
-        self.run_crab([*self.args.crab_args, "init", self.args.remote_url], self.repo, "crab init")
+        self.run_crab(
+            [*self.args.crab_args, "init", self.args.remote_url],
+            self.repo,
+            "crab init",
+        )
         self.run_crab(
             [*self.args.crab_args, "lfs", "install", "--local", "--skip-repo"],
             self.repo,

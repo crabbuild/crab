@@ -33,7 +33,7 @@ const BACKOFF_MULTIPLIER: u32 = 2;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// FUSE unmount can block while the kernel drains outstanding requests.
-const UNMOUNT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const UNMOUNT_RESPONSE_TIMEOUT: Duration = Duration::from_mins(2);
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -277,7 +277,7 @@ fn spawn_coordinator() -> std::result::Result<(), IpcClientError> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| {
-            IpcClientError::SpawnFailed(format!("failed to spawn coordinator at {crab_bin}: {e}",))
+            IpcClientError::SpawnFailed(format!("failed to spawn coordinator at {crab_bin}: {e}"))
         })?;
 
     info!(pid = child.id(), "spawned coordinator process");

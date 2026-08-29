@@ -9,7 +9,14 @@ meta:
 
 # What is Crab?
 
-Crab extends Git with a separate data path for large files. Git commits small pointer blobs, while Crab stores chunked file content in Amazon S3, Google Cloud Storage, Azure Blob Storage, or a compatible object store.
+Crab extends Git with a separate data path for large files. Git commits small pointer blobs, while Crab stores chunked file content through an object-store adapter.
+
+<Callout type="warning" title="Check provider qualification before deployment">
+  Adapter availability is not a release-support claim. RustFS is currently
+  development-qualified; Amazon S3, Google Cloud Storage, and Azure Blob
+  Storage remain unqualified until the exact release commit has retained
+  real-service evidence. See [Provider Qualification](/docs/cli/storage/provider-qualification).
+</Callout>
 
 <DocsPathDiagram
   id="getting-started-path"
@@ -80,6 +87,7 @@ Provider-prefixed URLs let `crab configure` infer credential discovery:
 | S3-compatible storage | `crab configure crab://example-bucket/repository --provider s3` |
 
 Crab normalizes provider-prefixed inputs to a `crab://` Git remote. The repository path isolates its metadata and objects inside the bucket or container.
+These entries describe adapter syntax, not current release qualification.
 
 ## Decide what to materialize after clone
 

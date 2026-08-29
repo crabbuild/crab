@@ -1431,16 +1431,16 @@ fn stage_crab_overlay_files(
         let mut entries = Vec::with_capacity(files.len());
         let cancel = CancellationToken::new();
 
-        let stage_result = async {
+        let stage_result = Box::pin(async {
             for file in &files {
-                let result = crab_staging::stream::stage_file_streaming_as(
+                let result = Box::pin(crab_staging::stream::stage_file_streaming_as(
                     &file.source_path,
                     &worktree,
                     Path::new(&file.path),
                     &staging,
                     crab_staging::stream::StreamStageProgress::default(),
                     &cancel,
-                )
+                ))
                 .await?;
                 entries.push(DirectPointerEntry {
                     path: file.path.clone(),
@@ -1452,7 +1452,7 @@ fn stage_crab_overlay_files(
                 });
             }
             Ok(())
-        }
+        })
         .await;
 
         if let Err(err) = stage_result {

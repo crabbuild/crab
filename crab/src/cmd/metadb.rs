@@ -324,7 +324,7 @@ async fn resolve_repo_store_in(
     }
     let parsed = CrabUrl::parse(&url)?;
     let config = Config::resolve_for_repo(root)?;
-    let store = crate::auth::build_store(&config, &parsed, "metadb", cancel).await?;
+    let store = crate::auth::build_repository_url_store(&config, &parsed, "metadb", cancel).await?;
     // `build_store` hands back a `ProbingStoreHandle` which wraps an
     // `Arc<dyn ObjectStore>` via `inner()`. Clone the inner handle out
     // so the metadb layer holds a plain `Arc<dyn ObjectStore>`.
@@ -1732,8 +1732,6 @@ struct RebuildPayload {
     repo_prefix: String,
     file_index_entries_written: u64,
     chunk_index_entries_written: u64,
-    legacy_file_rows_removed: u64,
-    legacy_chunk_rows_removed: u64,
     shards_processed: u64,
     shards_failed: u64,
     git_packs_processed: u64,
@@ -2437,16 +2435,6 @@ async fn rebuild_with_guard(
     file_entries_written += fi;
     chunk_entries_written += ci;
 
-    let (legacy_file_rows_removed, legacy_chunk_rows_removed) = if shards_failed == 0 {
-        retire_legacy_namespaces(guard, file_store.as_ref(), chunk_store.as_ref(), cancel).await?
-    } else {
-        notes.push(
-            "legacy namespaces retained because one or more committed shards failed proof"
-                .to_owned(),
-        );
-        (0, 0)
-    };
-
     let (git_packs_processed, git_packs_failed, git_objects_written, git_object_locator_digest) =
         if matches!(db, DbSelector::Both) {
             rebuild_git_object_locators(&storage, &router, &manifest).await?
@@ -2535,8 +2523,6 @@ async fn rebuild_with_guard(
         repo_prefix: String::from(repo_prefix),
         file_index_entries_written: file_entries_written,
         chunk_index_entries_written: chunk_entries_written,
-        legacy_file_rows_removed,
-        legacy_chunk_rows_removed,
         shards_processed,
         shards_failed,
         git_packs_processed,
@@ -3068,14 +3054,6 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) {
             "  chunk_index_entries_written: {}",
             payload.chunk_index_entries_written
         );
-        println!(
-            "  legacy_file_rows_removed:    {}",
-            payload.legacy_file_rows_removed
-        );
-        println!(
-            "  legacy_chunk_rows_removed:   {}",
-            payload.legacy_chunk_rows_removed
-        );
         println!("  elapsed_ms:                  {}", payload.elapsed_ms);
         if !payload.notes.is_empty() {
             println!("  notes:");
@@ -3090,8 +3068,6 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) {
         shards_failed = payload.shards_failed,
         file_entries_written = payload.file_index_entries_written,
         chunk_entries_written = payload.chunk_index_entries_written,
-        legacy_file_rows_removed = payload.legacy_file_rows_removed,
-        legacy_chunk_rows_removed = payload.legacy_chunk_rows_removed,
         git_packs_processed = payload.git_packs_processed,
         git_packs_failed = payload.git_packs_failed,
         git_objects_written = payload.git_objects_written,
@@ -3231,9 +3207,6 @@ async fn flush_rebuild_batch(
     let mut txn = guard.new_transaction()?;
     let file_written = match file_store {
         Some(store) if !pending_file.is_empty() => {
-            for (file_hash, _) in pending_file.iter() {
-                store.delete_legacy(&mut txn, file_hash);
-            }
             store.save_committed_batch(&mut txn, pending_file);
             pending_file.len() as u64
         }
@@ -3241,9 +3214,6 @@ async fn flush_rebuild_batch(
     };
     let chunk_written = match chunk_store {
         Some(store) if !pending_chunk.is_empty() || !pending_committed_chunk.is_empty() => {
-            for (chunk_hash, _) in pending_committed_chunk.iter() {
-                store.delete_legacy(&mut txn, chunk_hash);
-            }
             store.save_committed_receipts(&mut txn, pending_committed_chunk)?;
             pending_chunk.len() as u64
         }
@@ -3255,42 +3225,6 @@ async fn flush_rebuild_batch(
     pending_chunk.clear();
     pending_committed_chunk.clear();
     Ok((file_written, chunk_written))
-}
-
-async fn retire_legacy_namespaces(
-    guard: &MetaDbGuard,
-    file_store: Option<&crate::metadata::FileIndexStore>,
-    chunk_store: Option<&crate::metadata::ChunkIndexStore>,
-    cancel: &CancellationToken,
-) -> Result<(u64, u64)> {
-    let mut file_removed = 0u64;
-    let mut chunk_removed = 0u64;
-    loop {
-        check_cancelled(cancel)?;
-        let file_keys = match file_store {
-            Some(store) => store.legacy_keys_batch(REBUILD_COMMIT_BATCH).await?,
-            None => Vec::new(),
-        };
-        let chunk_keys = match chunk_store {
-            Some(store) => store.legacy_keys_batch(REBUILD_COMMIT_BATCH).await?,
-            None => Vec::new(),
-        };
-        if file_keys.is_empty() && chunk_keys.is_empty() {
-            break;
-        }
-
-        let mut txn = guard.new_transaction()?;
-        if let Some(store) = file_store {
-            store.delete_legacy_keys(&mut txn, &file_keys);
-        }
-        if let Some(store) = chunk_store {
-            store.delete_legacy_keys(&mut txn, &chunk_keys);
-        }
-        guard.commit(txn).await?;
-        file_removed = file_removed.saturating_add(file_keys.len() as u64);
-        chunk_removed = chunk_removed.saturating_add(chunk_keys.len() as u64);
-    }
-    Ok((file_removed, chunk_removed))
 }
 
 // --- compact --------------------------------------------------------
@@ -3572,7 +3506,8 @@ async fn diagnose_acceleration_health(
     } else {
         match crab_metadata::git_visibility::read_for_manifest(&storage, &router, &manifest).await {
             Ok(Some(read)) => {
-                let current = read.format == crab_metadata::git_visibility::GitVisibilityFormat::V5;
+                let current =
+                    read.format == crab_metadata::git_visibility::GitVisibilityFormat::CatalogV1;
                 if !current {
                     notes.push(
                         "Git visibility proof is not catalog-bound; run `crab metadb rebuild`"
@@ -4338,10 +4273,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diagnose_file_index_on_fresh_db_reports_all_none() {
-        // A freshly-constructed MetaDb has no sys:* keys written to
-        // either database. The diagnose helper must open cleanly and
-        // report every field as None rather than surfacing an error.
+    async fn diagnose_file_index_on_fresh_db_reports_canonical_format() {
+        // Opening a fresh MetaDb publishes the strict v1 format marker.
+        // Optional operational metadata remains absent.
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (metadb, _cache_dir) = test_metadb(Arc::clone(&store));
         let guard = MetaDbGuard::new(metadb);
@@ -4351,7 +4285,7 @@ mod tests {
         assert!(d.opened, "fresh file_index_db must open cleanly");
         assert_eq!(d.error, None);
         assert_eq!(d.label, "file_index_db");
-        assert_eq!(d.format_version, None);
+        assert_eq!(d.format_version, Some(1));
         assert_eq!(d.epoch, None);
         assert_eq!(d.created_at, None);
         assert_eq!(d.gc_generation, None);
@@ -4509,35 +4443,8 @@ mod tests {
         let (metadb, _cache_dir) = test_metadb(Arc::clone(&store));
         let guard = MetaDbGuard::new(metadb);
 
-        let orphan_legacy_file = MerkleHash::from([901, 902, 903, 904]);
-        let orphan_legacy_chunk = MerkleHash::from([905, 906, 907, 908]);
-        let mut legacy_txn = guard.new_transaction().expect("transaction");
-        guard
-            .file_index()
-            .await
-            .expect("legacy file store")
-            .save_legacy(
-                &mut legacy_txn,
-                &orphan_legacy_file,
-                &MerkleHash::from([909, 910, 911, 912]),
-            );
-        legacy_txn.put(
-            crate::metadata::metadb::transaction::DbTarget::ChunkIndex,
-            bytes::Bytes::copy_from_slice(&crab_metadata::key_codec::encode_content_key(
-                &orphan_legacy_chunk,
-            )),
-            bytes::Bytes::copy_from_slice(&crab_metadata::value_codec::encode_chunk_index_value(
-                &XorbRef {
-                    xorb_hash: MerkleHash::from([913, 914, 915, 916]),
-                    chunk_index: 0,
-                    uncompressed_size: 1024,
-                },
-            )),
-        );
-        guard.commit(legacy_txn).await.expect("seed legacy rows");
-
         let cancel = CancellationToken::new();
-        let payload = rebuild_with_guard(
+        rebuild_with_guard(
             &store,
             "org/test-repo",
             DbSelector::Both,
@@ -4547,27 +4454,11 @@ mod tests {
         )
         .await
         .expect("rebuild");
-        assert_eq!(payload.legacy_file_rows_removed, 1);
-        assert_eq!(payload.legacy_chunk_rows_removed, 1);
 
         // Expected state: each shard contributes 2 chunks (one xorb
         // with 2 chunks) and 2 file entries.
         let file_index = guard.file_index().await.expect("file index");
         let chunk_index = guard.chunk_index().await.expect("chunk index");
-        assert!(
-            file_index
-                .get_legacy(&orphan_legacy_file)
-                .await
-                .expect("legacy lookup")
-                .is_none()
-        );
-        assert!(
-            chunk_index
-                .legacy_keys_batch(REBUILD_COMMIT_BATCH)
-                .await
-                .expect("legacy chunk scan")
-                .is_empty()
-        );
 
         // Pull every (file_hash, shard_hash) pair back via the
         // streaming extractor and verify it round-trips through

@@ -10,10 +10,11 @@ crab init [OPTIONS] <url>
 
 ## Description
 
-`crab init` sets up a new crab-managed repository by connecting a local
-directory to a cloud object storage backend. It creates the `.crab/`
-configuration directory, writes the remote URL, installs the git filter and
-diff drivers, and prepares the repo for `crab setup`.
+`crab init` atomically creates the canonical v1 layout descriptor and empty
+generation-0 manifest in object storage, then connects the local directory to
+that repository. It creates the `.crab/` configuration directory, writes the
+remote URL, installs the git filter and diff drivers, and prepares the repo for
+`crab setup`.
 
 If no git repository exists in the current directory, `crab init` automatically
 runs `git init` — no need to initialize git separately.
@@ -34,7 +35,6 @@ the matching `.gitattributes` rules.
 | `--storage-provider <provider>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
 | `--gc-list-profile <profile>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <remote>` | — | Configure mirror mode with an existing Git remote |
-| `--remote` | `false` | Create the generation-0 manifest in object storage |
 | `--log-level` | — | Set log verbosity |
 
 ## URL Format
@@ -58,6 +58,10 @@ crab init gs://my-gcs-bucket/my-repo
 crab init gcs://my-gcs-bucket/my-repo
 crab init azure://my-container/my-repo
 ```
+
+Accepted adapter syntax is not a release-support claim. Consult
+[Provider Qualification](provider-qualification.md) before choosing a
+provider for retained data.
 
 After init, use the printed `crab://...` URL with Git and Crab commands. Git
 would otherwise look for helpers such as `git-remote-s3` instead of Crab's
@@ -101,11 +105,16 @@ Azure credentials, user config, or environment variables.
    - `filter.crab.smudge` — the smudge filter fallback.
    - `filter.crab.required = true` — ensures git fails if the filter is unavailable.
    - `diff.crab.command` — the external diff driver for `diff=crab` files.
-7. Prints the next `crab setup` and `crab ship` steps.
+7. Creates or validates the canonical v1 remote layout descriptor.
+8. Atomically creates the empty generation-0 manifest, or adopts an existing
+   canonical manifest after validating the descriptor.
+9. Prints the next `crab setup` and `crab ship` steps.
 
-By default, init only changes local state. Pass `--remote` to provision the
-empty generation-0 manifest in object storage. The create is atomic, and
-repeated or concurrent initialization adopts the manifest already present.
+There is no local-only initialization mode. If the remote prefix contains
+objects but lacks a canonical descriptor, or contains a non-v1 descriptor,
+init fails closed and directs development repositories through the explicit
+reset procedure. Push, clone, and `git ls-remote` never synthesize missing
+repository state.
 
 ## Auto-Tracking
 
@@ -160,6 +169,9 @@ crab init crab://my-bucket/my-project                        # safe to repeat
 
 - The `crab` binary must be on your `PATH`.
 - Cloud credentials must be configured for the selected storage backend.
+- The selected backend must be release-qualified for production use. Adapter
+  syntax alone is not qualification; check the retained status in
+  [Provider Qualification](provider-qualification.md).
 
 Note: `git init` is no longer a prerequisite — `crab init` handles it
 automatically.

@@ -531,7 +531,9 @@ async fn publish_manifest(
     let parsed = CrabUrl::parse(&remote_url)?;
     let config = Config::resolve_for_repo(repo_root)?;
     let cancel = CancellationToken::new();
-    let store = crate::auth::build_store(&config, &parsed, "release.publish", &cancel).await?;
+    let store =
+        crate::auth::build_repository_url_store(&config, &parsed, "release.publish", &cancel)
+            .await?;
     let path = publish_manifest_to_store(&store, &parsed.repo_path, manifest).await?;
     Ok(ReleasePublishResult { remote_url, path })
 }

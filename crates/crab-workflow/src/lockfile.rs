@@ -27,10 +27,10 @@ use crate::{CachedCmd, CachedOut, OutKind, Result, StageCacheEntry, StageName, W
 use crab_types::workflow::StageHash;
 
 /// Schema version of the on-disk lockfile.
-pub const LOCKFILE_SCHEMA_VERSION: u16 = 2;
+pub const LOCKFILE_SCHEMA_VERSION: u16 = 1;
 
 /// Hash-algorithm tag recorded in the lockfile.
-pub const LOCKFILE_HASH_ALGO: &str = "crab.stage.v3";
+pub const LOCKFILE_HASH_ALGO: &str = "crab.stage.v1";
 
 /// A dependency as recorded in the lockfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -794,8 +794,24 @@ fn parse_lockfile(path: &Path, bytes: &[u8]) -> Result<Lockfile> {
             source: serde_yaml_custom("schema_version does not fit in u16"),
         }
     })?;
+    if schema_version != LOCKFILE_SCHEMA_VERSION {
+        return Err(WorkflowError::LockfileCanonicalizationFailed {
+            path: path.to_path_buf(),
+            source: serde_yaml_custom_owned(format!(
+                "unsupported lockfile schema {schema_version}; expected {LOCKFILE_SCHEMA_VERSION}"
+            )),
+        });
+    }
 
     let crab_hash_algo = get_str(root, "crab_hash_algo", path)?.to_owned();
+    if crab_hash_algo != LOCKFILE_HASH_ALGO {
+        return Err(WorkflowError::LockfileCanonicalizationFailed {
+            path: path.to_path_buf(),
+            source: serde_yaml_custom_owned(format!(
+                "unsupported lockfile hash algorithm {crab_hash_algo:?}; expected {LOCKFILE_HASH_ALGO:?}"
+            )),
+        });
+    }
 
     let stages_value = root
         .get(serde_yaml::Value::String("stages".into()))
@@ -887,13 +903,13 @@ fn parse_stage(value: &serde_yaml::Value, path: &Path) -> Result<LockedStage> {
     let executed_at = get_str(map, "executed_at", path)?.to_owned();
     let duration_ms = get_u64(map, "duration_ms", path)?;
     let host_fingerprint = get_str(map, "host_fingerprint", path)?.to_owned();
-    let attempts = u32::try_from(get_u64_or_default(map, "attempts", 1)).map_err(|_| {
+    let attempts = u32::try_from(get_u64(map, "attempts", path)?).map_err(|_| {
         WorkflowError::LockfileCanonicalizationFailed {
             path: path.to_path_buf(),
             source: serde_yaml_custom("attempts does not fit in u32"),
         }
     })?;
-    let source = get_str_or_default(map, "source", "Local").to_owned();
+    let source = get_str(map, "source", path)?.to_owned();
 
     Ok(LockedStage {
         stage_hash: StageHash(stage_hash),
@@ -1131,16 +1147,6 @@ fn get_str<'a>(map: &'a serde_yaml::Mapping, key: &str, path: &Path) -> Result<&
         })
 }
 
-/// Like [`get_str`] but returns a default when the key is absent.
-/// Used for fields added in newer lockfile schema versions so v1
-/// lockfiles parse without error.
-fn get_str_or_default<'a>(map: &'a serde_yaml::Mapping, key: &str, default: &'a str) -> &'a str {
-    let key_value = serde_yaml::Value::String(key.to_owned());
-    map.get(&key_value)
-        .and_then(serde_yaml::Value::as_str)
-        .unwrap_or(default)
-}
-
 fn get_u64(map: &serde_yaml::Mapping, key: &str, path: &Path) -> Result<u64> {
     let key_value = serde_yaml::Value::String(key.to_owned());
     map.get(&key_value)
@@ -1149,16 +1155,6 @@ fn get_u64(map: &serde_yaml::Mapping, key: &str, path: &Path) -> Result<u64> {
             path: path.to_path_buf(),
             source: serde_yaml_custom_owned(format!("missing integer field '{key}'")),
         })
-}
-
-/// Like [`get_u64`] but returns a default when the key is absent.
-/// Used for fields added in newer lockfile schema versions so v1
-/// lockfiles parse without error.
-fn get_u64_or_default(map: &serde_yaml::Mapping, key: &str, default: u64) -> u64 {
-    let key_value = serde_yaml::Value::String(key.to_owned());
-    map.get(&key_value)
-        .and_then(serde_yaml::Value::as_u64)
-        .unwrap_or(default)
 }
 
 fn parse_octal_mode(s: &str) -> Option<u32> {
@@ -1310,23 +1306,8 @@ pub fn resolve_from_bytes(
 ///   Dropping keeps the lockfile byte-identical regardless of which side
 ///   invoked the command.
 ///
-/// Top-level schema and hash-algo come from whichever side carries
-/// the higher schema version, breaking ties toward `ours`. Both sides
-/// are guaranteed to come from the same git branch history so the
-/// algo string is always equal in practice; the tie-break is defensive.
+/// Both inputs have already passed the strict canonical v1 parser.
 fn recompute_merge(ours: Lockfile, theirs: Lockfile) -> ResolveOutcome {
-    let schema_version = ours
-        .schema_version
-        .max(theirs.schema_version)
-        .max(LOCKFILE_SCHEMA_VERSION);
-    let crab_hash_algo = if schema_version == LOCKFILE_SCHEMA_VERSION {
-        LOCKFILE_HASH_ALGO.to_owned()
-    } else if ours.schema_version >= theirs.schema_version {
-        ours.crab_hash_algo.clone()
-    } else {
-        theirs.crab_hash_algo.clone()
-    };
-
     let mut all_names: BTreeSet<StageName> = BTreeSet::new();
     all_names.extend(ours.stages.keys().cloned());
     all_names.extend(theirs.stages.keys().cloned());
@@ -1359,8 +1340,8 @@ fn recompute_merge(ours: Lockfile, theirs: Lockfile) -> ResolveOutcome {
 
     ResolveOutcome {
         lockfile: Lockfile {
-            schema_version,
-            crab_hash_algo,
+            schema_version: LOCKFILE_SCHEMA_VERSION,
+            crab_hash_algo: LOCKFILE_HASH_ALGO.to_owned(),
             stages,
         },
         strategy: ResolveStrategy::Recompute,
@@ -1744,8 +1725,8 @@ mod tests {
         assert_eq!(
             text,
             concat!(
-                "crab_hash_algo: \"crab.stage.v3\"\n",
-                "schema_version: 2\n",
+                "crab_hash_algo: \"crab.stage.v1\"\n",
+                "schema_version: 1\n",
                 "stages: {}\n",
             )
         );

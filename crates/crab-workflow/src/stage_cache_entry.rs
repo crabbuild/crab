@@ -9,13 +9,11 @@ use crate::hasher::{TreeEntry, TreeEntryKind, hash_tree_entries};
 use crate::{OutKind, Result, StageName, WorkflowError};
 use crab_types::workflow::StageHash;
 
-/// Current on-disk entry schema.
-///
-/// Newer readers migrate older entries up; older readers refuse newer entries.
-pub const ENTRY_SCHEMA_VERSION: u16 = 3;
+/// Canonical on-disk entry schema.
+pub const ENTRY_SCHEMA_VERSION: u16 = 1;
 
 /// Maximum schema version this crate can read.
-pub const ENTRY_SCHEMA_MAX_SUPPORTED: u16 = 3;
+pub const ENTRY_SCHEMA_MAX_SUPPORTED: u16 = ENTRY_SCHEMA_VERSION;
 
 /// Maximum serialized size accepted for one stage-cache manifest.
 pub const MAX_STAGE_CACHE_ENTRY_BYTES: usize = 64 * 1024 * 1024;
@@ -112,18 +110,8 @@ pub fn cached_artifacts(entry: &StageCacheEntry) -> impl Iterator<Item = &Cached
 /// their paths inside the worktree, enforces canonical content identities,
 /// and checks directory metadata before any filesystem operation occurs.
 pub fn validate_stage_cache_entry(entry: &StageCacheEntry) -> Result<()> {
-    validate_stage_cache_entry_at(entry, None)
-}
-
-/// Validate a cache entry while allowing legacy absolute paths under a
-/// caller-provided repository root. Remote manifests must use the strict
-/// [`validate_stage_cache_entry`] form because they have no trusted root.
-pub(crate) fn validate_stage_cache_entry_at(
-    entry: &StageCacheEntry,
-    repository_root: Option<&Path>,
-) -> Result<()> {
     let stage_hash = entry.stage_hash.as_hex();
-    if entry.schema_version == 0 || entry.schema_version > ENTRY_SCHEMA_MAX_SUPPORTED {
+    if entry.schema_version != ENTRY_SCHEMA_VERSION {
         return Err(cache_entry_invalid(
             &stage_hash,
             format!("unsupported schema version {}", entry.schema_version),
@@ -156,14 +144,7 @@ pub(crate) fn validate_stage_cache_entry_at(
             ));
         }
         for (index, output) in outputs.iter().enumerate() {
-            validate_cached_out(
-                output,
-                &stage_hash,
-                kind,
-                index,
-                repository_root,
-                &mut paths,
-            )?;
+            validate_cached_out(output, &stage_hash, kind, index, &mut paths)?;
         }
     }
     Ok(())
@@ -320,13 +301,11 @@ fn validate_cached_out(
     stage_hash: &str,
     category: &str,
     index: usize,
-    repository_root: Option<&Path>,
     paths: &mut BTreeMap<PathBuf, (String, CachedOut)>,
 ) -> Result<()> {
-    let path = validate_cached_path(
-        &output.path,
+    let path = validate_relative_path(
+        &output.path.to_string_lossy(),
         &format!("{category}[{index}] path"),
-        repository_root,
     )?;
     if let Some((existing_category, existing)) = paths.get(&path) {
         if existing != output {
@@ -429,37 +408,6 @@ fn validate_relative_path(value: &str, label: &str) -> Result<PathBuf> {
         ));
     }
     Ok(path.to_path_buf())
-}
-
-fn validate_cached_path(
-    path: &Path,
-    label: &str,
-    repository_root: Option<&Path>,
-) -> Result<PathBuf> {
-    let has_parent_component = path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir));
-    if path.is_absolute() {
-        let Some(root) = repository_root else {
-            return Err(cache_entry_invalid(
-                "",
-                format!("{label} must be repository-relative"),
-            ));
-        };
-        if has_parent_component
-            || path == root
-            || !path.starts_with(root)
-            || path.as_os_str().is_empty()
-            || path.to_string_lossy().chars().any(char::is_control)
-        {
-            return Err(cache_entry_invalid(
-                "",
-                format!("{label} must stay inside the repository root"),
-            ));
-        }
-        return Ok(path.to_path_buf());
-    }
-    validate_relative_path(&path.to_string_lossy(), label)
 }
 
 fn hex_nibble(value: u8) -> Option<u8> {

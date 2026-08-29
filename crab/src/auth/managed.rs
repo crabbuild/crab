@@ -3,7 +3,7 @@ use crab_auth::token_cache::expand_token_cache_path;
 use crab_auth_store::ManagedRepositoryResolver;
 use tokio_util::sync::CancellationToken;
 
-use super::build_store;
+use super::{build_repository_url_store, validate_repository_store};
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::storage::store::Store;
@@ -24,7 +24,7 @@ pub async fn build_repository_store(
     match locator {
         crab_git::RepositoryLocator::Direct(repository) => {
             let repository_prefix = repository.repo_prefix.clone();
-            let store = build_store(
+            let store = build_repository_url_store(
                 config,
                 crab_git::url::CrabUrl::from(repository),
                 transfer_operation_name(operation),
@@ -41,8 +41,10 @@ pub async fn build_repository_store(
             let managed = ManagedRepositoryResolver::new(cache_dir)
                 .resolve(&repository, operation, cancel)
                 .await?;
+            let store = Store::from_storage(managed.store);
+            validate_repository_store(&store, &managed.repository_prefix).await?;
             Ok(RepositoryStore {
-                store: Store::from_storage(managed.store),
+                store,
                 repository_prefix: managed.repository_prefix,
             })
         }

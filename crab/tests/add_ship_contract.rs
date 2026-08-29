@@ -29,6 +29,15 @@ fn assert_success(output: &Output, label: &str) {
 
 fn repository() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
+    let basename = dir
+        .path()
+        .file_name()
+        .expect("tempdir basename")
+        .to_string_lossy();
+    let remote_url = format!(
+        "crab://beyond/add-ship-contract-test-{}",
+        basename.trim_start_matches('.')
+    );
     assert_success(&git(dir.path(), &["init", "-q", "-b", "main"]), "git init");
     assert_success(
         &git(dir.path(), &["config", "user.name", "Crab Contract Test"]),
@@ -41,15 +50,21 @@ fn repository() -> tempfile::TempDir {
         ),
         "git config user.email",
     );
-    assert_success(
-        &crab(dir.path(), &["init", "crab://contract-test/repo"]),
-        "crab init",
-    );
+    assert_success(&crab(dir.path(), &["init", &remote_url]), "crab init");
     assert_success(
         &git(dir.path(), &["commit", "-qm", "initialize crab"]),
         "initial commit",
     );
     dir
+}
+
+fn origin_url(repo: &Path) -> String {
+    let output = git(repo, &["remote", "get-url", "origin"]);
+    assert_success(&output, "get origin URL");
+    String::from_utf8(output.stdout)
+        .expect("origin URL is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn write_large_model(repo: &Path) {
@@ -127,6 +142,7 @@ fn ship_json_emits_one_terminal_envelope() {
 fn ship_dry_run_auto_detects_crab_remote_when_origin_is_git_remote() {
     let dir = repository();
     write_large_model(dir.path());
+    let crab_url = origin_url(dir.path());
     assert_success(
         &git(
             dir.path(),
@@ -140,10 +156,7 @@ fn ship_dry_run_auto_detects_crab_remote_when_origin_is_git_remote() {
         "set Git origin",
     );
     assert_success(
-        &git(
-            dir.path(),
-            &["remote", "add", "crab", "crab://contract-test/repo"],
-        ),
+        &git(dir.path(), &["remote", "add", "crab", &crab_url]),
         "add Crab remote",
     );
 
@@ -169,11 +182,9 @@ fn ship_dry_run_auto_detects_crab_remote_when_origin_is_git_remote() {
 fn ship_dry_run_accepts_explicit_crab_remote_choice() {
     let dir = repository();
     write_large_model(dir.path());
+    let backup_url = format!("{}-backup", origin_url(dir.path()));
     assert_success(
-        &git(
-            dir.path(),
-            &["remote", "add", "backup", "crab://contract-test/backup"],
-        ),
+        &git(dir.path(), &["remote", "add", "backup", &backup_url]),
         "add backup Crab remote",
     );
 

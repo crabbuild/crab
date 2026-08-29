@@ -11,7 +11,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
-use crab_metadata::manifest_store::read_manifest;
 #[cfg(test)]
 use crab_read::plan_upload_pack;
 use crab_read::{
@@ -275,49 +274,18 @@ async fn capability_snapshot_is_stable(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<bool> {
-    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-    let (manifest, _) = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
-        result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
-    };
-    let repair_store = crate::storage::Store::from_storage(store.clone());
-    let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-    let active_marker_present = store
-        .list_prefix_bounded(&layout.ref_journal_active_prefix(), 1)
-        .await?
-        .map_or(true, |objects| !objects.is_empty());
-    let owner_active =
-        match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
-            Ok(active) => active,
-            Err(error) => {
-                tracing::warn!(%error, "generation owner probe failed during capability discovery");
-                return Ok(false);
-            }
-        };
-    if owner_active {
-        tracing::debug!(
-            active_marker_present,
-            "protocol-v2 capability withheld while generation-owner admission is active"
-        );
-        return Ok(false);
-    }
-    if manifest.refs.is_empty() {
+    // `stateless-connect` is a terminal handoff: Git cannot return to the
+    // legacy list/fetch path after the positive response. Require the exact
+    // locator and visibility snapshot here; reader-side repair belongs before
+    // a later session, not after this capability has been advertised.
+    let repository = open_repository_snapshot(store, prefix, cancellation).await?;
+    if repository.refs().entries.is_empty() {
         return Ok(true);
     }
-    match super::push::git_visibility_proof_available_for_manifest(
-        &repair_store,
-        &repair_layout,
-        &manifest,
-    )
-    .await
-    {
-        Ok(available) => Ok(available),
-        Err(error) => {
-            tracing::warn!(%error, "visibility proof probe failed during capability discovery");
-            Ok(false)
-        }
-    }
+    repository
+        .catalog_visibility_index(cancellation)
+        .await
+        .map(|_| true)
 }
 
 fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
@@ -2357,6 +2325,26 @@ mod tests {
                 .await
                 .expect("read empty capability snapshot"),
             true
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_capability_rejects_refs_without_a_pinned_locator() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.refs.insert(
+            "refs/heads/main".to_owned(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        );
+        manifest.seal_git_validation();
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .expect("create incomplete manifest");
+
+        assert!(
+            !snapshot_available(&store, "org/repo", &CancellationToken::new()).await,
+            "terminal protocol v2 must not be advertised without its exact locator snapshot"
         );
     }
 

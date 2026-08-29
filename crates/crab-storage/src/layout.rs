@@ -170,6 +170,12 @@ impl<S> StoreLayout<S> {
         self.repo_path("manifest")
     }
 
+    /// Path to the authoritative canonical-v1 repository layout descriptor.
+    #[must_use]
+    pub fn layout_descriptor_path(&self) -> ObjectPath {
+        self.repo_path("layout")
+    }
+
     /// Path to the fresh-clone replica discovery document.
     #[must_use]
     pub fn replica_discovery_path(&self) -> ObjectPath {
@@ -304,7 +310,7 @@ impl<S> StoreLayout<S> {
     #[must_use]
     pub fn git_visibility_path(&self, git_validation_digest: &str) -> ObjectPath {
         self.repo_path(&format!(
-            "metadata/git-visibility/v2/{git_validation_digest}.json"
+            "metadata/git-visibility/v1/digest/{git_validation_digest}.json"
         ))
     }
 
@@ -312,7 +318,7 @@ impl<S> StoreLayout<S> {
     #[must_use]
     pub fn git_visibility_catalog_path(&self, git_validation_digest: &str) -> ObjectPath {
         self.repo_path(&format!(
-            "metadata/git-visibility/v3/{git_validation_digest}.json"
+            "metadata/git-visibility/v1/catalog/{git_validation_digest}.json"
         ))
     }
 
@@ -321,14 +327,6 @@ impl<S> StoreLayout<S> {
     pub fn git_visibility_pending_path(&self, git_validation_digest: &str) -> ObjectPath {
         self.repo_path(&format!(
             "metadata/git-visibility-pending/v1/{git_validation_digest}.json"
-        ))
-    }
-
-    /// Path to a v1 visibility proof shipped by Crab 1.0.15.
-    #[must_use]
-    pub fn git_visibility_v1_path(&self, generation: u64, pack_index_hash: &str) -> ObjectPath {
-        self.repo_path(&format!(
-            "metadata/git-visibility/{generation:020}-{pack_index_hash}.json"
         ))
     }
 
@@ -666,6 +664,15 @@ mod tests {
     fn ref_registry_path_is_global() {
         let layout = test_layout();
         assert_eq!(layout.ref_registry_path().as_ref(), ".crab/ref-registry");
+    }
+
+    #[test]
+    fn layout_descriptor_is_repo_local() {
+        let layout = test_layout();
+        assert_eq!(
+            layout.layout_descriptor_path().as_ref(),
+            "org/models/layout"
+        );
     }
 
     #[test]

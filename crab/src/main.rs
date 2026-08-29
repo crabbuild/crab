@@ -114,9 +114,6 @@ enum Cmd {
         /// Value is the name of the existing git remote (typically "origin").
         #[arg(long)]
         mirror: Option<String>,
-        /// Create the generation-0 manifest in object storage after local setup.
-        #[arg(long)]
-        remote: bool,
         /// Emit structured JSON output.
         #[arg(long, conflicts_with = "jsonl")]
         json: bool,
@@ -3302,7 +3299,6 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             storage_provider,
             gc_list_profile,
             mirror,
-            remote,
             json,
             jsonl,
         }) => {
@@ -3336,10 +3332,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 gc_list_profile,
                             )
                             .await?;
-                            if remote {
-                                crab::cmd::init::initialize_remote_repository(&u, &cwd, &cancel)
-                                    .await?;
-                            }
+                            crab::cmd::init::initialize_remote_repository(&u, &cwd, &cancel)
+                                .await?;
                             // Sync .gitattributes with [track] patterns from .crab.toml
                             if let Some(ref track) = config.track {
                                 sync_gitattributes_from_track(&cwd, &track.patterns);
@@ -3408,9 +3402,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             )
             .await?;
 
-            if remote {
-                crab::cmd::init::initialize_remote_repository(&resolved_url, &cwd, &cancel).await?;
-            }
+            crab::cmd::init::initialize_remote_repository(&resolved_url, &cwd, &cancel).await?;
 
             // Mirror mode: validate remote, add crab remote, install hooks, write config.
             if let Some(ref mirror_remote) = mirror {
@@ -4028,6 +4020,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let parsed = crab::git::url::CrabUrl::parse(url)?;
             let prefix = parsed.repo_path.clone();
             let store = create_cli_store(&parsed.bucket, &config, "fsck", &cancel).await?;
+            let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
+            crab::core::remote_layout::open(&store, &router).await?;
 
             let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone());
             let repairer: Box<dyn crab::cmd::fsck::FsckRepairer> = if repair {
@@ -5606,6 +5600,8 @@ async fn run_compact_command(
         crab::replication::ensure_active_active_maintenance_admitted(&config, "compaction")?;
     }
     let store = create_cli_store(&bucket, &config, "compact", cancel).await?;
+    let router = crab::storage::StoreLayout::new(store.clone(), repo.clone());
+    crab::core::remote_layout::open(&store, &router).await?;
     let args = crab::cmd::compact::CompactArgs {
         repo,
         bucket,
@@ -5642,6 +5638,8 @@ async fn run_repack_command(
     let prefix = parsed.repo_path.clone();
 
     let store = create_cli_store(&parsed.bucket, &config, "repack", cancel).await?;
+    let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
+    crab::core::remote_layout::open(&store, &router).await?;
 
     let repack_config = crab::cmd::repack::RepackConfig {
         lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
@@ -6174,6 +6172,22 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn init_has_one_remote_publication_path() {
+        parse_cli_on_large_stack(|| {
+            let parsed = Cli::try_parse_from(["crab", "init", "crab://bucket/repo"])
+                .expect("canonical init syntax should parse");
+            assert!(matches!(parsed.cmd, Some(Cmd::Init { .. })));
+
+            let error =
+                match Cli::try_parse_from(["crab", "init", "--remote", "crab://bucket/repo"]) {
+                    Ok(_) => panic!("retired init selector remained as a compatibility path"),
+                    Err(error) => error,
+                };
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        });
     }
 
     #[test]

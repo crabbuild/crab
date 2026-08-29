@@ -205,7 +205,7 @@ async fn setup() -> Result<(LockManager, String)> {
     let parsed = crate::git::url::CrabUrl::parse(url)?;
     let config = crate::core::config::Config::resolve_local().unwrap_or_default();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let store = crate::auth::build_store(&config, &parsed, "lock", &cancel).await?;
+    let store = crate::auth::build_repository_url_store(&config, &parsed, "lock", &cancel).await?;
     let mgr = LockManager::native(store, &parsed.repo_path);
     let owner = resolve_owner()?;
 

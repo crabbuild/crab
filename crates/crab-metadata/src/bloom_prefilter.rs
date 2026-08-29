@@ -1,6 +1,6 @@
 //! Shared bloom pre-filter for shard fetches.
 //!
-//! When a shard has a v2 bloom trailer, a small Range GET on the tail
+//! When a canonical v1 shard has a bloom trailer, a small Range GET on the tail
 //! (≤ 4 KiB) can prove whether a file or chunk hash is definitely absent
 //! before the full shard body is pulled over the wire. Both the push-path
 //! shard synchronizer and the hydrate-path shard resolution use this to
@@ -9,10 +9,10 @@
 //! The trailer layout is identical to the one written by Crab's shard writer:
 //!
 //! ```text
-//!   ... v1 shard data ...
+//!   ... xet shard body ...
 //!   [bloom section: variable, encoded by ShardBloom::encode]
 //!   [bloom_offset: u64 LE]     ← start of bloom section
-//!   [magic: "SH02" (4 bytes)]  ← last 4 bytes of object
+//!   [magic: "SH01" (4 bytes)]  ← last 4 bytes of object
 //! ```
 //!
 //! The pre-filter is strictly advisory: on any I/O or parse failure we
@@ -27,11 +27,11 @@ use crab_xet::shard_bloom::ShardBloom;
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::MerkleHash;
 
-/// Size of the v2 shard trailer: `bloom_offset` (8 bytes) + magic (4 bytes).
-pub(crate) const SHARD_V2_TRAILER_SIZE: u64 = 12;
+/// Size of the canonical v1 bloom trailer.
+pub(crate) const SHARD_V1_TRAILER_SIZE: u64 = 12;
 
-/// Magic bytes at the end of a v2 shard.
-pub(crate) const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
+/// Magic bytes at the end of a canonical v1 shard bloom trailer.
+pub(crate) const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
 
 /// Maximum size of the bloom section we're willing to pull via Range GET.
 ///
@@ -53,7 +53,7 @@ pub enum BloomCheck {
     /// The bloom reports a possible hit. The caller must download the
     /// full shard to determine presence authoritatively.
     PossiblyPresent,
-    /// No bloom is available or usable: the shard is pre-v2, the trailer
+    /// No bloom is available or usable: the v1 shard has no trailer, the trailer
     /// is too small to parse, or the bloom section exceeds the 4 KiB
     /// Range GET budget. Callers should proceed with a full download.
     NoBloom,
@@ -62,8 +62,8 @@ pub enum BloomCheck {
 /// Check a shard's bloom against a single file hash.
 ///
 /// Returns [`BloomCheck::DefinitelyAbsent`] only when the shard carries
-/// a v2 bloom and the bloom definitively excludes `file_hash`. Every
-/// other outcome (v1 shard, oversized bloom, unreadable trailer, bloom
+/// a canonical v1 bloom and the bloom definitively excludes `file_hash`. Every
+/// other outcome (plain shard, oversized bloom, unreadable trailer, bloom
 /// says "maybe") resolves to [`BloomCheck::PossiblyPresent`] or
 /// [`BloomCheck::NoBloom`] so the caller falls back to a full shard
 /// download.
@@ -117,8 +117,8 @@ pub async fn check_shard_chunk_bloom(
 }
 
 /// Fetch and decode a shard's bloom section when one exists and fits in
-/// the Range GET budget. Returns `Ok(None)` for pre-v2 shards, shards too
-/// small for a v2 trailer, and shards whose bloom exceeds
+/// the Range GET budget. Returns `Ok(None)` for v1 shards without a bloom,
+/// shards too small for a trailer, and shards whose bloom exceeds
 /// [`MAX_BLOOM_RANGE_BYTES`].
 async fn load_bloom_if_any(store: &Store, shard_path: &Path) -> Result<Option<ShardBloom>> {
     let meta = store.head(shard_path).await?;
@@ -133,21 +133,21 @@ async fn load_bloom_if_any(store: &Store, shard_path: &Path) -> Result<Option<Sh
         });
     }
 
-    if shard_size < SHARD_V2_TRAILER_SIZE {
+    if shard_size < SHARD_V1_TRAILER_SIZE {
         return Ok(None);
     }
 
-    let trailer_start = shard_size - SHARD_V2_TRAILER_SIZE;
+    let trailer_start = shard_size - SHARD_V1_TRAILER_SIZE;
     let trailer = store
         .range_get(shard_path, trailer_start..shard_size)
         .await?;
 
-    if trailer.len() < SHARD_V2_TRAILER_SIZE as usize {
+    if trailer.len() < SHARD_V1_TRAILER_SIZE as usize {
         return Ok(None);
     }
 
-    if &trailer[8..12] != SHARD_V2_MAGIC {
-        // v1 shard — no bloom available.
+    if &trailer[8..12] != SHARD_V1_MAGIC {
+        // Canonical v1 shard without a bloom.
         return Ok(None);
     }
 
@@ -214,15 +214,15 @@ mod tests {
     }
 
     /// Build a synthetic shard body: a deterministic payload followed by a
-    /// v2 bloom trailer constructed from the provided file/chunk hashes.
-    fn make_v2_shard(file_hashes: &[MerkleHash], chunk_hashes: &[MerkleHash]) -> Bytes {
+    /// canonical v1 bloom trailer constructed from the provided hashes.
+    fn make_bloom_shard(file_hashes: &[MerkleHash], chunk_hashes: &[MerkleHash]) -> Bytes {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"synthetic-shard-body-v1");
         let bloom_offset = buf.len() as u64;
         let bloom = ShardBloom::build(file_hashes, chunk_hashes);
         buf.extend_from_slice(&bloom.encode());
         buf.extend_from_slice(&bloom_offset.to_le_bytes());
-        buf.extend_from_slice(SHARD_V2_MAGIC);
+        buf.extend_from_slice(SHARD_V1_MAGIC);
         Bytes::from(buf)
     }
 
@@ -236,7 +236,7 @@ mod tests {
         let store = memory_store();
         let path = Path::from("shards/test-absent");
         let present: Vec<MerkleHash> = (1..=20).map(hash_from_seed).collect();
-        let shard = make_v2_shard(&present, &[]);
+        let shard = make_bloom_shard(&present, &[]);
         store.put(&path, shard).await.unwrap();
 
         // A hash that was never inserted — bloom should report absent.
@@ -252,7 +252,7 @@ mod tests {
         let store = memory_store();
         let path = Path::from("shards/test-present");
         let present: Vec<MerkleHash> = (1..=20).map(hash_from_seed).collect();
-        let shard = make_v2_shard(&present, &[]);
+        let shard = make_bloom_shard(&present, &[]);
         store.put(&path, shard).await.unwrap();
 
         let result = check_shard_file_bloom(&store, &path, &present[7])
@@ -279,7 +279,7 @@ mod tests {
         let store = memory_store();
         let path = Path::from("shards/chunks-absent");
         let chunk_hashes: Vec<MerkleHash> = (100..=200).map(hash_from_seed).collect();
-        let shard = make_v2_shard(&[], &chunk_hashes);
+        let shard = make_bloom_shard(&[], &chunk_hashes);
         store.put(&path, shard).await.unwrap();
 
         let query: std::collections::HashSet<MerkleHash> =
@@ -295,7 +295,7 @@ mod tests {
         let store = memory_store();
         let path = Path::from("shards/chunks-present");
         let chunk_hashes: Vec<MerkleHash> = (100..=200).map(hash_from_seed).collect();
-        let shard = make_v2_shard(&[], &chunk_hashes);
+        let shard = make_bloom_shard(&[], &chunk_hashes);
         store.put(&path, shard).await.unwrap();
 
         let mut query: std::collections::HashSet<MerkleHash> =
@@ -316,7 +316,7 @@ mod tests {
         let store = memory_store();
         let path = Path::from("shards/test-oversized");
         let many: Vec<MerkleHash> = (0..5000).map(hash_from_seed).collect();
-        let shard = make_v2_shard(&many, &[]);
+        let shard = make_bloom_shard(&many, &[]);
         store.put(&path, shard).await.unwrap();
 
         let result = check_shard_file_bloom(&store, &path, &hash_from_seed(999_999))

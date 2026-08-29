@@ -25,9 +25,10 @@ pointer files. It is significantly faster than `git add` for many large files
 because it bypasses git's serial filter-process protocol and processes files
 concurrently.
 
-After chunking and staging, `crab add` runs `git add` on the resulting
-pointer files so they appear in git's index ready for commit — unless
-`--skip-git-add` is specified.
+After chunking and staging, `crab add` writes Crab pointer blobs directly to
+Git's object database and atomically replaces their index entries — unless
+`--skip-git-add` is specified. Staged recipes become push-visible only after
+that index transaction is durably reconciled.
 
 For conceptual background on adding files and content-defined chunking, see [Adding Files](/docs/cli/daily-workflow/adding-files).
 
@@ -43,7 +44,7 @@ For conceptual background on adding files and content-defined chunking, see [Add
 |--------|-------|---------|-------------|
 | `--jobs` | `-j` | `16` | Maximum number of concurrent file-processing tasks |
 | `--dry-run` | | `false` | Show what would be added without staging or writing pointers |
-| `--skip-git-add` | | `false` | Skip the final `git add` step (stage chunks only) |
+| `--skip-git-add` | | `false` | Prepare local staging only; do not publish pointer index entries or recipes |
 | `--json` | | `false` | Emit a single JSON envelope with the result |
 | `--jsonl` | | `false` | Stream JSONL output (one event per line) |
 
@@ -73,11 +74,11 @@ crab add -j 16 '*.bin' '*.safetensors'
 crab add --dry-run '*.bin'
 ```
 
-### Stage chunks without running git add
+### Prepare staging without changing Git's index
 
 ```bash
 crab add --skip-git-add '*.bin'
-git add models/weights.bin  # manually add later
+git add models/weights.bin  # promotes the exact prepared recipe later
 ```
 
 ## Output

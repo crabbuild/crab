@@ -1148,7 +1148,9 @@ class ConcurrentPushSmoke:
         self.seed.mkdir(parents=True)
         self.run_git(self.seed, ["init", "-b", "main"])
         self.configure_git_identity(self.seed, "seed")
-        self.run_crab(self.seed, ["init", self.remote_url], name="crab init seed")
+        self.run_crab(
+            self.seed, ["init", self.remote_url], name="crab init seed"
+        )
         self.configure_crab_repo(self.seed)
         (self.seed / "README.md").write_text(
             f"# Concurrent push smoke\n\nrun_id: {self.run_id}\n",

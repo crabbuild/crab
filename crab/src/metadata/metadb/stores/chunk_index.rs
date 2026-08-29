@@ -19,9 +19,10 @@ use crate::metadata::metadb::db::Db;
 use crate::metadata::metadb::transaction::{DbTarget, Transaction};
 use bytes::Bytes;
 use crab_metadata::chunk_index::ChunkIndex;
+#[cfg(test)]
+use crab_metadata::key_codec::encode_content_key;
 use crab_metadata::key_codec::{
-    PREFIX_CONTENT, decode_content_key, encode_committed_chunk_head_key,
-    encode_committed_chunk_key, encode_content_key, encode_origin_proof_key,
+    encode_committed_chunk_head_key, encode_committed_chunk_key, encode_origin_proof_key,
     encode_source_anchor_key,
 };
 use crab_metadata::persistent_chunk_index::PersistentChunkIndex;
@@ -378,7 +379,75 @@ impl ChunkIndexStore {
         Ok(out)
     }
 
-    /// Persist committed chunk receipts in the transaction's v2 namespace.
+    /// Read the immutable committed placements named by a staged proof.
+    ///
+    /// Unlike the rebuildable per-chunk head, these point reads preserve the
+    /// exact proof selected during add even when another repository later
+    /// publishes a newer candidate for the same chunk.
+    pub(crate) async fn get_committed_candidates_by_id_batch(
+        &self,
+        candidates: &[(MerkleHash, [u8; 32])],
+    ) -> Result<CommittedChunkCandidateBatch> {
+        let mut out = CommittedChunkCandidateBatch::default();
+        if candidates.is_empty() {
+            return Ok(out);
+        }
+        let keys = candidates
+            .iter()
+            .map(|(chunk_hash, placement_id)| {
+                Bytes::copy_from_slice(&encode_committed_chunk_key(chunk_hash, placement_id))
+            })
+            .collect::<Vec<_>>();
+        let values = self.db.get_batch(&keys).await?;
+        let mut proof_ids = Vec::new();
+        let mut anchor_ids = Vec::new();
+        let mut seen_proofs = HashSet::new();
+        let mut seen_anchors = HashSet::new();
+        for ((chunk_hash, placement_id), raw) in candidates.iter().zip(values) {
+            let Some(raw) = raw else {
+                continue;
+            };
+            let placement =
+                decode_committed_placement(*chunk_hash, raw.as_ref(), Some(*placement_id))?;
+            if seen_proofs.insert(placement.origin_proof_id) {
+                proof_ids.push(placement.origin_proof_id);
+            }
+            if seen_anchors.insert(placement.source_anchor_id) {
+                anchor_ids.push(placement.source_anchor_id);
+            }
+            out.placements.insert(*chunk_hash, placement);
+        }
+
+        let mut record_keys = proof_ids
+            .iter()
+            .map(|id| Bytes::copy_from_slice(&encode_origin_proof_key(id)))
+            .collect::<Vec<_>>();
+        record_keys.extend(
+            anchor_ids
+                .iter()
+                .map(|id| Bytes::copy_from_slice(&encode_source_anchor_key(id))),
+        );
+        let mut record_values = self.db.get_batch(&record_keys).await?.into_iter();
+        for id in proof_ids {
+            let raw = record_values
+                .next()
+                .flatten()
+                .ok_or_else(|| missing_receipt_record("origin proof", id))?;
+            out.origin_proofs
+                .insert(id, decode_origin_receipt(id, raw.as_ref())?);
+        }
+        for id in anchor_ids {
+            let raw = record_values
+                .next()
+                .flatten()
+                .ok_or_else(|| missing_receipt_record("source anchor", id))?;
+            out.source_anchors
+                .insert(id, decode_source_anchor(id, raw.as_ref())?);
+        }
+        Ok(out)
+    }
+
+    /// Persist committed chunk receipts in the canonical v1 namespace.
     pub fn save_committed_receipts(
         &self,
         txn: &mut Transaction,
@@ -468,41 +537,10 @@ impl ChunkIndexStore {
     }
 
     /// Record a delete into the transaction.
+    #[cfg(test)]
     pub(crate) fn delete_legacy(&self, txn: &mut Transaction, chunk_hash: &MerkleHash) {
         let key = Bytes::copy_from_slice(&encode_content_key(chunk_hash));
         txn.delete(DbTarget::ChunkIndex, key);
-    }
-
-    /// Return one bounded batch of legacy unversioned keys.
-    pub(crate) async fn legacy_keys_batch(&self, limit: usize) -> Result<Vec<Bytes>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut rows = self.db.scan_prefix(&[PREFIX_CONTENT]).await?;
-        let mut keys = Vec::with_capacity(limit);
-        while keys.len() < limit {
-            let Some(row) = rows.next().await.map_err(|source| {
-                CrabError::from(crate::core::error::MetaDbError::Read {
-                    db: DB_LABEL.to_owned(),
-                    prefix: String::from("<legacy-content>"),
-                    source,
-                })
-            })?
-            else {
-                break;
-            };
-            decode_content_key(&row.key)
-                .map_err(|error| super::map_value_codec_error(error, DB_LABEL, &row.key))?;
-            keys.push(row.key);
-        }
-        Ok(keys)
-    }
-
-    /// Tombstone a bounded legacy-key batch after a complete rebuild.
-    pub(crate) fn delete_legacy_keys(&self, txn: &mut Transaction, keys: &[Bytes]) {
-        for key in keys {
-            txn.delete(DbTarget::ChunkIndex, key.clone());
-        }
     }
 
     /// Evict stale candidates from both local acceleration tiers.
@@ -910,6 +948,45 @@ mod tests {
             ctx.persistent.get(&chunk).expect("persistent get"),
             None,
             "unattached persistent tier must not be mutated"
+        );
+
+        ctx.db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn exact_committed_candidate_survives_head_replacement() {
+        let ctx = new_ctx().await;
+        let chunk = hash_from_seed(41);
+        let xorb_ref = xorb_ref_for(305, 12, 8192);
+        let first = committed_receipt(chunk, xorb_ref);
+        let mut second = committed_receipt(chunk, xorb_ref);
+        second.origin.etag = Some("newer-etag".to_owned());
+        second.source_repo_prefix = "org/newer-repo".to_owned();
+        second.committed_generation = 2;
+
+        let mut batch = slatedb::WriteBatch::new();
+        put_receipt(&mut batch, &chunk, &first);
+        ctx.db.write(batch).await.expect("seed first receipt");
+        let mut batch = slatedb::WriteBatch::new();
+        put_receipt(&mut batch, &chunk, &second);
+        ctx.db.write(batch).await.expect("replace receipt head");
+
+        let first_placement = first.compact_placement();
+        let exact = ctx
+            .store
+            .get_committed_candidates_by_id_batch(&[(chunk, first_placement.placement_id())])
+            .await
+            .expect("load exact receipt");
+        assert_eq!(exact.placements.get(&chunk), Some(&first_placement));
+        assert!(
+            exact
+                .origin_proofs
+                .contains_key(&first_placement.origin_proof_id)
+        );
+        assert!(
+            exact
+                .source_anchors
+                .contains_key(&first_placement.source_anchor_id)
         );
 
         ctx.db.close().await.expect("close");

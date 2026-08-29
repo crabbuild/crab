@@ -18,6 +18,7 @@ pub mod file_index_lookup;
 pub mod git_object_locator;
 pub mod git_visibility;
 pub mod key_codec;
+pub mod layout_descriptor;
 #[cfg(feature = "storage")]
 pub mod manifest_store;
 pub mod manifests;

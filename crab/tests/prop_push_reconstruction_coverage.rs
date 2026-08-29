@@ -28,8 +28,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    deprecated,
-    reason = "test assertions; exercises the deprecated RefPushOutcome::Error path"
+    reason = "test assertions"
 )]
 
 use std::io::{self, Write};
@@ -85,6 +84,10 @@ impl RecordingStore {
 
     fn puts(&self) -> Vec<String> {
         self.puts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn clear_puts(&self) {
+        self.puts.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     fn record(&self, path: &ObjectPath) {
@@ -413,6 +416,13 @@ async fn push_files(
     let inner: Arc<dyn ObjectStore> = Arc::new(recording.clone());
     let store = Store::new(inner);
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    crab::core::remote_layout::initialize(&store, &router)
+        .await
+        .expect("initialize canonical remote layout");
+    crab::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+        .await
+        .expect("initialize canonical remote manifest");
+    recording.clear_puts();
 
     let specs = vec![PushSpec {
         force: false,
@@ -438,7 +448,6 @@ async fn push_files(
         .get("refs/heads/main")
         .and_then(|o| match o {
             RefPushOutcome::Ok => None,
-            RefPushOutcome::Error(msg) => Some(msg.clone()),
             RefPushOutcome::Rejected(reason) => Some(reason.to_string()),
         });
 

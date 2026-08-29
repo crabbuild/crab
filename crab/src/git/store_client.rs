@@ -160,7 +160,7 @@ impl StoreClient {
     /// [`ClientError`].
     ///
     /// Applies the bloom pre-filter when the shard is not yet in the
-    /// local cache: a small Range-GET on the shard's v2 bloom trailer
+    /// local cache: a small Range-GET on the shard's v1 bloom trailer
     /// can prove the file is absent before we pull the whole shard body.
     /// A definitive-absent result is surfaced as `Ok(None)` so the
     /// caller reports "file not found" without a costly full download.
@@ -741,6 +741,22 @@ mod tests {
         ])
     }
 
+    fn four_chunk_xorb(xorb_hash: MerkleHash, seed: u64) -> Arc<MDBXorbInfo> {
+        let chunks = (0_u32..4)
+            .map(|index| {
+                XorbChunkSequenceEntry::new(
+                    hash_from_seed(seed.wrapping_add(u64::from(index))),
+                    1024,
+                    index * 1024,
+                )
+            })
+            .collect();
+        Arc::new(MDBXorbInfo {
+            metadata: XorbChunkSequenceHeader::new(xorb_hash, 4, 4096),
+            chunks,
+        })
+    }
+
     fn test_client() -> (StoreClient, tempfile::TempDir) {
         let inner = Arc::new(InMemory::new());
         let origin = Store::new(inner);
@@ -979,6 +995,9 @@ mod tests {
         };
 
         let mut shard = ShardWriter::new();
+        shard
+            .add_xorb(four_chunk_xorb(xorb_hash, 5_300))
+            .expect("add xorb");
         shard.add_file(file_info).expect("add file");
         let (shard_bytes, shard_hash) = shard.finalize().expect("finalize shard");
         client
@@ -1017,6 +1036,9 @@ mod tests {
         };
 
         let mut shard = ShardWriter::new();
+        shard
+            .add_xorb(four_chunk_xorb(xorb_hash, 6_300))
+            .expect("add xorb");
         shard.add_file(file_info).expect("add file");
         let (shard_bytes, shard_hash) = shard.finalize().expect("finalize shard");
         client

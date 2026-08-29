@@ -1,14 +1,11 @@
 //! Thin wrappers around xet-core's `MDBInMemoryShard` for building and
 //! reading shards, plus a one-shard-per-push session with 100 MiB splitting.
 //!
-//! ## Footer versioning
-//!
-//! v1 shards use xet-core's standard footer (72 bytes). v2 shards append a
-//! bloom filter section after the shard data and write an 8-byte
-//! `bloom_offset` trailer followed by a 4-byte magic `SH02` at the very end.
-//! Readers detect v2 by checking the last 4 bytes; absence of the magic means
-//! v1 (backward-compatible).
+//! Crab's canonical v1 shard may append a bloom section after xet-core's shard
+//! body. An 8-byte `bloom_offset` and the `SH01` magic terminate the object.
+//! A body without the optional bloom remains a v1 shard.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Seek, SeekFrom};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -38,17 +35,17 @@ use crate::shard_bloom::ShardBloom;
 /// 100 MiB soft cap for shard splitting.
 const SHARD_SIZE_CAP: u64 = 100 * 1024 * 1024;
 
-/// Magic bytes at the end of a v2 shard identifying the extended footer.
-/// Readers that don't see this magic treat the shard as v1.
-const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
+/// Magic bytes identifying the canonical v1 bloom trailer.
+const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
 
-/// Size of the v2 trailer: `bloom_offset` (8 bytes) + magic (4 bytes).
-const SHARD_V2_TRAILER_SIZE: usize = 12;
+/// Size of the v1 bloom trailer: `bloom_offset` (8 bytes) + magic (4 bytes).
+const SHARD_V1_TRAILER_SIZE: usize = 12;
 
 /// Thin wrapper around xet-core's `MDBInMemoryShard` for building shards.
 pub struct ShardWriter {
     inner: MDBInMemoryShard,
     size_cap: u64,
+    xorb_info: HashMap<MerkleHash, Arc<MDBXorbInfo>>,
 }
 
 impl ShardWriter {
@@ -58,6 +55,7 @@ impl ShardWriter {
         Self {
             inner: MDBInMemoryShard::default(),
             size_cap: SHARD_SIZE_CAP,
+            xorb_info: HashMap::new(),
         }
     }
 
@@ -66,17 +64,32 @@ impl ShardWriter {
     /// # Errors
     /// Returns `XetError::Internal` if the underlying shard rejects the entry.
     pub fn add_xorb(&mut self, xorb_info: Arc<MDBXorbInfo>) -> Result<()> {
+        let xorb_hash = xorb_info.metadata.xorb_hash;
+        if let Some(existing) = self.xorb_info.get(&xorb_hash) {
+            if existing.as_ref() == xorb_info.as_ref() {
+                return Ok(());
+            }
+            return Err(XetError::Internal(format!(
+                "shard supplies conflicting metadata for xorb {}",
+                xorb_hash.hex()
+            )));
+        }
         self.inner
-            .add_xorb_block(xorb_info)
+            .add_xorb_block(Arc::clone(&xorb_info))
             .map_err(|e| XetError::Internal(format!("shard add_xorb: {e}")))?;
+        self.xorb_info.insert(xorb_hash, xorb_info);
         Ok(())
     }
 
     /// Add file reconstruction info.
     ///
     /// # Errors
-    /// Returns `XetError::Internal` if the underlying shard rejects the entry.
+    /// Returns `XetError::Internal` if any reconstruction dependency is
+    /// absent or invalid, or if the underlying shard rejects the entry.
     pub fn add_file(&mut self, file_info: MDBFileInfo) -> Result<()> {
+        validate_file_terms(&file_info, |xorb_hash| {
+            self.xorb_info.get(xorb_hash).map(Arc::as_ref)
+        })?;
         self.inner
             .add_file_reconstruction_info(file_info)
             .map_err(|e| XetError::Internal(format!("shard add_file: {e}")))?;
@@ -110,9 +123,9 @@ impl ShardWriter {
         Ok((buf, hash))
     }
 
-    /// Serialize the shard with an appended bloom filter (footer version 2).
+    /// Serialize the canonical v1 shard with an appended bloom filter.
     ///
-    /// Layout: `[shard v1 data][bloom encoded][bloom_offset: u64 LE][magic: "SH02"]`
+    /// Layout: `[xet shard body][bloom][bloom_offset: u64 LE][magic: "SH01"]`
     ///
     /// The `bloom_offset` points to the start of the bloom section relative
     /// to the beginning of the buffer. The hash covers the entire buffer
@@ -125,7 +138,7 @@ impl ShardWriter {
         file_hashes: &[MerkleHash],
         chunk_hashes: &[MerkleHash],
     ) -> Result<(Vec<u8>, MerkleHash)> {
-        // Serialize the v1 shard data first.
+        // Serialize the xet shard body first.
         let mut buf = Vec::new();
         MDBShardInfo::serialize_from(&mut buf, &self.inner, None)
             .map_err(|e| XetError::Internal(format!("shard finalize: {e}")))?;
@@ -133,11 +146,11 @@ impl ShardWriter {
         // Record where the bloom section starts.
         let bloom_offset = buf.len() as u64;
 
-        // Build and append bloom + v2 trailer.
+        // Build and append the canonical v1 bloom trailer.
         let bloom = ShardBloom::build(file_hashes, chunk_hashes);
         buf.extend_from_slice(&bloom.encode());
         buf.extend_from_slice(&bloom_offset.to_le_bytes());
-        buf.extend_from_slice(SHARD_V2_MAGIC);
+        buf.extend_from_slice(SHARD_V1_MAGIC);
 
         // Hash the entire buffer.
         let hash = {
@@ -163,6 +176,58 @@ impl Default for ShardWriter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn validate_file_terms<'a>(
+    file_info: &MDBFileInfo,
+    dependency_for: impl Fn(&MerkleHash) -> Option<&'a MDBXorbInfo>,
+) -> Result<()> {
+    for segment in &file_info.segments {
+        let dependency = dependency_for(&segment.xorb_hash).ok_or_else(|| {
+            XetError::Internal(format!(
+                "shard file {} lacks xorb {}",
+                file_info.metadata.file_hash.hex(),
+                segment.xorb_hash.hex()
+            ))
+        })?;
+        let start = usize::try_from(segment.chunk_index_start).map_err(|_| {
+            XetError::Internal(format!(
+                "shard file {} chunk start cannot be represented",
+                file_info.metadata.file_hash.hex()
+            ))
+        })?;
+        let end = usize::try_from(segment.chunk_index_end).map_err(|_| {
+            XetError::Internal(format!(
+                "shard file {} chunk end cannot be represented",
+                file_info.metadata.file_hash.hex()
+            ))
+        })?;
+        let selected = dependency.chunks.get(start..end).ok_or_else(|| {
+            XetError::Internal(format!(
+                "shard file {} range {start}..{end} exceeds xorb {} bounds",
+                file_info.metadata.file_hash.hex(),
+                segment.xorb_hash.hex()
+            ))
+        })?;
+        let selected_bytes = selected.iter().try_fold(0u64, |total, chunk| {
+            total
+                .checked_add(u64::from(chunk.unpacked_segment_bytes))
+                .ok_or_else(|| {
+                    XetError::Internal(format!(
+                        "shard file {} byte count overflow",
+                        file_info.metadata.file_hash.hex()
+                    ))
+                })
+        })?;
+        if selected_bytes != u64::from(segment.unpacked_segment_bytes) {
+            return Err(XetError::Internal(format!(
+                "shard file {} range {start}..{end} covers {selected_bytes} bytes, expected {}",
+                file_info.metadata.file_hash.hex(),
+                segment.unpacked_segment_bytes
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Lazy-loading shard reader backed by raw bytes.
@@ -285,23 +350,23 @@ impl ShardReader {
         self.hash
     }
 
-    /// Try to read the bloom filter from a v2 shard.
+    /// Try to read the optional bloom filter from a canonical v1 shard.
     ///
-    /// Returns `None` for v1 shards (no bloom). Returns an error only if the
-    /// v2 trailer is present but the bloom data is corrupt.
+    /// Returns `None` when the v1 shard has no bloom. Returns an error when a
+    /// present trailer is corrupt.
     ///
     /// # Errors
     /// Returns `XetError::CorruptObject` if the bloom section is malformed.
     pub fn bloom(&self) -> Result<Option<ShardBloom>> {
         let data = self.data.as_ref();
-        if data.len() < SHARD_V2_TRAILER_SIZE {
+        if data.len() < SHARD_V1_TRAILER_SIZE {
             return Ok(None);
         }
         let tail = &data[data.len() - 4..];
-        if tail != SHARD_V2_MAGIC {
+        if tail != SHARD_V1_MAGIC {
             return Ok(None);
         }
-        let offset_start = data.len() - SHARD_V2_TRAILER_SIZE;
+        let offset_start = data.len() - SHARD_V1_TRAILER_SIZE;
         let bloom_offset_u64 = u64::from_le_bytes(
             data[offset_start..offset_start + 8]
                 .try_into()
@@ -329,18 +394,16 @@ impl ShardReader {
 
     /// Lazily parse the shard header + footer on first access.
     ///
-    /// Handles both v1 and v2 shard formats. V2 shards have a bloom
-    /// section + trailer appended after the v1 data. The `bloom_offset`
-    /// in the v2 trailer tells us where the v1 data ends.
+    /// The optional canonical v1 bloom trailer identifies where the xet shard
+    /// body ends.
     fn shard_info(&self) -> Result<&MDBShardInfo> {
         let result = self.parsed.get_or_init(|| {
             let data = self.data.as_ref();
 
-            // Check for v2 trailer and extract the v1 portion.
-            let v1_data = if data.len() >= SHARD_V2_TRAILER_SIZE
-                && &data[data.len() - 4..] == SHARD_V2_MAGIC
+            let shard_body = if data.len() >= SHARD_V1_TRAILER_SIZE
+                && &data[data.len() - 4..] == SHARD_V1_MAGIC
             {
-                let offset_start = data.len() - SHARD_V2_TRAILER_SIZE;
+                let offset_start = data.len() - SHARD_V1_TRAILER_SIZE;
                 let bloom_offset = u64::from_le_bytes(
                     data[offset_start..offset_start + 8]
                         .try_into()
@@ -355,7 +418,7 @@ impl ShardReader {
                 data
             };
 
-            let mut cursor = Cursor::new(v1_data);
+            let mut cursor = Cursor::new(shard_body);
             MDBShardInfo::load_from_reader(&mut cursor).map_err(|e| format!("{e}"))
         });
         match result {
@@ -377,15 +440,14 @@ impl ShardReader {
         &self.data
     }
 
-    /// Returns the v1 portion of the shard data (without the v2 bloom trailer).
+    /// Returns the xet shard body without Crab's optional v1 bloom trailer.
     ///
-    /// For v1 shards, returns the full data. For v2 shards, strips the
-    /// bloom section and trailer using the `bloom_offset`.
+    /// Shards without a bloom return the full data.
     #[must_use]
     pub fn v1_data(&self) -> &[u8] {
         let data = self.data.as_ref();
-        if data.len() >= SHARD_V2_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V2_MAGIC {
-            let offset_start = data.len() - SHARD_V2_TRAILER_SIZE;
+        if data.len() >= SHARD_V1_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V1_MAGIC {
+            let offset_start = data.len() - SHARD_V1_TRAILER_SIZE;
             if let Ok(bytes) = data[offset_start..offset_start + 8].try_into() {
                 let bloom_offset = u64::from_le_bytes(bytes) as usize;
                 if bloom_offset <= data.len() {
@@ -418,6 +480,7 @@ pub struct PushShardSession {
 struct ShardHashes {
     file_hashes: Vec<MerkleHash>,
     chunk_hashes: Vec<MerkleHash>,
+    xorb_info: HashMap<MerkleHash, Arc<MDBXorbInfo>>,
 }
 
 impl ShardHashes {
@@ -425,6 +488,7 @@ impl ShardHashes {
         Self {
             file_hashes: Vec::new(),
             chunk_hashes: Vec::new(),
+            xorb_info: HashMap::new(),
         }
     }
 }
@@ -451,35 +515,95 @@ impl PushShardSession {
         }
     }
 
-    /// Add xorb info, rotating to a new shard if the current one is full.
+    /// Create a session with a qualification-only soft cap override.
     ///
-    /// Chunk hashes from the xorb are collected for bloom construction.
-    ///
-    /// # Errors
-    /// Returns `XetError::Internal` if the underlying shard rejects the entry.
-    pub fn add_xorb(&mut self, xorb_info: Arc<MDBXorbInfo>) -> Result<()> {
-        if self.bloom_enabled {
-            for chunk in &xorb_info.chunks {
-                self.current_hashes.chunk_hashes.push(chunk.chunk_hash);
-            }
-        }
-        self.current.add_xorb(xorb_info)?;
-        self.maybe_rotate();
-        Ok(())
+    /// This is not a product configuration surface; sibling producer tests
+    /// use it to force real multi-shard boundaries with small fixtures.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_qualification_size_cap(size_cap: u64) -> Self {
+        let mut session = Self::new();
+        session.current.size_cap = size_cap;
+        session
     }
 
-    /// Add file info, rotating to a new shard if the current one is full.
-    ///
-    /// The file hash is collected for bloom construction.
+    /// Add one file together with every xorb-info block it references.
     ///
     /// Returns the 0-based index of the shard this file was added to.
     /// The index corresponds to the position in the `finalize()` result
-    /// vector, so callers can build a precise file→shard mapping even
-    /// for multi-shard pushes. See finding CR1-F12.
+    /// vector. Rotation happens only after the complete bundle is present, so
+    /// a file never lands in a shard that lacks one of its xorb dependencies.
+    /// Xorb metadata shared by files in one shard is serialized once.
     ///
     /// # Errors
-    /// Returns `XetError::Internal` if the underlying shard rejects the entry.
-    pub fn add_file(&mut self, file_info: MDBFileInfo) -> Result<usize> {
+    /// Returns `XetError::Internal` when dependencies are missing or the
+    /// underlying shard rejects an entry.
+    pub fn add_file_bundle(
+        &mut self,
+        file_info: MDBFileInfo,
+        dependencies: &[Arc<MDBXorbInfo>],
+    ) -> Result<usize> {
+        let required = file_info
+            .segments
+            .iter()
+            .map(|segment| segment.xorb_hash)
+            .collect::<HashSet<_>>();
+        let supplied = dependencies
+            .iter()
+            .map(|dependency| dependency.metadata.xorb_hash)
+            .collect::<HashSet<_>>();
+        if required != supplied || supplied.len() != dependencies.len() {
+            let missing = required.difference(&supplied).next();
+            let extra = supplied.difference(&required).next();
+            return Err(XetError::Internal(format!(
+                "shard file bundle dependency mismatch for {}: missing={}, extra={}, duplicate={}",
+                file_info.metadata.file_hash.hex(),
+                missing.map_or_else(|| "none".to_owned(), MerkleHash::hex),
+                extra.map_or_else(|| "none".to_owned(), MerkleHash::hex),
+                supplied.len() != dependencies.len(),
+            )));
+        }
+
+        let dependencies_by_hash = dependencies
+            .iter()
+            .map(|dependency| (dependency.metadata.xorb_hash, dependency.as_ref()))
+            .collect::<HashMap<_, _>>();
+        validate_file_terms(&file_info, |xorb_hash| {
+            dependencies_by_hash.get(xorb_hash).copied()
+        })?;
+        for dependency in dependencies {
+            let xorb_hash = dependency.metadata.xorb_hash;
+            if self
+                .current_hashes
+                .xorb_info
+                .get(&xorb_hash)
+                .is_some_and(|existing| existing.as_ref() != dependency.as_ref())
+            {
+                return Err(XetError::Internal(format!(
+                    "shard file bundle supplies conflicting metadata for xorb {}",
+                    xorb_hash.hex()
+                )));
+            }
+        }
+
+        let mut ordered_dependencies = dependencies.iter().collect::<Vec<_>>();
+        ordered_dependencies.sort_by_key(|dependency| dependency.metadata.xorb_hash);
+        for dependency in ordered_dependencies {
+            let xorb_hash = dependency.metadata.xorb_hash;
+            if self.current_hashes.xorb_info.contains_key(&xorb_hash) {
+                continue;
+            }
+            self.current_hashes
+                .xorb_info
+                .insert(xorb_hash, Arc::clone(dependency));
+            if self.bloom_enabled {
+                self.current_hashes
+                    .chunk_hashes
+                    .extend(dependency.chunks.iter().map(|chunk| chunk.chunk_hash));
+            }
+            self.current.add_xorb(Arc::clone(dependency))?;
+        }
+
         if self.bloom_enabled {
             self.current_hashes
                 .file_hashes
@@ -496,8 +620,8 @@ impl PushShardSession {
 
     /// Finalize all shards, returning `(bytes, hash)` pairs.
     ///
-    /// When bloom is enabled, each shard is finalized with an appended bloom
-    /// filter (footer version 2). Otherwise, plain v1 finalization is used.
+    /// When bloom is enabled, each v1 shard carries the canonical bloom
+    /// trailer. Otherwise, the plain xet shard body is used.
     ///
     /// Empty shards are skipped.
     ///
@@ -589,7 +713,7 @@ mod tests {
                     xorb_hash_seed,
                     xorb_hash_seed,
                 ]),
-                4096u32,
+                1024u32,
                 0u32,
                 1u32,
             )],
@@ -612,6 +736,29 @@ mod tests {
         w.add_file(make_file(10, 1)).unwrap();
         assert!(!w.is_empty());
         assert!(w.size() > 0);
+    }
+
+    #[test]
+    fn writer_rejects_file_without_dependency_before_mutation() {
+        let mut writer = ShardWriter::new();
+        let error = writer
+            .add_file(make_file(10, 1))
+            .expect_err("missing dependency must fail");
+
+        assert!(error.to_string().contains("lacks xorb"));
+        assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn writer_rejects_conflicting_xorb_metadata() {
+        let mut writer = ShardWriter::new();
+        writer.add_xorb(make_xorb(1, 2)).unwrap();
+
+        let error = writer
+            .add_xorb(make_xorb(1, 3))
+            .expect_err("same xorb hash with different metadata must fail");
+
+        assert!(error.to_string().contains("conflicting metadata"));
     }
 
     #[test]
@@ -697,8 +844,8 @@ mod tests {
     #[test]
     fn push_session_single_shard_when_small() {
         let mut session = PushShardSession::new();
-        session.add_xorb(make_xorb(1, 2)).unwrap();
-        session.add_file(make_file(10, 1)).unwrap();
+        let xorb = make_xorb(1, 2);
+        session.add_file_bundle(make_file(10, 1), &[xorb]).unwrap();
 
         let shards = session.finalize().unwrap();
         assert_eq!(shards.len(), 1);
@@ -718,9 +865,13 @@ mod tests {
         // Override the cap on the current writer to force rotation.
         session.current.size_cap = 1; // 1 byte cap — any entry triggers split.
 
-        session.add_xorb(make_xorb(1, 2)).unwrap();
-        // After adding, should_split is true → rotated.
-        session.add_xorb(make_xorb(2, 2)).unwrap();
+        session
+            .add_file_bundle(make_file(10, 1), &[make_xorb(1, 2)])
+            .unwrap();
+        // After adding the complete first bundle, should_split is true → rotated.
+        session
+            .add_file_bundle(make_file(20, 2), &[make_xorb(2, 2)])
+            .unwrap();
 
         let shards = session.finalize().unwrap();
         // At least 2 shards since each add triggers rotation.
@@ -738,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_shard_has_bloom_with_no_false_negatives() {
+    fn canonical_v1_shard_has_bloom_with_no_false_negatives() {
         let xorb = make_xorb(1, 3);
         let chunk_hashes: Vec<MerkleHash> = xorb.chunks.iter().map(|c| c.chunk_hash).collect();
         let file_hash = MerkleHash::from([10u64, 10, 10, 10]);
@@ -750,7 +901,7 @@ mod tests {
         let (bytes, hash) = w.finalize_with_bloom(&[file_hash], &chunk_hashes).unwrap();
 
         let reader = ShardReader::from_bytes(Bytes::from(bytes), hash);
-        let bloom = reader.bloom().unwrap().expect("v2 shard should have bloom");
+        let bloom = reader.bloom().unwrap().expect("v1 shard should have bloom");
 
         assert!(bloom.maybe_contains_file(&file_hash));
         for ch in &chunk_hashes {
@@ -759,19 +910,21 @@ mod tests {
     }
 
     #[test]
-    fn push_session_with_bloom_produces_v2_shards() {
+    fn push_session_with_bloom_produces_canonical_v1_shards() {
         let xorb = make_xorb(1, 3);
         let chunk_hashes: Vec<MerkleHash> = xorb.chunks.iter().map(|c| c.chunk_hash).collect();
 
         let mut session = PushShardSession::new(); // bloom enabled by default
-        session.add_xorb(xorb).unwrap();
-        session.add_file(make_file(10, 1)).unwrap();
+        session.add_file_bundle(make_file(10, 1), &[xorb]).unwrap();
 
         let shards = session.finalize().unwrap();
         assert_eq!(shards.len(), 1);
 
         let reader = ShardReader::from_bytes(Bytes::from(shards[0].0.clone()), shards[0].1);
-        let bloom = reader.bloom().unwrap().expect("should be v2 with bloom");
+        let bloom = reader
+            .bloom()
+            .unwrap()
+            .expect("canonical v1 shard should have bloom");
 
         // File hash should be present.
         let file_hash = MerkleHash::from([10u64, 10, 10, 10]);
@@ -786,13 +939,108 @@ mod tests {
     #[test]
     fn push_session_without_bloom_produces_v1_shards() {
         let mut session = PushShardSession::with_bloom(false);
-        session.add_xorb(make_xorb(1, 2)).unwrap();
-        session.add_file(make_file(10, 1)).unwrap();
+        session
+            .add_file_bundle(make_file(10, 1), &[make_xorb(1, 2)])
+            .unwrap();
 
         let shards = session.finalize().unwrap();
         assert_eq!(shards.len(), 1);
 
         let reader = ShardReader::from_bytes(Bytes::from(shards[0].0.clone()), shards[0].1);
         assert!(reader.bloom().unwrap().is_none());
+    }
+
+    #[test]
+    fn push_session_rejects_file_without_complete_dependency_set() {
+        let mut session = PushShardSession::new();
+        let error = session
+            .add_file_bundle(make_file(10, 1), &[])
+            .expect_err("missing dependency must fail");
+        assert!(error.to_string().contains("dependency mismatch"));
+    }
+
+    #[test]
+    fn push_session_rejects_invalid_bundle_before_mutation() {
+        let mut session = PushShardSession::new();
+        let dependency = make_xorb(1, 2);
+        let mut file = make_file(10, 1);
+        file.segments[0] = FileDataSequenceEntry::new(dependency.metadata.xorb_hash, 1024, 1, 3);
+
+        let error = session
+            .add_file_bundle(file, &[dependency])
+            .expect_err("out-of-bounds dependency range must fail");
+        assert!(error.to_string().contains("exceeds xorb"));
+        assert!(session.current.is_empty());
+        assert!(session.writers.is_empty());
+    }
+
+    #[test]
+    fn push_session_rotation_keeps_each_file_with_its_dependencies() {
+        let mut session = PushShardSession::with_bloom(false);
+        session.current.size_cap = 1;
+        session
+            .add_file_bundle(make_file(10, 1), &[make_xorb(1, 2)])
+            .unwrap();
+        session
+            .add_file_bundle(make_file(20, 2), &[make_xorb(2, 2)])
+            .unwrap();
+
+        let shards = session.finalize().unwrap();
+        assert_eq!(shards.len(), 2);
+        for (bytes, hash) in shards {
+            let reader = ShardReader::from_bytes(Bytes::from(bytes), hash);
+            let file_hashes = [
+                MerkleHash::from([10u64, 10, 10, 10]),
+                MerkleHash::from([20u64, 20, 20, 20]),
+            ];
+            let file = file_hashes
+                .iter()
+                .find_map(|file_hash| reader.get_file_info(file_hash).unwrap());
+            let file = file.expect("one file per forced shard");
+            for segment in file.segments {
+                assert!(reader.get_xorb_info(&segment.xorb_hash).unwrap().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn push_session_repeats_shared_dependency_across_partitions() {
+        let mut session = PushShardSession::with_bloom(false);
+        session.current.size_cap = 1;
+        let shared = make_xorb(1, 2);
+        session
+            .add_file_bundle(make_file(10, 1), &[Arc::clone(&shared)])
+            .unwrap();
+        session
+            .add_file_bundle(make_file(20, 1), &[shared])
+            .unwrap();
+
+        let shards = session.finalize().unwrap();
+        assert_eq!(shards.len(), 2);
+        for (bytes, _) in shards {
+            let recipes = crate::shard_parse::extract_file_recipes(&Bytes::from(bytes))
+                .expect("each partition must be dependency closed");
+            assert_eq!(recipes.len(), 1);
+            assert_eq!(recipes[0].chunks.len(), 1);
+        }
+    }
+
+    #[test]
+    fn push_session_accepts_zero_byte_file_without_dependencies() {
+        let file_hash = MerkleHash::from([30u64, 30, 30, 30]);
+        let file = MDBFileInfo {
+            metadata: FileDataSequenceHeader::new(file_hash, 0, false, false),
+            segments: Vec::new(),
+            verification: Vec::new(),
+            metadata_ext: None,
+        };
+        let mut session = PushShardSession::with_bloom(false);
+        session.add_file_bundle(file, &[]).unwrap();
+
+        let shards = session.finalize().unwrap();
+        let recipes = crate::shard_parse::extract_file_recipes(&Bytes::from(shards[0].0.clone()))
+            .expect("zero-byte recipe");
+        assert_eq!(recipes[0].file_hash, file_hash);
+        assert!(recipes[0].chunks.is_empty());
     }
 }

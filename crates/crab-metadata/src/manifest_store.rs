@@ -902,7 +902,8 @@ mod tests {
 
         fn tracks(location: &object_store::path::Path) -> bool {
             let path = location.as_ref();
-            path.contains("refs/journal/frontiers/") || path.contains("metadata/git-visibility/v2/")
+            path.contains("refs/journal/frontiers/")
+                || path.contains("metadata/git-visibility/v1/digest/")
         }
     }
 
@@ -1024,7 +1025,7 @@ mod tests {
         let mut refs = BTreeMap::new();
         refs.insert("refs/heads/main".to_owned(), "aaaa".repeat(10));
         let mut manifest = Manifest {
-            version: 2,
+            version: crate::manifests::MANIFEST_VERSION,
             generation: 1,
             created_at: "2025-07-01T00:00:00Z".to_owned(),
             pusher: Some("test".to_owned()),

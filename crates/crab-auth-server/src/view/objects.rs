@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -86,7 +86,16 @@ fn build_view_shards(
     xorbs: &[XorbResult],
     placement: &ChunkPlacementMap,
 ) -> Result<ViewShardPlan> {
-    let mut shard_session = PushShardSession::new();
+    build_view_shards_with_session(files, xorbs, placement, PushShardSession::new())
+}
+
+fn build_view_shards_with_session(
+    files: &[RepackedFile],
+    xorbs: &[XorbResult],
+    placement: &ChunkPlacementMap,
+    mut shard_session: PushShardSession,
+) -> Result<ViewShardPlan> {
+    let mut xorb_info_by_hash = HashMap::with_capacity(xorbs.len());
     for xorb in xorbs {
         let mut chunks = xorb.placements.clone();
         chunks.sort_by_key(|chunk| chunk.chunk_index);
@@ -106,13 +115,21 @@ fn build_view_shards(
             })
             .collect();
 
-        shard_session.add_xorb(Arc::new(MDBXorbInfo {
+        let xorb_info = Arc::new(MDBXorbInfo {
             metadata: header,
             chunks: entries,
-        }))?;
+        });
+        if xorb_info_by_hash.insert(xorb.hash, xorb_info).is_some() {
+            return Err(AuthServerError::Internal(format!(
+                "duplicate protected-view xorb metadata for {}",
+                xorb.hash.hex()
+            )));
+        }
     }
 
-    for file in files {
+    let mut ordered_files = files.iter().collect::<Vec<_>>();
+    ordered_files.sort_by_key(|file| file.file_hash);
+    for file in ordered_files {
         let terms = build_file_terms(&file.file_hash, &file.chunk_hashes, placement)?;
         let covered: u64 = terms
             .iter()
@@ -139,13 +156,35 @@ fn build_view_shards(
                 )
             })
             .collect();
+        let mut dependency_hashes = entries
+            .iter()
+            .map(|entry| entry.xorb_hash)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        dependency_hashes.sort_unstable();
+        let dependencies = dependency_hashes
+            .into_iter()
+            .map(|xorb_hash| {
+                xorb_info_by_hash.get(&xorb_hash).cloned().ok_or_else(|| {
+                    AuthServerError::Internal(format!(
+                        "missing protected-view xorb metadata {} for file {}",
+                        xorb_hash.hex(),
+                        file.file_hash.hex()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let header = FileDataSequenceHeader::new(file.file_hash, entries.len(), false, false);
-        shard_session.add_file(MDBFileInfo {
-            metadata: header,
-            segments: entries,
-            verification: vec![],
-            metadata_ext: None,
-        })?;
+        shard_session.add_file_bundle(
+            MDBFileInfo {
+                metadata: header,
+                segments: entries,
+                verification: vec![],
+                metadata_ext: None,
+            },
+            &dependencies,
+        )?;
     }
 
     Ok(ViewShardPlan {
@@ -360,5 +399,93 @@ mod tests {
         super::super::verify_crab_pointers_backed_by_view(&store, repo_prefix, &[pointer])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn view_shard_forced_partitions_commit_metadb_dependency_closed() {
+        use crab_xet::xorb::format::Chunk;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let repo_prefix = "org/repo/acl-views/v1/scope/partitioned";
+        let router = super::super::view_store_layout(&store, repo_prefix);
+        let first = Chunk::new(Bytes::from_static(b"partitioned view first"));
+        let second = Chunk::new(Bytes::from_static(b"partitioned view second"));
+        let mut builder = XorbBuilder::new();
+        builder.push(&first, RunId(0)).unwrap();
+        builder.push(&second, RunId(1)).unwrap();
+        let xorbs = builder.finalize().unwrap();
+        assert_eq!(xorbs.len(), 1, "fixture must share one xorb dependency");
+
+        let files = vec![
+            RepackedFile {
+                file_hash: MerkleHash::from(*blake3::hash(&first.data).as_bytes()),
+                size: first.data.len() as u64,
+                chunk_hashes: vec![first.hash],
+            },
+            RepackedFile {
+                file_hash: MerkleHash::from(*blake3::hash(&second.data).as_bytes()),
+                size: second.data.len() as u64,
+                chunk_hashes: vec![second.hash],
+            },
+        ];
+        let placement = placement_map(&xorbs);
+        let plan = build_view_shards_with_session(
+            &files,
+            &xorbs,
+            &placement,
+            PushShardSession::with_qualification_size_cap(1),
+        )
+        .unwrap();
+        assert_eq!(plan.shards.len(), 2);
+        for (bytes, _) in &plan.shards {
+            let recipes = crab_xet::shard_parse::extract_file_recipes(&Bytes::from(bytes.clone()))
+                .expect("each protected-view partition must be dependency closed");
+            assert_eq!(recipes.len(), 1);
+        }
+
+        for xorb in &xorbs {
+            store
+                .put(&router.xorb_path(&xorb.hash), xorb.bytes.clone())
+                .await
+                .unwrap();
+        }
+        for (bytes, hash) in &plan.shards {
+            store
+                .put(&router.shard_path(hash), Bytes::from(bytes.clone()))
+                .await
+                .unwrap();
+        }
+        let uploaded = UploadedViewCrabObjects {
+            shard_hashes: plan.shards.iter().map(|(_, hash)| hash.hex()).collect(),
+            shards: plan.shards,
+            placement,
+            payload_digests: xorbs
+                .iter()
+                .map(|xorb| (xorb.hash, xorb.payload_digest))
+                .collect(),
+        };
+        let (shard_index_hash, _, shard_index) =
+            crab_metadata::manifests::compact_shard_index(1, &uploaded.shard_hashes).unwrap();
+        crab_metadata::manifest_store::upload_segmented_bulk(
+            &store,
+            &router,
+            &crab_metadata::manifests::BulkData {
+                shard_index,
+                pack_index: crab_metadata::segmented::SegmentWrite::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.shard_index_hash = shard_index_hash;
+        manifest.seal_git_validation();
+        crab_metadata::manifest_store::create_manifest(&store, &router, &manifest)
+            .await
+            .unwrap();
+
+        commit_view_metadb(&store, &router, &uploaded, &manifest, 1)
+            .await
+            .expect("commit forced protected-view partitions");
     }
 }

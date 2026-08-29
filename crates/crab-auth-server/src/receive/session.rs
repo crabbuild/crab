@@ -101,6 +101,13 @@ impl ReceiveContext {
         &self.push_id
     }
 
+    pub(crate) async fn validate_layout(&self) -> Result<()> {
+        crab_metadata::layout_descriptor::read_canonical_layout(&self.store, &self.router)
+            .await
+            .map(|_| ())
+            .map_err(AuthServerError::from)
+    }
+
     pub async fn read_plan(&self) -> Result<ProtectedPushPlan> {
         let path = ObjectPath::from(format!(
             "{}/staging/{}/push-plan.json",
@@ -120,30 +127,26 @@ impl ReceiveContext {
     pub fn verified_plan_digest(
         &self,
         plan: &ProtectedPushPlan,
-        base: Option<&BaseState>,
+        base: &BaseState,
     ) -> Result<String> {
         let bytes = serde_json::to_vec_pretty(plan)
             .map_err(|e| AuthServerError::Internal(format!("push-plan serialize: {e}")))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(&bytes);
         hasher.update(b"\nsource-generation:");
-        match base {
-            Some(base) => {
-                hasher.update(base.manifest.generation.to_string().as_bytes());
-                hasher.update(b"\nsource-etag:");
-                hasher.update(base.etag.as_bytes());
-            }
-            None => {
-                hasher.update(b"none");
-            }
-        }
+        hasher.update(base.manifest.generation.to_string().as_bytes());
+        hasher.update(b"\nsource-etag:");
+        hasher.update(base.etag.as_bytes());
         Ok(hasher.finalize().to_hex().to_string())
     }
 
-    pub async fn read_base_state(&self) -> Result<Option<BaseState>> {
+    pub async fn read_base_state(&self) -> Result<BaseState> {
         match read_manifest(&self.store, &self.router).await {
-            Ok((manifest, etag)) => Ok(Some(BaseState { manifest, etag })),
-            Err(AuthServerError::NotFound { .. }) => Ok(None),
+            Ok((manifest, etag)) => Ok(BaseState { manifest, etag }),
+            Err(AuthServerError::NotFound { path }) => Err(AuthServerError::CorruptObject {
+                path,
+                reason: "canonical v1 manifest is missing; initialize or reset the repository with `crab init` before protected push".to_owned(),
+            }),
             Err(e) => Err(e),
         }
     }
@@ -157,7 +160,7 @@ impl ReceiveContext {
         let record = build_prepare_record(
             &self.repo_prefix,
             &self.push_id,
-            base.as_ref().map(|state| (state.manifest(), state.etag())),
+            (base.manifest(), base.etag()),
             view_ref_updates,
             view_scope,
         )?;

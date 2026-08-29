@@ -1092,6 +1092,7 @@ where
 {
     let storage = store.clone().into_storage();
     let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+    crab_metadata::layout_descriptor::read_canonical_layout(&storage, &router).await?;
     let mut history =
         crab_metadata::manifest_store::stream_manifest_history(&storage, &router, concurrency);
     while let Some(entry) = history.try_next().await.map_err(CrabError::from)? {
@@ -1248,6 +1249,7 @@ async fn repository_referenced_shards(
         let mut shards = current.iter().cloned().collect::<HashSet<_>>();
         async move {
             let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
+            crab_metadata::layout_descriptor::read_canonical_layout(&storage, &router).await?;
             let mut history = crab_metadata::manifest_store::stream_manifest_history(
                 &storage,
                 &router,
@@ -2471,6 +2473,7 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
         let mut shard_count = 0usize;
         for repo_prefix in &repo_prefixes {
             let router = StoreLayout::new(store.clone(), repo_prefix.clone());
+            crate::core::remote_layout::open(store, &router).await?;
             let snapshot =
                 crate::metadata::manifest::read_repository_snapshot(store, &router).await?;
             let shards = snapshot.journal.shards;
@@ -2992,6 +2995,9 @@ mod tests {
         let store = memory_store();
         for repo in ["org/a", "org/b"] {
             let router = StoreLayout::new(store.clone(), repo.to_owned());
+            crate::core::remote_layout::initialize(&store, &router)
+                .await
+                .unwrap();
             let manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
             crate::metadata::manifest::create_manifest(&store, &router, &manifest)
                 .await
@@ -3016,6 +3022,9 @@ mod tests {
 
         let store = memory_store();
         let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         let historical_shard = "a".repeat(64);
         let (old_shard_hash, _, old_shard_write) =
             compact_shard_index(1, std::slice::from_ref(&historical_shard)).unwrap();
@@ -3068,6 +3077,29 @@ mod tests {
         assert_eq!(
             historical["org/models"],
             [historical_shard].into_iter().collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_repair_rejects_manifest_without_canonical_layout() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/legacy".to_owned());
+        crate::metadata::manifest::create_manifest(
+            &store,
+            &router,
+            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+
+        let error = repair_ref_registry(&store)
+            .await
+            .expect_err("bucket root repair must reject a repository without its v1 descriptor");
+
+        assert!(
+            error
+                .to_string()
+                .contains("canonical v1 layout descriptor is missing")
         );
     }
 
@@ -3279,6 +3311,10 @@ mod tests {
     #[tokio::test]
     async fn gc_writer_fence_blocks_destructive_bucket_gc_but_not_preview() {
         let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         let mut registry = RefRegistry::default();
         registry.register("org/models", Vec::new());
         registry.mark_coverage_complete();
@@ -3338,6 +3374,10 @@ mod tests {
     #[tokio::test]
     async fn destructive_gc_aborts_when_referenced_shard_is_corrupt() {
         let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         let corrupt_shard = Bytes::from_static(b"not a shard");
         let shard_hash = crab_xet::hash::compute_data_hash(&corrupt_shard).hex();
         store
@@ -3379,6 +3419,10 @@ mod tests {
     #[tokio::test]
     async fn destructive_gc_aborts_when_registry_root_is_missing() {
         let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         let mut registry = RefRegistry::default();
         registry.register("org/models", vec!["a".repeat(64)]);
         registry.mark_coverage_complete();
@@ -3453,6 +3497,10 @@ mod tests {
     #[tokio::test]
     async fn bucket_gc_destructive_run_accepts_all_repo_coordinator_proof() {
         let store = memory_store();
+        let router = StoreLayout::new(store.as_storage().clone(), "org/models".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(store.as_storage(), &router)
+            .await
+            .expect("initialize canonical repository layout");
         let mut reg = RefRegistry::default();
         reg.mark_coverage_complete();
         reg.register_active_active_coordinator(

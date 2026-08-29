@@ -36,7 +36,8 @@ pub use objects::{
 };
 pub use operation::{OperationContext, OperationKind, ShallowClosureSelection};
 pub use pack::{
-    GeneratedPack, GeneratedPackCacheKey, GeneratedPackLease, GeneratedPackLeaseAttempt,
+    GENERATED_PACK_CACHE_VERSION, GeneratedPack, GeneratedPackCacheKey, GeneratedPackLease,
+    GeneratedPackLeaseAttempt,
     GeneratedPackLeaseError, GeneratedPackLeaseProvider, GeneratedPackRequestCacheError,
     GeneratedPackRequestCacheKey,
 };

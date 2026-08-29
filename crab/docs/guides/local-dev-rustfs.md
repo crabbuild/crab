@@ -116,7 +116,7 @@ export AWS_EC2_METADATA_DISABLED=true   # skip IMDS lookup on macOS/Linux
 For Crab-specific config, point the remote URL at your bucket:
 
 ```bash
-crab init --remote crab://dev-bucket/my-repo
+crab init crab://dev-bucket/my-repo
 crab config set storage.endpoint http://127.0.0.1:9000
 crab config set storage.force_path_style true
 ```
@@ -180,7 +180,7 @@ mkdir -p /tmp/e2e && cd /tmp/e2e
 mc mb local-crab/crab-e2e 2>/dev/null
 
 # Clone, add a large file, push, dehydrate, re-hydrate.
-crab init --remote crab://crab-e2e/demo
+crab init crab://crab-e2e/demo
 crab track '*.bin'
 dd if=/dev/urandom of=big.bin bs=1M count=8 2>/dev/null
 crab add big.bin

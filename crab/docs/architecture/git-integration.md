@@ -75,7 +75,7 @@ and ETag evidence before Crab claims provider parity.
 
 | Git operation or capability | Direct S3-compatible remote | Automated evidence | RustFS evidence |
 |---|---|---|---|
-| Ref list / `git ls-remote` | Supported; only an absent routed manifest is an empty repository | `git::remote_helper` manifest and resolved-session tests | missing, valid, and malformed manifest cases |
+| Ref list / `git ls-remote` | Supported; missing layout or manifest fails closed until `crab init` creates generation 0 | `git::remote_helper` manifest and resolved-session tests | missing, valid, and malformed manifest cases |
 | Clone | Supported | `remote_helper_transcript`, `e2e_fetch_fsck` | fresh ordinary-Git and `crab clone` cases |
 | Fetch into an existing clone | Supported | resolved helper session and `e2e_fetch_fsck` | second-clone branch update case |
 | Push / branch update | Supported | `e2e_add_commit_push`, helper transcript tests | ordinary Git and Crab CLI cases |

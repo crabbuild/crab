@@ -25,7 +25,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // the total selection and each coalesced range bounds transient range memory.
 const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-const GENERATED_PACK_CACHE_VERSION: u32 = 2;
+pub const GENERATED_PACK_CACHE_VERSION: u32 = 1;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // Generated response packs can require a large catalog lookup plus pack
@@ -1473,9 +1473,7 @@ async fn load_cached_pack(
         Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let Some(descriptor) = decode_generated_pack_descriptor(&bytes)? else {
-        return Ok(None);
-    };
+    let descriptor = decode_generated_pack_descriptor(&bytes)?;
     if !generated_pack_descriptor_matches_request(
         &descriptor,
         &request_hash,
@@ -1642,7 +1640,7 @@ async fn publish_cached_pack(
     }
 }
 
-fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<Option<GeneratedPackDescriptor>> {
+fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<GeneratedPackDescriptor> {
     let value = serde_json::from_slice::<serde_json::Value>(bytes).map_err(|_| Error::Corrupt {
         stage: crate::CorruptionStage::PackEntry,
     })?;
@@ -1656,12 +1654,12 @@ fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<Option<GeneratedPack
     };
     let version = u32::try_from(number("version").ok_or_else(corrupt)?).map_err(|_| corrupt())?;
     if version != GENERATED_PACK_CACHE_VERSION {
-        return Ok(None);
+        return Err(corrupt());
     }
     if object.len() != 7 {
         return Err(corrupt());
     }
-    Ok(Some(GeneratedPackDescriptor {
+    Ok(GeneratedPackDescriptor {
         version,
         request_hash: string("request_hash").ok_or_else(corrupt)?.to_owned(),
         content_hash: string("content_hash").ok_or_else(corrupt)?.to_owned(),
@@ -1670,7 +1668,7 @@ fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<Option<GeneratedPack
         object_count: u32::try_from(number("object_count").ok_or_else(corrupt)?)
             .map_err(|_| corrupt())?,
         selection_object_count: number("selection_object_count").ok_or_else(corrupt)?,
-    }))
+    })
 }
 
 fn inspect_cached_pack(
@@ -2858,7 +2856,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_pack_cache_treats_an_older_descriptor_as_a_miss() {
+    fn generated_pack_cache_rejects_retired_descriptor_shape() {
         let bytes = serde_json::json!({
             "version": 1,
             "request_hash": "request",
@@ -2868,10 +2866,6 @@ mod tests {
             "object_count": 3,
         });
 
-        assert!(
-            decode_generated_pack_descriptor(&serde_json::to_vec(&bytes).unwrap())
-                .unwrap()
-                .is_none()
-        );
+        assert!(decode_generated_pack_descriptor(&serde_json::to_vec(&bytes).unwrap()).is_err());
     }
 }

@@ -31,10 +31,6 @@ fn shard_format_overflow(field: &str, value: impl fmt::Display) -> XetError {
     }
 }
 
-fn usize_to_shard_u32(field: &str, value: usize) -> Result<u32> {
-    u32::try_from(value).map_err(|_| shard_format_overflow(field, value))
-}
-
 fn checked_shard_add(field: &str, lhs: u32, rhs: u32) -> Result<u32> {
     lhs.checked_add(rhs)
         .ok_or_else(|| shard_format_overflow(field, u64::from(lhs).saturating_add(u64::from(rhs))))
@@ -45,61 +41,64 @@ fn checked_shard_len(field: &str, start: u32, end: u32) -> Result<u32> {
         .ok_or_else(|| XetError::Internal(format!("shard term {field} has end before start")))
 }
 
-/// Coalesce consecutive chunks in the same xorb into reconstruction terms.
-pub fn build_file_terms(
-    file_hash: &MerkleHash,
-    chunk_hashes: &[MerkleHash],
-    placement: &ChunkPlacementMap,
-) -> Result<Vec<FileTerm>> {
-    if chunk_hashes.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Incremental file-term builder whose memory is independent of recipe length.
+pub struct FileTermBuilder {
+    terms: Vec<FileTerm>,
+    current: Option<FileTerm>,
+    emitted_starts: HashSet<(MerkleHash, u32)>,
+    uncovered: usize,
+    first_miss: Option<(u32, MerkleHash)>,
+    chunk_count: u64,
+}
 
-    let mut uncovered = 0usize;
-    let mut first_miss: Option<(u32, MerkleHash)> = None;
-    for (idx, ch) in chunk_hashes.iter().enumerate() {
-        if !placement.contains_key(ch) {
-            uncovered += 1;
-            if first_miss.is_none() {
-                first_miss = Some((usize_to_shard_u32("file chunk index", idx)?, *ch));
-            }
+impl FileTermBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            terms: Vec::new(),
+            current: None,
+            emitted_starts: HashSet::new(),
+            uncovered: 0,
+            first_miss: None,
+            chunk_count: 0,
         }
     }
-    if let Some((example_chunk_index, example_chunk_hash)) = first_miss {
-        return Err(XetError::IncompleteShardReconstruction {
-            file_hash: file_hash.hex(),
-            path: None,
-            uncovered_chunks: uncovered,
-            example_chunk_hash: example_chunk_hash.hex(),
-            example_chunk_index,
-        });
-    }
 
-    let mut terms = Vec::new();
-    let mut current: Option<FileTerm> = None;
-    let mut emitted_starts: HashSet<(MerkleHash, u32)> = HashSet::new();
-
-    for ch in chunk_hashes {
-        let p = &placement[ch];
-        match &mut current {
-            Some(t)
-                if t.xorb_hash == p.xorb_hash
-                    && t.chunk_end == p.chunk_index
-                    && !emitted_starts.contains(&(t.xorb_hash, t.chunk_start)) =>
+    /// Consume one ordered recipe occurrence.
+    pub fn push(&mut self, chunk_hash: MerkleHash, placement: &ChunkPlacementMap) -> Result<()> {
+        let file_index = u32::try_from(self.chunk_count)
+            .map_err(|_| shard_format_overflow("file chunk index", self.chunk_count))?;
+        self.chunk_count = self
+            .chunk_count
+            .checked_add(1)
+            .ok_or_else(|| shard_format_overflow("file chunk count", u64::MAX))?;
+        let Some(p) = placement.get(&chunk_hash) else {
+            self.uncovered = self.uncovered.saturating_add(1);
+            self.first_miss.get_or_insert((file_index, chunk_hash));
+            return Ok(());
+        };
+        match &mut self.current {
+            Some(term)
+                if term.xorb_hash == p.xorb_hash
+                    && term.chunk_end == p.chunk_index
+                    && !self
+                        .emitted_starts
+                        .contains(&(term.xorb_hash, term.chunk_start)) =>
             {
-                t.chunk_end = checked_shard_add("xorb chunk range end", t.chunk_end, 1)?;
-                t.unpacked_bytes = checked_shard_add(
+                term.chunk_end = checked_shard_add("xorb chunk range end", term.chunk_end, 1)?;
+                term.unpacked_bytes = checked_shard_add(
                     "file term uncompressed bytes",
-                    t.unpacked_bytes,
+                    term.unpacked_bytes,
                     p.uncompressed_size,
                 )?;
             }
             _ => {
-                if let Some(t) = current.take() {
-                    emitted_starts.insert((t.xorb_hash, t.chunk_start));
-                    terms.push(t);
+                if let Some(term) = self.current.take() {
+                    self.emitted_starts
+                        .insert((term.xorb_hash, term.chunk_start));
+                    self.terms.push(term);
                 }
-                current = Some(FileTerm {
+                self.current = Some(FileTerm {
                     xorb_hash: p.xorb_hash,
                     chunk_start: p.chunk_index,
                     chunk_end: checked_shard_add("xorb chunk range end", p.chunk_index, 1)?,
@@ -107,11 +106,54 @@ pub fn build_file_terms(
                 });
             }
         }
+        Ok(())
     }
-    if let Some(t) = current {
-        terms.push(t);
+
+    /// Seal after every recipe occurrence has been consumed.
+    pub fn finish(mut self, file_hash: &MerkleHash, expected_chunks: u64) -> Result<Vec<FileTerm>> {
+        if let Some(term) = self.current.take() {
+            self.terms.push(term);
+        }
+        if let Some((example_chunk_index, example_chunk_hash)) = self.first_miss {
+            return Err(XetError::IncompleteShardReconstruction {
+                file_hash: file_hash.hex(),
+                path: None,
+                uncovered_chunks: self.uncovered,
+                example_chunk_hash: example_chunk_hash.hex(),
+                example_chunk_index,
+            });
+        }
+        if self.chunk_count != expected_chunks {
+            return Err(XetError::IncompleteShardReconstruction {
+                file_hash: file_hash.hex(),
+                path: None,
+                uncovered_chunks: usize::try_from(expected_chunks.saturating_sub(self.chunk_count))
+                    .unwrap_or(usize::MAX),
+                example_chunk_hash: String::new(),
+                example_chunk_index: u32::try_from(self.chunk_count).unwrap_or(u32::MAX),
+            });
+        }
+        Ok(self.terms)
     }
-    Ok(terms)
+}
+
+impl Default for FileTermBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Coalesce consecutive chunks in the same xorb into reconstruction terms.
+pub fn build_file_terms(
+    file_hash: &MerkleHash,
+    chunk_hashes: &[MerkleHash],
+    placement: &ChunkPlacementMap,
+) -> Result<Vec<FileTerm>> {
+    let mut builder = FileTermBuilder::new();
+    for ch in chunk_hashes {
+        builder.push(*ch, placement)?;
+    }
+    builder.finish(file_hash, chunk_hashes.len() as u64)
 }
 
 /// Validate that reconstruction terms cover a file's chunk list completely.

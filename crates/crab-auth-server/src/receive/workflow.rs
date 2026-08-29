@@ -102,7 +102,7 @@ struct VerifiedReceiveEvidence {
 
 /// Prepared protected-push receive state returned to the helper.
 pub struct PreparedReceive {
-    pub source_generation: Option<u64>,
+    pub source_generation: u64,
 }
 
 /// Verified protected-push receive state returned to the helper.
@@ -179,6 +179,7 @@ pub async fn prepare_receive(
     ref_updates: Vec<PushRefUpdate>,
     view_scope: Option<PreparedViewScope>,
 ) -> Result<PreparedReceive> {
+    ctx.validate_layout().await?;
     let record = ctx.write_prepare_record(ref_updates, view_scope).await?;
     Ok(PreparedReceive {
         source_generation: record.source_manifest_generation,
@@ -187,17 +188,15 @@ pub async fn prepare_receive(
 
 /// Verifies a staged protected-push receive plan.
 pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
+    ctx.validate_layout().await?;
     let plan = ctx.read_plan().await?;
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
-    let source_plan_digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
+    let source_plan_digest = ctx.verified_plan_digest(&plan, &base)?;
     let prepare = ctx.read_prepare_record().await?;
-    let source_ref_updates = source_ref_updates_from_prepare(
-        &prepare,
-        base.as_ref().map(|state| state.manifest()),
-        &plan.ref_updates,
-    )?;
+    let source_ref_updates =
+        source_ref_updates_from_prepare(&prepare, base.manifest(), &plan.ref_updates)?;
     validate_candidate_manifest_shape(&plan, ctx.repo_prefix())?;
     ctx.validate_staged_objects(&plan).await?;
     validate_candidate_metadata(ctx.store(), ctx.router(), &plan).await?;
@@ -205,7 +204,7 @@ pub async fn verify_receive(ctx: &ReceiveContext) -> Result<VerifiedReceive> {
         ctx.store(),
         ctx.router(),
         ctx.repo_prefix(),
-        base.as_ref().map(|state| state.manifest()),
+        Some(base.manifest()),
         &plan,
         &source_ref_updates,
         &prepare,
@@ -235,6 +234,7 @@ pub async fn commit_receive(
     plan_digest: &str,
     active_active_json: Option<&str>,
 ) -> Result<PushFinalizeResponse> {
+    ctx.validate_layout().await?;
     let operation_cancel = CancellationToken::new();
     let fences = ReceiveWriterFences::acquire(ctx, &operation_cancel).await?;
     let operation = tokio::select! {
@@ -261,16 +261,12 @@ async fn commit_receive_inner(
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
-    let source_plan_digest = ctx.verified_plan_digest(&plan, base.as_ref())?;
+    let source_plan_digest = ctx.verified_plan_digest(&plan, &base)?;
     if super::validate_hash_component(plan_digest, "verified receive digest").is_err() {
         return Err(conflict("source manifest changed after verification"));
     }
     let prepare = ctx.read_prepare_record().await?;
-    source_ref_updates_from_prepare(
-        &prepare,
-        base.as_ref().map(|state| state.manifest()),
-        &plan.ref_updates,
-    )?;
+    source_ref_updates_from_prepare(&prepare, base.manifest(), &plan.ref_updates)?;
     validate_candidate_manifest_shape(&plan, ctx.repo_prefix())?;
     // Promotion re-reads and hashes every staged body immediately before its
     // canonical write. Validate paths here, but do not download all candidate
@@ -292,7 +288,7 @@ async fn commit_receive_inner(
     let manifest = build_service_candidate_manifest(
         ctx.store(),
         ctx.router(),
-        base.as_ref().map(|state| state.manifest()),
+        Some(base.manifest()),
         &plan,
         &materialized,
     )
@@ -338,7 +334,7 @@ async fn commit_receive_inner(
             plan: &plan,
             materialized: &materialized,
             manifest: &manifest,
-            base_etag: base.as_ref().map(|state| state.etag()),
+            base_etag: Some(base.etag()),
             visibility_proof_published: visibility_publication.is_published(),
         },
     )
@@ -399,9 +395,7 @@ async fn commit_receive_inner(
             )
             .await?
         };
-        let base_pack_ids = if let Some(base) = &base
-            && !base.manifest().pack_index_hash.is_empty()
-        {
+        let base_pack_ids = if !base.manifest().pack_index_hash.is_empty() {
             crab_metadata::manifest_store::read_bulk_pack_list(
                 ctx.store(),
                 ctx.router(),
@@ -488,12 +482,24 @@ mod tests {
 
     const PUSH_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    fn context() -> ReceiveContext {
-        ReceiveContext::from_store(
+    async fn context() -> Result<ReceiveContext> {
+        let context = ReceiveContext::from_store(
             Store::new(Arc::new(InMemory::new())),
             "org/repo".to_owned(),
             PUSH_ID.to_owned(),
+        );
+        crab_metadata::layout_descriptor::ensure_canonical_layout(
+            context.store(),
+            context.router(),
         )
+        .await?;
+        manifest_store::create_manifest(
+            context.store(),
+            context.router(),
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await?;
+        Ok(context)
     }
 
     fn oid(ch: char) -> String {
@@ -598,16 +604,6 @@ mod tests {
             )
             .await?;
         Ok(())
-    }
-
-    async fn create_manifest(
-        store: &Store,
-        router: &crab_storage::StoreLayout<Store>,
-        manifest: &Manifest,
-    ) -> Result<()> {
-        manifest_store::create_manifest(store, router, manifest)
-            .await
-            .map_err(AuthServerError::from)
     }
 
     fn staged_object(canonical_key: String, bytes: &[u8]) -> StagedWrite {
@@ -772,7 +768,13 @@ mod tests {
         ctx.store()
             .put_exact(
                 &ctx.router().pack_index_path(&pack.pack_id),
-                Bytes::from(std::fs::read(installed.idx_path)?),
+                Bytes::from(std::fs::read(&installed.idx_path)?),
+            )
+            .await?;
+        ctx.store()
+            .put_exact(
+                &ctx.router().pack_reverse_index_path(&pack.pack_id),
+                Bytes::from(std::fs::read(&installed.rev_path)?),
             )
             .await?;
         let metadata = PackMetadata {
@@ -905,20 +907,44 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_receive_writes_prepare_record() -> Result<()> {
-        let ctx = context();
+        let ctx = context().await?;
 
         let prepared = prepare_receive(&ctx, vec![ref_update()], None).await?;
 
-        assert_eq!(prepared.source_generation, None);
+        assert_eq!(prepared.source_generation, 0);
         let record = ctx.read_prepare_record().await?;
-        assert_eq!(record.source_manifest_generation, None);
+        assert_eq!(record.source_manifest_generation, 0);
         assert_eq!(record.source_ref_updates[0].old_oid, None);
         Ok(())
     }
 
     #[tokio::test]
+    async fn prepare_receive_rejects_layout_without_manifest() -> Result<()> {
+        let ctx = ReceiveContext::from_store(
+            Store::new(Arc::new(InMemory::new())),
+            "org/repo".to_owned(),
+            PUSH_ID.to_owned(),
+        );
+        crab_metadata::layout_descriptor::ensure_canonical_layout(ctx.store(), ctx.router())
+            .await?;
+
+        let error = match prepare_receive(&ctx, vec![ref_update()], None).await {
+            Ok(_) => {
+                return Err(invalid(
+                    "protected push synthesized missing repository state",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, AuthServerError::CorruptObject { .. }));
+        assert!(error.to_string().contains("crab init"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn commit_receive_rejects_stale_digest_before_prepare_record() -> Result<()> {
-        let ctx = context();
+        let ctx = context().await?;
         write_plan(&ctx, &push_plan()).await?;
 
         let err = commit_receive(&ctx, "crab://bucket/org/repo", "stale-digest", None)
@@ -935,7 +961,7 @@ mod tests {
 
     #[tokio::test]
     async fn verified_receive_evidence_rejects_replacement() -> Result<()> {
-        let ctx = context();
+        let ctx = context().await?;
         let prepare = ctx.write_prepare_record(vec![ref_update()], None).await?;
         let materialized = MaterializedSourcePush {
             ref_updates: vec![ref_update()],
@@ -971,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_rejects_unreferenced_staged_object_before_body_download() -> Result<()> {
-        let ctx = context();
+        let ctx = context().await?;
         let mut plan = push_plan();
         plan.candidate_manifest.seal_git_validation();
         let missing_body = b"candidate pack body";
@@ -982,7 +1008,8 @@ mod tests {
         )];
         write_plan(&ctx, &plan).await?;
         prepare_receive(&ctx, plan.ref_updates.clone(), None).await?;
-        let digest = ctx.verified_plan_digest(&plan, None)?;
+        let base = ctx.read_base_state().await?;
+        let digest = ctx.verified_plan_digest(&plan, &base)?;
 
         let error = commit_receive(&ctx, "crab://bucket/org/repo", &digest, None)
             .await
@@ -999,7 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_object_locator_filtered_view_push_preserves_hidden_paths() -> Result<()> {
-        let ctx = context();
+        let ctx = context().await?;
         let temp = tempfile::tempdir()?;
 
         let source_repo = temp.path().join("source");
@@ -1044,7 +1071,8 @@ mod tests {
             .insert("refs/heads/main".to_owned(), source_old.clone());
         base.pack_index_hash = source_pack_index;
         base.seal_git_validation();
-        create_manifest(ctx.store(), ctx.router(), &base).await?;
+        let (_, initial_etag) = manifest_store::read_manifest(ctx.store(), ctx.router()).await?;
+        manifest_store::write_manifest_cas(ctx.store(), ctx.router(), &base, &initial_etag).await?;
 
         let view_repo = temp.path().join("view");
         run_git(["init", path_str(&view_repo)?], None)?;
@@ -1127,10 +1155,7 @@ mod tests {
             .ok_or_else(|| invalid("test materialization returned no ref update"))?;
         assert_ne!(final_update.new_oid, view_new);
 
-        let final_state = ctx
-            .read_base_state()
-            .await?
-            .ok_or_else(|| invalid("test final manifest missing"))?;
+        let final_state = ctx.read_base_state().await?;
         let final_oid = final_state
             .manifest()
             .refs
@@ -1194,7 +1219,7 @@ mod tests {
                 ctx.repo_prefix().to_owned(),
             );
 
-            super::super::download_verified_service_locator_evidence(
+            super::super::download_service_locator_evidence(
                 &observed_store,
                 &observed_router,
                 pack,

@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::StagingArea;
-use crate::push_plan::{FilePushPlan, PlannedPlacement, PlannedXorb, move_prepared_xorb};
+use crate::push_plan::{
+    ExistingChunkCandidate, ExistingChunkLookup, FilePushPlan, PlannedPlacement, PlannedXorb,
+    move_prepared_xorb,
+};
 use crate::{Result, StagingError as CrabError};
 use crab_xet::chunker::GearChunker;
 use crab_xet::hash::MerkleHash;
@@ -55,6 +58,8 @@ pub struct StreamStageProgress {
     pub chunks_done: Option<Arc<AtomicU64>>,
     /// Optional add-time xorb builder used by local `crab add` fast paths.
     pub xorb_builder: Option<StreamStageXorbBuilder>,
+    /// Optional generation-pinned remote classifier shared by add workers.
+    pub existing_lookup: Option<Arc<dyn ExistingChunkLookup>>,
 }
 
 /// Factory for per-file add-time xorb builders.
@@ -258,7 +263,6 @@ pub struct StreamStageResult {
     pub file_hash: [u8; 32],
     pub size: u64,
     pub chunks: usize,
-    pub chunk_pairs: Vec<(MerkleHash, u64)>,
     pub recipe: crate::recipe::FileRecipe,
     pub prepared_xorbs: Vec<StreamStagePreparedXorb>,
     pub index_stat: Option<VerifiedIndexStat>,
@@ -457,10 +461,12 @@ async fn stage_file_streaming_inner(
         &mut read_file,
         &provisional_merkle,
         staging,
+        &batch_id,
         progress.bytes_done.as_ref(),
         progress.chunk_bytes_done.as_ref(),
         progress.chunks_done.as_ref(),
         progress.xorb_builder.as_ref(),
+        progress.existing_lookup.as_deref(),
         cancel,
         &hooks,
     )
@@ -482,7 +488,6 @@ async fn stage_file_streaming_inner(
     };
 
     let file_merkle = MerkleHash::from(stage_stats.file_hash);
-    let chunk_pairs = stage_stats.recipe_recorder.chunks().to_vec();
     let recipe = stage_stats
         .recipe_recorder
         .seal(file_merkle, stage_stats.size)?;
@@ -523,12 +528,12 @@ async fn stage_file_streaming_inner(
         return Err(with_path(abs_path, err));
     }
 
-    if !stage_stats.prepared_xorbs.is_empty()
+    if (!stage_stats.prepared_xorbs.is_empty() || stage_stats.remote_existing_chunks > 0)
         && let Err(err) = persist_stream_prepared_plan(
             staging,
             &file_merkle,
-            stage_stats.size,
-            &chunk_pairs,
+            &recipe,
+            &batch_id,
             &mut stage_stats.prepared_xorbs,
         )
         .await
@@ -566,7 +571,6 @@ async fn stage_file_streaming_inner(
         file_hash: stage_stats.file_hash,
         size: stage_stats.size,
         chunks: stage_stats.chunks,
-        chunk_pairs,
         recipe,
         prepared_xorbs: stage_stats.prepared_xorbs,
         index_stat,
@@ -666,10 +670,12 @@ async fn stream_chunk_and_stage(
     file: &mut tokio::fs::File,
     file_hash: &MerkleHash,
     staging: &StagingArea,
+    batch_id: &crate::StagingBatchId,
     bytes_done: Option<&Arc<AtomicU64>>,
     chunk_bytes_done: Option<&Arc<AtomicU64>>,
     chunks_done: Option<&Arc<AtomicU64>>,
     xorb_builder_factory: Option<&StreamStageXorbBuilder>,
+    existing_lookup: Option<&dyn ExistingChunkLookup>,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
 ) -> Result<ChunkStageStats> {
@@ -685,10 +691,12 @@ async fn stream_chunk_and_stage(
         file,
         file_hash,
         staging,
+        batch_id,
         bytes_done,
         chunk_bytes_done,
         chunks_done,
         xorb_builder_factory,
+        existing_lookup,
         xorb_writer.as_mut(),
         cancel,
         hooks,
@@ -725,10 +733,12 @@ async fn stream_chunk_and_stage_producer(
     file: &mut tokio::fs::File,
     file_hash: &MerkleHash,
     staging: &StagingArea,
+    batch_id: &crate::StagingBatchId,
     bytes_done: Option<&Arc<AtomicU64>>,
     chunk_bytes_done: Option<&Arc<AtomicU64>>,
     chunks_done: Option<&Arc<AtomicU64>>,
     xorb_builder_factory: Option<&StreamStageXorbBuilder>,
+    existing_lookup: Option<&dyn ExistingChunkLookup>,
     mut xorb_writer: Option<&mut StreamPreparedXorbWriter>,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
@@ -747,7 +757,9 @@ async fn stream_chunk_and_stage_producer(
         None => (None, None),
     };
     let mut chunk_index_offset = 0u64;
+    let mut recipe_byte_offset = 0u64;
     let mut total_chunks = 0usize;
+    let mut remote_existing_chunks = 0u64;
     let mut total = 0u64;
 
     loop {
@@ -777,11 +789,15 @@ async fn stream_chunk_and_stage_producer(
         flush_full_batches(
             file_hash,
             staging,
+            batch_id,
             &mut batch,
             &mut batch_payload_bytes,
             &mut chunk_index_offset,
+            &mut recipe_byte_offset,
             &mut xorb_builder,
             &mut xorb_writer,
+            existing_lookup,
+            &mut remote_existing_chunks,
             cancel,
             hooks,
         )
@@ -801,11 +817,15 @@ async fn stream_chunk_and_stage_producer(
     flush_batch(
         file_hash,
         staging,
+        batch_id,
         &mut batch,
         &mut batch_payload_bytes,
         &mut chunk_index_offset,
+        &mut recipe_byte_offset,
         &mut xorb_builder,
         &mut xorb_writer,
+        existing_lookup,
+        &mut remote_existing_chunks,
         cancel,
         hooks,
     )
@@ -845,6 +865,7 @@ async fn stream_chunk_and_stage_producer(
         chunks: total_chunks,
         recipe_recorder,
         prepared_xorbs: Vec::new(),
+        remote_existing_chunks,
     })
 }
 
@@ -862,6 +883,7 @@ struct ChunkStageStats {
     chunks: usize,
     recipe_recorder: crate::recipe::RecipeRecorder,
     prepared_xorbs: Vec<StreamStagePreparedXorb>,
+    remote_existing_chunks: u64,
 }
 
 fn append_emitted_chunks(
@@ -898,11 +920,15 @@ fn append_emitted_chunks(
 async fn flush_full_batches(
     file_hash: &MerkleHash,
     staging: &StagingArea,
+    batch_id: &crate::StagingBatchId,
     batch: &mut Vec<(MerkleHash, Bytes)>,
     batch_payload_bytes: &mut u64,
     chunk_index_offset: &mut u64,
+    recipe_byte_offset: &mut u64,
     xorb_builder: &mut Option<XorbBuilder>,
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
+    existing_lookup: Option<&dyn ExistingChunkLookup>,
+    remote_existing_chunks: &mut u64,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
 ) -> Result<()> {
@@ -916,11 +942,15 @@ async fn flush_full_batches(
         flush_batch(
             file_hash,
             staging,
+            batch_id,
             &mut full,
             &mut full_payload_bytes,
             chunk_index_offset,
+            recipe_byte_offset,
             xorb_builder,
             xorb_writer,
+            existing_lookup,
+            remote_existing_chunks,
             cancel,
             hooks,
         )
@@ -973,11 +1003,15 @@ fn batch_flush_prefix_from_lengths(
 async fn flush_batch(
     file_hash: &MerkleHash,
     staging: &StagingArea,
+    batch_id: &crate::StagingBatchId,
     batch: &mut Vec<(MerkleHash, Bytes)>,
     batch_payload_bytes: &mut u64,
     chunk_index_offset: &mut u64,
+    recipe_byte_offset: &mut u64,
     xorb_builder: &mut Option<XorbBuilder>,
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
+    existing_lookup: Option<&dyn ExistingChunkLookup>,
+    remote_existing_chunks: &mut u64,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
 ) -> Result<()> {
@@ -985,15 +1019,76 @@ async fn flush_batch(
         return Ok(());
     }
 
-    if xorb_builder.is_none() {
-        staging
-            .stage_owned_chunks_batch_for_retired_file(
-                batch.clone(),
-                file_hash,
-                *chunk_index_offset,
-            )
-            .await?;
+    let batch_start = *chunk_index_offset;
+    let mut existing = classify_existing_batch(batch, existing_lookup, cancel).await?;
+    for (candidate, (_, data)) in existing.iter_mut().zip(batch.iter()) {
+        if candidate.as_ref().is_some_and(|candidate| {
+            u64::from(candidate.xorb_ref.uncompressed_size) != data.len() as u64
+                || candidate.placement_id == [0; 32]
+                || candidate.origin_proof_id == [0; 32]
+        }) {
+            *candidate = None;
+        }
     }
+    let remote_authority = batch
+        .iter()
+        .zip(existing.iter())
+        .filter_map(|((chunk_hash, _), candidate)| {
+            candidate.map(|candidate| (*chunk_hash, candidate))
+        })
+        .collect::<Vec<_>>();
+    staging.append_recording_remote_chunks(batch_id, &remote_authority)?;
+    *remote_existing_chunks = remote_existing_chunks
+        .checked_add(remote_authority.len() as u64)
+        .ok_or_else(|| {
+            CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
+        })?;
+
+    if xorb_builder.is_none() {
+        let mut start = 0usize;
+        while start < batch.len() {
+            while start < batch.len() && existing[start].is_some() {
+                start += 1;
+            }
+            if start == batch.len() {
+                break;
+            }
+            let mut end = start + 1;
+            while end < batch.len() && existing[end].is_none() {
+                end += 1;
+            }
+            staging
+                .stage_owned_chunks_batch_for_retired_file(
+                    batch[start..end].to_vec(),
+                    file_hash,
+                    batch_start.checked_add(start as u64).ok_or_else(|| {
+                        CrabError::StagingCorrupt(
+                            "stream staging miss-run offset overflow".to_owned(),
+                        )
+                    })?,
+                )
+                .await?;
+            start = end;
+        }
+    }
+    let recipe_terms = batch
+        .iter()
+        .map(|(hash, data)| (*hash, data.len() as u64))
+        .collect::<Vec<_>>();
+    staging.append_recipe_recording_terms(
+        batch_id,
+        *chunk_index_offset,
+        *recipe_byte_offset,
+        &recipe_terms,
+    )?;
+    *recipe_byte_offset =
+        recipe_terms
+            .iter()
+            .try_fold(*recipe_byte_offset, |offset, (_, size)| {
+                offset.checked_add(*size).ok_or_else(|| {
+                    CrabError::StagingCorrupt("stream recipe byte offset overflow".to_owned())
+                })
+            })?;
     let batch_len = u64::try_from(batch.len()).map_err(|_| {
         CrabError::StagingCorrupt(format!(
             "stream staging batch length {} cannot be represented",
@@ -1009,7 +1104,9 @@ async fn flush_batch(
     if xorb_builder.is_some() {
         let to_pack: Vec<_> = batch
             .iter()
-            .map(|(hash, data)| {
+            .zip(existing.iter())
+            .filter(|(_, candidate)| candidate.is_none())
+            .map(|((hash, data), _)| {
                 (
                     Chunk {
                         hash: *hash,
@@ -1061,14 +1158,53 @@ async fn flush_batch(
     Ok(())
 }
 
+async fn classify_existing_batch(
+    batch: &[(MerkleHash, Bytes)],
+    lookup: Option<&dyn ExistingChunkLookup>,
+    cancel: &CancellationToken,
+) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+    let Some(lookup) = lookup else {
+        return Ok(vec![None; batch.len()]);
+    };
+    let terms = batch
+        .iter()
+        .map(|(hash, data)| (*hash, data.len() as u64))
+        .collect::<Vec<_>>();
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = lookup.lookup_existing_candidates(&terms) => result,
+    };
+    match result {
+        Ok(candidates) if candidates.len() == batch.len() => Ok(candidates),
+        Ok(candidates) => {
+            warn!(
+                returned = candidates.len(),
+                requested = batch.len(),
+                "remote chunk classifier returned malformed cardinality; packing batch locally"
+            );
+            Ok(vec![None; batch.len()])
+        }
+        Err(CrabError::Cancelled) => Err(CrabError::Cancelled),
+        Err(error) => {
+            warn!(
+                error = %error,
+                chunks = batch.len(),
+                "remote chunk classifier unavailable; packing batch locally"
+            );
+            Ok(vec![None; batch.len()])
+        }
+    }
+}
+
 async fn persist_stream_prepared_plan(
     staging: &StagingArea,
     file_hash: &MerkleHash,
-    file_size: u64,
-    chunks: &[(MerkleHash, u64)],
+    recipe: &crate::recipe::FileRecipe,
+    batch_id: &crate::StagingBatchId,
     prepared_xorbs: &mut [StreamStagePreparedXorb],
 ) -> Result<()> {
-    let mut plan = FilePushPlan::new_verified_staging(*file_hash, file_size, chunks);
+    let mut plan = FilePushPlan::new_verified_recipe(recipe);
     for prepared in prepared_xorbs {
         let written = move_prepared_xorb(
             staging.root(),
@@ -1096,7 +1232,9 @@ async fn persist_stream_prepared_plan(
                 .collect(),
         });
     }
-    staging.write_file_push_plan(&plan).await
+    staging
+        .write_file_push_plan_for_open_recipe(&plan, recipe, batch_id)
+        .await
 }
 
 async fn stream_prepared_xorb(
@@ -1246,6 +1384,50 @@ mod tests {
     use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression};
     use crab_xet::xorb::format::CompressionScheme;
 
+    struct BatchRemoteLookup {
+        first_only: bool,
+    }
+
+    struct MalformedRemoteLookup;
+
+    #[async_trait::async_trait]
+    impl ExistingChunkLookup for MalformedRemoteLookup {
+        async fn lookup_existing_candidates(
+            &self,
+            _chunks: &[(MerkleHash, u64)],
+        ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExistingChunkLookup for BatchRemoteLookup {
+        async fn lookup_existing_candidates(
+            &self,
+            chunks: &[(MerkleHash, u64)],
+        ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+            Ok(chunks
+                .iter()
+                .enumerate()
+                .map(|(index, (chunk_hash, size))| {
+                    (!self.first_only || index == 0).then(|| {
+                        let mut proof = <[u8; 32]>::from(*chunk_hash);
+                        proof[0] ^= 0xA5;
+                        ExistingChunkCandidate {
+                            xorb_ref: crab_xet::xorb::format::XorbRef {
+                                xorb_hash: MerkleHash::from(proof),
+                                chunk_index: u32::from_le_bytes(proof[..4].try_into().unwrap()),
+                                uncompressed_size: (*size).try_into().unwrap(),
+                            },
+                            placement_id: *blake3::hash(&proof).as_bytes(),
+                            origin_proof_id: *blake3::hash(&proof).as_bytes(),
+                        }
+                    })
+                })
+                .collect())
+        }
+    }
+
     fn write_pattern_file(path: &Path, bytes: usize) {
         write_pattern_file_with_salt(path, bytes, 0);
     }
@@ -1291,6 +1473,38 @@ mod tests {
         usize::try_from(STAGE_BATCH_TARGET_BYTES)
             .unwrap()
             .saturating_add(READ_BUF_SIZE * 2)
+    }
+
+    fn recipe_pairs(staging: &StagingArea, result: &StreamStageResult) -> Vec<(MerkleHash, u64)> {
+        let mut pairs = Vec::new();
+        let mut next = 0u64;
+        while next < result.recipe.chunk_count() {
+            let page = staging.recipe_page(&result.recipe, next).unwrap();
+            pairs.extend(
+                page.chunks
+                    .iter()
+                    .map(|chunk| (chunk.chunk_hash, chunk.len)),
+            );
+            next = page.next_occurrence();
+        }
+        pairs
+    }
+
+    fn recipe_remote_chunks(
+        staging: &StagingArea,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Vec<(MerkleHash, crate::push_plan::ExistingChunkCandidate)> {
+        let mut chunks = Vec::new();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = staging
+                .recipe_remote_chunk_page(recipe, next)
+                .expect("remote authority page");
+            assert!(page.len() <= crate::recipe::RECIPE_PAGE_ENTRIES);
+            chunks.extend(page);
+            next += crate::recipe::RECIPE_PAGE_ENTRIES as u64;
+        }
+        chunks
     }
 
     #[test]
@@ -1478,7 +1692,7 @@ mod tests {
         assert_eq!(result.size, 0);
         assert_eq!(result.file_hash, *blake3::hash(b"").as_bytes());
         assert_eq!(result.chunks, 0);
-        assert!(result.chunk_pairs.is_empty());
+        assert_eq!(result.recipe.chunk_count(), 0);
         let file_hash = MerkleHash::from(result.file_hash);
         assert!(staging.chunks_for_file(&file_hash).unwrap().is_empty());
     }
@@ -1580,8 +1794,8 @@ mod tests {
         assert_eq!(result.file_hash, expected_hash);
         assert_eq!(result.size, data.len() as u64);
         assert_eq!(result.chunks, expected_chunks.len());
-        let result_chunk_hashes: Vec<_> =
-            result.chunk_pairs.iter().map(|(hash, _)| *hash).collect();
+        let result_pairs = recipe_pairs(&staging, &result);
+        let result_chunk_hashes: Vec<_> = result_pairs.iter().map(|(hash, _)| *hash).collect();
         assert_eq!(result_chunk_hashes, expected_chunks);
         let staged = staging
             .chunks_for_file(&MerkleHash::from(result.file_hash))
@@ -1590,7 +1804,7 @@ mod tests {
         let staged_with_sizes = staging
             .chunks_for_file_with_sizes(&MerkleHash::from(result.file_hash))
             .unwrap();
-        assert_eq!(result.chunk_pairs, staged_with_sizes);
+        assert_eq!(result_pairs, staged_with_sizes);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1629,8 +1843,7 @@ mod tests {
         let file_hash = MerkleHash::from(first.file_hash);
         assert_eq!(
             staging.chunks_for_file(&file_hash).unwrap(),
-            first
-                .chunk_pairs
+            recipe_pairs(&staging, &first)
                 .iter()
                 .map(|(chunk_hash, _)| *chunk_hash)
                 .collect::<Vec<_>>()
@@ -1763,8 +1976,9 @@ mod tests {
                     .map(|placement| (placement.chunk_hash, u64::from(placement.uncompressed_size)))
             })
             .collect();
+        let result_pairs = recipe_pairs(&staging, &result);
         let unique_staged_chunks: std::collections::HashSet<_> =
-            result.chunk_pairs.iter().copied().collect();
+            result_pairs.iter().copied().collect();
         let unique_prepared_chunks: std::collections::HashSet<_> =
             prepared_chunks.iter().copied().collect();
 
@@ -1776,14 +1990,17 @@ mod tests {
             .find(|file| file.file_hash == result.file_hash)
             .unwrap();
         assert_eq!(file.committed_chunks + file.pending_chunks, 0);
+        staging
+            .mark_batch_published(&result.batch_id)
+            .expect("publish staged recipe");
         let plan = staging
             .load_file_push_plan(&MerkleHash::from(result.file_hash))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(plan.chunk_pairs().unwrap(), result.chunk_pairs);
-        let hashes = result
-            .chunk_pairs
+        assert_eq!(plan.chunk_count, result.recipe.chunk_count());
+        assert_eq!(plan.sequence_hash().unwrap(), result.recipe.sequence_hash());
+        let hashes = result_pairs
             .iter()
             .map(|(hash, _)| *hash)
             .collect::<Vec<_>>();
@@ -1815,7 +2032,6 @@ mod tests {
                     .all(|placement| placement.xorb_hash == prepared.hash)
             );
         }
-        staging.mark_batch_published(&result.batch_id).unwrap();
         let staging_root = staging.root().to_path_buf();
         staging.close().await.unwrap();
 
@@ -1826,7 +2042,7 @@ mod tests {
             reopened
                 .chunks_for_file_with_sizes(&MerkleHash::from(result.file_hash))
                 .unwrap(),
-            result.chunk_pairs
+            result_pairs
         );
         let reconstructed = reopened
             .get_chunks_batch(&hashes)
@@ -1836,6 +2052,249 @@ mod tests {
             .flat_map(|(_, bytes)| bytes)
             .collect::<Vec<_>>();
         assert_eq!(reconstructed, source);
+    }
+
+    #[tokio::test]
+    async fn proven_remote_chunks_create_no_local_payload_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-only.bin");
+        write_pattern_file(&path, 2 * 1024 * 1024);
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+
+        let result = stage_file_streaming(
+            &path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                existing_lookup: Some(Arc::new(BatchRemoteLookup { first_only: false })),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.prepared_xorbs.is_empty());
+        let file = staging
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .find(|file| file.file_hash == result.file_hash)
+            .unwrap();
+        assert_eq!(file.committed_chunks + file.pending_chunks, 0);
+        staging.mark_batch_published(&result.batch_id).unwrap();
+        let plan = staging
+            .load_file_push_plan(&MerkleHash::from(result.file_hash))
+            .await
+            .unwrap()
+            .unwrap();
+        let unique_recipe_chunks = recipe_pairs(&staging, &result)
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(plan.existing.is_empty());
+        let indexed_remote_chunks = recipe_remote_chunks(&staging, &result.recipe)
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(indexed_remote_chunks, unique_recipe_chunks);
+        assert!(plan.prepared_xorbs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mixed_remote_batch_packs_only_unknown_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.bin");
+        write_pattern_file(&path, 4 * 1024 * 1024);
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+
+        let result = stage_file_streaming(
+            &path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(StreamStageXorbBuilder::new(1, XorbBuilder::new)),
+                existing_lookup: Some(Arc::new(BatchRemoteLookup { first_only: true })),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&result.batch_id).unwrap();
+        let plan = staging
+            .load_file_push_plan(&MerkleHash::from(result.file_hash))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(plan.existing.is_empty());
+        let existing = recipe_remote_chunks(&staging, &result.recipe)
+            .into_iter()
+            .map(|(hash, _candidate)| hash)
+            .collect::<std::collections::HashSet<_>>();
+        let prepared = plan
+            .prepared_xorbs
+            .iter()
+            .flat_map(|xorb| xorb.placements.iter())
+            .map(|placement| MerkleHash::from_hex(&placement.chunk_hash).unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        let recipe = recipe_pairs(&staging, &result)
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(!existing.is_empty());
+        assert!(!prepared.is_empty());
+        assert!(existing.is_disjoint(&prepared));
+        assert_eq!(
+            existing
+                .union(&prepared)
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            recipe
+        );
+        let file = staging
+            .list_files()
+            .unwrap()
+            .into_iter()
+            .find(|file| file.file_hash == result.file_hash)
+            .unwrap();
+        assert_eq!(file.committed_chunks + file.pending_chunks, 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_remote_lookup_conservatively_packs_every_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-lookup.bin");
+        write_pattern_file(&path, 2 * 1024 * 1024);
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+
+        let result = stage_file_streaming(
+            &path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(StreamStageXorbBuilder::new(1, XorbBuilder::new)),
+                existing_lookup: Some(Arc::new(MalformedRemoteLookup)),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&result.batch_id).unwrap();
+        let plan = staging
+            .load_file_push_plan(&MerkleHash::from(result.file_hash))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(plan.existing.is_empty());
+        let prepared = plan
+            .prepared_xorbs
+            .iter()
+            .flat_map(|xorb| xorb.placements.iter())
+            .map(|placement| placement.chunk_hash.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let recipe = recipe_pairs(&staging, &result)
+            .into_iter()
+            .map(|(hash, _)| hash.hex())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(prepared, recipe.iter().map(String::as_str).collect());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restaging_path_reclaims_prepared_payload_after_snapshot_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let first_source = dir.path().join("first.bin");
+        let second_source = dir.path().join("second.bin");
+        write_pattern_file(&first_source, 2 * 1024 * 1024);
+        write_pattern_file(&second_source, 3 * 1024 * 1024);
+        let staging_root = dir.path().join(".crab/staging");
+        let logical_path = Path::new("models/model.bin");
+
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let first = stage_file_streaming_as(
+            &first_source,
+            &repo,
+            logical_path,
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(StreamStageXorbBuilder::new(1, XorbBuilder::new)),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&first.batch_id).unwrap();
+        let first_hash = MerkleHash::from(first.file_hash);
+        let prepared_paths = first
+            .prepared_xorbs
+            .iter()
+            .map(|prepared| {
+                crate::push_plan::prepared_xorb_path(staging.root(), &first_hash, &prepared.hash)
+            })
+            .collect::<Vec<_>>();
+        assert!(prepared_paths.iter().all(|path| path.is_file()));
+        staging.close().await.unwrap();
+
+        let reader = crate::StagingAreaReadOnly::open(staging_root.clone())
+            .await
+            .unwrap();
+        reader
+            .create_push_snapshot("push-first", std::slice::from_ref(&first.recipe))
+            .unwrap();
+        drop(reader);
+
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let second = stage_file_streaming_as(
+            &second_source,
+            &repo,
+            logical_path,
+            &staging,
+            StreamStageProgress::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&second.batch_id).unwrap();
+        assert!(prepared_paths.iter().all(|path| path.is_file()));
+        assert!(
+            staging
+                .published_recipe_for_file(&first_hash)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            staging
+                .published_recipe_for_file(&MerkleHash::from(second.file_hash))
+                .unwrap(),
+            Some(second.recipe.clone())
+        );
+        staging.close().await.unwrap();
+
+        let reader = crate::StagingAreaReadOnly::open(staging_root)
+            .await
+            .unwrap();
+        let retired = reader
+            .discard_open_push_snapshot("push-first")
+            .await
+            .unwrap();
+        assert_eq!(retired.len(), 1);
+        assert!(prepared_paths.iter().all(|path| !path.exists()));
+        let second_chunks = reader
+            .chunks_for_file(&MerkleHash::from(second.file_hash))
+            .unwrap();
+        assert_eq!(second_chunks.len(), second.chunks);
     }
 
     #[tokio::test]
@@ -1903,6 +2362,7 @@ mod tests {
                 chunk_bytes_done: Some(Arc::clone(&chunk_bytes)),
                 chunks_done: Some(Arc::clone(&chunks)),
                 xorb_builder: None,
+                existing_lookup: None,
             },
             &CancellationToken::new(),
         )
@@ -1948,7 +2408,7 @@ mod tests {
         let staged_with_sizes = staging
             .chunks_for_file_with_sizes(&MerkleHash::from(result.file_hash))
             .unwrap();
-        assert_eq!(result.chunk_pairs, staged_with_sizes);
+        assert_eq!(recipe_pairs(&staging, &result), staged_with_sizes);
     }
 
     #[tokio::test]

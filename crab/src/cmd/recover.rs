@@ -1100,7 +1100,7 @@ fn parse_pack_inventory(path: &Path, bytes: &[u8]) -> Result<Vec<PackInventoryEn
                 size: entry.size,
                 content_hash: None,
                 object_count: None,
-                ref_tips: entry.ref_tips.unwrap_or_default(),
+                ref_tips: entry.ref_tips,
             })
             .collect());
     }

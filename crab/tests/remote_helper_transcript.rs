@@ -4,20 +4,36 @@
 //! snapshots the exact byte-level response using `cargo insta`.
 
 #![recursion_limit = "256"]
-#![allow(
-    deprecated,
-    reason = "exercises the deprecated RefPushOutcome::Error path for backward-compat regression"
-)]
-
 use std::io::Cursor;
 
 use crab::git::remote_helper::{
-    ListOutput, RefEntry, StdIo, filter_list_for_push, format_list_output,
+    ListOutput, RefEntry, StdIo, filter_list_for_push, format_capabilities, format_list_output,
 };
 use tokio::io::BufReader;
 
-fn test_url() -> gix_url::Url {
-    gix_url::Url::from_bytes(b"crab://bucket/repo".into()).expect("test URL should parse")
+fn test_url() -> (tempfile::TempDir, gix_url::Url) {
+    let remote = tempfile::tempdir().expect("create local transcript remote");
+    let url = format!("file://{}", remote.path().display());
+    let parsed = gix_url::Url::from_bytes(url.as_str().into()).expect("test URL should parse");
+    (remote, parsed)
+}
+
+async fn initialize_remote(
+    store: &crab::storage::store::Store,
+    router: &crab::storage::StoreLayout,
+) {
+    crab::core::remote_layout::initialize(store, router)
+        .await
+        .expect("initialize canonical remote layout");
+    match crab::cmd::init::create_initial_manifest(store, router, "refs/heads/main").await {
+        Ok(()) => {}
+        Err(crab::core::error::CrabError::CasConflict { .. }) => {
+            crab::metadata::manifest::read_manifest(store, router)
+                .await
+                .expect("read initialized canonical manifest");
+        }
+        Err(error) => panic!("initialize canonical remote manifest: {error}"),
+    }
 }
 
 /// Run the remote helper with the given input and capture stdout as a string.
@@ -50,7 +66,7 @@ async fn run_remote_helper_capture(input: &str) -> String {
         writer: writer_tx,
     };
 
-    let url = test_url();
+    let (_remote, url) = test_url();
     let mut output = Vec::new();
     let helper = crab::git::remote_helper::run_remote_helper(
         "origin",
@@ -70,7 +86,7 @@ async fn run_remote_helper_capture(input: &str) -> String {
 
 #[tokio::test]
 async fn capabilities_transcript() {
-    let output = run_remote_helper_capture("capabilities\n").await;
+    let output = format_capabilities(false);
     let expected_agent = format!("agent=crab/{}", env!("CARGO_PKG_VERSION"));
     assert!(
         output.lines().any(|line| line == expected_agent),
@@ -178,8 +194,11 @@ mod refname_validation {
 
     use crab::git::remote_helper::StdIo;
 
-    fn test_url() -> gix_url::Url {
-        gix_url::Url::from_bytes(b"crab://bucket/repo".into()).expect("test URL should parse")
+    fn test_url() -> (tempfile::TempDir, gix_url::Url) {
+        let remote = tempfile::tempdir().expect("create local transcript remote");
+        let url = format!("file://{}", remote.path().display());
+        let parsed = gix_url::Url::from_bytes(url.as_str().into()).expect("test URL should parse");
+        (remote, parsed)
     }
 
     /// Run the helper with `input`, capture stdout, and return both the
@@ -228,7 +247,7 @@ mod refname_validation {
             writer: writer_tx,
         };
 
-        let url = test_url();
+        let (_remote, url) = test_url();
         let mut output = Vec::new();
         let helper = crab::git::remote_helper::run_remote_helper(
             "origin",
@@ -521,6 +540,7 @@ mod delete_ref {
         push_state: &mut PushState,
         specs: &[PushSpec],
     ) -> crab::git::push::PushResult {
+        super::initialize_remote(&store, &router).await;
         let config = NativePushConfig::new(PushConfig::default());
         let cancel = CancellationToken::new();
         run_native_push(
@@ -941,6 +961,7 @@ mod pipeline_error_outcomes {
         push_state: &mut PushState,
         specs: &[PushSpec],
     ) -> PushResult {
+        super::initialize_remote(&store, &router).await;
         let config = NativePushConfig::new(PushConfig::default());
         let cancel = CancellationToken::new();
         run_native_push(
@@ -963,9 +984,8 @@ mod pipeline_error_outcomes {
     }
 
     /// Regression for the remote-helper collapse site. Before this
-    /// task, a batch-global pipeline failure overwrote every ref with
-    /// `RefPushOutcome::Error(stringified_error)` — losing the
-    /// `PushRejectReason` taxonomy. Post-fix, non-`PushPartialOutcome`
+    /// A batch-global pipeline failure must preserve the
+    /// `PushRejectReason` taxonomy. Non-`PushPartialOutcome`
     /// errors land as `Rejected(PushRejectReason::Internal(...))`,
     /// preserving the structured shape so the remote helper can emit
     /// a stable `error {ref} internal` line. Failures that the
@@ -1012,8 +1032,7 @@ mod pipeline_error_outcomes {
         // generation, well before the unified manifest CAS. The
         // remote-helper collapse site must map that error to
         // `Rejected(PushRejectReason::Internal(...))` across every
-        // ref in the batch rather than the pre-fix `Error(String)`
-        // shape, so scripts pivoting on protocol tags keep working.
+        // ref in the batch so scripts can rely on protocol tags.
         let new_main_sha = fixture.commit_text("b.txt", 0xB1, "advance main");
         let blob_sha = {
             let out = Command::new("git")
@@ -1057,11 +1076,6 @@ mod pipeline_error_outcomes {
         for ref_name in ["refs/heads/main", "refs/heads/feature"] {
             match result.outcomes.get(ref_name) {
                 Some(RefPushOutcome::Rejected(PushRejectReason::Internal(_))) => {}
-                Some(RefPushOutcome::Error(_)) => panic!(
-                    "{ref_name} surfaced `Error(String)` — the pre-task-2 collapse \
-                     shape should no longer be produced; outcomes={:?}",
-                    result.outcomes
-                ),
                 other => panic!(
                     "expected {ref_name} to be Rejected(Internal(_)), got {other:?}; \
                      full outcomes={:?}",
@@ -1360,6 +1374,9 @@ mod atomic_push {
         specs: &[PushSpec],
         atomic: bool,
     ) -> PushResult {
+        if !specs.is_empty() {
+            super::initialize_remote(&store, &router).await;
+        }
         let mut config = NativePushConfig::new(PushConfig::default());
         config.push.atomic = atomic;
         let cancel = CancellationToken::new();
@@ -2016,6 +2033,7 @@ mod receive_policy {
         specs: &[PushSpec],
         push_cfg: PushConfig,
     ) -> PushResult {
+        super::initialize_remote(&store, &router).await;
         let config = NativePushConfig::new(push_cfg);
         let cancel = CancellationToken::new();
         run_native_push(
@@ -2573,6 +2591,7 @@ mod followtags {
         specs: &[PushSpec],
         followtags: bool,
     ) -> PushResult {
+        super::initialize_remote(&store, &router).await;
         let mut config = NativePushConfig::new(PushConfig::default());
         config.followtags = followtags;
         let cancel = CancellationToken::new();
@@ -2870,6 +2889,7 @@ mod head_symref {
         specs: &[PushSpec],
         push_cfg: PushConfig,
     ) -> PushResult {
+        super::initialize_remote(&store, &router).await;
         let config = NativePushConfig::new(push_cfg);
         let cancel = CancellationToken::new();
         run_native_push(
@@ -2976,24 +2996,21 @@ mod head_symref {
         );
     }
 
-    /// Fresh repo with no base manifest: `remote_head()` returns
-    /// `None`, so `denyCurrentBranch = refuse` has nothing to match
-    /// against. The first push under a strict policy must still
-    /// succeed — otherwise admins who enabled the policy repo-wide
-    /// could never bootstrap a new repo.
+    /// A canonical repository always has a HEAD symref. A strict
+    /// `denyCurrentBranch` policy still permits bootstrapping a sibling
+    /// branch because only the manifest's HEAD target is protected.
     #[tokio::test]
-    async fn deny_current_branch_with_no_head_is_skipped() {
+    async fn deny_current_branch_allows_non_head_on_initial_manifest() {
         let git_guard = ScopedGitDir::acquire();
         let fixture = GitFixture::new_with_initial_branch("main");
         git_guard.set_git_dir(&fixture.git_dir());
         let seed_sha = fixture.commit_text("a.txt", 0xD3, "first commit");
+        GitFixture::run_git(fixture.work_tree(), &["branch", "feature"]);
 
         let store = make_store();
         let router = make_router(store.clone(), "repo-prefix");
         let mut push_state = PushState::default();
 
-        // No prior manifest → `remote_head()` returns None → the
-        // denyCurrentBranch gate in `evaluate_decisions` is bypassed.
         let mut strict = PushConfig::default();
         strict.receive_deny_current_branch = "refuse".into();
 
@@ -3001,15 +3018,15 @@ mod head_symref {
             store.clone(),
             router.clone(),
             &mut push_state,
-            &[spec("refs/heads/main", "refs/heads/main")],
+            &[spec("refs/heads/feature", "refs/heads/feature")],
             strict,
         )
         .await;
 
-        match result.outcomes.get("refs/heads/main") {
+        match result.outcomes.get("refs/heads/feature") {
             Some(RefPushOutcome::Ok) => {}
             other => panic!(
-                "expected Ok on a fresh repo even under refuse policy; \
+                "expected non-HEAD bootstrap to succeed under refuse policy; \
                  got {other:?}; outcomes={:?}",
                 result.outcomes
             ),
@@ -3019,9 +3036,9 @@ mod head_symref {
             .await
             .expect("manifest must exist after first push");
         assert_eq!(
-            manifest.refs.get("refs/heads/main"),
+            manifest.refs.get("refs/heads/feature"),
             Some(&seed_sha),
-            "main must land at the seed SHA; refs={:?}",
+            "feature must land at the seed SHA; refs={:?}",
             manifest.refs
         );
     }
@@ -3264,8 +3281,11 @@ mod protocol_edges {
     use crab::git::remote_helper::StdIo;
     use tokio::io::{AsyncReadExt, BufReader, duplex};
 
-    fn test_url() -> gix_url::Url {
-        gix_url::Url::from_bytes(b"crab://bucket/repo".into()).expect("test URL should parse")
+    fn test_url() -> (tempfile::TempDir, gix_url::Url) {
+        let remote = tempfile::tempdir().expect("create local transcript remote");
+        let url = format!("file://{}", remote.path().display());
+        let parsed = gix_url::Url::from_bytes(url.as_str().into()).expect("test URL should parse");
+        (remote, parsed)
     }
 
     async fn run_capture(input: &str) -> (String, std::result::Result<(), String>) {
@@ -3289,7 +3309,7 @@ mod protocol_edges {
             reader: BufReader::new(Cursor::new(input_bytes)),
             writer: writer_tx,
         };
-        let url = test_url();
+        let (_remote, url) = test_url();
         let mut output = Vec::new();
         let helper = crab::git::remote_helper::run_remote_helper(
             "origin",

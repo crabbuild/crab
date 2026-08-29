@@ -21,6 +21,7 @@ use object_store::path::Path;
 
 /// Coordinator metadata for a repo that uses active-active writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActiveActiveCoordinatorRegistration {
     pub provider: String,
     pub url: String,
@@ -35,13 +36,8 @@ pub struct ActiveActiveCoordinatorRegistration {
 /// current shard-list. The `generation` counter is bumped on every CAS
 /// write, providing a total ordering of registry versions.
 ///
-/// The workflow-related fields (`workflow_stage_hashes`,
-/// `workflow_experiment_ids`) are `#[serde(default)]` so older on-disk
-/// payloads written before the workflow layer shipped deserialize cleanly
-/// into empty maps. Writers always emit the fields, even when empty; the
-/// serde default handles readers that see an older payload.
 pub const REF_REGISTRY_SCHEMA_VERSION: u32 = 1;
-pub const REF_REGISTRY_RECORD_SCHEMA_VERSION: u32 = 2;
+pub const REF_REGISTRY_RECORD_SCHEMA_VERSION: u32 = 1;
 const REF_REGISTRY_ROOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +76,7 @@ struct ShardRootPartition {
     shard_hashes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryCoverage {
     schema_version: u32,
@@ -95,16 +91,13 @@ pub struct RepoShardRootStatus {
     pub rooted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RefRegistry {
-    /// Registry schema. Missing on legacy payloads and therefore decoded as 0.
-    #[serde(default)]
+    /// Registry schema.
     pub schema_version: u32,
     /// True only after a bucket-wide repair has enumerated every repo manifest.
-    #[serde(default)]
     pub coverage_complete: bool,
     /// Repos whose entry is known to contain their complete current shard set.
-    #[serde(default)]
     pub complete_repos: HashSet<String>,
     /// Monotonically increasing version counter, bumped on each CAS write.
     pub generation: u64,
@@ -113,23 +106,16 @@ pub struct RefRegistry {
     pub repos: HashMap<String, Vec<String>>,
     /// Workflow-referenced stage hashes keyed by repo prefix.
     ///
-    /// Absent on registries written before the workflow layer shipped —
-    /// `#[serde(default)]` makes older JSON deserialize to an empty map
-    /// without a migration step.
-    #[serde(default)]
     pub workflow_stage_hashes: HashMap<String, Vec<String>>,
     /// Live experiment IDs keyed by repo prefix. Entries survive the
     /// client-side `exp gc` retention pass; removing them here is what
     /// makes their backing stage entries eligible for remote deletion.
-    #[serde(default)]
     pub workflow_experiment_ids: HashMap<String, Vec<String>>,
     /// Active-active coordinator metadata keyed by repo prefix.
     ///
     /// Bucket-scope GC uses this as the authoritative list of repos whose
     /// coordinator transaction history must be consulted before deleting shared
-    /// `.crab/` objects. Missing on older registries means no active-active repo
-    /// has registered a bucket-GC safety contract yet.
-    #[serde(default)]
+    /// `.crab/` objects.
     pub active_active_coordinators: HashMap<String, ActiveActiveCoordinatorRegistration>,
 }
 
@@ -609,11 +595,13 @@ pub async fn load_ref_registry_summary(
                 reason: format!("invalid JSON: {error}"),
             }
         })?,
-        Err(crab_storage::StorageError::NotFound { .. }) => RegistryCoverage::default(),
+        Err(crab_storage::StorageError::NotFound { .. }) => RegistryCoverage {
+            schema_version: REF_REGISTRY_RECORD_SCHEMA_VERSION,
+            complete: false,
+        },
         Err(error) => return Err(MetadataError::from(error)),
     };
-    if coverage.schema_version != 0 && coverage.schema_version != REF_REGISTRY_RECORD_SCHEMA_VERSION
-    {
+    if coverage.schema_version != REF_REGISTRY_RECORD_SCHEMA_VERSION {
         return Err(MetadataError::CorruptObject {
             path: coverage_path.to_string(),
             reason: "unsupported partitioned ref-registry coverage schema".to_owned(),
@@ -762,7 +750,7 @@ where
     Ok(generation)
 }
 
-/// Loads the partitioned bucket registry into its aggregate compatibility view.
+/// Loads the partitioned bucket registry into one aggregate in-memory view.
 #[cfg(feature = "storage")]
 pub async fn load_ref_registry(store: &Store, router: &StoreLayout<Store>) -> Result<RefRegistry> {
     let mut registry = load_ref_registry_summary(store, router).await?;
@@ -1169,22 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn serialize_deserialize_round_trip() {
-        let mut reg = RefRegistry::default();
-        reg.generation = 42;
-        reg.register("org/models", vec!["abc123".into(), "def456".into()]);
-        reg.register("org/datasets", vec!["abc123".into(), "fed987".into()]);
-
-        let json = serde_json::to_string(&reg).unwrap();
-        let parsed: RefRegistry = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.generation, 42);
-        assert_eq!(parsed.repos.len(), 2);
-        assert_eq!(parsed.repos["org/models"], reg.repos["org/models"]);
-        assert_eq!(parsed.repos["org/datasets"], reg.repos["org/datasets"]);
-    }
-
-    #[test]
     fn deregister_exclusive_shards_removed_from_union() {
         let mut reg = RefRegistry::default();
         reg.register("repo-a", vec!["shared".into(), "only-a".into()]);
@@ -1320,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn active_active_coordinator_registration_round_trips() {
+    fn active_active_coordinator_registration_is_indexed() {
         let mut reg = RefRegistry::default();
         reg.register_active_active_coordinator(
             "org/models",
@@ -1332,14 +1304,11 @@ mod tests {
             },
         );
 
-        let json = serde_json::to_string(&reg).unwrap();
-        let parsed: RefRegistry = serde_json::from_str(&json).unwrap();
-
         assert_eq!(
-            parsed.active_active_coordinators["org/models"].url,
+            reg.active_active_coordinators["org/models"].url,
             "spanner://crab-coordinator"
         );
-        assert!(parsed.active_active_repos().contains("org/models"));
+        assert!(reg.active_active_repos().contains("org/models"));
     }
 
     #[test]
@@ -1592,56 +1561,5 @@ mod tests {
             registry.repos["org/models"],
             vec!["concurrent".to_owned(), "replacement".to_owned()]
         );
-    }
-
-    #[test]
-    fn workflow_round_trip_through_serde() {
-        let mut reg = RefRegistry {
-            generation: 7,
-            ..RefRegistry::default()
-        };
-        reg.register("org/models", vec!["shard-a".into()]);
-        reg.register_workflow_stages("org/models", vec!["stage-a".into(), "stage-b".into()]);
-        reg.register_experiments("org/models", vec!["exp-a".into()]);
-
-        let json = serde_json::to_string(&reg).unwrap();
-        let parsed: RefRegistry = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.generation, 7);
-        assert_eq!(parsed.repos["org/models"], vec!["shard-a".to_string()]);
-        assert_eq!(
-            parsed.workflow_stage_hashes["org/models"],
-            vec!["stage-a".to_string(), "stage-b".to_string()]
-        );
-        assert_eq!(
-            parsed.workflow_experiment_ids["org/models"],
-            vec!["exp-a".to_string()]
-        );
-    }
-
-    #[test]
-    fn legacy_payload_without_workflow_fields_deserializes_empty() {
-        // Payload shape written before the workflow layer shipped —
-        // only `generation` + `repos`. The `#[serde(default)]`
-        // attributes MUST make the two workflow maps default to
-        // empty so older registries load cleanly without migration.
-        let legacy = r#"{
-            "generation": 3,
-            "repos": {
-                "org/models": ["sh1", "sh2"]
-            }
-        }"#;
-        let parsed: RefRegistry = serde_json::from_str(legacy).unwrap();
-        assert_eq!(parsed.schema_version, 0);
-        assert!(!parsed.coverage_complete);
-        assert!(parsed.complete_repos.is_empty());
-        assert_eq!(parsed.generation, 3);
-        assert_eq!(parsed.repos.len(), 1);
-        assert!(parsed.workflow_stage_hashes.is_empty());
-        assert!(parsed.workflow_experiment_ids.is_empty());
-        assert!(parsed.active_active_coordinators.is_empty());
-        assert!(parsed.all_referenced_workflow_stages().is_empty());
-        assert!(parsed.all_referenced_experiments().is_empty());
-        assert!(parsed.active_active_repos().is_empty());
     }
 }

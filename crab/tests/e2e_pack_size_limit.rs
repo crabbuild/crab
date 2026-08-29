@@ -158,6 +158,12 @@ async fn oversized_aggregate_is_atomically_published_as_bounded_packs() {
     let inner: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
     let store = Store::new(Arc::clone(&inner));
     let router = StoreLayout::new(store.clone(), "bounded-pack-set".to_owned());
+    crab::core::remote_layout::initialize(&store, &router)
+        .await
+        .expect("initialize canonical layout");
+    crab::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+        .await
+        .expect("initialize canonical manifest");
     let mut config = PushConfig::default();
     config.git_dir = Some(source.path().join(".git"));
     config.receive_max_input_size = 1024 * 1024;

@@ -32,7 +32,9 @@ struct CacheEnvGuard {
 
 impl CacheEnvGuard {
     fn new(path: &Path) -> Self {
-        let guard = CACHE_ENV_LOCK.lock().expect("cache env lock");
+        let guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os("CRAB_CACHE_DIR");
         unsafe { std::env::set_var("CRAB_CACHE_DIR", path) };
         Self {
@@ -122,22 +124,26 @@ fn deterministic_content(size: usize) -> Vec<u8> {
     data
 }
 
-async fn push_main_to_memory(repo: &Path, scratch: &Path) -> (Store, StoreLayout) {
+async fn push_refs_to_memory(repo: &Path, scratch: &Path, refs: &[&str]) -> (Store, StoreLayout) {
     let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
         .await
         .expect("open staging readonly");
     let store = Store::new(Arc::new(InMemory::new()));
     let router = StoreLayout::new(store.clone(), "smoke/add-commit-push".to_owned());
+    initialize_memory_repository(&store, &router).await;
     let mut config = PushConfig {
         git_dir: Some(repo.join(".git")),
         ..PushConfig::default()
     };
     config.metadb.chunk_index.local_path = Some(scratch.join("metadb-cache/chunk-index.sqlite"));
-    let specs = vec![PushSpec {
-        force: false,
-        src: "refs/heads/main".to_owned(),
-        dst: "refs/heads/main".to_owned(),
-    }];
+    let specs = refs
+        .iter()
+        .map(|reference| PushSpec {
+            force: false,
+            src: (*reference).to_owned(),
+            dst: (*reference).to_owned(),
+        })
+        .collect::<Vec<_>>();
 
     let result = run_push_batch(
         &specs,
@@ -152,11 +158,10 @@ async fn push_main_to_memory(repo: &Path, scratch: &Path) -> (Store, StoreLayout
     )
     .await;
 
-    let outcome = result
-        .outcomes
-        .get("refs/heads/main")
-        .expect("main outcome");
-    assert!(matches!(outcome, RefPushOutcome::Ok), "{outcome:?}");
+    for reference in refs {
+        let outcome = result.outcomes.get(*reference).expect("ref outcome");
+        assert!(matches!(outcome, RefPushOutcome::Ok), "{outcome:?}");
+    }
 
     let (manifest_bytes, _) = store
         .get_with_etag(&router.manifest_path())
@@ -164,7 +169,9 @@ async fn push_main_to_memory(repo: &Path, scratch: &Path) -> (Store, StoreLayout
         .expect("manifest uploaded");
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes).expect("manifest json");
     assert_eq!(manifest.generation, 1);
-    assert!(manifest.refs.contains_key("refs/heads/main"));
+    for reference in refs {
+        assert!(manifest.refs.contains_key(*reference));
+    }
     assert!(!manifest.shard_index_hash.is_empty());
 
     let xorbs = store
@@ -199,6 +206,7 @@ async fn native_push_main_follow_tags_to_memory(
         .expect("open staging readonly");
     let store = Store::new(Arc::new(InMemory::new()));
     let router = StoreLayout::new(store.clone(), "smoke/follow-tags".to_owned());
+    initialize_memory_repository(&store, &router).await;
     let mut push_config = PushConfig {
         git_dir: Some(repo.join(".git")),
         ..PushConfig::default()
@@ -264,7 +272,7 @@ fn assert_main_push_uploads(repo: &Path, scratch: &Path) {
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        let _ = push_main_to_memory(repo, scratch).await;
+        let _ = push_refs_to_memory(repo, scratch, &["refs/heads/main"]).await;
     });
 }
 
@@ -291,6 +299,7 @@ fn assert_shallow_first_push_rejects_with_boundary(repo: &Path, scratch: &Path) 
     runtime.block_on(async {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "smoke/shallow-boundary".to_owned());
+        initialize_memory_repository(&store, &router).await;
         let mut config = PushConfig {
             git_dir: Some(repo.join(".git")),
             ..PushConfig::default()
@@ -330,6 +339,15 @@ fn assert_shallow_first_push_rejects_with_boundary(repo: &Path, scratch: &Path) 
     });
 }
 
+async fn initialize_memory_repository(store: &Store, router: &StoreLayout) {
+    crab::core::remote_layout::initialize(store, router)
+        .await
+        .expect("publish canonical v1 layout");
+    crab::cmd::init::create_initial_manifest(store, router, "refs/heads/main")
+        .await
+        .expect("publish generation-0 manifest");
+}
+
 fn assert_staging_chunk_count_at_least(repo: &Path, pointer: &Pointer, min_chunks: usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -350,13 +368,69 @@ fn assert_staging_chunk_count_at_least(repo: &Path, pointer: &Pointer, min_chunk
     });
 }
 
-fn assert_main_push_hydrates(repo: &Path, scratch: &Path, pointer_bytes: &[u8], expected: &[u8]) {
+fn assert_prepared_only_recipe_state(
+    repo: &Path,
+    pointer: Option<&Pointer>,
+    expected: Option<&[u8]>,
+) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        let (store, router) = push_main_to_memory(repo, scratch).await;
+        let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
+            .await
+            .expect("open staging readonly");
+        let Some(pointer) = pointer else {
+            let published = staging
+                .list_files()
+                .expect("list open prepared files")
+                .into_iter()
+                .any(|file| {
+                    staging
+                        .published_recipe_for_file(&MerkleHash::from(file.file_hash))
+                        .expect("inspect published recipe")
+                        .is_some()
+                });
+            assert!(
+                !published,
+                "skip-only recipes must remain invisible to push"
+            );
+            return;
+        };
+
+        let file_hash = MerkleHash::from(pointer.file_hash);
+        let recipe = staging
+            .published_recipe_for_file(&file_hash)
+            .expect("load published prepared recipe")
+            .expect("prepared recipe should be published after git add");
+        assert!(
+            !staging
+                .has_complete_segment_authority_for_recipe(&recipe)
+                .expect("inspect segment authority"),
+            "ordinary git add must reuse prepared authority without writing segments"
+        );
+        let hashes = staging
+            .chunks_for_file(&file_hash)
+            .expect("load prepared recipe chunks");
+        let reconstructed = staging
+            .get_chunks_batch(&hashes)
+            .await
+            .expect("read prepared-only chunks")
+            .into_iter()
+            .flat_map(|(_, bytes)| bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(reconstructed, expected.expect("expected prepared bytes"));
+    });
+}
+
+fn assert_push_hydrates(repo: &Path, scratch: &Path, refs: &[&str], files: &[(&[u8], &[u8])]) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let (store, router) = push_refs_to_memory(repo, scratch, refs).await;
         let hydrate_cache = Arc::new(LocalCache::new(scratch.join("hydrate-cache")));
         let caching_store = CachingStore::new_with_local_cache(
             store.clone(),
@@ -366,11 +440,13 @@ fn assert_main_push_hydrates(repo: &Path, scratch: &Path, pointer_bytes: &[u8], 
         .expect("caching store");
         let hydrator =
             ShardHydrator::new_from_cli_layout(caching_store, router).expect("shard hydrator");
-        let hydrated = hydrator
-            .reconstruct_from_pointer(pointer_bytes)
-            .await
-            .expect("hydrate pushed pointer");
-        assert_eq!(hydrated, expected);
+        for (pointer_bytes, expected) in files {
+            let hydrated = hydrator
+                .reconstruct_from_pointer(pointer_bytes)
+                .await
+                .expect("hydrate pushed pointer");
+            assert_eq!(hydrated.as_slice(), *expected);
+        }
     });
 }
 
@@ -537,5 +613,116 @@ fn git_add_multi_batch_file_pushes_and_hydrates_byte_identically() {
     assert_staging_chunk_count_at_least(&repo, &pointer, 65);
 
     require_git_ok(&repo, &["commit", "-qm", "add large pointer"]).expect("commit pointer");
-    assert_main_push_hydrates(&repo, tmp.path(), &pointer_bytes, &content);
+    assert_push_hydrates(
+        &repo,
+        tmp.path(),
+        &["refs/heads/main"],
+        &[(&pointer_bytes, &content)],
+    );
+}
+
+#[test]
+fn skip_git_add_then_git_add_reuses_prepared_authority_and_hydrates() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let cache_dir = tmp.path().join("cache");
+    let _cache_guard = CacheEnvGuard::new(&cache_dir);
+
+    let Some(()) = init_repo(&repo) else {
+        return;
+    };
+    let Some(()) = configure_crab_filter(&repo) else {
+        return;
+    };
+    commit_crab_attributes(&repo);
+
+    let content = deterministic_content(2 * 1024 * 1024);
+    std::fs::write(repo.join("prepared.bin"), &content).expect("write prepared content");
+    let add = Command::new(crab_bin())
+        .args(["add", "--jobs", "0", "--skip-git-add", "prepared.bin"])
+        .current_dir(&repo)
+        .env("CRAB_CACHE_DIR", &cache_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .expect("spawn crab add --skip-git-add");
+    assert!(
+        add.status.success(),
+        "crab add --skip-git-add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert!(
+        !run_git(&repo, &["ls-files", "--error-unmatch", "prepared.bin"])
+            .status
+            .success(),
+        "skip-git-add must not mutate Git's index"
+    );
+    assert_prepared_only_recipe_state(&repo, None, None);
+
+    require_git_ok(&repo, &["add", "prepared.bin"]).expect("git add prepared content");
+    let (pointer, pointer_bytes) = indexed_crab_pointer(&repo, "prepared.bin");
+    assert_eq!(pointer.size, content.len() as u64);
+    assert_prepared_only_recipe_state(&repo, Some(&pointer), Some(&content));
+
+    require_git_ok(&repo, &["commit", "-qm", "add prepared pointer"])
+        .expect("commit prepared pointer");
+    assert_push_hydrates(
+        &repo,
+        tmp.path(),
+        &["refs/heads/main"],
+        &[(&pointer_bytes, &content)],
+    );
+}
+
+#[test]
+fn committed_recipe_on_another_branch_survives_skip_then_git_add_until_first_push() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let cache_dir = tmp.path().join("cache");
+    let _cache_guard = CacheEnvGuard::new(&cache_dir);
+
+    let Some(()) = init_repo(&repo) else {
+        return;
+    };
+    let Some(()) = configure_crab_filter(&repo) else {
+        return;
+    };
+    commit_crab_attributes(&repo);
+
+    let first = deterministic_content(2 * 1024 * 1024);
+    std::fs::write(repo.join("history.bin"), &first).expect("write first version");
+    require_git_ok(&repo, &["add", "history.bin"]).expect("git add first version");
+    let (_, first_pointer) = indexed_crab_pointer(&repo, "history.bin");
+    require_git_ok(&repo, &["commit", "-qm", "add first version"]).expect("commit first version");
+    require_git_ok(&repo, &["checkout", "-qb", "other", "HEAD~1"])
+        .expect("switch to branch without first version");
+
+    let mut second = deterministic_content(2 * 1024 * 1024);
+    second.reverse();
+    std::fs::write(repo.join("history.bin"), &second).expect("write second version");
+    let add = Command::new(crab_bin())
+        .args(["add", "--skip-git-add", "history.bin"])
+        .current_dir(&repo)
+        .env("CRAB_CACHE_DIR", &cache_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .expect("spawn crab add --skip-git-add");
+    assert!(
+        add.status.success(),
+        "crab add --skip-git-add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    require_git_ok(&repo, &["add", "history.bin"]).expect("git add second version");
+    let (_, second_pointer) = indexed_crab_pointer(&repo, "history.bin");
+    require_git_ok(&repo, &["commit", "-qm", "add second version"]).expect("commit second version");
+
+    assert_push_hydrates(
+        &repo,
+        tmp.path(),
+        &["refs/heads/main", "refs/heads/other"],
+        &[(&first_pointer, &first), (&second_pointer, &second)],
+    );
 }

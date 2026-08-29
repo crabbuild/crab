@@ -24,9 +24,9 @@ use crate::storage::StoreLayout;
 /// Per-repo prefixes live under `{repo}/`; content-addressed objects live
 /// under the global `.crab/` prefix.
 ///
-/// Legacy skeleton objects (empty `pack-list`, empty `shard-list`, per-ref
-/// `HEAD`) are no longer created. The unified manifest at `{repo}/manifest`
-/// is the sole mutable state for a new repo.
+/// The descriptor at `{repo}/layout` and unified manifest at
+/// `{repo}/manifest` are the canonical repository roots. Auxiliary empty
+/// `pack-list`, `shard-list`, per-ref, and `HEAD` objects are not created.
 const REMOTE_PREFIXES: &[&str] = &[];
 
 /// Global prefixes shared across all repos in the bucket.
@@ -77,8 +77,9 @@ pub async fn run_init(url: &str, cancel: &CancellationToken) -> Result<()> {
 
 /// Initialize a crab repository rooted at `root`.
 ///
-/// Creates `{root}/.crab/config.toml` with the remote URL. Pass `--remote` to
-/// create the generation-0 manifest after local setup.
+/// Creates `{root}/.crab/config.toml` with the remote URL. The command entry
+/// point publishes the canonical remote layout and generation-0 manifest
+/// after this local setup succeeds.
 ///
 /// # Errors
 ///
@@ -111,13 +112,44 @@ pub async fn initialize_remote_repository(
     let router = StoreLayout::new(store.clone(), repo_prefix);
     let head = format!("refs/heads/{}", config.default_branch);
 
-    ensure_initial_manifest(&store, &router, &head).await?;
+    initialize_remote_repository_store(&store, &router, &head).await?;
     tracing::info!(
         url = %remote.canonical_url,
         head = %head,
         "remote repository initialized"
     );
     Ok(())
+}
+
+pub(crate) async fn initialize_remote_repository_store(
+    store: &crate::storage::Store,
+    router: &StoreLayout,
+    head: &str,
+) -> Result<()> {
+    match store.head(&router.layout_descriptor_path()).await {
+        Ok(_) => {
+            crate::core::remote_layout::open(store, router).await?;
+        }
+        Err(CrabError::NotFound { .. }) => {
+            let repo_prefix =
+                object_store::path::Path::from(router.repo_prefix().trim_end_matches('/'));
+            let empty = store
+                .as_storage()
+                .list_prefix_bounded(&repo_prefix, 0)
+                .await
+                .map_err(CrabError::from)?
+                .is_some();
+            if !empty {
+                return Err(CrabError::CorruptObject {
+                    path: router.layout_descriptor_path().to_string(),
+                    reason: "canonical v1 layout descriptor is missing but repository objects already exist; reset this isolated development repository instead of converting it in place".to_owned(),
+                });
+            }
+            crate::core::remote_layout::initialize(store, router).await?;
+        }
+        Err(error) => return Err(error),
+    }
+    ensure_initial_manifest(store, router, head).await
 }
 
 /// Options-driven init implementation.
@@ -389,9 +421,8 @@ async fn run_init_inner(
         emit_json(INIT_SCHEMA, INIT_VERSION, payload);
     }
 
-    // The default init path remains local-only. `--remote` calls
-    // `initialize_remote_repository` after local setup has written the
-    // provider and credential configuration needed to build the Store.
+    // Remote publication runs after local setup has written the provider and
+    // credential configuration needed to build the Store.
     for prefix in REMOTE_PREFIXES {
         tracing::info!(
             prefix = %prefix,
@@ -1751,7 +1782,10 @@ storage_provider = "azure"
             .await
             .expect("read_manifest should succeed");
 
-        assert_eq!(manifest.version, 2);
+        assert_eq!(
+            manifest.version,
+            crate::metadata::manifest::MANIFEST_VERSION
+        );
         assert_eq!(manifest.generation, 0);
         assert_eq!(manifest.head, "refs/heads/main");
         assert!(manifest.refs.is_empty());
@@ -1816,6 +1850,138 @@ storage_provider = "azure"
         let (manifest, _) = read_manifest(&store, &router)
             .await
             .expect("initialized manifest should remain readable");
+        assert_eq!(manifest.generation, 0);
+        assert_eq!(manifest.head, "refs/heads/main");
+    }
+
+    #[tokio::test]
+    async fn remote_initialization_publishes_canonical_layout_before_manifest() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_owned());
+
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect("canonical repository initialization should succeed");
+
+        crate::core::remote_layout::open(&store, &router)
+            .await
+            .expect("layout descriptor should open");
+        let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
+            .await
+            .expect("manifest should follow layout publication");
+        assert_eq!(
+            manifest.version,
+            crate::metadata::manifest::MANIFEST_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_layout_prevents_manifest_creation() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_owned());
+        store
+            .put_exact(
+                &router.layout_descriptor_path(),
+                Bytes::from_static(br#"{"schema_version":2}"#),
+            )
+            .await
+            .expect("seed non-v1 descriptor");
+
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect_err("non-v1 descriptor must fail closed");
+
+        assert!(store.head(&router.manifest_path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_layout_cannot_adopt_existing_repository_objects() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_owned());
+        store
+            .put_exact(
+                &object_store::path::Path::from("org/my-repo/orphan"),
+                Bytes::from_static(b"legacy state"),
+            )
+            .await
+            .expect("seed repository object without descriptor");
+
+        let error = initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect_err("non-empty repository without a descriptor must fail closed");
+
+        assert!(error.to_string().contains("reset"));
+        assert!(store.head(&router.layout_descriptor_path()).await.is_err());
+        assert!(store.head(&router.manifest_path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_initialization_ignores_objects_outside_the_repository_prefix() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_owned());
+        store
+            .put_exact(
+                &object_store::path::Path::from(".crab/xorbs/aa/unrelated"),
+                Bytes::from_static(b"shared content"),
+            )
+            .await
+            .expect("seed unrelated global object");
+
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect("unrelated bucket objects must not block repository initialization");
+
+        crate::core::remote_layout::open(&store, &router)
+            .await
+            .expect("canonical repository descriptor");
+    }
+
+    #[tokio::test]
+    async fn explicit_init_repairs_missing_manifest_only_after_layout_validation() {
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/my-repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .expect("seed canonical descriptor");
+
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect("explicit init should restore the missing generation-0 manifest");
+
+        crate::core::remote_layout::open(&store, &router)
+            .await
+            .expect("descriptor remains canonical");
+        let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
+            .await
+            .expect("manifest should be recreated");
         assert_eq!(manifest.generation, 0);
         assert_eq!(manifest.head, "refs/heads/main");
     }

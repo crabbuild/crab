@@ -239,6 +239,15 @@ fn make_router(store: Store, prefix: &str) -> StoreLayout {
     StoreLayout::new(store, prefix.to_owned())
 }
 
+async fn initialize_remote(store: &Store, router: &StoreLayout) {
+    crab::core::remote_layout::initialize(store, router)
+        .await
+        .expect("initialize canonical remote layout");
+    crab::cmd::init::create_initial_manifest(store, router, "refs/heads/main")
+        .await
+        .expect("initialize canonical remote manifest");
+}
+
 fn make_specs() -> Vec<PushSpec> {
     vec![PushSpec {
         force: false,
@@ -274,6 +283,7 @@ async fn second_native_push_reuses_prepopulated_walk() {
 
     let store = make_store();
     let router = make_router(store.clone(), "repo-prefix");
+    initialize_remote(&store, &router).await;
     let config = NativePushConfig::new(PushConfig::default());
     let cancel = CancellationToken::new();
     let metrics: Option<Arc<Metrics>> = None;
@@ -369,6 +379,7 @@ async fn stale_push_state_falls_back_to_full_walk() {
 
     let store = make_store();
     let router = make_router(store.clone(), "repo-prefix");
+    initialize_remote(&store, &router).await;
     let config = NativePushConfig::new(PushConfig::default());
     let cancel = CancellationToken::new();
 
@@ -421,6 +432,7 @@ async fn non_native_push_batch_walks_full_graph() {
 
     let store = make_store();
     let router = make_router(store.clone(), "repo-prefix");
+    initialize_remote(&store, &router).await;
     let config = PushConfig::default();
     let cancel = CancellationToken::new();
 

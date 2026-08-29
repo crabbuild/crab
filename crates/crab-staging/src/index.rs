@@ -1,10 +1,10 @@
 //! SQLite index layer for the segment-based staging area.
 //!
-//! Manages schema migrations, chunk locator lookups, segment registry,
+//! Manages the canonical schema, chunk locator lookups, segment registry,
 //! and the pending-chunks flush protocol. The `Index` struct owns a
 //! `rusqlite::Connection` in WAL mode with foreign key enforcement.
 
-use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter, types::Value};
+use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::debug;
@@ -13,10 +13,91 @@ use crate::error::{Result, StagingError};
 
 use super::segment::ChunkLocator;
 
-/// Current on-disk layout version. Uses BLOB columns for hash storage
-/// to avoid hex encoding overhead and reduce index size.
-const LAYOUT_VERSION: &str = "2";
-const LEGACY_LAYOUT_VERSION: &str = "1";
+type StoredRecipeRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String);
+type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
+type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
+
+/// Canonical pre-release on-disk layout contract.
+const LAYOUT_VERSION: &str = "1";
+
+const CANONICAL_TABLES: &[&str] = &[
+    "chunk_payloads",
+    "chunks",
+    "file_paths",
+    "file_push_plans",
+    "file_recipes",
+    "files",
+    "path_heads",
+    "path_leases",
+    "pending_chunks",
+    "prepared_leases",
+    "prepared_payloads",
+    "prepared_xorb_chunks",
+    "prepared_xorbs",
+    "publication_intent_entries",
+    "publication_intents",
+    "push_snapshot_leases",
+    "push_snapshot_recipes",
+    "push_snapshots",
+    "recipe_occurrences",
+    "recipe_pages",
+    "recipe_payload_leases",
+    "recipe_recording_terms",
+    "recipe_remote_chunks",
+    "recording_remote_chunks",
+    "segments",
+    "staging_batches",
+    "staging_meta",
+    "staging_quarantine",
+    "verified_recipes",
+];
+
+const CANONICAL_INDEXES: &[&str] = &[
+    "chunks_by_hash",
+    "chunks_by_segment",
+    "leases_by_file",
+    "path_heads_by_file",
+    "pending_by_file",
+    "pending_by_hash",
+    "prepared_xorb_chunks_by_hash",
+    "prepared_xorb_chunks_by_xorb",
+    "publication_entries_by_batch",
+    "recipe_occurrences_by_chunk",
+    "recipe_payload_leases_by_chunk",
+    "recipe_remote_chunks_by_hash",
+    "recipes_by_file",
+];
+
+const CANONICAL_TRIGGERS: &[&str] = &["chunks_register_payload", "pending_chunks_register_payload"];
+
+const PUBLICATION_INTENT_ENTRY_COLUMNS: &[&str] = &[
+    "intent_id",
+    "batch_id",
+    "path_bytes",
+    "recipe_hash",
+    "expected_pointer_oid",
+    "previous_index_state",
+];
+
+const REMOTE_CHUNK_COLUMNS: &[&str] = &[
+    "batch_id",
+    "chunk_hash",
+    "xorb_hash",
+    "chunk_index",
+    "uncompressed_size",
+    "placement_id",
+    "origin_proof_id",
+];
+
+const RECIPE_REMOTE_CHUNK_COLUMNS: &[&str] = &[
+    "recipe_hash",
+    "chunk_hash",
+    "xorb_hash",
+    "chunk_index",
+    "uncompressed_size",
+    "placement_id",
+    "origin_proof_id",
+];
 
 /// A row staged in `pending_chunks` before the segment is fsynced.
 ///
@@ -50,6 +131,12 @@ pub(crate) struct PreparedChunkLocator {
     pub xorb_bytes: u64,
     pub chunk_index: u32,
     pub size: u32,
+}
+
+/// One disk-planned residual read group with caller-owned opaque context.
+pub(crate) enum IndexedCoalescedReadGroup {
+    Segments(Vec<(u64, FileChunkLocator)>),
+    Prepared(Vec<(u64, [u8; 32], PreparedChunkLocator)>),
 }
 
 /// Authoritative add-time push plan stored in the staging index.
@@ -89,10 +176,47 @@ pub(crate) struct PreparedXorbWrite {
     pub placements: Vec<PreparedXorbPlacementWrite>,
 }
 
+pub(crate) struct FilePushPlanWrite<'a> {
+    pub file_hash: &'a [u8; 32],
+    pub recipe_hash: &'a [u8; 32],
+    pub recording_batch_id: Option<&'a str>,
+    pub version: u32,
+    pub file_size: u64,
+    pub chunk_count: u64,
+    pub chunk_sequence_hash: &'a [u8; 32],
+    pub plan_json: &'a [u8],
+    pub existing_chunks: &'a [ExistingChunkWrite],
+    pub prepared_xorbs: &'a [PreparedXorbWrite],
+}
+
+pub(crate) struct ExistingChunkWrite {
+    pub chunk_hash: [u8; 32],
+    pub xorb_hash: [u8; 32],
+    pub chunk_index: u32,
+    pub uncompressed_size: u32,
+    pub placement_id: [u8; 32],
+    pub origin_proof_id: [u8; 32],
+}
+
 pub(crate) struct PreparedXorbPlacementWrite {
     pub chunk_hash: [u8; 32],
     pub chunk_index: u32,
     pub uncompressed_size: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredPublicationIntentEntry {
+    pub batch_id: String,
+    pub path_bytes: Vec<u8>,
+    pub recipe_hash: [u8; 32],
+    pub expected_pointer_oid: String,
+    pub previous_index_state: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredPublicationIntent {
+    pub intent_id: String,
+    pub entries: Vec<StoredPublicationIntentEntry>,
 }
 
 type StoredFilePushPlanRow = (i64, i64, i64, Vec<u8>, Vec<u8>);
@@ -101,7 +225,6 @@ pub(crate) type BatchDedupExisting = (usize, [u8; 32], ChunkLocator, bool);
 pub(crate) type BatchDedupResult = (Vec<BatchDedupExisting>, Vec<usize>);
 
 const PREPARED_XORB_QUERY_CHUNK_BATCH: usize = 500;
-const RECIPE_OCCURRENCE_INSERT_BATCH: usize = 4096;
 
 /// Per-file staging information returned by [`Index::list_files_with_chunks`].
 #[derive(Debug, Clone)]
@@ -149,6 +272,12 @@ fn nonnegative_count(field: &str, value: i64) -> Result<u64> {
         .map_err(|_| StagingError::StagingCorrupt(format!("{field} is negative: {value}")))
 }
 
+fn retired_staging_schema() -> StagingError {
+    StagingError::StagingCorrupt(
+        "staging schema is not canonical v1; remove .crab/staging and restage".to_owned(),
+    )
+}
+
 fn sqlite_i64(field: &str, value: u64) -> Result<i64> {
     i64::try_from(value)
         .map_err(|_| StagingError::StagingCorrupt(format!("{field} is too large: {value}")))
@@ -166,61 +295,74 @@ fn validate_chunk_index(expected: usize, actual: i64) -> Result<()> {
     Ok(())
 }
 
-fn has_unique_index(conn: &Connection, table: &str, columns: &[&str]) -> Result<bool> {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA index_list({})", quote_identifier(table)))
-        .map_err(|e| StagingError::Internal(format!("prepare index_list for {table}: {e}")))?;
-    let indexes = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2).map(|unique| unique != 0)?,
-            ))
-        })
-        .map_err(|e| StagingError::Internal(format!("query index_list for {table}: {e}")))?;
-
-    for index in indexes {
-        let (name, unique) = index
-            .map_err(|e| StagingError::Internal(format!("collect index_list for {table}: {e}")))?;
-        if !unique {
-            continue;
-        }
-
-        let mut info_stmt = conn
-            .prepare(&format!("PRAGMA index_info({})", quote_identifier(&name)))
-            .map_err(|e| StagingError::Internal(format!("prepare index_info for {name}: {e}")))?;
-        let info_rows = info_stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(2)?))
-            })
-            .map_err(|e| StagingError::Internal(format!("query index_info for {name}: {e}")))?;
-
-        let mut indexed_columns = Vec::new();
-        for info in info_rows {
-            let (seqno, Some(column)) = info.map_err(|e| {
-                StagingError::Internal(format!("collect index_info for {name}: {e}"))
-            })?
-            else {
-                indexed_columns.clear();
-                break;
-            };
-            indexed_columns.push((seqno, column));
-        }
-        indexed_columns.sort_by_key(|(seqno, _)| *seqno);
-        let indexed_columns: Vec<&str> = indexed_columns
-            .iter()
-            .map(|(_, column)| column.as_str())
-            .collect();
-        if indexed_columns == columns {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+fn publication_intent_batch_ids(
+    tx: &rusqlite::Transaction<'_>,
+    intent_id: &str,
+) -> Result<Vec<String>> {
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT DISTINCT batch_id
+             FROM publication_intent_entries
+             WHERE intent_id = ?1
+             ORDER BY batch_id",
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!("failed to prepare publication batches: {e}"))
+        })?;
+    statement
+        .query_map(params![intent_id], |row| row.get(0))
+        .map_err(|e| StagingError::Internal(format!("failed to query publication batches: {e}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| StagingError::Internal(format!("failed to collect publication batches: {e}")))
 }
 
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+fn unowned_file_hashes(
+    tx: &rusqlite::Transaction<'_>,
+    mut candidates: Vec<[u8; 32]>,
+) -> Result<Vec<[u8; 32]>> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut unowned = Vec::new();
+    for file_hash in candidates {
+        let owned: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM path_leases WHERE file_hash = ?1
+                 ) OR EXISTS(
+                     SELECT 1
+                     FROM push_snapshot_recipes AS pin
+                     JOIN file_recipes AS recipe USING (recipe_hash)
+                     WHERE recipe.file_hash = ?1
+                 )",
+                params![file_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to inspect staged file ownership: {e}"))
+            })?;
+        if !owned {
+            unowned.push(file_hash);
+        }
+    }
+    Ok(unowned)
+}
+
+fn remove_empty_published_batches(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "DELETE FROM staging_batches
+         WHERE state = 'published'
+           AND NOT EXISTS (
+               SELECT 1 FROM path_leases
+               WHERE path_leases.batch_id = staging_batches.batch_id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM publication_intent_entries
+               WHERE publication_intent_entries.batch_id = staging_batches.batch_id
+           )",
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| StagingError::Internal(format!("failed to remove superseded empty batches: {e}")))
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -278,8 +420,8 @@ impl Index {
     /// Open (or create) the staging index at `path`.
     ///
     /// Enables WAL mode, `PRAGMA synchronous = NORMAL`, and foreign key
-    /// enforcement. Runs schema migrations and seeds `layout_version = 2`
-    /// on first open.
+    /// enforcement. Initializes a fresh canonical v1 schema or rejects any
+    /// other shape with an explicit restage instruction.
     ///
     /// # Errors
     ///
@@ -314,15 +456,21 @@ impl Index {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| StagingError::Internal(format!("failed to enable foreign keys: {e}")))?;
 
+        // Residual push schedules may contain millions of unique chunks.
+        // Force connection-local TEMP tables onto disk so recipe scale cannot
+        // turn SQLite's compile-time temp-store default into unbounded RAM.
+        conn.pragma_update(None, "temp_store", "FILE")
+            .map_err(|e| StagingError::Internal(format!("failed to set temp_store = FILE: {e}")))?;
+
         let mut idx = Self { conn };
-        idx.run_migrations()?;
+        idx.open_canonical_schema()?;
         Ok(idx)
     }
 
     /// Open the staging index for a shared push handle.
     ///
-    /// Runs idempotent migrations before admitting the push, then enables WAL,
-    /// foreign keys, and a busy timeout. The SQLite connection is read-write
+    /// Validates the canonical schema before admitting the push, then enables
+    /// WAL, foreign keys, and a busy timeout. The SQLite connection is read-write
     /// because callers record push snapshot and retirement lifecycle rows;
     /// they never append or relocate segment payloads through this handle.
     ///
@@ -345,13 +493,132 @@ impl Index {
 
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| StagingError::Internal(format!("failed to enable foreign keys: {e}")))?;
+        conn.pragma_update(None, "temp_store", "FILE")
+            .map_err(|e| StagingError::Internal(format!("failed to set temp_store = FILE: {e}")))?;
         let mut index = Self { conn };
-        index.run_migrations()?;
+        index.open_canonical_schema()?;
         Ok(index)
     }
 
-    /// Run schema migrations (idempotent — uses `IF NOT EXISTS`).
-    fn run_migrations(&mut self) -> Result<()> {
+    fn open_canonical_schema(&mut self) -> Result<()> {
+        let existing_tables = self.application_objects("table")?;
+        let fresh = existing_tables.is_empty();
+        if !fresh {
+            if existing_tables
+                .iter()
+                .map(String::as_str)
+                .ne(CANONICAL_TABLES.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
+            let existing_indexes = self.application_objects("index")?;
+            if existing_indexes
+                .iter()
+                .map(String::as_str)
+                .ne(CANONICAL_INDEXES.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
+            let existing_triggers = self.application_objects("trigger")?;
+            if existing_triggers
+                .iter()
+                .map(String::as_str)
+                .ne(CANONICAL_TRIGGERS.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
+            if self
+                .table_columns("publication_intent_entries")?
+                .iter()
+                .map(String::as_str)
+                .ne(PUBLICATION_INTENT_ENTRY_COLUMNS.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
+            if self
+                .table_columns("recording_remote_chunks")?
+                .iter()
+                .map(String::as_str)
+                .ne(REMOTE_CHUNK_COLUMNS.iter().copied())
+                || self
+                    .table_columns("recipe_remote_chunks")?
+                    .iter()
+                    .map(String::as_str)
+                    .ne(RECIPE_REMOTE_CHUNK_COLUMNS.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
+            let version: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT value FROM staging_meta WHERE key = 'layout_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to read staging layout version: {e}"))
+                })?;
+            if version.as_deref() != Some(LAYOUT_VERSION) {
+                return Err(retired_staging_schema());
+            }
+        }
+
+        self.initialize_schema()?;
+        if fresh {
+            self.conn
+                .execute(
+                    "INSERT INTO staging_meta (key, value) VALUES ('layout_version', ?1)",
+                    params![LAYOUT_VERSION],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to seed staging layout version: {e}"))
+                })?;
+            debug!(
+                version = LAYOUT_VERSION,
+                "initialized canonical staging schema"
+            );
+        }
+        Ok(())
+    }
+
+    fn application_objects(&self, kind: &str) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = ?1 AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to inspect staging schema: {e}"))
+            })?;
+        statement
+            .query_map(params![kind], |row| row.get(0))
+            .map_err(|e| StagingError::Internal(format!("failed to query staging schema: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StagingError::Internal(format!("failed to collect staging schema: {e}")))
+    }
+
+    fn table_columns(&self, table: &str) -> Result<Vec<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to inspect staging table {table}: {e}"))
+            })?;
+        statement
+            .query_map(params![table], |row| row.get(0))
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to query staging table {table}: {e}"))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to collect staging table {table}: {e}"))
+            })
+    }
+
+    fn initialize_schema(&mut self) -> Result<()> {
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS files (
@@ -359,6 +626,11 @@ impl Index {
                     shard_hash   BLOB,
                     total_bytes  INTEGER NOT NULL,
                     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS file_paths (
+                    file_hash  BLOB PRIMARY KEY,
+                    file_path  TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS segments (
@@ -419,6 +691,35 @@ impl Index {
                     FOREIGN KEY (file_hash) REFERENCES files(file_hash)
                 );
 
+                CREATE TABLE IF NOT EXISTS recording_remote_chunks (
+                    batch_id           TEXT NOT NULL,
+                    chunk_hash         BLOB NOT NULL,
+                    xorb_hash          BLOB NOT NULL,
+                    chunk_index        INTEGER NOT NULL,
+                    uncompressed_size  INTEGER NOT NULL,
+                    placement_id      BLOB NOT NULL,
+                    origin_proof_id    BLOB NOT NULL,
+                    PRIMARY KEY (batch_id, chunk_hash),
+                    FOREIGN KEY (batch_id) REFERENCES staging_batches(batch_id)
+                        ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS recipe_remote_chunks (
+                    recipe_hash        BLOB NOT NULL,
+                    chunk_hash         BLOB NOT NULL,
+                    xorb_hash          BLOB NOT NULL,
+                    chunk_index        INTEGER NOT NULL,
+                    uncompressed_size  INTEGER NOT NULL,
+                    placement_id      BLOB NOT NULL,
+                    origin_proof_id    BLOB NOT NULL,
+                    PRIMARY KEY (recipe_hash, chunk_hash),
+                    FOREIGN KEY (recipe_hash) REFERENCES file_recipes(recipe_hash)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS recipe_remote_chunks_by_hash
+                    ON recipe_remote_chunks(chunk_hash);
+
                 CREATE TABLE IF NOT EXISTS prepared_xorbs (
                     file_hash     BLOB NOT NULL,
                     xorb_hash     BLOB NOT NULL,
@@ -454,12 +755,27 @@ impl Index {
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
+                CREATE TABLE IF NOT EXISTS recipe_recording_terms (
+                    batch_id      TEXT NOT NULL,
+                    occurrence    INTEGER NOT NULL,
+                    chunk_hash    BLOB NOT NULL,
+                    chunk_offset  INTEGER NOT NULL,
+                    chunk_size    INTEGER NOT NULL,
+                    PRIMARY KEY (batch_id, occurrence),
+                    FOREIGN KEY (batch_id) REFERENCES staging_batches(batch_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS file_recipes (
-                    recipe_hash  BLOB PRIMARY KEY,
-                    file_hash    BLOB NOT NULL,
-                    file_size    INTEGER NOT NULL,
-                    policy_id    TEXT NOT NULL,
-                    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                    recipe_hash    BLOB PRIMARY KEY,
+                    file_hash      BLOB NOT NULL,
+                    file_size      INTEGER NOT NULL,
+                    chunk_count    INTEGER NOT NULL,
+                    sequence_hash  BLOB NOT NULL,
+                    page_count     INTEGER NOT NULL,
+                    page_root_hash BLOB NOT NULL,
+                    policy_id      TEXT NOT NULL,
+                    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS recipe_occurrences (
@@ -469,6 +785,22 @@ impl Index {
                     chunk_offset  INTEGER NOT NULL,
                     chunk_size    INTEGER NOT NULL,
                     PRIMARY KEY (recipe_hash, occurrence),
+                    FOREIGN KEY (recipe_hash) REFERENCES file_recipes(recipe_hash)
+                        ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS recipe_occurrences_by_chunk
+                    ON recipe_occurrences(recipe_hash, chunk_hash, chunk_size);
+
+                CREATE TABLE IF NOT EXISTS recipe_pages (
+                    recipe_hash      BLOB NOT NULL,
+                    page_index       INTEGER NOT NULL,
+                    start_occurrence INTEGER NOT NULL,
+                    start_offset     INTEGER NOT NULL,
+                    occurrence_count INTEGER NOT NULL,
+                    page_bytes       INTEGER NOT NULL,
+                    page_hash        BLOB NOT NULL,
+                    PRIMARY KEY (recipe_hash, page_index),
                     FOREIGN KEY (recipe_hash) REFERENCES file_recipes(recipe_hash)
                         ON DELETE CASCADE
                 );
@@ -496,6 +828,44 @@ impl Index {
 
                 CREATE INDEX IF NOT EXISTS leases_by_file
                     ON path_leases(file_hash);
+
+                CREATE TABLE IF NOT EXISTS path_heads (
+                    path_bytes   BLOB PRIMARY KEY,
+                    batch_id     TEXT NOT NULL,
+                    file_hash    BLOB NOT NULL,
+                    recipe_hash  BLOB NOT NULL,
+                    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (batch_id, path_bytes)
+                        REFERENCES path_leases(batch_id, path_bytes),
+                    FOREIGN KEY (recipe_hash) REFERENCES file_recipes(recipe_hash)
+                );
+
+                CREATE INDEX IF NOT EXISTS path_heads_by_file
+                    ON path_heads(file_hash);
+
+                CREATE TABLE IF NOT EXISTS publication_intents (
+                    intent_id   TEXT PRIMARY KEY,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS publication_intent_entries (
+                    intent_id             TEXT NOT NULL,
+                    batch_id              TEXT NOT NULL,
+                    path_bytes            BLOB NOT NULL,
+                    recipe_hash           BLOB NOT NULL,
+                    expected_pointer_oid  TEXT NOT NULL,
+                    previous_index_state  TEXT NOT NULL,
+                    PRIMARY KEY (intent_id, path_bytes),
+                    FOREIGN KEY (intent_id) REFERENCES publication_intents(intent_id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (batch_id, path_bytes)
+                        REFERENCES path_leases(batch_id, path_bytes)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (recipe_hash) REFERENCES file_recipes(recipe_hash)
+                );
+
+                CREATE INDEX IF NOT EXISTS publication_entries_by_batch
+                    ON publication_intent_entries(batch_id, path_bytes);
 
                 CREATE TABLE IF NOT EXISTS chunk_payloads (
                     chunk_hash     BLOB PRIMARY KEY,
@@ -586,373 +956,27 @@ impl Index {
                     );
                 END;",
             )
-            .map_err(|e| StagingError::Internal(format!("schema migration failed: {e}")))?;
-
-        // Capture every distinct legacy payload locator before normalizing
-        // duplicate file positions. A conflicting duplicate is not safe to
-        // publish as an ordered recipe, but its bytes may be the only local
-        // recovery copy and must remain inventoried for quarantine/repair.
-        self.conn
-            .execute_batch(
-                "INSERT OR IGNORE INTO chunk_payloads
-                     (chunk_hash, size, segment_id, segment_offset)
-                     SELECT chunk_hash, size, segment_id, segment_offset FROM chunks;
-                 INSERT OR IGNORE INTO chunk_payloads
-                     (chunk_hash, size, segment_id, segment_offset)
-                     SELECT chunk_hash, size, segment_id, segment_offset FROM pending_chunks;",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("legacy payload inventory migration failed: {e}"))
-            })?;
-
-        // Legacy staging databases may have been created before the
-        // per-file chunk-position constraints existed. Normalize those
-        // duplicates before adding unique indexes; push treats this table as
-        // the source of truth for file layout, so constraint failures must
-        // stop startup instead of letting a malformed sequence reach shards.
-        self.conn
-            .execute_batch(
-                "DELETE FROM chunks WHERE rowid NOT IN (
-                     SELECT MIN(rowid) FROM chunks
-                     GROUP BY file_hash, chunk_index
-                 );
-                 DELETE FROM pending_chunks WHERE rowid NOT IN (
-                     SELECT MIN(rowid) FROM pending_chunks
-                     GROUP BY file_hash, chunk_index
-                 );",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("staging chunk uniqueness migration failed: {e}"))
-            })?;
-        if !has_unique_index(&self.conn, "chunks", &["file_hash", "chunk_index"])? {
-            self.conn
-                .execute(
-                    "CREATE UNIQUE INDEX chunks_file_chunk_idx ON chunks(file_hash, chunk_index)",
-                    [],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to create chunks uniqueness index: {e}"))
-                })?;
-        }
-        if !has_unique_index(&self.conn, "pending_chunks", &["file_hash", "chunk_index"])? {
-            self.conn
-                .execute(
-                    "CREATE UNIQUE INDEX pending_file_chunk_idx
-                     ON pending_chunks(file_hash, chunk_index)",
-                    [],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to create pending_chunks uniqueness index: {e}"
-                    ))
-                })?;
-        }
-
-        // Additive migration: file_paths side table for UX (maps hash → path).
-        self.conn
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS file_paths (
-                    file_hash  BLOB PRIMARY KEY,
-                    file_path  TEXT NOT NULL
-                );",
-            )
-            .map_err(|e| {
-                tracing::debug!(error = %e, "file_paths migration (non-fatal)");
-            })
-            .ok();
-
-        self.conn
-            .execute_batch(
-                "INSERT OR IGNORE INTO chunk_payloads
-                     (chunk_hash, size, segment_id, segment_offset)
-                     SELECT chunk_hash, size, segment_id, segment_offset FROM chunks;
-                 INSERT OR IGNORE INTO chunk_payloads
-                     (chunk_hash, size, segment_id, segment_offset)
-                     SELECT chunk_hash, size, segment_id, segment_offset FROM pending_chunks;",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("payload inventory migration failed: {e}"))
-            })?;
-
-        self.conn
-            .execute(
-                "INSERT INTO staging_meta (key, value)
-                 SELECT 'migration_validation_pending', '1'
-                 WHERE EXISTS (
-                     SELECT 1 FROM file_recipes AS recipe
-                     JOIN path_leases AS lease USING (recipe_hash)
-                     LEFT JOIN verified_recipes AS verified USING (recipe_hash)
-                     WHERE verified.recipe_hash IS NULL
-                 )
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to schedule recipe validation: {e}"))
-            })?;
-
-        // Seed layout_version on first open; verify on subsequent opens.
-        let existing: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM staging_meta WHERE key = 'layout_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| StagingError::Internal(format!("failed to read layout_version: {e}")))?;
-
-        match existing {
-            None => {
-                let files: u64 = self
-                    .conn
-                    .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-                    .map_err(|e| {
-                        StagingError::Internal(format!("failed to count legacy files: {e}"))
-                    })?;
-                if files == 0 {
-                    self.conn
-                        .execute(
-                            "INSERT INTO staging_meta (key, value) VALUES ('layout_version', ?1)",
-                            params![LAYOUT_VERSION],
-                        )
-                        .map_err(|e| {
-                            StagingError::Internal(format!("failed to seed layout_version: {e}"))
-                        })?;
-                    debug!(version = LAYOUT_VERSION, "seeded staging layout_version");
-                } else {
-                    self.migrate_legacy_layout()?;
-                }
-            }
-            Some(ref v) if v == LAYOUT_VERSION => {}
-            Some(ref v) if v == LEGACY_LAYOUT_VERSION => self.migrate_legacy_layout()?,
-            Some(v) => {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "unsupported layout_version: expected {LAYOUT_VERSION}, found {v}"
-                )));
-            }
-        }
+            .map_err(|e| StagingError::Internal(format!("schema initialization failed: {e}")))?;
 
         Ok(())
     }
 
-    fn migrate_legacy_layout(&mut self) -> Result<()> {
-        struct LegacyRecipe {
-            file_hash: [u8; 32],
-            path_bytes: Vec<u8>,
-            recipe: crate::recipe::FileRecipe,
-        }
-
-        let file_rows = {
-            let mut statement = self
-                .conn
-                .prepare(
-                    "SELECT files.file_hash, files.total_bytes, file_paths.file_path
-                     FROM files LEFT JOIN file_paths USING(file_hash)",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to prepare legacy migration: {e}"))
-                })?;
-            statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                })
-                .map_err(|e| StagingError::Internal(format!("failed to query legacy files: {e}")))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to collect legacy files: {e}"))
-                })?
-        };
-        let mut valid = Vec::new();
-        let mut quarantined = Vec::new();
-        for (raw_hash, raw_size, path) in file_rows {
-            let file_hash = match decode_hash_blob("legacy file hash", raw_hash.clone()) {
-                Ok(hash) => hash,
-                Err(error) => {
-                    quarantined.push((raw_hash, error.to_string()));
-                    continue;
-                }
-            };
-            let file_size = match u64::try_from(raw_size) {
-                Ok(size) => size,
-                Err(_) => {
-                    quarantined.push((file_hash.to_vec(), "negative legacy file size".to_owned()));
-                    continue;
-                }
-            };
-            let chunks = match self.chunks_for_file_with_sizes(&file_hash) {
-                Ok(chunks) => chunks,
-                Err(error) => {
-                    quarantined.push((file_hash.to_vec(), error.to_string()));
-                    continue;
-                }
-            };
-            let chunks = chunks
-                .into_iter()
-                .map(|(hash, size)| (crab_xet::hash::MerkleHash::from(hash), size))
-                .collect::<Vec<_>>();
-            let recipe = match crate::recipe::FileRecipe::from_staged_chunks(
-                crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
-                crab_xet::hash::MerkleHash::from(file_hash),
-                file_size,
-                &chunks,
-            ) {
-                Ok(recipe) => recipe,
-                Err(error) => {
-                    quarantined.push((file_hash.to_vec(), error.to_string()));
-                    continue;
-                }
-            };
-            let path_bytes = path.map_or_else(
-                || {
-                    let mut diagnostic = b"legacy-file:".to_vec();
-                    diagnostic.extend_from_slice(&file_hash);
-                    diagnostic
-                },
-                String::into_bytes,
-            );
-            valid.push(LegacyRecipe {
-                file_hash,
-                path_bytes,
-                recipe,
-            });
-        }
-
-        let tx = self.conn.unchecked_transaction().map_err(|e| {
-            StagingError::Internal(format!("failed to begin layout-v2 migration: {e}"))
-        })?;
-        tx.execute("DELETE FROM path_leases WHERE batch_id = 'legacy-v1'", [])
-            .map_err(|e| StagingError::Internal(format!("failed to remove legacy leases: {e}")))?;
-        tx.execute(
-            "DELETE FROM staging_batches WHERE batch_id = 'legacy-v1'",
-            [],
-        )
-        .map_err(|e| StagingError::Internal(format!("failed to remove legacy batch: {e}")))?;
-        tx.execute(
-            "DELETE FROM file_recipes WHERE policy_id = 'legacy-unknown'",
-            [],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to remove legacy recipe hints: {e}"))
-        })?;
-        tx.execute(
-            "INSERT OR REPLACE INTO staging_batches (batch_id, state)
-             VALUES ('migration-v2', 'open')",
-            [],
-        )
-        .map_err(|e| StagingError::Internal(format!("failed to create migration batch: {e}")))?;
-        for legacy in valid {
-            let recipe_hash = legacy.recipe.hash();
-            let file_hash: [u8; 32] = legacy.recipe.sequence().file_hash.into();
-            tx.execute(
-                "INSERT OR IGNORE INTO file_recipes
-                 (recipe_hash, file_hash, file_size, policy_id)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    recipe_hash.as_slice(),
-                    file_hash.as_slice(),
-                    sqlite_i64("legacy recipe size", legacy.recipe.sequence().file_size)?,
-                    legacy.recipe.policy().as_str(),
-                ],
-            )
-            .map_err(|e| StagingError::Internal(format!("failed to migrate recipe: {e}")))?;
-            for (occurrence, chunk) in legacy.recipe.sequence().spans.iter().enumerate() {
-                let chunk_hash: [u8; 32] = chunk.chunk_hash.into();
-                tx.execute(
-                    "INSERT OR IGNORE INTO recipe_occurrences
-                     (recipe_hash, occurrence, chunk_hash, chunk_offset, chunk_size)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        recipe_hash.as_slice(),
-                        i64::try_from(occurrence).map_err(|_| StagingError::StagingCorrupt(
-                            "too many legacy recipe occurrences".to_owned()
-                        ))?,
-                        chunk_hash.as_slice(),
-                        sqlite_i64("legacy chunk offset", chunk.offset)?,
-                        sqlite_i64("legacy chunk size", chunk.len)?,
-                    ],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to migrate occurrence: {e}"))
-                })?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO recipe_payload_leases (recipe_hash, chunk_hash)
-                     VALUES (?1, ?2)",
-                    params![recipe_hash.as_slice(), chunk_hash.as_slice()],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to migrate payload lease: {e}"))
-                })?;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO path_leases
-                 (batch_id, path_bytes, file_hash, recipe_hash)
-                 VALUES ('migration-v2', ?1, ?2, ?3)",
-                params![
-                    legacy.path_bytes,
-                    legacy.file_hash.as_slice(),
-                    recipe_hash.as_slice(),
-                ],
-            )
-            .map_err(|e| StagingError::Internal(format!("failed to migrate path lease: {e}")))?;
-        }
-        for (identity, reason) in quarantined {
-            tx.execute(
-                "INSERT OR REPLACE INTO staging_quarantine (kind, identity, reason)
-                 VALUES ('legacy-file', ?1, ?2)",
-                params![identity, reason],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to quarantine legacy file: {e}"))
-            })?;
-        }
-        tx.execute(
-            "UPDATE staging_batches SET state = 'published' WHERE batch_id = 'migration-v2'",
-            [],
-        )
-        .map_err(|e| StagingError::Internal(format!("failed to publish migration batch: {e}")))?;
-        tx.execute(
-            "INSERT INTO staging_meta (key, value) VALUES ('layout_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![LAYOUT_VERSION],
-        )
-        .map_err(|e| StagingError::Internal(format!("failed to record layout migration: {e}")))?;
-        tx.execute(
-            "INSERT INTO staging_meta (key, value)
-             VALUES ('migration_validation_pending', '1')
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to schedule migration validation: {e}"))
-        })?;
-        tx.commit().map_err(|e| {
-            StagingError::Internal(format!("failed to commit layout-v2 migration: {e}"))
-        })?;
-        debug!(version = LAYOUT_VERSION, "migrated staging layout");
-        Ok(())
-    }
-
-    pub fn migration_validation_pending(&self) -> Result<bool> {
+    pub fn recipe_payload_validation_pending(&self) -> Result<bool> {
         self.conn
             .query_row(
                 "SELECT EXISTS(
                      SELECT 1 FROM staging_meta
-                     WHERE key = 'migration_validation_pending' AND value = '1'
+                     WHERE key = 'recipe_payload_validation_pending' AND value = '1'
                  )",
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| {
-                StagingError::Internal(format!("failed to inspect migration validation: {e}"))
+                StagingError::Internal(format!("failed to inspect recipe payload validation: {e}"))
             })
     }
 
-    pub fn unverified_recipe_hashes(&self) -> Result<Vec<[u8; 32]>> {
+    pub fn pending_recipe_hashes(&self) -> Result<Vec<[u8; 32]>> {
         let recipe_hashes = {
             let mut statement = self
                 .conn
@@ -983,15 +1007,34 @@ impl Index {
         Ok(recipe_hashes)
     }
 
-    pub fn unverified_recipe(&self, recipe_hash: &[u8; 32]) -> Result<crate::recipe::FileRecipe> {
-        let (raw_file_hash, raw_file_size, policy_id): (Vec<u8>, i64, String) = self
+    pub fn pending_recipe(&self, recipe_hash: &[u8; 32]) -> Result<crate::recipe::FileRecipe> {
+        let (
+            raw_file_hash,
+            raw_file_size,
+            raw_chunk_count,
+            raw_sequence_hash,
+            raw_page_count,
+            raw_page_root_hash,
+            policy_id,
+        ): StoredRecipeRow = self
             .conn
             .query_row(
-                "SELECT file_hash, file_size, policy_id
+                "SELECT file_hash, file_size, chunk_count, sequence_hash,
+                        page_count, page_root_hash, policy_id
                  FROM file_recipes
                  WHERE recipe_hash = ?1",
                 params![recipe_hash.as_slice()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| StagingError::Internal(format!("failed to load unverified recipe: {e}")))?
@@ -999,7 +1042,18 @@ impl Index {
                 StagingError::StagingCorrupt("unverified recipe disappeared".to_owned())
             })?;
         let file_hash = decode_hash_blob("unverified recipe file hash", raw_file_hash)?;
-        self.load_stored_recipe(recipe_hash, &file_hash, raw_file_size, &policy_id)
+        self.load_stored_recipe(
+            recipe_hash,
+            &file_hash,
+            (
+                raw_file_size,
+                raw_chunk_count,
+                raw_sequence_hash,
+                raw_page_count,
+                raw_page_root_hash,
+                policy_id,
+            ),
+        )
     }
 
     pub fn mark_recipe_verified(&self, recipe_hash: &[u8; 32]) -> Result<()> {
@@ -1032,10 +1086,16 @@ impl Index {
         Ok(())
     }
 
-    pub fn quarantine_unverified_recipe(&self, recipe_hash: &[u8; 32], reason: &str) -> Result<()> {
+    pub fn quarantine_pending_recipe(&self, recipe_hash: &[u8; 32], reason: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe quarantine: {e}"))
         })?;
+        tx.execute(
+            "DELETE FROM path_heads
+             WHERE recipe_hash = ?1",
+            params![recipe_hash.as_slice()],
+        )
+        .map_err(|e| StagingError::Internal(format!("failed to hide corrupt recipe head: {e}")))?;
         tx.execute(
             "DELETE FROM path_leases
              WHERE recipe_hash = ?1",
@@ -1056,15 +1116,15 @@ impl Index {
             .map_err(|e| StagingError::Internal(format!("failed to commit recipe quarantine: {e}")))
     }
 
-    pub fn finish_migration_validation(&self) -> Result<()> {
+    pub fn finish_recipe_payload_validation(&self) -> Result<()> {
         self.conn
             .execute(
-                "DELETE FROM staging_meta WHERE key = 'migration_validation_pending'",
+                "DELETE FROM staging_meta WHERE key = 'recipe_payload_validation_pending'",
                 [],
             )
             .map(|_| ())
             .map_err(|e| {
-                StagingError::Internal(format!("failed to finish migration validation: {e}"))
+                StagingError::Internal(format!("failed to finish recipe payload validation: {e}"))
             })
     }
 
@@ -1989,11 +2049,274 @@ impl Index {
         Ok(())
     }
 
-    pub fn mark_batch_published(&self, batch_id: &str) -> Result<()> {
-        let changed = self
-            .conn
+    /// Append one bounded contiguous term batch to an open recipe recording.
+    pub fn append_recipe_recording_terms(
+        &self,
+        batch_id: &str,
+        start_occurrence: u64,
+        start_offset: u64,
+        chunks: &[(crab_xet::hash::MerkleHash, u64)],
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        if chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe recording append has {} terms, limit is {}",
+                chunks.len(),
+                super::stream::STAGE_BATCH_CHUNKS
+            )));
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!("failed to begin recipe recording append: {e}"))
+        })?;
+        let batch_is_open: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM staging_batches
+                    WHERE batch_id = ?1 AND state = 'open'
+                 )",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to inspect recipe recording batch: {e}"))
+            })?;
+        if !batch_is_open {
+            return Err(StagingError::NotFound {
+                path: format!("open staging batch {batch_id}"),
+            });
+        }
+        let (stored_count, stored_end): (i64, Option<i64>) = tx
+            .query_row(
+                "SELECT COUNT(*), MAX(chunk_offset + chunk_size)
+                 FROM recipe_recording_terms WHERE batch_id = ?1",
+                params![batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to inspect recipe recording tail: {e}"))
+            })?;
+        let expected_occurrence = nonnegative_count("recipe recording count", stored_count)?;
+        let expected_offset = stored_end
+            .map(|value| nonnegative_count("recipe recording offset", value))
+            .transpose()?
+            .unwrap_or(0);
+        if start_occurrence != expected_occurrence || start_offset != expected_offset {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe recording append is not contiguous: expected occurrence {expected_occurrence} offset {expected_offset}, found occurrence {start_occurrence} offset {start_offset}"
+            )));
+        }
+
+        let mut statement = tx
+            .prepare_cached(
+                "INSERT INTO recipe_recording_terms
+                 (batch_id, occurrence, chunk_hash, chunk_offset, chunk_size)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to prepare recipe recording insert: {e}"))
+            })?;
+        let mut occurrence = start_occurrence;
+        let mut offset = start_offset;
+        for (chunk_hash, size) in chunks {
+            let raw_hash: [u8; 32] = (*chunk_hash).into();
+            statement
+                .execute(params![
+                    batch_id,
+                    sqlite_i64("recipe recording occurrence", occurrence)?,
+                    raw_hash.as_slice(),
+                    sqlite_i64("recipe recording offset", offset)?,
+                    sqlite_i64("recipe recording size", *size)?,
+                ])
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to append recipe recording term: {e}"))
+                })?;
+            occurrence = occurrence.checked_add(1).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe recording occurrence overflow".to_owned())
+            })?;
+            offset = offset.checked_add(*size).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe recording byte offset overflow".to_owned())
+            })?;
+        }
+        drop(statement);
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!("failed to commit recipe recording append: {e}"))
+        })?;
+        Ok(())
+    }
+
+    /// Append a bounded set of generation-pinned remote payload authorities.
+    pub fn append_recording_remote_chunks(
+        &self,
+        batch_id: &str,
+        chunks: &[ExistingChunkWrite],
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        if chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+            return Err(StagingError::StagingCorrupt(format!(
+                "remote authority append has {} terms, limit is {}",
+                chunks.len(),
+                super::stream::STAGE_BATCH_CHUNKS
+            )));
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|error| {
+            StagingError::Internal(format!("failed to begin remote authority append: {error}"))
+        })?;
+        let batch_is_open: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM staging_batches
+                    WHERE batch_id = ?1 AND state = 'open'
+                 )",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to inspect remote authority batch: {error}"))
+            })?;
+        if !batch_is_open {
+            return Err(StagingError::NotFound {
+                path: format!("open staging batch {batch_id}"),
+            });
+        }
+        for chunk in chunks {
+            if chunk.placement_id == [0; 32] || chunk.origin_proof_id == [0; 32] {
+                return Err(StagingError::StagingCorrupt(
+                    "remote authority has an empty placement or origin proof id".to_owned(),
+                ));
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO recording_remote_chunks
+                 (batch_id, chunk_hash, xorb_hash, chunk_index,
+                  uncompressed_size, placement_id, origin_proof_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    batch_id,
+                    chunk.chunk_hash.as_slice(),
+                    chunk.xorb_hash.as_slice(),
+                    i64::from(chunk.chunk_index),
+                    i64::from(chunk.uncompressed_size),
+                    chunk.placement_id.as_slice(),
+                    chunk.origin_proof_id.as_slice(),
+                ],
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to append recording remote authority: {error}"
+                ))
+            })?;
+            let matches: bool = tx
+                .query_row(
+                    "SELECT xorb_hash = ?3
+                            AND chunk_index = ?4
+                            AND uncompressed_size = ?5
+                            AND placement_id = ?6
+                            AND origin_proof_id = ?7
+                     FROM recording_remote_chunks
+                     WHERE batch_id = ?1 AND chunk_hash = ?2",
+                    params![
+                        batch_id,
+                        chunk.chunk_hash.as_slice(),
+                        chunk.xorb_hash.as_slice(),
+                        i64::from(chunk.chunk_index),
+                        i64::from(chunk.uncompressed_size),
+                        chunk.placement_id.as_slice(),
+                        chunk.origin_proof_id.as_slice(),
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to verify recording remote authority: {error}"
+                    ))
+                })?;
+            if !matches {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "remote authority for chunk {} changed within one add",
+                    crab_xet::hash::MerkleHash::from(chunk.chunk_hash).hex()
+                )));
+            }
+        }
+        tx.commit().map_err(|error| {
+            StagingError::Internal(format!("failed to commit remote authority append: {error}"))
+        })
+    }
+
+    pub fn mark_batch_published(&self, batch_id: &str) -> Result<Vec<[u8; 32]>> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!("failed to begin staging publication: {e}"))
+        })?;
+        let superseded_batches = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT DISTINCT lease.batch_id
+                     FROM path_leases AS lease
+                     WHERE lease.batch_id != ?1
+                       AND EXISTS (
+                           SELECT 1 FROM path_leases AS incoming
+                           WHERE incoming.batch_id = ?1
+                             AND incoming.path_bytes = lease.path_bytes
+                       )",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare superseded staging batches: {e}"
+                    ))
+                })?;
+            statement
+                .query_map(params![batch_id], |row| row.get::<_, String>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to query superseded staging batches: {e}"
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to collect superseded staging batch: {e}"
+                    ))
+                })?
+        };
+        let candidates = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT DISTINCT lease.file_hash
+                     FROM path_leases AS lease
+                     WHERE EXISTS (
+                         SELECT 1 FROM path_leases AS incoming
+                         WHERE incoming.batch_id = ?1
+                           AND incoming.path_bytes = lease.path_bytes
+                     )",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare superseded publication owners: {e}"
+                    ))
+                })?;
+            statement
+                .query_map(params![batch_id], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to query superseded publication owners: {e}"
+                    ))
+                })?
+                .map(|row| {
+                    row.map_err(|e| {
+                        StagingError::Internal(format!(
+                            "failed to collect superseded publication owner: {e}"
+                        ))
+                    })
+                    .and_then(|hash| decode_hash_blob("published file hash", hash))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let changed = tx
             .execute(
-                "UPDATE staging_batches SET state = 'published' WHERE batch_id = ?1",
+                "UPDATE staging_batches SET state = 'published'
+                 WHERE batch_id = ?1 AND state = 'open'",
                 params![batch_id],
             )
             .map_err(|e| StagingError::Internal(format!("failed to publish staging batch: {e}")))?;
@@ -2002,14 +2325,407 @@ impl Index {
                 path: format!("staging batch {batch_id}"),
             });
         }
-        Ok(())
+        tx.execute(
+            "INSERT INTO path_heads (path_bytes, batch_id, file_hash, recipe_hash)
+             SELECT path_bytes, batch_id, file_hash, recipe_hash
+             FROM path_leases WHERE batch_id = ?1
+             ON CONFLICT(path_bytes) DO UPDATE SET
+                batch_id = excluded.batch_id,
+                file_hash = excluded.file_hash,
+                recipe_hash = excluded.recipe_hash,
+                updated_at = datetime('now')",
+            params![batch_id],
+        )
+        .map_err(|e| StagingError::Internal(format!("failed to replace path heads: {e}")))?;
+        tx.execute(
+            "DELETE FROM path_leases AS lease
+             WHERE EXISTS (
+                 SELECT 1 FROM path_heads AS incoming
+                 WHERE incoming.batch_id = ?1
+                   AND incoming.path_bytes = lease.path_bytes
+             )
+               AND NOT EXISTS (
+                   SELECT 1 FROM path_heads AS head
+                   WHERE head.batch_id = lease.batch_id
+                     AND head.path_bytes = lease.path_bytes
+                     AND head.recipe_hash = lease.recipe_hash
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM publication_intent_entries AS pending
+                   WHERE pending.batch_id = lease.batch_id
+                     AND pending.path_bytes = lease.path_bytes
+                     AND pending.recipe_hash = lease.recipe_hash
+               )",
+            params![batch_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!("failed to release superseded path leases: {e}"))
+        })?;
+        for superseded_batch in superseded_batches {
+            tx.execute(
+                "DELETE FROM staging_batches
+                 WHERE batch_id = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM path_leases
+                       WHERE path_leases.batch_id = staging_batches.batch_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_intent_entries
+                       WHERE publication_intent_entries.batch_id = staging_batches.batch_id
+                   )",
+                params![superseded_batch],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to remove superseded empty staging batch: {e}"
+                ))
+            })?;
+        }
+        remove_empty_published_batches(&tx)?;
+        let unowned = unowned_file_hashes(&tx, candidates)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!("failed to commit staging publication: {e}"))
+        })?;
+        Ok(unowned)
     }
 
-    /// Load the exact immutable recipe owned by published path leases.
+    pub fn create_publication_intent(
+        &self,
+        intent_id: &str,
+        entries: &[(String, Vec<u8>, String, String)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Err(StagingError::Internal(
+                "publication intent must contain at least one path".to_owned(),
+            ));
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!("failed to begin publication intent: {e}"))
+        })?;
+        tx.execute(
+            "INSERT INTO publication_intents (intent_id) VALUES (?1)",
+            params![intent_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to create publication intent {intent_id}: {e}"
+            ))
+        })?;
+
+        for (batch_id, path_bytes, expected_pointer_oid, previous_index_state) in entries {
+            let recipe_hash: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT lease.recipe_hash
+                     FROM path_leases AS lease
+                     JOIN staging_batches AS batch USING (batch_id)
+                     JOIN verified_recipes AS verified USING (recipe_hash)
+                     WHERE lease.batch_id = ?1 AND lease.path_bytes = ?2
+                       AND batch.state = 'open'",
+                    params![batch_id, path_bytes],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to resolve publication lease {batch_id}: {e}"
+                    ))
+                })?;
+            let recipe_hash = recipe_hash.ok_or_else(|| {
+                StagingError::StagingCorrupt(format!(
+                    "publication intent {intent_id} path has no exact verified open lease in batch {batch_id}"
+                ))
+            })?;
+            tx.execute(
+                "INSERT INTO publication_intent_entries
+                 (intent_id, batch_id, path_bytes, recipe_hash, expected_pointer_oid,
+                  previous_index_state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    intent_id,
+                    batch_id,
+                    path_bytes,
+                    recipe_hash,
+                    expected_pointer_oid,
+                    previous_index_state
+                ],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to record publication intent {intent_id}: {e}"
+                ))
+            })?;
+        }
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to commit publication intent {intent_id}: {e}"
+            ))
+        })
+    }
+
+    pub fn unresolved_publication_intents(&self) -> Result<Vec<StoredPublicationIntent>> {
+        let rows = {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT intent_id, batch_id, path_bytes, recipe_hash, expected_pointer_oid,
+                            previous_index_state
+                     FROM publication_intent_entries
+                     ORDER BY intent_id, path_bytes",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare unresolved publication intents: {e}"
+                    ))
+                })?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to query unresolved publication intents: {e}"
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to collect unresolved publication intents: {e}"
+                    ))
+                })?
+        };
+
+        let mut intents = Vec::<StoredPublicationIntent>::new();
+        for (
+            intent_id,
+            batch_id,
+            path_bytes,
+            recipe_hash,
+            expected_pointer_oid,
+            previous_index_state,
+        ) in rows
+        {
+            if intents
+                .last()
+                .is_none_or(|intent| intent.intent_id != intent_id)
+            {
+                intents.push(StoredPublicationIntent {
+                    intent_id: intent_id.clone(),
+                    entries: Vec::new(),
+                });
+            }
+            let intent = intents.last_mut().ok_or_else(|| {
+                StagingError::Internal("publication intent grouping failed".to_owned())
+            })?;
+            intent.entries.push(StoredPublicationIntentEntry {
+                batch_id,
+                path_bytes,
+                recipe_hash: decode_hash_blob("publication recipe hash", recipe_hash)?,
+                expected_pointer_oid,
+                previous_index_state,
+            });
+        }
+        Ok(intents)
+    }
+
+    pub fn publish_publication_intent(&self, intent_id: &str) -> Result<Vec<[u8; 32]>> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!("failed to begin publication commit: {e}"))
+        })?;
+        let batch_ids = publication_intent_batch_ids(&tx, intent_id)?;
+        if batch_ids.is_empty() {
+            return Err(StagingError::NotFound {
+                path: format!("publication intent {intent_id}"),
+            });
+        }
+        let candidates = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT DISTINCT lease.file_hash
+                     FROM path_leases AS lease
+                     WHERE EXISTS (
+                         SELECT 1 FROM publication_intent_entries AS incoming
+                         WHERE incoming.intent_id = ?1
+                           AND incoming.path_bytes = lease.path_bytes
+                     )",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare superseded intent owners: {e}"
+                    ))
+                })?;
+            statement
+                .query_map(params![intent_id], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to query superseded intent owners: {e}"))
+                })?
+                .map(|row| {
+                    row.map_err(|e| {
+                        StagingError::Internal(format!(
+                            "failed to collect superseded intent owner: {e}"
+                        ))
+                    })
+                    .and_then(|hash| decode_hash_blob("publication intent file hash", hash))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        for batch_id in &batch_ids {
+            let changed = tx
+                .execute(
+                    "UPDATE staging_batches SET state = 'published'
+                     WHERE batch_id = ?1 AND state = 'open'",
+                    params![batch_id],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to publish batch {batch_id} for intent {intent_id}: {e}"
+                    ))
+                })?;
+            if changed != 1 {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "publication intent {intent_id} batch {batch_id} is not open"
+                )));
+            }
+        }
+        tx.execute(
+            "INSERT INTO path_heads (path_bytes, batch_id, file_hash, recipe_hash)
+             SELECT entry.path_bytes, entry.batch_id, lease.file_hash, entry.recipe_hash
+             FROM publication_intent_entries AS entry
+             JOIN path_leases AS lease
+               ON lease.batch_id = entry.batch_id
+              AND lease.path_bytes = entry.path_bytes
+             WHERE entry.intent_id = ?1
+             ON CONFLICT(path_bytes) DO UPDATE SET
+                batch_id = excluded.batch_id,
+                file_hash = excluded.file_hash,
+                recipe_hash = excluded.recipe_hash,
+                updated_at = datetime('now')",
+            params![intent_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to replace publication path heads {intent_id}: {e}"
+            ))
+        })?;
+        tx.execute(
+            "DELETE FROM path_leases AS lease
+             WHERE EXISTS (
+                 SELECT 1 FROM publication_intent_entries AS incoming
+                 WHERE incoming.intent_id = ?1
+                   AND incoming.path_bytes = lease.path_bytes
+             )
+               AND NOT EXISTS (
+                   SELECT 1 FROM path_heads AS head
+                   WHERE head.batch_id = lease.batch_id
+                     AND head.path_bytes = lease.path_bytes
+                     AND head.recipe_hash = lease.recipe_hash
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM publication_intent_entries AS pending
+                   WHERE pending.intent_id != ?1
+                     AND pending.batch_id = lease.batch_id
+                     AND pending.path_bytes = lease.path_bytes
+                     AND pending.recipe_hash = lease.recipe_hash
+               )",
+            params![intent_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to release superseded intent path leases {intent_id}: {e}"
+            ))
+        })?;
+        tx.execute(
+            "DELETE FROM publication_intents WHERE intent_id = ?1",
+            params![intent_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to clear publication intent {intent_id}: {e}"
+            ))
+        })?;
+        remove_empty_published_batches(&tx)?;
+        let unowned = unowned_file_hashes(&tx, candidates)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!("failed to commit publication {intent_id}: {e}"))
+        })?;
+        Ok(unowned)
+    }
+
+    pub fn rollback_publication_intent(&self, intent_id: &str) -> Result<Vec<[u8; 32]>> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!("failed to begin publication rollback: {e}"))
+        })?;
+        let batch_ids = publication_intent_batch_ids(&tx, intent_id)?;
+        if batch_ids.is_empty() {
+            return Err(StagingError::NotFound {
+                path: format!("publication intent {intent_id}"),
+            });
+        }
+        let mut candidates = Vec::new();
+        for batch_id in &batch_ids {
+            let mut statement = tx
+                .prepare_cached("SELECT DISTINCT file_hash FROM path_leases WHERE batch_id = ?1")
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare publication rollback leases: {e}"
+                    ))
+                })?;
+            let hashes = statement
+                .query_map(params![batch_id], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to query publication rollback leases: {e}"
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to collect publication rollback leases: {e}"
+                    ))
+                })?;
+            for hash in hashes {
+                candidates.push(decode_hash_blob("publication rollback file hash", hash)?);
+            }
+        }
+        tx.execute(
+            "DELETE FROM publication_intents WHERE intent_id = ?1",
+            params![intent_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to clear publication intent {intent_id}: {e}"
+            ))
+        })?;
+        for batch_id in &batch_ids {
+            tx.execute(
+                "DELETE FROM staging_batches WHERE batch_id = ?1",
+                params![batch_id],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to remove rolled-back batch {batch_id}: {e}"
+                ))
+            })?;
+        }
+        let unleased = unowned_file_hashes(&tx, candidates)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to commit publication rollback {intent_id}: {e}"
+            ))
+        })?;
+        Ok(unleased)
+    }
+
+    /// Load the exact immutable recipe owned by a canonical path head.
     ///
-    /// This is the push/read boundary for layout v2. Legacy `files/chunks`
-    /// rows remain the physical segment-write journal, but they cannot define
-    /// a publishable file once migration has completed.
+    /// Physical file/chunk rows cannot define a publishable file without a
+    /// verified recipe retained for an unpushed Git history entry.
     pub fn published_recipe_for_file(
         &self,
         file_hash: &[u8; 32],
@@ -2018,10 +2734,12 @@ impl Index {
             let mut statement = self
                 .conn
                 .prepare_cached(
-                    "SELECT DISTINCT recipe.recipe_hash, recipe.file_size, recipe.policy_id
+                    "SELECT DISTINCT recipe.recipe_hash, recipe.file_size,
+                            recipe.chunk_count, recipe.sequence_hash,
+                            recipe.page_count, recipe.page_root_hash, recipe.policy_id
                      FROM file_recipes AS recipe
                      JOIN verified_recipes AS verified USING (recipe_hash)
-                     JOIN path_leases AS lease USING (recipe_hash)
+                     JOIN path_heads AS head USING (recipe_hash)
                      JOIN staging_batches AS batch USING (batch_id)
                      WHERE recipe.file_hash = ?1 AND batch.state = 'published'
                      ORDER BY recipe.recipe_hash",
@@ -2034,7 +2752,11 @@ impl Index {
                     Ok((
                         row.get::<_, Vec<u8>>(0)?,
                         row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 })
                 .map_err(|e| {
@@ -2047,10 +2769,29 @@ impl Index {
         };
 
         let mut selected = None;
-        for (raw_recipe_hash, raw_file_size, policy_id) in rows {
+        for (
+            raw_recipe_hash,
+            raw_file_size,
+            raw_chunk_count,
+            raw_sequence_hash,
+            raw_page_count,
+            raw_page_root_hash,
+            policy_id,
+        ) in rows
+        {
             let stored_recipe_hash = decode_hash_blob("published recipe hash", raw_recipe_hash)?;
-            let recipe =
-                self.load_stored_recipe(&stored_recipe_hash, file_hash, raw_file_size, &policy_id)?;
+            let recipe = self.load_stored_recipe(
+                &stored_recipe_hash,
+                file_hash,
+                (
+                    raw_file_size,
+                    raw_chunk_count,
+                    raw_sequence_hash,
+                    raw_page_count,
+                    raw_page_root_hash,
+                    policy_id,
+                ),
+            )?;
             if let Some(prior) = &selected
                 && prior != &recipe
             {
@@ -2063,115 +2804,398 @@ impl Index {
         Ok(selected)
     }
 
+    pub fn verified_local_recipe(
+        &self,
+        recipe_hash: &[u8; 32],
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        let stored: Option<StoredRecipeRow> = self
+            .conn
+            .query_row(
+                "SELECT recipe.file_hash, recipe.file_size, recipe.chunk_count,
+                        recipe.sequence_hash, recipe.page_count,
+                        recipe.page_root_hash, recipe.policy_id
+                 FROM file_recipes AS recipe
+                 JOIN verified_recipes AS verified USING (recipe_hash)
+                 WHERE recipe.recipe_hash = ?1",
+                params![recipe_hash.as_slice()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to query verified local recipe: {e}"))
+            })?;
+        let Some((
+            file_hash,
+            file_size,
+            chunk_count,
+            sequence_hash,
+            page_count,
+            page_root_hash,
+            policy_id,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        let file_hash = decode_hash_blob("verified local recipe file hash", file_hash)?;
+        self.load_stored_recipe(
+            recipe_hash,
+            &file_hash,
+            (
+                file_size,
+                chunk_count,
+                sequence_hash,
+                page_count,
+                page_root_hash,
+                policy_id,
+            ),
+        )
+        .map(Some)
+    }
+
     fn load_stored_recipe(
         &self,
         stored_recipe_hash: &[u8; 32],
         file_hash: &[u8; 32],
-        raw_file_size: i64,
-        policy_id: &str,
+        metadata: StoredRecipeMetadata,
     ) -> Result<crate::recipe::FileRecipe> {
+        let (
+            raw_file_size,
+            raw_chunk_count,
+            raw_sequence_hash,
+            raw_page_count,
+            raw_page_root_hash,
+            policy_id,
+        ) = metadata;
         let file_size = u64::try_from(raw_file_size)
             .map_err(|_| StagingError::StagingCorrupt("negative stored recipe size".to_owned()))?;
-        let policy = crate::recipe::ChunkingPolicyId::parse(policy_id)?;
-        let occurrences = {
-            let mut statement = self
-                .conn
-                .prepare_cached(
-                    "SELECT occurrence.occurrence, occurrence.chunk_hash,
-                            occurrence.chunk_offset, occurrence.chunk_size,
-                            (
-                                SELECT payload.size
-                                FROM chunk_payloads AS payload
-                                WHERE payload.chunk_hash = occurrence.chunk_hash
-                                LIMIT 1
-                            ),
-                            (
-                                SELECT prepared.uncompressed_size
-                                FROM prepared_xorb_chunks AS prepared
-                                JOIN prepared_xorbs AS xorb
-                                  ON xorb.file_hash = prepared.file_hash
-                                 AND xorb.xorb_hash = prepared.xorb_hash
-                                WHERE prepared.chunk_hash = occurrence.chunk_hash
-                                ORDER BY prepared.file_hash, prepared.xorb_hash
-                                LIMIT 1
-                            )
-                     FROM recipe_occurrences AS occurrence
-                     WHERE occurrence.recipe_hash = ?1
-                     ORDER BY occurrence.occurrence",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to prepare stored recipe occurrence query: {e}"
+        let chunk_count = nonnegative_count("stored recipe chunk count", raw_chunk_count)?;
+        let sequence_hash = decode_hash_blob("stored recipe sequence hash", raw_sequence_hash)?;
+        let page_count = nonnegative_count("stored recipe page count", raw_page_count)?;
+        let page_root_hash = decode_hash_blob("stored recipe page-root hash", raw_page_root_hash)?;
+        let policy = crate::recipe::ChunkingPolicyId::parse(&policy_id)?;
+        let recipe = crate::recipe::FileRecipe::from_stored_root(
+            policy,
+            crab_xet::hash::MerkleHash::from(*file_hash),
+            file_size,
+            chunk_count,
+            sequence_hash,
+            page_count,
+            page_root_hash,
+            *stored_recipe_hash,
+        )?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT page_index, page_hash
+                 FROM recipe_pages
+                 WHERE recipe_hash = ?1
+                 ORDER BY page_index",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to prepare recipe page-root query: {e}"))
+            })?;
+        let mut rows = statement
+            .query(params![stored_recipe_hash.as_slice()])
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to query recipe page root: {e}"))
+            })?;
+        let mut page_root_hasher = crate::recipe::new_page_root_hasher();
+        let mut found_pages = 0u64;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| StagingError::Internal(format!("failed to read recipe page root: {e}")))?
+        {
+            let page_index: i64 = row.get(0).map_err(|e| {
+                StagingError::Internal(format!("failed to read recipe page index: {e}"))
+            })?;
+            if nonnegative_count("recipe page index", page_index)? != found_pages {
+                return Err(StagingError::StagingCorrupt(
+                    "stored recipe pages are not contiguous".to_owned(),
+                ));
+            }
+            let page_hash = decode_hash_blob(
+                "stored recipe page hash",
+                row.get(1).map_err(|e| {
+                    StagingError::Internal(format!("failed to read recipe page hash: {e}"))
+                })?,
+            )?;
+            page_root_hasher.update(&page_hash);
+            found_pages = found_pages.checked_add(1).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe page count overflow".to_owned())
+            })?;
+        }
+        if found_pages != recipe.page_count()
+            || page_root_hasher.finalize().as_bytes() != &recipe.page_root_hash()
+        {
+            return Err(StagingError::StagingCorrupt(
+                "stored recipe page root does not match its indexed pages".to_owned(),
+            ));
+        }
+        Ok(recipe)
+    }
+
+    /// Read and verify one bounded canonical recipe page.
+    pub fn recipe_page(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<crate::recipe::RecipePage> {
+        if start_occurrence > recipe.chunk_count()
+            || !start_occurrence.is_multiple_of(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+        {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe page start {start_occurrence} is invalid for {} terms",
+                recipe.chunk_count()
+            )));
+        }
+        if start_occurrence == recipe.chunk_count() {
+            return Ok(crate::recipe::RecipePage {
+                start_occurrence,
+                start_offset: recipe.file_size(),
+                chunks: Vec::new(),
+            });
+        }
+        let page_index = start_occurrence / crate::recipe::RECIPE_PAGE_ENTRIES as u64;
+        let metadata: (i64, i64, i64, i64, Vec<u8>) = self
+            .conn
+            .query_row(
+                "SELECT start_occurrence, start_offset, occurrence_count,
+                        page_bytes, page_hash
+                 FROM recipe_pages
+                 WHERE recipe_hash = ?1 AND page_index = ?2",
+                params![
+                    recipe.hash().as_slice(),
+                    sqlite_i64("recipe page index", page_index)?
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
                     ))
-                })?;
-            statement
-                .query_map(params![stored_recipe_hash.as_slice()], |row| {
+                },
+            )
+            .optional()
+            .map_err(|e| StagingError::Internal(format!("failed to query recipe page: {e}")))?
+            .ok_or_else(|| {
+                StagingError::StagingCorrupt(format!(
+                    "recipe {} is missing page {page_index}",
+                    crab_xet::hash::MerkleHash::from(recipe.hash()).hex()
+                ))
+            })?;
+        let stored_start = nonnegative_count("recipe page start", metadata.0)?;
+        let start_offset = nonnegative_count("recipe page offset", metadata.1)?;
+        let occurrence_count = nonnegative_count("recipe page term count", metadata.2)?;
+        let page_bytes = nonnegative_count("recipe page bytes", metadata.3)?;
+        let stored_page_hash = decode_hash_blob("recipe page hash", metadata.4)?;
+        if stored_start != start_occurrence
+            || occurrence_count == 0
+            || occurrence_count > crate::recipe::RECIPE_PAGE_ENTRIES as u64
+        {
+            return Err(StagingError::StagingCorrupt(
+                "stored recipe page metadata is invalid".to_owned(),
+            ));
+        }
+
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT occurrence, chunk_hash, chunk_offset, chunk_size
+                 FROM recipe_occurrences AS occurrence
+                 WHERE recipe_hash = ?1
+                   AND occurrence >= ?2
+                   AND occurrence < ?3
+                 ORDER BY occurrence",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to prepare recipe page terms: {e}"))
+            })?;
+        let end_occurrence = start_occurrence
+            .checked_add(occurrence_count)
+            .ok_or_else(|| StagingError::StagingCorrupt("recipe page end overflow".to_owned()))?;
+        let rows = statement
+            .query_map(
+                params![
+                    recipe.hash().as_slice(),
+                    sqlite_i64("recipe page start", start_occurrence)?,
+                    sqlite_i64("recipe page end", end_occurrence)?
+                ],
+                |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
                     ))
-                })
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to query stored recipe occurrences: {e}"
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to collect stored recipe occurrences: {e}"
-                    ))
-                })?
-        };
-        let mut chunks = Vec::with_capacity(occurrences.len());
-        let mut expected_offset = 0u64;
-        for (expected_occurrence, row) in occurrences.into_iter().enumerate() {
-            let (
-                occurrence,
-                raw_chunk_hash,
-                raw_offset,
-                raw_size,
-                raw_segment_size,
-                raw_prepared_size,
-            ) = row;
-            validate_chunk_index(expected_occurrence, occurrence)?;
-            let chunk_hash = decode_hash_blob("stored recipe chunk", raw_chunk_hash)?;
-            let offset = u64::try_from(raw_offset).map_err(|_| {
-                StagingError::StagingCorrupt("negative stored recipe chunk offset".to_owned())
+                },
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to query recipe page terms: {e}"))
             })?;
-            let size = u64::try_from(raw_size).map_err(|_| {
-                StagingError::StagingCorrupt("negative stored recipe chunk size".to_owned())
+        let mut chunks = Vec::with_capacity(occurrence_count as usize);
+        let mut expected_occurrence = start_occurrence;
+        let mut expected_offset = start_offset;
+        for row in rows {
+            let (occurrence, raw_hash, raw_offset, raw_size) = row.map_err(|e| {
+                StagingError::Internal(format!("failed to read recipe page term: {e}"))
             })?;
-            let payload_matches = [raw_segment_size, raw_prepared_size]
-                .into_iter()
-                .flatten()
-                .any(|payload_size| u64::try_from(payload_size) == Ok(size));
-            if offset != expected_offset || !payload_matches {
+            if nonnegative_count("recipe occurrence", occurrence)? != expected_occurrence
+                || nonnegative_count("recipe occurrence offset", raw_offset)? != expected_offset
+            {
                 return Err(StagingError::StagingCorrupt(
-                    "stored recipe occurrence does not match its payload inventory".to_owned(),
+                    "recipe page is non-contiguous".to_owned(),
                 ));
             }
-            expected_offset = expected_offset.checked_add(size).ok_or_else(|| {
-                StagingError::StagingCorrupt("stored recipe byte length overflow".to_owned())
+            let size = nonnegative_count("recipe occurrence size", raw_size)?;
+            let chunk_hash = crab_xet::hash::MerkleHash::from(decode_hash_blob(
+                "recipe occurrence hash",
+                raw_hash,
+            )?);
+            chunks.push(crab_diff::chunk_sequence::ChunkSpan {
+                chunk_hash,
+                offset: expected_offset,
+                len: size,
+                origin: crab_diff::chunk_sequence::ChunkOrigin {
+                    xorb_hash: None,
+                    xorb_chunk_index: None,
+                },
+            });
+            expected_occurrence = expected_occurrence.checked_add(1).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe occurrence overflow".to_owned())
             })?;
-            chunks.push((crab_xet::hash::MerkleHash::from(chunk_hash), size));
+            expected_offset = expected_offset.checked_add(size).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe occurrence byte overflow".to_owned())
+            })?;
         }
-        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
-            policy,
-            crab_xet::hash::MerkleHash::from(*file_hash),
-            file_size,
-            &chunks,
-        )?;
-        if recipe.hash() != *stored_recipe_hash {
+        if expected_occurrence != end_occurrence
+            || expected_offset.checked_sub(start_offset) != Some(page_bytes)
+        {
             return Err(StagingError::StagingCorrupt(
-                "stored recipe hash does not match its occurrences".to_owned(),
+                "recipe page coverage does not match its metadata".to_owned(),
             ));
         }
-        Ok(recipe)
+        let page_terms = chunks
+            .iter()
+            .map(|chunk| (chunk.chunk_hash, chunk.len))
+            .collect::<Vec<_>>();
+        if crate::recipe::page_hash(start_occurrence, start_offset, &page_terms)?
+            != stored_page_hash
+        {
+            return Err(StagingError::StagingCorrupt(
+                "recipe page digest does not match its terms".to_owned(),
+            ));
+        }
+        Ok(crate::recipe::RecipePage {
+            start_occurrence,
+            start_offset,
+            chunks,
+        })
+    }
+
+    /// Verify that one canonical recipe page is backed by this file's segments.
+    pub fn recipe_page_has_segment_authority(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<bool> {
+        let page = self.recipe_page(recipe, start_occurrence)?;
+        if page.chunks.is_empty() {
+            return Ok(true);
+        }
+        let end_occurrence = page.next_occurrence();
+        let file_hash: [u8; 32] = recipe.file_hash().into();
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "WITH combined AS (
+                     SELECT chunk_hash, size, chunk_index, 0 AS priority, rowid
+                     FROM chunks
+                     WHERE file_hash = ?1 AND chunk_index >= ?2 AND chunk_index < ?3
+                     UNION ALL
+                     SELECT chunk_hash, size, chunk_index, 1 AS priority, rowid
+                     FROM pending_chunks
+                     WHERE file_hash = ?1 AND chunk_index >= ?2 AND chunk_index < ?3
+                 )
+                 SELECT chunk_index, chunk_hash, size
+                 FROM combined AS candidate
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM combined AS preferred
+                     WHERE preferred.chunk_index = candidate.chunk_index
+                       AND (
+                           preferred.priority < candidate.priority
+                           OR (
+                               preferred.priority = candidate.priority
+                               AND preferred.rowid < candidate.rowid
+                           )
+                       )
+                 )
+                 ORDER BY chunk_index",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to prepare recipe segment-authority page: {e}"
+                ))
+            })?;
+        let rows = statement
+            .query_map(
+                params![
+                    file_hash.as_slice(),
+                    sqlite_i64("recipe segment page start", start_occurrence)?,
+                    sqlite_i64("recipe segment page end", end_occurrence)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to query recipe segment-authority page: {e}"
+                ))
+            })?;
+        let rows = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to collect recipe segment-authority page: {e}"
+                ))
+            })?;
+        if rows.len() != page.chunks.len() {
+            return Ok(false);
+        }
+        for (index, ((raw_occurrence, raw_hash, raw_size), expected)) in
+            rows.into_iter().zip(&page.chunks).enumerate()
+        {
+            let occurrence = nonnegative_count("segment recipe occurrence", raw_occurrence)?;
+            let expected_occurrence =
+                start_occurrence.checked_add(index as u64).ok_or_else(|| {
+                    StagingError::StagingCorrupt("segment recipe occurrence overflow".to_owned())
+                })?;
+            if occurrence != expected_occurrence
+                || decode_hash_blob("segment recipe chunk hash", raw_hash)?
+                    != <[u8; 32]>::from(expected.chunk_hash)
+                || nonnegative_count("segment recipe chunk size", raw_size)? != expected.len
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Atomically pin the exact immutable recipes consumed by one push.
@@ -2197,13 +3221,24 @@ impl Index {
 
         for recipe in recipes {
             let recipe_hash = recipe.hash();
-            let file_hash: [u8; 32] = recipe.sequence().file_hash.into();
-            let stored: Option<(Vec<u8>, i64, String)> = tx
+            let file_hash: [u8; 32] = recipe.file_hash().into();
+            let stored: Option<StoredRecipeRow> = tx
                 .query_row(
-                    "SELECT file_hash, file_size, policy_id
+                    "SELECT file_hash, file_size, chunk_count, sequence_hash,
+                            page_count, page_root_hash, policy_id
                      FROM file_recipes WHERE recipe_hash = ?1",
                     params![recipe_hash.as_slice()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|e| {
@@ -2211,14 +3246,27 @@ impl Index {
                         "failed to read recipe for push snapshot {snapshot_id}: {e}"
                     ))
                 })?;
-            let Some((stored_file_hash, stored_size, stored_policy)) = stored else {
+            let Some((
+                stored_file_hash,
+                stored_size,
+                stored_chunks,
+                stored_sequence_hash,
+                stored_pages,
+                stored_page_root_hash,
+                stored_policy,
+            )) = stored
+            else {
                 return Err(StagingError::StagingCorrupt(format!(
                     "push snapshot {snapshot_id} references missing recipe {}",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             };
             if stored_file_hash.as_slice() != file_hash
-                || stored_size != sqlite_i64("recipe file size", recipe.sequence().file_size)?
+                || stored_size != sqlite_i64("recipe file size", recipe.file_size())?
+                || stored_chunks != sqlite_i64("recipe chunk count", recipe.chunk_count())?
+                || stored_sequence_hash.as_slice() != recipe.sequence_hash()
+                || stored_pages != sqlite_i64("recipe page count", recipe.page_count())?
+                || stored_page_root_hash.as_slice() != recipe.page_root_hash()
                 || stored_policy != recipe.policy().as_str()
             {
                 return Err(StagingError::StagingCorrupt(format!(
@@ -2227,79 +3275,25 @@ impl Index {
                 )));
             }
 
-            let stored_occurrences = {
-                let mut statement = tx
-                    .prepare_cached(
-                        "SELECT chunk_hash, chunk_offset, chunk_size
-                         FROM recipe_occurrences
-                         WHERE recipe_hash = ?1
-                         ORDER BY occurrence",
-                    )
-                    .map_err(|e| {
-                        StagingError::Internal(format!(
-                            "failed to prepare snapshot recipe occurrence query: {e}"
-                        ))
-                    })?;
-                statement
-                    .query_map(params![recipe_hash.as_slice()], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    })
-                    .map_err(|e| {
-                        StagingError::Internal(format!(
-                            "failed to query snapshot recipe occurrences: {e}"
-                        ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| {
-                        StagingError::Internal(format!(
-                            "failed to collect snapshot recipe occurrences: {e}"
-                        ))
-                    })?
-            };
-            if stored_occurrences.len() != recipe.sequence().spans.len() {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} has {} stored occurrences, expected {}",
-                    blake3::Hash::from(recipe_hash).to_hex(),
-                    stored_occurrences.len(),
-                    recipe.sequence().spans.len()
-                )));
-            }
-            for (stored, expected) in stored_occurrences.iter().zip(&recipe.sequence().spans) {
-                let expected_hash: [u8; 32] = expected.chunk_hash.into();
-                if stored.0.as_slice() != expected_hash
-                    || stored.1 != sqlite_i64("recipe chunk offset", expected.offset)?
-                    || stored.2 != sqlite_i64("recipe chunk size", expected.len)?
-                {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "push snapshot {snapshot_id} recipe {} occurrence data changed",
-                        blake3::Hash::from(recipe_hash).to_hex()
-                    )));
-                }
-            }
-
-            let published_lease: bool = tx
+            let published_head: bool = tx
                 .query_row(
                     "SELECT EXISTS(
                          SELECT 1
-                         FROM path_leases AS lease
+                         FROM path_heads AS head
                          JOIN staging_batches AS batch USING (batch_id)
-                         WHERE lease.recipe_hash = ?1 AND batch.state = 'published'
+                         WHERE head.recipe_hash = ?1 AND batch.state = 'published'
                      )",
                     params![recipe_hash.as_slice()],
                     |row| row.get(0),
                 )
                 .map_err(|e| {
                     StagingError::Internal(format!(
-                        "failed to verify published recipe lease for snapshot {snapshot_id}: {e}"
+                        "failed to verify published recipe head for snapshot {snapshot_id}: {e}"
                     ))
                 })?;
-            if !published_lease {
+            if !published_head {
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} has no published path lease",
+                    "push snapshot {snapshot_id} recipe {} has no published path head",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -2317,11 +3311,11 @@ impl Index {
                 .execute(
                     "INSERT INTO push_snapshot_leases
                      (snapshot_id, batch_id, path_bytes, file_hash, recipe_hash)
-                     SELECT ?1, lease.batch_id, lease.path_bytes,
-                            lease.file_hash, lease.recipe_hash
-                     FROM path_leases AS lease
-                     JOIN staging_batches AS batch USING (batch_id)
-                     WHERE lease.recipe_hash = ?2 AND batch.state = 'published'",
+                     SELECT ?1, head.batch_id, head.path_bytes,
+                            head.file_hash, head.recipe_hash
+                     FROM path_heads AS head
+                     JOIN staging_batches AS batch ON batch.batch_id = head.batch_id
+                     WHERE head.recipe_hash = ?2 AND batch.state = 'published'",
                     params![snapshot_id, recipe_hash.as_slice()],
                 )
                 .map_err(|e| {
@@ -2446,6 +3440,22 @@ impl Index {
 
         if state.as_deref() == Some("committed") {
             tx.execute(
+                "DELETE FROM path_heads
+                 WHERE EXISTS (
+                     SELECT 1 FROM push_snapshot_leases AS captured
+                     WHERE captured.snapshot_id = ?1
+                       AND captured.batch_id = path_heads.batch_id
+                       AND captured.path_bytes = path_heads.path_bytes
+                       AND captured.recipe_hash = path_heads.recipe_hash
+                 )",
+                params![snapshot_id],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to retire exact path heads for push snapshot {snapshot_id}: {e}"
+                ))
+            })?;
+            tx.execute(
                 "DELETE FROM path_leases
                  WHERE EXISTS (
                      SELECT 1 FROM push_snapshot_leases AS captured
@@ -2508,23 +3518,7 @@ impl Index {
             })?;
         }
 
-        let mut unleased = Vec::new();
-        for file_hash in file_hashes {
-            let remaining: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM path_leases WHERE file_hash = ?1)",
-                    params![file_hash.as_slice()],
-                    |row| row.get(0),
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to check leases after snapshot retirement: {e}"
-                    ))
-                })?;
-            if !remaining {
-                unleased.push(file_hash);
-            }
-        }
+        let unleased = unowned_file_hashes(&tx, file_hashes)?;
         tx.commit().map_err(|e| {
             StagingError::Internal(format!(
                 "failed to commit push snapshot retirement {snapshot_id}: {e}"
@@ -2545,8 +3539,44 @@ impl Index {
         Ok(())
     }
 
-    pub fn remove_open_push_snapshot(&self, snapshot_id: &str) -> Result<()> {
-        self.conn
+    /// Discard an uncommitted snapshot and reclaim leases that it alone pinned.
+    pub fn discard_open_push_snapshot(&self, snapshot_id: &str) -> Result<Vec<[u8; 32]>> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to begin open push snapshot discard {snapshot_id}: {e}"
+            ))
+        })?;
+        let file_hashes = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT DISTINCT recipe.file_hash
+                     FROM push_snapshot_recipes AS pin
+                     JOIN file_recipes AS recipe USING (recipe_hash)
+                     WHERE pin.snapshot_id = ?1",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare discarded snapshot owners {snapshot_id}: {e}"
+                    ))
+                })?;
+            statement
+                .query_map(params![snapshot_id], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to query discarded snapshot owners {snapshot_id}: {e}"
+                    ))
+                })?
+                .map(|row| {
+                    row.map_err(|e| {
+                        StagingError::Internal(format!(
+                            "failed to collect discarded snapshot owner {snapshot_id}: {e}"
+                        ))
+                    })
+                    .and_then(|hash| decode_hash_blob("discarded snapshot file hash", hash))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let removed = tx
             .execute(
                 "DELETE FROM push_snapshots
                  WHERE snapshot_id = ?1 AND state = 'open'",
@@ -2557,7 +3587,32 @@ impl Index {
                     "failed to discard open push snapshot {snapshot_id}: {e}"
                 ))
             })?;
-        Ok(())
+        if removed == 0 {
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM push_snapshots WHERE snapshot_id = ?1)",
+                    params![snapshot_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to inspect push snapshot {snapshot_id}: {e}"
+                    ))
+                })?;
+            if exists {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "push snapshot {snapshot_id} is committed and cannot be discarded"
+                )));
+            }
+            return Ok(Vec::new());
+        }
+        let unowned = unowned_file_hashes(&tx, file_hashes)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to commit open push snapshot discard {snapshot_id}: {e}"
+            ))
+        })?;
+        Ok(unowned)
     }
 
     pub fn push_snapshot_states(&self) -> Result<Vec<(String, String)>> {
@@ -2572,6 +3627,81 @@ impl Index {
             .map_err(|e| StagingError::Internal(format!("failed to query push snapshots: {e}")))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| StagingError::Internal(format!("failed to collect push snapshots: {e}")))
+    }
+
+    /// Release any non-canonical published leases and return completed files
+    /// that have no path head/lease or immutable push-snapshot pin.
+    pub fn reclaim_superseded_ownership(&self) -> Result<Vec<[u8; 32]>> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to begin superseded ownership reclamation: {e}"
+            ))
+        })?;
+        tx.execute(
+            "DELETE FROM path_leases AS lease
+             WHERE EXISTS (
+                 SELECT 1 FROM staging_batches AS batch
+                 WHERE batch.batch_id = lease.batch_id
+                   AND batch.state = 'published'
+             )
+               AND NOT EXISTS (
+                   SELECT 1 FROM path_heads AS head
+                   WHERE head.batch_id = lease.batch_id
+                     AND head.path_bytes = lease.path_bytes
+                     AND head.recipe_hash = lease.recipe_hash
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM publication_intent_entries AS pending
+                   WHERE pending.batch_id = lease.batch_id
+                     AND pending.path_bytes = lease.path_bytes
+                     AND pending.recipe_hash = lease.recipe_hash
+               )",
+            [],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to release reclaimable superseded leases: {e}"
+            ))
+        })?;
+        remove_empty_published_batches(&tx)?;
+
+        let candidates = {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT DISTINCT recipe.file_hash
+                     FROM file_recipes AS recipe
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM path_leases AS lease
+                         WHERE lease.file_hash = recipe.file_hash
+                     )",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare reclaimable staged files: {e}"
+                    ))
+                })?;
+            statement
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to query reclaimable staged files: {e}"))
+                })?
+                .map(|row| {
+                    row.map_err(|e| {
+                        StagingError::Internal(format!(
+                            "failed to collect reclaimable staged file: {e}"
+                        ))
+                    })
+                    .and_then(|hash| decode_hash_blob("reclaimable staged file hash", hash))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let unowned = unowned_file_hashes(&tx, candidates)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!(
+                "failed to commit superseded ownership reclamation: {e}"
+            ))
+        })?;
+        Ok(unowned)
     }
 
     /// Atomically persist an immutable recipe and attach one batch/path lease.
@@ -2605,78 +3735,174 @@ impl Index {
             })?;
         let recipe_hash_array = recipe.hash();
         let recipe_hash: &[u8] = &recipe_hash_array;
-        let file_hash_array: [u8; 32] = recipe.sequence().file_hash.into();
+        let file_hash_array: [u8; 32] = recipe.file_hash().into();
         let file_hash: &[u8] = &file_hash_array;
         tx.execute(
             "INSERT OR IGNORE INTO file_recipes
-             (recipe_hash, file_hash, file_size, policy_id)
-             VALUES (?1, ?2, ?3, ?4)",
+             (recipe_hash, file_hash, file_size, chunk_count, sequence_hash,
+              page_count, page_root_hash, policy_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 recipe_hash,
                 file_hash,
-                sqlite_i64("recipe file size", recipe.sequence().file_size)?,
+                sqlite_i64("recipe file size", recipe.file_size())?,
+                sqlite_i64("recipe chunk count", recipe.chunk_count())?,
+                recipe.sequence_hash().as_slice(),
+                sqlite_i64("recipe page count", recipe.page_count())?,
+                recipe.page_root_hash().as_slice(),
                 recipe.policy().as_str()
             ],
         )
         .map_err(|e| StagingError::Internal(format!("failed to insert file recipe: {e}")))?;
-        let stored_recipe: (Vec<u8>, i64, String) = tx
+        let stored_recipe: (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String) = tx
             .query_row(
-                "SELECT file_hash, file_size, policy_id
+                "SELECT file_hash, file_size, chunk_count, sequence_hash,
+                        page_count, page_root_hash, policy_id
                  FROM file_recipes WHERE recipe_hash = ?1",
                 params![recipe_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to validate stored file recipe: {e}"))
             })?;
         if stored_recipe.0.as_slice() != file_hash
-            || stored_recipe.1 != sqlite_i64("recipe file size", recipe.sequence().file_size)?
-            || stored_recipe.2 != recipe.policy().as_str()
+            || stored_recipe.1 != sqlite_i64("recipe file size", recipe.file_size())?
+            || stored_recipe.2 != sqlite_i64("recipe chunk count", recipe.chunk_count())?
+            || stored_recipe.3.as_slice() != recipe.sequence_hash()
+            || stored_recipe.4 != sqlite_i64("recipe page count", recipe.page_count())?
+            || stored_recipe.5.as_slice() != recipe.page_root_hash()
+            || stored_recipe.6 != recipe.policy().as_str()
         {
             return Err(StagingError::StagingCorrupt(
                 "stored recipe identity collides with different file metadata".to_owned(),
             ));
         }
 
-        for (batch_index, chunks) in recipe
-            .sequence()
-            .spans
-            .chunks(RECIPE_OCCURRENCE_INSERT_BATCH)
-            .enumerate()
-        {
-            let batch_offset = batch_index
-                .checked_mul(RECIPE_OCCURRENCE_INSERT_BATCH)
-                .ok_or_else(|| {
-                    StagingError::StagingCorrupt("too many recipe occurrences".to_owned())
-                })?;
-            let placeholders = vec!["(?, ?, ?, ?)"; chunks.len()].join(",");
-            let sql = format!(
+        tx.execute(
+            "INSERT INTO temp.incoming_recipe_occurrences
+             (occurrence, chunk_hash, chunk_offset, chunk_size)
+             SELECT occurrence, chunk_hash, chunk_offset, chunk_size
+             FROM recipe_recording_terms
+             WHERE batch_id = ?1
+             ORDER BY occurrence",
+            params![batch_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!("failed to load recorded recipe terms: {e}"))
+        })?;
+        let mut incoming_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM temp.incoming_recipe_occurrences",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StagingError::Internal(format!("failed to count recipe terms: {e}")))?;
+        if incoming_count == 0 && recipe.chunk_count() > 0 {
+            tx.execute(
                 "INSERT INTO temp.incoming_recipe_occurrences
                  (occurrence, chunk_hash, chunk_offset, chunk_size)
-                 VALUES {placeholders}"
-            );
-            let mut values = Vec::with_capacity(chunks.len() * 4);
-            for (relative_index, chunk) in chunks.iter().enumerate() {
-                let occurrence = batch_offset.checked_add(relative_index).ok_or_else(|| {
-                    StagingError::StagingCorrupt("too many recipe occurrences".to_owned())
-                })?;
-                let occurrence = i64::try_from(occurrence).map_err(|_| {
-                    StagingError::StagingCorrupt("too many recipe occurrences".to_owned())
-                })?;
-                let chunk_hash: [u8; 32] = chunk.chunk_hash.into();
-                values.push(Value::Integer(occurrence));
-                values.push(Value::Blob(chunk_hash.to_vec()));
-                values.push(Value::Integer(sqlite_i64(
-                    "recipe chunk offset",
-                    chunk.offset,
-                )?));
-                values.push(Value::Integer(sqlite_i64("recipe chunk size", chunk.len)?));
-            }
-            tx.execute(&sql, params_from_iter(values)).map_err(|e| {
-                StagingError::Internal(format!(
-                    "failed to load incoming recipe occurrence batch: {e}"
-                ))
+                 SELECT occurrence, chunk_hash, chunk_offset, chunk_size
+                 FROM recipe_occurrences
+                 WHERE recipe_hash = ?1
+                 ORDER BY occurrence",
+                params![recipe_hash],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to reuse indexed recipe terms: {e}"))
             })?;
+            incoming_count = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM temp.incoming_recipe_occurrences",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to recount recipe terms: {e}"))
+                })?;
+        }
+        if incoming_count == 0 && recipe.chunk_count() > 0 {
+            tx.execute(
+                "WITH combined AS (
+                     SELECT chunk_hash, chunk_index, size, 0 AS priority, rowid
+                     FROM chunks WHERE file_hash = ?1
+                     UNION ALL
+                     SELECT chunk_hash, chunk_index, size, 1 AS priority, rowid
+                     FROM pending_chunks WHERE file_hash = ?1
+                 ), ranked AS (
+                     SELECT chunk_hash, chunk_index, size,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY chunk_index ORDER BY priority, rowid
+                            ) AS authority_rank
+                     FROM combined
+                 )
+                 INSERT INTO temp.incoming_recipe_occurrences
+                 (occurrence, chunk_hash, chunk_offset, chunk_size)
+                 SELECT chunk_index, chunk_hash,
+                        COALESCE(SUM(size) OVER (
+                            ORDER BY chunk_index ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                        ), 0),
+                        size
+                 FROM ranked
+                 WHERE authority_rank = 1
+                 ORDER BY chunk_index",
+                params![file_hash],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to derive indexed recipe terms: {e}"))
+            })?;
+        }
+
+        let occurrence_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM temp.incoming_recipe_occurrences",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StagingError::Internal(format!("failed to count recipe terms: {e}")))?;
+        if occurrence_count != sqlite_i64("recipe chunk count", recipe.chunk_count())? {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe has {occurrence_count} indexed terms, expected {}",
+                recipe.chunk_count()
+            )));
+        }
+        let discontinuity: Option<i64> = tx
+            .query_row(
+                "WITH ordered AS (
+                     SELECT occurrence, chunk_offset,
+                            ROW_NUMBER() OVER (ORDER BY occurrence) - 1
+                                AS expected_occurrence,
+                            COALESCE(SUM(chunk_size) OVER (
+                                ORDER BY occurrence
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                            ), 0) AS expected_offset
+                     FROM temp.incoming_recipe_occurrences
+                 )
+                 SELECT occurrence
+                 FROM ordered
+                 WHERE occurrence != expected_occurrence
+                    OR chunk_offset != expected_offset
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to validate recipe continuity: {e}"))
+            })?;
+        if let Some(occurrence) = discontinuity {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe occurrence {occurrence} is not contiguous"
+            )));
         }
 
         let collision: Option<i64> = tx
@@ -2703,6 +3929,62 @@ impl Index {
             )));
         }
 
+        let remote_collision: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT recording.chunk_hash
+                 FROM recording_remote_chunks AS recording
+                 JOIN recipe_remote_chunks AS stored
+                   ON stored.recipe_hash = ?1
+                  AND stored.chunk_hash = recording.chunk_hash
+                 WHERE recording.batch_id = ?2
+                   AND (stored.xorb_hash != recording.xorb_hash
+                     OR stored.chunk_index != recording.chunk_index
+                     OR stored.uncompressed_size != recording.uncompressed_size
+                     OR stored.placement_id != recording.placement_id
+                     OR stored.origin_proof_id != recording.origin_proof_id)
+                 LIMIT 1",
+                params![recipe_hash, batch_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to validate indexed remote authority: {error}"
+                ))
+            })?;
+        if let Some(chunk_hash) = remote_collision {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe remote authority for chunk {} changed",
+                crab_xet::hash::MerkleHash::from(decode_hash_blob(
+                    "remote authority chunk hash",
+                    chunk_hash,
+                )?)
+                .hex()
+            )));
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO recipe_remote_chunks
+             (recipe_hash, chunk_hash, xorb_hash, chunk_index,
+              uncompressed_size, placement_id, origin_proof_id)
+             SELECT ?1, chunk_hash, xorb_hash, chunk_index,
+                    uncompressed_size, placement_id, origin_proof_id
+             FROM recording_remote_chunks
+             WHERE batch_id = ?2",
+            params![recipe_hash, batch_id],
+        )
+        .map_err(|error| {
+            StagingError::Internal(format!("failed to seal recipe remote authority: {error}"))
+        })?;
+        tx.execute(
+            "DELETE FROM recording_remote_chunks WHERE batch_id = ?1",
+            params![batch_id],
+        )
+        .map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to retire sealed remote authority recording: {error}"
+            ))
+        })?;
+
         let missing_payload: Option<i64> = tx
             .query_row(
                 "SELECT incoming.occurrence
@@ -2720,8 +4002,15 @@ impl Index {
                        WHERE prepared.chunk_hash = incoming.chunk_hash
                          AND prepared.uncompressed_size = incoming.chunk_size
                    )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM recipe_remote_chunks AS existing
+                       WHERE existing.recipe_hash = ?1
+                         AND existing.chunk_hash = incoming.chunk_hash
+                         AND existing.uncompressed_size = incoming.chunk_size
+                   )
                  LIMIT 1",
-                [],
+                params![recipe_hash],
                 |row| row.get(0),
             )
             .optional()
@@ -2756,21 +4045,127 @@ impl Index {
             StagingError::Internal(format!("failed to insert recipe payload leases: {e}"))
         })?;
 
-        let occurrence_count: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM recipe_occurrences WHERE recipe_hash = ?1",
-                params![recipe_hash],
-                |row| row.get(0),
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to count stored recipe occurrences: {e}"))
+        let mut sequence_hasher = crate::recipe::new_sequence_hasher();
+        let mut page_root_hasher = crate::recipe::new_page_root_hasher();
+        let mut page_index = 0u64;
+        let mut page_start = 0u64;
+        let mut page_start_offset = 0u64;
+        while page_start < recipe.chunk_count() {
+            let page_end = page_start
+                .saturating_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+                .min(recipe.chunk_count());
+            let page_rows = {
+                let mut statement = tx
+                    .prepare_cached(
+                        "SELECT chunk_hash, chunk_size
+                         FROM temp.incoming_recipe_occurrences
+                         WHERE occurrence >= ?1 AND occurrence < ?2
+                         ORDER BY occurrence",
+                    )
+                    .map_err(|e| {
+                        StagingError::Internal(format!("failed to prepare recipe page seal: {e}"))
+                    })?;
+                statement
+                    .query_map(
+                        params![
+                            sqlite_i64("recipe page start", page_start)?,
+                            sqlite_i64("recipe page end", page_end)?
+                        ],
+                        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .map_err(|e| {
+                        StagingError::Internal(format!("failed to query recipe page seal: {e}"))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        StagingError::Internal(format!("failed to collect recipe page seal: {e}"))
+                    })?
+            };
+            let mut page_terms = Vec::with_capacity(page_rows.len());
+            let mut page_bytes = 0u64;
+            for (raw_hash, raw_size) in page_rows {
+                let chunk_hash = crab_xet::hash::MerkleHash::from(decode_hash_blob(
+                    "recipe seal chunk hash",
+                    raw_hash,
+                )?);
+                let size = nonnegative_count("recipe seal chunk size", raw_size)?;
+                crate::recipe::update_sequence_hasher(&mut sequence_hasher, chunk_hash, size);
+                page_bytes = page_bytes.checked_add(size).ok_or_else(|| {
+                    StagingError::StagingCorrupt("recipe page byte overflow".to_owned())
+                })?;
+                page_terms.push((chunk_hash, size));
+            }
+            let page_hash = crate::recipe::page_hash(page_start, page_start_offset, &page_terms)?;
+            page_root_hasher.update(&page_hash);
+            let stored_page: Option<(i64, i64, i64, i64, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT start_occurrence, start_offset, occurrence_count,
+                            page_bytes, page_hash
+                     FROM recipe_pages
+                     WHERE recipe_hash = ?1 AND page_index = ?2",
+                    params![recipe_hash, sqlite_i64("recipe page index", page_index)?],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to inspect stored recipe page: {e}"))
+                })?;
+            let page_count = page_end - page_start;
+            if let Some(stored) = stored_page {
+                if stored.0 != sqlite_i64("recipe page start", page_start)?
+                    || stored.1 != sqlite_i64("recipe page offset", page_start_offset)?
+                    || stored.2 != sqlite_i64("recipe page count", page_count)?
+                    || stored.3 != sqlite_i64("recipe page bytes", page_bytes)?
+                    || stored.4.as_slice() != page_hash
+                {
+                    return Err(StagingError::StagingCorrupt(
+                        "stored recipe page collides with different metadata".to_owned(),
+                    ));
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO recipe_pages
+                     (recipe_hash, page_index, start_occurrence, start_offset,
+                      occurrence_count, page_bytes, page_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        recipe_hash,
+                        sqlite_i64("recipe page index", page_index)?,
+                        sqlite_i64("recipe page start", page_start)?,
+                        sqlite_i64("recipe page offset", page_start_offset)?,
+                        sqlite_i64("recipe page count", page_count)?,
+                        sqlite_i64("recipe page bytes", page_bytes)?,
+                        page_hash.as_slice(),
+                    ],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to insert recipe page: {e}"))
+                })?;
+            }
+            page_index = page_index.checked_add(1).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe page count overflow".to_owned())
             })?;
-        let expected_occurrence_count = i64::try_from(recipe.sequence().spans.len())
-            .map_err(|_| StagingError::StagingCorrupt("too many recipe occurrences".to_owned()))?;
-        if occurrence_count != expected_occurrence_count {
-            return Err(StagingError::StagingCorrupt(format!(
-                "stored recipe has {occurrence_count} occurrences, expected {expected_occurrence_count}"
-            )));
+            page_start = page_end;
+            page_start_offset = page_start_offset.checked_add(page_bytes).ok_or_else(|| {
+                StagingError::StagingCorrupt("recipe page offset overflow".to_owned())
+            })?;
+        }
+        if page_index != recipe.page_count()
+            || page_start_offset != recipe.file_size()
+            || sequence_hasher.finalize().as_bytes() != &recipe.sequence_hash()
+            || page_root_hasher.finalize().as_bytes() != &recipe.page_root_hash()
+        {
+            return Err(StagingError::StagingCorrupt(
+                "indexed recipe terms do not match the sealed root".to_owned(),
+            ));
         }
 
         tx.execute(
@@ -2803,8 +4198,14 @@ impl Index {
                       AND lease.recipe_hash = ?1
                      WHERE prepared.chunk_hash = incoming.chunk_hash
                        AND prepared.uncompressed_size = incoming.chunk_size
+                 ) OR EXISTS (
+                     SELECT 1
+                     FROM recipe_remote_chunks AS existing
+                     WHERE existing.recipe_hash = ?2
+                       AND existing.chunk_hash = incoming.chunk_hash
+                       AND existing.uncompressed_size = incoming.chunk_size
                  )",
-                params![recipe_hash],
+                params![recipe_hash, recipe_hash],
                 |row| row.get(0),
             )
             .map_err(|e| {
@@ -2855,7 +4256,7 @@ impl Index {
             RecipeVerification::Pending => {
                 tx.execute(
                     "INSERT INTO staging_meta (key, value)
-                     VALUES ('migration_validation_pending', '1')
+                     VALUES ('recipe_payload_validation_pending', '1')
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     [],
                 )
@@ -2882,20 +4283,34 @@ impl Index {
                     "failed to release incoming recipe occurrences: {e}"
                 ))
             })?;
+        tx.execute(
+            "DELETE FROM recipe_recording_terms WHERE batch_id = ?1",
+            params![batch_id],
+        )
+        .map_err(|e| {
+            StagingError::Internal(format!("failed to release recipe recording terms: {e}"))
+        })?;
 
         tx.commit()
             .map_err(|e| StagingError::Internal(format!("failed to commit recipe lease: {e}")))?;
         Ok(())
     }
 
-    pub fn has_file_lease(&self, file_hash: &[u8; 32]) -> Result<bool> {
+    pub fn has_file_owner(&self, file_hash: &[u8; 32]) -> Result<bool> {
         self.conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM path_leases WHERE file_hash = ?1)",
+                "SELECT EXISTS(
+                     SELECT 1 FROM path_leases WHERE file_hash = ?1
+                 ) OR EXISTS(
+                     SELECT 1
+                     FROM push_snapshot_recipes AS pin
+                     JOIN file_recipes AS recipe USING (recipe_hash)
+                     WHERE recipe.file_hash = ?1
+                 )",
                 params![file_hash.as_slice()],
                 |row| row.get(0),
             )
-            .map_err(|e| StagingError::Internal(format!("failed to check file leases: {e}")))
+            .map_err(|e| StagingError::Internal(format!("failed to check file owners: {e}")))
     }
 
     pub fn rollback_batch(&self, batch_id: &str) -> Result<Vec<[u8; 32]>> {
@@ -2903,6 +4318,25 @@ impl Index {
             .conn
             .unchecked_transaction()
             .map_err(|e| StagingError::Internal(format!("failed to begin batch rollback: {e}")))?;
+        let state = tx
+            .query_row(
+                "SELECT state FROM staging_batches WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to validate rollback batch: {e}"))
+            })?;
+        match state.as_deref() {
+            None => return Ok(Vec::new()),
+            Some("open") => {}
+            Some(_) => {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "published staging batch {batch_id} cannot be rolled back"
+                )));
+            }
+        }
         let file_hashes = {
             let mut statement = tx
                 .prepare_cached("SELECT DISTINCT file_hash FROM path_leases WHERE batch_id = ?1")
@@ -2931,21 +4365,7 @@ impl Index {
         )
         .map_err(|e| StagingError::Internal(format!("failed to delete staging batch: {e}")))?;
 
-        let mut unleased = Vec::new();
-        for file_hash in file_hashes {
-            let exists: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM path_leases WHERE file_hash = ?1)",
-                    params![file_hash.as_slice()],
-                    |row| row.get(0),
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to check remaining leases: {e}"))
-                })?;
-            if !exists {
-                unleased.push(file_hash);
-            }
-        }
+        let unleased = unowned_file_hashes(&tx, file_hashes)?;
         tx.commit()
             .map_err(|e| StagingError::Internal(format!("failed to commit batch rollback: {e}")))?;
         Ok(unleased)
@@ -3563,20 +4983,41 @@ impl Index {
         Ok(exists)
     }
 
+    pub fn chunk_payload_exists(&self, chunk_hash: &[u8; 32], size: u64) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM chunk_payloads
+                    WHERE chunk_hash = ?1 AND size = ?2
+                 )",
+                params![
+                    chunk_hash.as_slice(),
+                    sqlite_i64("chunk payload size", size)?
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to inspect staged chunk payload: {error}"))
+            })
+    }
+
     /// Store a verified add-time push plan for one staged file.
     ///
     /// The JSON body preserves the existing plan contract while the indexed
     /// metadata lets push reject stale rows before trusting the plan body.
-    pub fn insert_file_push_plan(
-        &self,
-        file_hash: &[u8; 32],
-        version: u32,
-        file_size: u64,
-        chunk_count: u64,
-        chunk_sequence_hash: &[u8; 32],
-        plan_json: &[u8],
-        prepared_xorbs: &[PreparedXorbWrite],
-    ) -> Result<()> {
+    pub fn insert_file_push_plan(&self, write: FilePushPlanWrite<'_>) -> Result<()> {
+        let FilePushPlanWrite {
+            file_hash,
+            recipe_hash,
+            recording_batch_id,
+            version,
+            file_size,
+            chunk_count,
+            chunk_sequence_hash,
+            plan_json,
+            existing_chunks,
+            prepared_xorbs,
+        } = write;
         let fh: &[u8] = file_hash;
         let sequence_hash: &[u8] = chunk_sequence_hash;
         let file_size = sqlite_i64("file push plan file_size", file_size)?;
@@ -3584,18 +5025,45 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin file push plan tx: {e}"))
         })?;
-        let recipe_hash: Option<Vec<u8>> = tx
+        let recipe_is_indexed: bool = tx
             .query_row(
-                "SELECT recipe_hash FROM file_recipes
-                 WHERE file_hash = ?1 AND policy_id = 'xet-gear-v1-64k'
-                 ORDER BY created_at DESC LIMIT 1",
-                params![fh],
+                "SELECT EXISTS(
+                     SELECT 1 FROM file_recipes
+                     WHERE recipe_hash = ?1 AND file_hash = ?2
+                 )",
+                params![recipe_hash.as_slice(), fh],
                 |row| row.get(0),
             )
-            .optional()
             .map_err(|e| {
                 StagingError::Internal(format!("failed to resolve prepared recipe: {e}"))
             })?;
+        if !recipe_is_indexed {
+            let Some(batch_id) = recording_batch_id else {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "cannot persist prepared authority before recipe {} is indexed",
+                    crab_xet::hash::MerkleHash::from(*recipe_hash).hex()
+                )));
+            };
+            let recording_is_open: bool = tx
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM staging_batches
+                         WHERE batch_id = ?1 AND state = 'open'
+                     )",
+                    params![batch_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to resolve prepared recipe recording: {e}"
+                    ))
+                })?;
+            if !recording_is_open {
+                return Err(StagingError::NotFound {
+                    path: format!("open staging batch {batch_id}"),
+                });
+            }
+        }
 
         tx.execute(
             "INSERT INTO file_push_plans
@@ -3619,15 +5087,141 @@ impl Index {
         )
         .map_err(|e| StagingError::Internal(format!("failed to store file push plan: {e}")))?;
 
+        let recipe_owner = recipe_hash.as_slice();
+        let recording_owner = recording_batch_id.unwrap_or_default();
+        let (table, owner_column, owner, coverage_sql): (&str, &str, &dyn ToSql, &str) =
+            if recipe_is_indexed {
+                (
+                    "recipe_remote_chunks",
+                    "recipe_hash",
+                    &recipe_owner,
+                    "SELECT EXISTS(
+                         SELECT 1 FROM recipe_occurrences
+                         WHERE recipe_hash = ?1
+                           AND chunk_hash = ?2
+                           AND chunk_size = ?3
+                     )",
+                )
+            } else {
+                (
+                    "recording_remote_chunks",
+                    "batch_id",
+                    &recording_owner,
+                    "SELECT EXISTS(
+                         SELECT 1 FROM recipe_recording_terms
+                         WHERE batch_id = ?1
+                           AND chunk_hash = ?2
+                           AND chunk_size = ?3
+                     )",
+                )
+            };
+        let insert_sql = format!(
+            "INSERT OR IGNORE INTO {table}
+             ({owner_column}, chunk_hash, xorb_hash, chunk_index,
+              uncompressed_size, placement_id, origin_proof_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        );
+        let verify_sql = format!(
+            "SELECT xorb_hash = ?3
+                    AND chunk_index = ?4
+                    AND uncompressed_size = ?5
+                    AND placement_id = ?6
+                    AND origin_proof_id = ?7
+             FROM {table}
+             WHERE {owner_column} = ?1 AND chunk_hash = ?2"
+        );
+        let mut coverage_statement = tx.prepare_cached(coverage_sql).map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to prepare planned existing coverage: {error}"
+            ))
+        })?;
+        let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to prepare planned existing insert: {error}"
+            ))
+        })?;
+        let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to prepare planned existing verification: {error}"
+            ))
+        })?;
+        for existing in existing_chunks {
+            if existing.placement_id == [0; 32] || existing.origin_proof_id == [0; 32] {
+                return Err(StagingError::StagingCorrupt(
+                    "planned existing chunk has an empty placement or origin proof id".to_owned(),
+                ));
+            }
+            let chunk_hash: &[u8] = &existing.chunk_hash;
+            let covers_recipe = coverage_statement
+                .query_row(
+                    params![owner, chunk_hash, i64::from(existing.uncompressed_size)],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to validate planned existing recipe coverage: {error}"
+                    ))
+                })?;
+            if !covers_recipe {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "planned existing chunk {} does not cover file {}",
+                    crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex(),
+                    crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                )));
+            }
+            insert_statement
+                .execute(params![
+                    owner,
+                    chunk_hash,
+                    existing.xorb_hash.as_slice(),
+                    i64::from(existing.chunk_index),
+                    i64::from(existing.uncompressed_size),
+                    existing.placement_id.as_slice(),
+                    existing.origin_proof_id.as_slice(),
+                ])
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to store planned existing chunk: {error}"
+                    ))
+                })?;
+            let matches: bool = verify_statement
+                .query_row(
+                    params![
+                        owner,
+                        chunk_hash,
+                        existing.xorb_hash.as_slice(),
+                        i64::from(existing.chunk_index),
+                        i64::from(existing.uncompressed_size),
+                        existing.placement_id.as_slice(),
+                        existing.origin_proof_id.as_slice(),
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to verify planned existing chunk: {error}"
+                    ))
+                })?;
+            if !matches {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "planned existing chunk {} has conflicting proof authority",
+                    crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
+                )));
+            }
+        }
+        drop(coverage_statement);
+        drop(insert_statement);
+        drop(verify_statement);
+
         tx.execute(
             "DELETE FROM prepared_xorbs WHERE file_hash = ?1",
             params![fh],
         )
         .map_err(|e| StagingError::Internal(format!("failed to replace prepared xorbs: {e}")))?;
-        if let Some(recipe_hash) = recipe_hash.as_deref() {
+        if recipe_is_indexed {
             tx.execute(
                 "DELETE FROM prepared_leases WHERE recipe_hash = ?1",
-                params![recipe_hash],
+                params![recipe_hash.as_slice()],
             )
             .map_err(|e| {
                 StagingError::Internal(format!("failed to replace prepared leases: {e}"))
@@ -3677,19 +5271,63 @@ impl Index {
                     crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex()
                 )));
             }
-            if let Some(recipe_hash) = recipe_hash.as_deref() {
+            if recipe_is_indexed {
                 tx.execute(
                     "INSERT OR IGNORE INTO prepared_leases (recipe_hash, xorb_hash)
                      VALUES (?1, ?2)",
-                    params![recipe_hash, xorb_hash],
+                    params![recipe_hash.as_slice(), xorb_hash],
                 )
                 .map_err(|e| {
                     StagingError::Internal(format!("failed to store prepared lease: {e}"))
                 })?;
             }
 
+            let mut covers_recipe = false;
             for placement in &prepared.placements {
                 let chunk_hash: &[u8] = &placement.chunk_hash;
+                if !covers_recipe {
+                    covers_recipe = if recipe_is_indexed {
+                        tx.query_row(
+                            "SELECT EXISTS(
+                                 SELECT 1 FROM recipe_occurrences
+                                 WHERE recipe_hash = ?1
+                                   AND chunk_hash = ?2
+                                   AND chunk_size = ?3
+                             )",
+                            params![
+                                recipe_hash.as_slice(),
+                                chunk_hash,
+                                i64::from(placement.uncompressed_size)
+                            ],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|error| {
+                            StagingError::Internal(format!(
+                                "failed to validate prepared xorb recipe coverage: {error}"
+                            ))
+                        })?
+                    } else {
+                        tx.query_row(
+                            "SELECT EXISTS(
+                                 SELECT 1 FROM recipe_recording_terms
+                                 WHERE batch_id = ?1
+                                   AND chunk_hash = ?2
+                                   AND chunk_size = ?3
+                             )",
+                            params![
+                                recording_batch_id,
+                                chunk_hash,
+                                i64::from(placement.uncompressed_size)
+                            ],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(|error| {
+                            StagingError::Internal(format!(
+                                "failed to validate prepared xorb recipe coverage: {error}"
+                            ))
+                        })?
+                    };
+                }
                 tx.execute(
                     "INSERT INTO prepared_xorb_chunks
                      (file_hash, xorb_hash, chunk_hash, chunk_index, uncompressed_size)
@@ -3706,12 +5344,168 @@ impl Index {
                     StagingError::Internal(format!("failed to store prepared xorb chunk: {e}"))
                 })?;
             }
+            if !covers_recipe {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "prepared xorb {} does not cover file {}",
+                    crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex(),
+                    crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                )));
+            }
         }
 
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit file push plan tx: {e}"))
         })?;
         Ok(())
+    }
+
+    pub fn validate_prepared_xorb_recipe_coverage(
+        &self,
+        recipe_hash: &[u8; 32],
+        file_hash: &[u8; 32],
+        prepared_xorbs: &[PreparedXorbWrite],
+    ) -> Result<()> {
+        for prepared in prepared_xorbs {
+            let mut covers_recipe = false;
+            for placement in &prepared.placements {
+                covers_recipe = self
+                    .conn
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM recipe_occurrences
+                             WHERE recipe_hash = ?1
+                               AND chunk_hash = ?2
+                               AND chunk_size = ?3
+                         )",
+                        params![
+                            recipe_hash.as_slice(),
+                            placement.chunk_hash.as_slice(),
+                            i64::from(placement.uncompressed_size)
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to validate loaded prepared xorb recipe coverage: {error}"
+                        ))
+                    })?;
+                if covers_recipe {
+                    break;
+                }
+            }
+            if !covers_recipe {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "prepared xorb {} does not cover file {}",
+                    crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex(),
+                    crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn recipe_remote_chunk_page(
+        &self,
+        recipe_hash: &[u8; 32],
+        start_occurrence: u64,
+    ) -> Result<Vec<ExistingChunkWrite>> {
+        let end_occurrence = start_occurrence
+            .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+            .ok_or_else(|| {
+                StagingError::StagingCorrupt("remote authority page range overflow".to_owned())
+            })?;
+        let start_occurrence = i64::try_from(start_occurrence).map_err(|_| {
+            StagingError::StagingCorrupt("remote authority page start is too large".to_owned())
+        })?;
+        let end_occurrence = i64::try_from(end_occurrence).map_err(|_| {
+            StagingError::StagingCorrupt("remote authority page end is too large".to_owned())
+        })?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT remote.chunk_hash, remote.xorb_hash, remote.chunk_index,
+                        remote.uncompressed_size, remote.placement_id,
+                        remote.origin_proof_id
+                 FROM recipe_occurrences AS occurrence
+                 JOIN recipe_remote_chunks AS remote
+                   ON remote.recipe_hash = occurrence.recipe_hash
+                  AND remote.chunk_hash = occurrence.chunk_hash
+                 WHERE occurrence.recipe_hash = ?1
+                   AND occurrence.occurrence >= ?2
+                   AND occurrence.occurrence < ?3
+                 ORDER BY occurrence.occurrence",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare recipe remote authority: {error}"
+                ))
+            })?;
+        statement
+            .query_map(
+                params![recipe_hash.as_slice(), start_occurrence, end_occurrence],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to query recipe remote authority: {error}"))
+            })?
+            .map(|row| {
+                let (
+                    chunk_hash,
+                    xorb_hash,
+                    chunk_index,
+                    uncompressed_size,
+                    placement_id,
+                    origin_proof_id,
+                ) = row.map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to read recipe remote authority: {error}"
+                    ))
+                })?;
+                Ok(ExistingChunkWrite {
+                    chunk_hash: decode_hash_blob("remote chunk hash", chunk_hash)?,
+                    xorb_hash: decode_hash_blob("remote xorb hash", xorb_hash)?,
+                    chunk_index: u32::try_from(chunk_index).map_err(|_| {
+                        StagingError::StagingCorrupt(format!(
+                            "remote chunk index is invalid: {chunk_index}"
+                        ))
+                    })?,
+                    uncompressed_size: u32::try_from(uncompressed_size).map_err(|_| {
+                        StagingError::StagingCorrupt(format!(
+                            "remote chunk size is invalid: {uncompressed_size}"
+                        ))
+                    })?,
+                    placement_id: decode_hash_blob("remote placement id", placement_id)?,
+                    origin_proof_id: decode_hash_blob("remote origin proof id", origin_proof_id)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn recipe_remote_chunk_count(&self, recipe_hash: &[u8; 32]) -> Result<u64> {
+        let count = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM recipe_remote_chunks WHERE recipe_hash = ?1",
+                params![recipe_hash.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to count recipe remote authority: {error}"))
+            })?;
+        u64::try_from(count).map_err(|_| {
+            StagingError::StagingCorrupt(format!(
+                "recipe remote authority count is invalid: {count}"
+            ))
+        })
     }
 
     /// Load the authoritative add-time push plan record for a staged file.
@@ -4376,6 +6170,423 @@ impl Index {
         Ok(out)
     }
 
+    /// Start one connection-local, disk-backed residual read plan.
+    pub fn begin_coalesced_read_plan(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS coalesced_read_requests (
+                    sequence             INTEGER PRIMARY KEY,
+                    chunk_hash          BLOB NOT NULL,
+                    expected_size       INTEGER NOT NULL,
+                    context             INTEGER NOT NULL,
+                    authority           INTEGER NOT NULL CHECK (authority IN (0, 1)),
+                    segment_id          INTEGER,
+                    segment_offset      INTEGER,
+                    segment_length      INTEGER,
+                    prepared_file_hash  BLOB,
+                    prepared_xorb_hash  BLOB,
+                    payload_hash        BLOB,
+                    xorb_bytes          INTEGER,
+                    prepared_chunk_index INTEGER,
+                    prepared_size       INTEGER
+                ) WITHOUT ROWID;
+                DELETE FROM temp.coalesced_read_requests;",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to initialize coalesced residual read plan: {error}"
+                ))
+            })
+    }
+
+    /// Append one bounded request page to the disk-backed residual plan.
+    pub fn append_coalesced_read_requests(
+        &self,
+        requests: &[(u64, [u8; 32], u64, u64)],
+    ) -> Result<()> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let hashes = requests
+            .iter()
+            .map(|(_, hash, _, _)| *hash)
+            .collect::<Vec<_>>();
+        let segment_locators = self.locate_batch(&hashes)?;
+        let prepared_locators = self.locate_prepared_batch(&hashes)?;
+        let tx = self.conn.unchecked_transaction().map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to begin coalesced residual request append: {error}"
+            ))
+        })?;
+        {
+            let mut insert = tx
+                .prepare_cached(
+                    "INSERT INTO temp.coalesced_read_requests (
+                         sequence, chunk_hash, expected_size, context, authority,
+                         segment_id, segment_offset, segment_length,
+                         prepared_file_hash, prepared_xorb_hash, payload_hash,
+                         xorb_bytes, prepared_chunk_index, prepared_size
+                     ) VALUES (
+                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                     )",
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare coalesced residual request append: {error}"
+                    ))
+                })?;
+            for (((sequence, hash, expected_size, context), segment), prepared) in
+                requests.iter().zip(segment_locators).zip(prepared_locators)
+            {
+                if let Some(locator) = segment {
+                    let actual_size = u64::from(locator.length);
+                    if actual_size != *expected_size {
+                        return Err(StagingError::StagingCorrupt(format!(
+                            "staged chunk {} changed size: expected {expected_size}, found {actual_size}",
+                            crab_xet::hash::MerkleHash::from(*hash).hex()
+                        )));
+                    }
+                    insert
+                        .execute(params![
+                            sqlite_i64("coalesced request sequence", *sequence)?,
+                            hash.as_slice(),
+                            sqlite_i64("coalesced request size", *expected_size)?,
+                            sqlite_i64("coalesced request context", *context)?,
+                            0i64,
+                            locator.segment_id,
+                            locator.offset,
+                            locator.length,
+                            Option::<&[u8]>::None,
+                            Option::<&[u8]>::None,
+                            Option::<&[u8]>::None,
+                            Option::<i64>::None,
+                            Option::<i64>::None,
+                            Option::<i64>::None,
+                        ])
+                        .map_err(|error| {
+                            StagingError::Internal(format!(
+                                "failed to append segment residual request: {error}"
+                            ))
+                        })?;
+                    continue;
+                }
+                let Some(locator) = prepared else {
+                    return Err(StagingError::ChunkNotFound {
+                        hash: crab_xet::hash::MerkleHash::from(*hash).hex(),
+                    });
+                };
+                if u64::from(locator.size) != *expected_size {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "prepared chunk {} changed size: expected {expected_size}, found {}",
+                        crab_xet::hash::MerkleHash::from(*hash).hex(),
+                        locator.size
+                    )));
+                }
+                insert
+                    .execute(params![
+                        sqlite_i64("coalesced request sequence", *sequence)?,
+                        hash.as_slice(),
+                        sqlite_i64("coalesced request size", *expected_size)?,
+                        sqlite_i64("coalesced request context", *context)?,
+                        1i64,
+                        Option::<i64>::None,
+                        Option::<i64>::None,
+                        Option::<i64>::None,
+                        locator.file_hash.as_slice(),
+                        locator.xorb_hash.as_slice(),
+                        locator.payload_hash.as_slice(),
+                        sqlite_i64("prepared xorb bytes", locator.xorb_bytes)?,
+                        i64::from(locator.chunk_index),
+                        i64::from(locator.size),
+                    ])
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to append prepared residual request: {error}"
+                        ))
+                    })?;
+            }
+        }
+        tx.commit().map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to commit coalesced residual request append: {error}"
+            ))
+        })
+    }
+
+    /// Remove and return the next bounded residual read group.
+    pub fn take_coalesced_read_group(
+        &self,
+        max_segment_chunks: usize,
+        max_segment_bytes: u64,
+    ) -> Result<Option<IndexedCoalescedReadGroup>> {
+        let first: Option<ResidualAuthorityRow> = self
+            .conn
+            .query_row(
+                "SELECT authority, prepared_xorb_hash, payload_hash, xorb_bytes
+                 FROM temp.coalesced_read_requests
+                 ORDER BY sequence
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to inspect coalesced residual read plan: {error}"
+                ))
+            })?;
+        let Some((authority, raw_xorb_hash, raw_payload_hash, raw_xorb_bytes)) = first else {
+            return Ok(None);
+        };
+
+        if authority == 0 {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT sequence, context, chunk_hash, expected_size,
+                            segment_id, segment_offset, segment_length
+                     FROM temp.coalesced_read_requests
+                     WHERE authority = 0
+                     ORDER BY sequence",
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare segment residual group: {error}"
+                    ))
+                })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, u64>(4)?,
+                        row.get::<_, u64>(5)?,
+                        row.get::<_, u32>(6)?,
+                    ))
+                })
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to query segment residual group: {error}"
+                    ))
+                })?;
+            let mut sequences = Vec::new();
+            let mut chunks = Vec::new();
+            let mut bytes = 0u64;
+            for row in rows {
+                let (
+                    raw_sequence,
+                    raw_context,
+                    raw_chunk_hash,
+                    raw_expected_size,
+                    segment_id,
+                    segment_offset,
+                    length,
+                ) = row.map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to read segment residual group: {error}"
+                    ))
+                })?;
+                let sequence = nonnegative_count("segment residual sequence", raw_sequence)?;
+                let context = nonnegative_count("segment residual context", raw_context)?;
+                let chunk_hash = decode_hash_blob("segment residual chunk hash", raw_chunk_hash)?;
+                let expected_size =
+                    nonnegative_count("segment residual chunk size", raw_expected_size)?;
+                if u64::from(length) != expected_size {
+                    return Err(StagingError::StagingCorrupt(
+                        "segment residual locator size changed".to_owned(),
+                    ));
+                }
+                let exceeds = !chunks.is_empty()
+                    && (chunks.len() >= max_segment_chunks.max(1)
+                        || bytes.saturating_add(expected_size) > max_segment_bytes.max(1));
+                if exceeds {
+                    break;
+                }
+                sequences.push(sequence);
+                chunks.push((
+                    context,
+                    FileChunkLocator {
+                        chunk_hash,
+                        size: expected_size,
+                        locator: ChunkLocator {
+                            segment_id,
+                            offset: segment_offset,
+                            length,
+                        },
+                    },
+                ));
+                bytes = bytes.saturating_add(expected_size);
+            }
+            drop(statement);
+            let tx = self.conn.unchecked_transaction().map_err(|error| {
+                StagingError::Internal(format!("failed to begin segment residual dequeue: {error}"))
+            })?;
+            {
+                let mut delete = tx
+                    .prepare_cached("DELETE FROM temp.coalesced_read_requests WHERE sequence = ?1")
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to prepare segment residual dequeue: {error}"
+                        ))
+                    })?;
+                for sequence in sequences {
+                    delete
+                        .execute(params![sqlite_i64("segment residual sequence", sequence)?])
+                        .map_err(|error| {
+                            StagingError::Internal(format!(
+                                "failed to dequeue segment residual request: {error}"
+                            ))
+                        })?;
+                }
+            }
+            tx.commit().map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to commit segment residual dequeue: {error}"
+                ))
+            })?;
+            return Ok(Some(IndexedCoalescedReadGroup::Segments(chunks)));
+        }
+
+        if authority != 1 {
+            return Err(StagingError::StagingCorrupt(format!(
+                "unknown coalesced residual authority {authority}"
+            )));
+        }
+        let xorb_hash = decode_hash_blob(
+            "prepared residual xorb hash",
+            raw_xorb_hash.ok_or_else(|| {
+                StagingError::StagingCorrupt(
+                    "prepared residual request lacks an xorb hash".to_owned(),
+                )
+            })?,
+        )?;
+        let payload_hash = decode_hash_blob(
+            "prepared residual payload hash",
+            raw_payload_hash.ok_or_else(|| {
+                StagingError::StagingCorrupt(
+                    "prepared residual request lacks a payload hash".to_owned(),
+                )
+            })?,
+        )?;
+        let xorb_bytes = nonnegative_count(
+            "prepared residual xorb bytes",
+            raw_xorb_bytes.ok_or_else(|| {
+                StagingError::StagingCorrupt(
+                    "prepared residual request lacks a payload size".to_owned(),
+                )
+            })?,
+        )?;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT context, chunk_hash, expected_size, prepared_file_hash,
+                        prepared_chunk_index, prepared_size
+                 FROM temp.coalesced_read_requests
+                 WHERE authority = 1
+                   AND prepared_xorb_hash = ?1
+                   AND payload_hash = ?2
+                   AND xorb_bytes = ?3
+                 ORDER BY sequence",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare source-xorb residual group: {error}"
+                ))
+            })?;
+        let rows = statement
+            .query_map(
+                params![
+                    xorb_hash.as_slice(),
+                    payload_hash.as_slice(),
+                    sqlite_i64("prepared residual xorb bytes", xorb_bytes)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to query source-xorb residual group: {error}"
+                ))
+            })?;
+        let mut chunks = Vec::new();
+        for row in rows {
+            let (context, chunk_hash, expected_size, file_hash, chunk_index, prepared_size) =
+                row.map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to read source-xorb residual group: {error}"
+                    ))
+                })?;
+            let expected_size = nonnegative_count("prepared residual chunk size", expected_size)?;
+            let prepared_size = u32::try_from(prepared_size).map_err(|_| {
+                StagingError::StagingCorrupt("invalid prepared residual chunk size".to_owned())
+            })?;
+            if u64::from(prepared_size) != expected_size {
+                return Err(StagingError::StagingCorrupt(
+                    "prepared residual locator size changed".to_owned(),
+                ));
+            }
+            let chunk_hash = decode_hash_blob("prepared residual chunk hash", chunk_hash)?;
+            chunks.push((
+                nonnegative_count("prepared residual context", context)?,
+                chunk_hash,
+                PreparedChunkLocator {
+                    file_hash: decode_hash_blob("prepared residual file hash", file_hash)?,
+                    xorb_hash,
+                    payload_hash,
+                    xorb_bytes,
+                    chunk_index: u32::try_from(chunk_index).map_err(|_| {
+                        StagingError::StagingCorrupt(
+                            "invalid prepared residual chunk index".to_owned(),
+                        )
+                    })?,
+                    size: prepared_size,
+                },
+            ));
+        }
+        drop(statement);
+        self.conn
+            .execute(
+                "DELETE FROM temp.coalesced_read_requests
+                 WHERE authority = 1
+                   AND prepared_xorb_hash = ?1
+                   AND payload_hash = ?2
+                   AND xorb_bytes = ?3",
+                params![
+                    xorb_hash.as_slice(),
+                    payload_hash.as_slice(),
+                    sqlite_i64("prepared residual xorb bytes", xorb_bytes)?
+                ],
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to dequeue source-xorb residual group: {error}"
+                ))
+            })?;
+        Ok(Some(IndexedCoalescedReadGroup::Prepared(chunks)))
+    }
+
+    /// Discard any remaining connection-local residual requests.
+    pub fn clear_coalesced_read_plan(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM temp.coalesced_read_requests", [])
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to clear coalesced residual read plan: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
     /// Batch dedup check: classify chunks as existing (with locator) or new.
     ///
     /// For each `(index, chunk_hash)` pair, checks both `chunks` and
@@ -4872,16 +7083,134 @@ impl Index {
                 })?;
             nonnegative_count("staging lifecycle count", value)
         };
+        let bytes = |query: &str| -> Result<u64> {
+            let value: i64 = self
+                .conn
+                .query_row(query, [], |row| row.get(0))
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed staging lifecycle byte query {query:?}: {e}"
+                    ))
+                })?;
+            nonnegative_count("staging lifecycle bytes", value)
+        };
         Ok(super::stats::StagingLifecycleHealth {
             layout_version,
             quarantined_entries: count("SELECT COUNT(*) FROM staging_quarantine")?,
+            unresolved_publications: count("SELECT COUNT(*) FROM publication_intents")?,
+            open_batches_without_publication: count(
+                "SELECT COUNT(*)
+                 FROM staging_batches AS batch
+                 WHERE batch.state = 'open'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_intent_entries AS entry
+                       WHERE entry.batch_id = batch.batch_id
+                   )",
+            )?,
             open_push_snapshots: count("SELECT COUNT(*) FROM push_snapshots WHERE state = 'open'")?,
             committed_push_snapshots: count(
                 "SELECT COUNT(*) FROM push_snapshots WHERE state = 'committed'",
             )?,
             recipes: count("SELECT COUNT(*) FROM file_recipes")?,
+            path_heads: count("SELECT COUNT(*) FROM path_heads")?,
             path_leases: count("SELECT COUNT(*) FROM path_leases")?,
+            snapshot_pinned_superseded_leases: count(
+                "SELECT COUNT(*)
+                 FROM push_snapshot_leases AS pin
+                 JOIN push_snapshots AS snapshot USING (snapshot_id)
+                 WHERE snapshot.state IN ('open', 'committed')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM path_heads AS head
+                       WHERE head.batch_id = pin.batch_id
+                         AND head.path_bytes = pin.path_bytes
+                         AND head.recipe_hash = pin.recipe_hash
+                   )",
+            )?,
+            reclaimable_superseded_leases: count(
+                "SELECT COUNT(*)
+                 FROM path_leases AS lease
+                 JOIN staging_batches AS batch USING (batch_id)
+                 WHERE batch.state = 'published'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM path_heads AS head
+                       WHERE head.batch_id = lease.batch_id
+                         AND head.path_bytes = lease.path_bytes
+                         AND head.recipe_hash = lease.recipe_hash
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM publication_intent_entries AS entry
+                       WHERE entry.batch_id = lease.batch_id
+                         AND entry.path_bytes = lease.path_bytes
+                         AND entry.recipe_hash = lease.recipe_hash
+                   )",
+            )?,
+            reclaimable_files: count(
+                "SELECT COUNT(DISTINCT recipe.file_hash)
+                 FROM file_recipes AS recipe
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM path_leases AS lease
+                     WHERE lease.file_hash = recipe.file_hash
+                 )
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM push_snapshot_recipes AS pin
+                     JOIN file_recipes AS pinned USING (recipe_hash)
+                     WHERE pinned.file_hash = recipe.file_hash
+                 )",
+            )?,
             payloads: count("SELECT COUNT(*) FROM chunk_payloads")?,
+            current_head_segment_bytes: bytes(
+                "SELECT COALESCE(SUM(payload.size), 0)
+                 FROM chunk_payloads AS payload
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM recipe_payload_leases AS lease
+                     JOIN path_heads AS head USING (recipe_hash)
+                     WHERE lease.chunk_hash = payload.chunk_hash
+                 )",
+            )?,
+            snapshot_pinned_segment_bytes: bytes(
+                "SELECT COALESCE(SUM(payload.size), 0)
+                 FROM chunk_payloads AS payload
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM recipe_payload_leases AS lease
+                     JOIN push_snapshot_recipes AS pin USING (recipe_hash)
+                     WHERE lease.chunk_hash = payload.chunk_hash
+                 )
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM recipe_payload_leases AS lease
+                     JOIN path_heads AS head USING (recipe_hash)
+                     WHERE lease.chunk_hash = payload.chunk_hash
+                 )",
+            )?,
+            current_head_prepared_bytes: bytes(
+                "SELECT COALESCE(SUM(payload.bytes), 0)
+                 FROM prepared_payloads AS payload
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM prepared_leases AS lease
+                     JOIN path_heads AS head USING (recipe_hash)
+                     WHERE lease.xorb_hash = payload.xorb_hash
+                 )",
+            )?,
+            snapshot_pinned_prepared_bytes: bytes(
+                "SELECT COALESCE(SUM(payload.bytes), 0)
+                 FROM prepared_payloads AS payload
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM prepared_leases AS lease
+                     JOIN push_snapshot_recipes AS pin USING (recipe_hash)
+                     WHERE lease.xorb_hash = payload.xorb_hash
+                 )
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM prepared_leases AS lease
+                     JOIN path_heads AS head USING (recipe_hash)
+                     WHERE lease.xorb_hash = payload.xorb_hash
+                 )",
+            )?,
         })
     }
 
@@ -4918,7 +7247,7 @@ mod tests {
             .expect("insert test file");
     }
 
-    fn assert_staging_corrupt_contains<T: std::fmt::Debug>(result: Result<T>, expected: &str) {
+    fn assert_staging_corrupt_contains<T>(result: Result<T>, expected: &str) {
         match result {
             Err(StagingError::StagingCorrupt(reason)) => {
                 assert!(
@@ -4926,12 +7255,372 @@ mod tests {
                     "expected staging corruption containing {expected:?}, got {reason:?}"
                 );
             }
-            other => panic!("expected staging corruption, got {other:?}"),
+            Err(other) => panic!("expected staging corruption, got {other:?}"),
+            Ok(_) => panic!("expected staging corruption, got success"),
         }
     }
 
+    fn insert_test_recipe_lease(
+        idx: &Index,
+        batch_id: &str,
+        path: &[u8],
+        file_seed: u8,
+        chunk_seed: u8,
+    ) -> crate::recipe::FileRecipe {
+        let segment_id = idx.allocate_segment_id().expect("allocate segment");
+        let file_hash = test_hash(file_seed);
+        let chunk_hash = test_hash(chunk_seed);
+        insert_test_file(idx, &file_hash, 8);
+        idx.conn
+            .execute(
+                "INSERT INTO chunks
+                 (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
+                 VALUES (?1, ?2, 0, 8, ?3, 0)",
+                params![chunk_hash.as_slice(), file_hash.as_slice(), segment_id],
+            )
+            .expect("insert chunk");
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            crab_xet::hash::MerkleHash::from(file_hash),
+            8,
+            &[(crab_xet::hash::MerkleHash::from(chunk_hash), 8)],
+        )
+        .expect("recipe");
+        idx.insert_batch(batch_id).expect("batch");
+        idx.insert_recipe_lease(batch_id, path, &recipe, RecipeVerification::CallerVerified)
+            .expect("recipe lease");
+        recipe
+    }
+
     #[test]
-    fn migration_is_idempotent() {
+    fn publication_intent_atomically_replaces_canonical_path_head() {
+        let idx = open_in_memory();
+        let path = b"models/large.bin";
+        let first = insert_test_recipe_lease(&idx, "batch-a", path, 0xA1, 0xA2);
+        idx.create_publication_intent(
+            "intent-a",
+            &[(
+                "batch-a".to_owned(),
+                path.to_vec(),
+                "oid-a".to_owned(),
+                "old-a".to_owned(),
+            )],
+        )
+        .expect("create first intent");
+        let unresolved = idx.unresolved_publication_intents().expect("list intents");
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].entries[0].previous_index_state, "old-a");
+        assert!(
+            idx.publish_publication_intent("intent-a")
+                .expect("publish first")
+                .is_empty()
+        );
+        let first_file_hash: [u8; 32] = first.file_hash().into();
+        assert_eq!(
+            idx.published_recipe_for_file(&first_file_hash)
+                .expect("first lookup"),
+            Some(first.clone())
+        );
+
+        let second = insert_test_recipe_lease(&idx, "batch-b", path, 0xB1, 0xB2);
+        idx.create_publication_intent(
+            "intent-b",
+            &[(
+                "batch-b".to_owned(),
+                path.to_vec(),
+                "oid-b".to_owned(),
+                "old-b".to_owned(),
+            )],
+        )
+        .expect("create second intent");
+        let unleased = idx
+            .publish_publication_intent("intent-b")
+            .expect("publish second");
+        assert_eq!(unleased, vec![first_file_hash]);
+        assert_eq!(
+            idx.published_recipe_for_file(&first_file_hash)
+                .expect("superseded lookup"),
+            None
+        );
+        let second_file_hash: [u8; 32] = second.file_hash().into();
+        assert_eq!(
+            idx.published_recipe_for_file(&second_file_hash)
+                .expect("current lookup"),
+            Some(second)
+        );
+        let heads: i64 = idx
+            .conn
+            .query_row("SELECT COUNT(*) FROM path_heads", [], |row| row.get(0))
+            .expect("count heads");
+        assert_eq!(heads, 1);
+    }
+
+    #[test]
+    fn open_push_snapshot_pins_superseded_path_until_retirement() {
+        let idx = open_in_memory();
+        let path = b"models/snapshot.bin";
+        let first = insert_test_recipe_lease(&idx, "batch-a", path, 0xC1, 0xC2);
+        idx.mark_batch_published("batch-a").expect("publish first");
+        idx.create_push_snapshot("push-a", std::slice::from_ref(&first))
+            .expect("snapshot first");
+
+        let second = insert_test_recipe_lease(&idx, "batch-b", path, 0xD1, 0xD2);
+        assert!(
+            idx.mark_batch_published("batch-b")
+                .expect("publish second")
+                .is_empty(),
+            "the open snapshot must retain the superseded file"
+        );
+        let old_lease: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM path_leases WHERE recipe_hash = ?1
+                )",
+                params![first.hash().as_slice()],
+                |row| row.get(0),
+            )
+            .expect("old lease");
+        assert!(!old_lease);
+        let snapshot_pin: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM push_snapshot_recipes WHERE recipe_hash = ?1
+                )",
+                params![first.hash().as_slice()],
+                |row| row.get(0),
+            )
+            .expect("snapshot recipe pin");
+        assert!(snapshot_pin);
+        let health = idx.lifecycle_health().expect("snapshot lifecycle health");
+        assert_eq!(health.path_heads, 1);
+        assert_eq!(health.path_leases, 1);
+        assert_eq!(health.snapshot_pinned_superseded_leases, 1);
+        assert_eq!(health.reclaimable_superseded_leases, 0);
+        assert_eq!(health.reclaimable_files, 0);
+
+        idx.commit_push_snapshot("push-a").expect("commit snapshot");
+        let first_file_hash: [u8; 32] = first.file_hash().into();
+        assert_eq!(
+            idx.retire_push_snapshot("push-a").expect("retire snapshot"),
+            vec![first_file_hash]
+        );
+        let second_file_hash: [u8; 32] = second.file_hash().into();
+        assert_eq!(
+            idx.published_recipe_for_file(&second_file_hash)
+                .expect("current lookup"),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn discarding_open_snapshot_releases_superseded_path_lease() {
+        let idx = open_in_memory();
+        let path = b"models/cancelled.bin";
+        let first = insert_test_recipe_lease(&idx, "batch-a", path, 0xE1, 0xE2);
+        idx.mark_batch_published("batch-a").expect("publish first");
+        idx.create_push_snapshot("push-a", std::slice::from_ref(&first))
+            .expect("snapshot first");
+
+        let second = insert_test_recipe_lease(&idx, "batch-b", path, 0xF1, 0xF2);
+        assert!(
+            idx.mark_batch_published("batch-b")
+                .expect("publish second")
+                .is_empty()
+        );
+
+        let first_file_hash: [u8; 32] = first.file_hash().into();
+        assert_eq!(
+            idx.discard_open_push_snapshot("push-a")
+                .expect("discard cancelled snapshot"),
+            vec![first_file_hash]
+        );
+        let second_file_hash: [u8; 32] = second.file_hash().into();
+        assert_eq!(
+            idx.published_recipe_for_file(&second_file_hash)
+                .expect("current lookup"),
+            Some(second)
+        );
+        let old_lease: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_leases WHERE recipe_hash = ?1)",
+                params![first.hash().as_slice()],
+                |row| row.get(0),
+            )
+            .expect("old lease");
+        assert!(!old_lease);
+        assert_eq!(
+            idx.published_recipe_for_file(&first_file_hash)
+                .expect("superseded lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn repeated_path_publication_keeps_one_head_and_one_ordinary_lease() {
+        let idx = open_in_memory();
+        let path = b"models/repeated.bin";
+        let mut previous_file_hash: Option<[u8; 32]> = None;
+        let mut current_recipe = None;
+
+        for generation in 0..=250_u16 {
+            let file_seed = u8::try_from(generation % 251).expect("bounded seed");
+            let recipe_seed = file_seed.wrapping_add(1);
+            let batch_id = format!("batch-{generation}");
+            let recipe = insert_test_recipe_lease(&idx, &batch_id, path, file_seed, recipe_seed);
+            let unowned = idx
+                .mark_batch_published(&batch_id)
+                .expect("publish replacement");
+            if let Some(previous) = previous_file_hash {
+                assert_eq!(unowned, vec![previous]);
+            } else {
+                assert!(unowned.is_empty());
+            }
+            previous_file_hash = Some(recipe.file_hash().into());
+            current_recipe = Some(recipe);
+        }
+
+        let current_recipe = current_recipe.expect("current recipe");
+        for repetition in 0..1_000_u16 {
+            let batch_id = format!("batch-identical-{repetition}");
+            idx.insert_batch(&batch_id).expect("identical batch");
+            idx.insert_recipe_lease(
+                &batch_id,
+                path,
+                &current_recipe,
+                RecipeVerification::CallerVerified,
+            )
+            .expect("identical recipe lease");
+            assert!(
+                idx.mark_batch_published(&batch_id)
+                    .expect("publish identical replacement")
+                    .is_empty(),
+                "an identical re-add transfers ownership without reclaiming shared payload"
+            );
+        }
+
+        let counts: (i64, i64, i64) = idx
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM path_heads),
+                        (SELECT COUNT(*) FROM path_leases),
+                        (SELECT COUNT(*) FROM staging_batches)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("count canonical ownership");
+        assert_eq!(counts, (1, 1, 1));
+    }
+
+    #[test]
+    fn published_replacement_removes_superseded_empty_open_batch() {
+        let idx = open_in_memory();
+        let path = b"models/prepared.bin";
+        let prepared = insert_test_recipe_lease(&idx, "batch-prepared", path, 0x31, 0x32);
+        idx.insert_batch("batch-published")
+            .expect("published batch");
+        idx.insert_recipe_lease(
+            "batch-published",
+            path,
+            &prepared,
+            RecipeVerification::CallerVerified,
+        )
+        .expect("published lease");
+
+        assert!(
+            idx.mark_batch_published("batch-published")
+                .expect("publish prepared replacement")
+                .is_empty(),
+            "the published owner keeps the same prepared recipe live"
+        );
+
+        let prepared_batch_exists: bool = idx
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM staging_batches WHERE batch_id = 'batch-prepared')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("prepared batch existence");
+        assert!(!prepared_batch_exists);
+        let published_file_hash: [u8; 32] = prepared.file_hash().into();
+        assert_eq!(
+            idx.published_recipe_for_file(&published_file_hash)
+                .expect("published recipe"),
+            Some(prepared)
+        );
+    }
+
+    #[test]
+    fn rollback_preserves_snapshot_pin_and_rejects_published_batch() {
+        let idx = open_in_memory();
+        let path = b"models/rollback.bin";
+        let first = insert_test_recipe_lease(&idx, "batch-first", path, 0x41, 0x42);
+        idx.mark_batch_published("batch-first")
+            .expect("publish first");
+        idx.create_push_snapshot("push-first", std::slice::from_ref(&first))
+            .expect("snapshot first");
+
+        insert_test_recipe_lease(&idx, "batch-current", path, 0x51, 0x52);
+        idx.mark_batch_published("batch-current")
+            .expect("publish replacement");
+        idx.insert_batch("batch-retry").expect("retry batch");
+        idx.insert_recipe_lease(
+            "batch-retry",
+            b"models/retry.bin",
+            &first,
+            RecipeVerification::CallerVerified,
+        )
+        .expect("retry recipe lease");
+        assert!(
+            idx.rollback_batch("batch-retry")
+                .expect("rollback open retry")
+                .is_empty(),
+            "the immutable snapshot recipe pin remains an owner"
+        );
+
+        idx.insert_batch("batch-intent-retry")
+            .expect("intent retry batch");
+        idx.insert_recipe_lease(
+            "batch-intent-retry",
+            b"models/intent-retry.bin",
+            &first,
+            RecipeVerification::CallerVerified,
+        )
+        .expect("intent retry recipe lease");
+        idx.create_publication_intent(
+            "intent-retry",
+            &[(
+                "batch-intent-retry".to_owned(),
+                b"models/intent-retry.bin".to_vec(),
+                "pointer".to_owned(),
+                "absent".to_owned(),
+            )],
+        )
+        .expect("retry publication intent");
+        assert!(
+            idx.rollback_publication_intent("intent-retry")
+                .expect("rollback publication retry")
+                .is_empty(),
+            "publication rollback must also preserve the snapshot pin"
+        );
+
+        let error = idx
+            .rollback_batch("batch-current")
+            .expect_err("published ownership cannot roll back");
+        assert!(matches!(error, StagingError::StagingCorrupt(_)));
+        let first_file_hash: [u8; 32] = first.file_hash().into();
+        assert_eq!(
+            idx.discard_open_push_snapshot("push-first")
+                .expect("release snapshot"),
+            vec![first_file_hash]
+        );
+    }
+
+    #[test]
+    fn canonical_schema_reopens_without_change() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
 
@@ -4951,7 +7640,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_indexes_recipe_payload_leases_by_chunk() {
+    fn canonical_schema_rejects_missing_required_index() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path();
 
@@ -4961,17 +7650,50 @@ mod tests {
             .expect("drop chunk lease index");
         drop(idx);
 
-        let idx = Index::open(path).expect("migration reopen");
-        let columns: Vec<String> = idx
-            .conn
-            .prepare("PRAGMA index_info(recipe_payload_leases_by_chunk)")
-            .expect("prepare index info")
-            .query_map([], |row| row.get(2))
-            .expect("query index info")
-            .collect::<std::result::Result<_, _>>()
-            .expect("collect index columns");
+        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+    }
 
-        assert_eq!(columns, vec!["chunk_hash"]);
+    #[test]
+    fn canonical_schema_rejects_retired_publication_intent_shape() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path();
+
+        let idx = Index::open(path).expect("first open");
+        idx.conn
+            .execute_batch(
+                "DROP TABLE publication_intent_entries;
+                 CREATE TABLE publication_intent_entries (
+                    intent_id             TEXT NOT NULL,
+                    batch_id              TEXT NOT NULL,
+                    path_bytes            BLOB NOT NULL,
+                    recipe_hash           BLOB NOT NULL,
+                    expected_pointer_oid  TEXT NOT NULL,
+                    PRIMARY KEY (intent_id, path_bytes)
+                 );
+                 CREATE INDEX publication_entries_by_batch
+                    ON publication_intent_entries(batch_id, path_bytes);",
+            )
+            .expect("install retired publication table");
+        drop(idx);
+
+        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
+    }
+
+    #[test]
+    fn canonical_schema_rejects_remote_authority_without_placement_identity() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path();
+
+        let idx = Index::open(path).expect("first open");
+        idx.conn
+            .execute(
+                "ALTER TABLE recording_remote_chunks DROP COLUMN placement_id",
+                [],
+            )
+            .expect("install retired remote authority table");
+        drop(idx);
+
+        assert_staging_corrupt_contains(Index::open(path), "canonical v1");
     }
 
     #[test]
@@ -5068,9 +7790,9 @@ mod tests {
 
         assert!(
             idx.published_recipe_for_file(&file_hash)
-                .expect("legacy-only lookup")
+                .expect("headless lookup")
                 .is_none(),
-            "legacy file/chunk rows cannot publish a recipe"
+            "file/chunk rows without a published recipe lease cannot publish"
         );
 
         idx.insert_batch("batch-open").expect("batch");
@@ -5123,6 +7845,14 @@ mod tests {
         )
         .expect("recipe");
         idx.insert_batch("batch-large").expect("batch");
+        let mut occurrence = 0u64;
+        let mut offset = 0u64;
+        for page in chunks.chunks(crate::stream::STAGE_BATCH_CHUNKS) {
+            idx.append_recipe_recording_terms("batch-large", occurrence, offset, page)
+                .expect("record repeated recipe terms");
+            occurrence += u64::try_from(page.len()).expect("page length");
+            offset += page.iter().map(|(_, size)| size).sum::<u64>();
+        }
 
         idx.insert_recipe_lease(
             "batch-large",
@@ -5161,6 +7891,13 @@ mod tests {
         )
         .expect("recipe");
         idx.insert_batch("batch-missing").expect("batch");
+        idx.append_recipe_recording_terms(
+            "batch-missing",
+            0,
+            0,
+            &[(crab_xet::hash::MerkleHash::from(missing_chunk), 8)],
+        )
+        .expect("record missing recipe term");
 
         assert_staging_corrupt_contains(
             idx.insert_recipe_lease(
@@ -5261,153 +7998,31 @@ mod tests {
     }
 
     #[test]
-    fn migration_dedups_legacy_chunk_position_rows() {
+    fn retired_schema_is_rejected_without_mutation() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_path_buf();
-        let file_hash = test_hash(0xF1);
-        let chunk_a = test_hash(0xA1);
-        let stale_chunk_a = test_hash(0xA2);
-        let chunk_b = test_hash(0xB1);
-        let stale_chunk_b = test_hash(0xB2);
-
         {
-            let conn = Connection::open(&path).expect("open legacy db");
-            conn.execute_batch(
-                "CREATE TABLE files (
-                    file_hash    BLOB PRIMARY KEY,
-                    shard_hash   BLOB,
-                    total_bytes  INTEGER NOT NULL,
-                    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-                );
-                CREATE TABLE segments (
-                    segment_id       INTEGER PRIMARY KEY,
-                    sealed_at        TEXT,
-                    size_bytes       INTEGER NOT NULL,
-                    chunk_count      INTEGER NOT NULL DEFAULT 0,
-                    live_chunk_count INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE chunks (
-                    chunk_hash       BLOB NOT NULL,
-                    file_hash        BLOB NOT NULL,
-                    chunk_index      INTEGER NOT NULL,
-                    size             INTEGER NOT NULL,
-                    segment_id       INTEGER NOT NULL,
-                    segment_offset   INTEGER NOT NULL
-                );
-                CREATE TABLE pending_chunks (
-                    chunk_hash       BLOB NOT NULL,
-                    file_hash        BLOB NOT NULL,
-                    chunk_index      INTEGER NOT NULL,
-                    size             INTEGER NOT NULL,
-                    segment_id       INTEGER NOT NULL,
-                    segment_offset   INTEGER NOT NULL
-                );",
-            )
-            .expect("create legacy schema");
-            conn.execute(
-                "INSERT INTO files (file_hash, total_bytes) VALUES (?1, ?2)",
-                params![file_hash.as_slice(), 8_i64],
-            )
-            .expect("insert file");
-            conn.execute(
-                "INSERT INTO segments (segment_id, sealed_at, size_bytes, chunk_count, live_chunk_count)
-                 VALUES (1, datetime('now'), 32, 4, 4)",
-                [],
-            )
-            .expect("insert segment");
-            for (chunk_hash, chunk_index, offset) in
-                [(chunk_a, 0_i64, 0_i64), (stale_chunk_a, 0_i64, 8_i64)]
-            {
-                conn.execute(
-                    "INSERT INTO chunks
-                     (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
-                     VALUES (?1, ?2, ?3, 4, 1, ?4)",
-                    params![
-                        chunk_hash.as_slice(),
-                        file_hash.as_slice(),
-                        chunk_index,
-                        offset
-                    ],
-                )
-                .expect("insert legacy chunk");
-            }
-            for (chunk_hash, chunk_index, offset) in
-                [(chunk_b, 1_i64, 16_i64), (stale_chunk_b, 1_i64, 24_i64)]
-            {
-                conn.execute(
-                    "INSERT INTO pending_chunks
-                     (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
-                     VALUES (?1, ?2, ?3, 4, 1, ?4)",
-                    params![
-                        chunk_hash.as_slice(),
-                        file_hash.as_slice(),
-                        chunk_index,
-                        offset
-                    ],
-                )
-                .expect("insert legacy pending chunk");
-            }
+            let connection = Connection::open(&path).expect("open retired db");
+            connection
+                .execute("CREATE TABLE files (file_hash BLOB PRIMARY KEY)", [])
+                .expect("create retired schema");
         }
 
-        let idx = Index::open(&path).expect("migrate legacy db");
-        assert_eq!(
-            idx.chunks_for_file(&file_hash).expect("chunks"),
-            vec![chunk_a, chunk_b]
-        );
-        assert_eq!(
-            idx.chunks_for_file_with_sizes(&file_hash)
-                .expect("chunks with sizes"),
-            vec![(chunk_a, 4), (chunk_b, 4)]
-        );
-        let migrated: (i64, i64, i64, i64) = idx
-            .conn
-            .query_row(
-                "SELECT
-                    (SELECT COUNT(*) FROM file_recipes WHERE policy_id = 'xet-gear-v1-64k'),
-                    (SELECT COUNT(*) FROM recipe_occurrences),
-                    (SELECT COUNT(*) FROM chunk_payloads),
-                    (SELECT COUNT(*) FROM recipe_payload_leases)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .expect("read migrated ownership rows");
-        assert_eq!(
-            migrated,
-            (1, 2, 4, 2),
-            "all distinct legacy payloads survive even when duplicate positions are normalized"
-        );
-        let lease_count: i64 = idx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM path_leases WHERE batch_id = 'migration-v2'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read migration lease");
-        assert_eq!(lease_count, 1);
+        assert_staging_corrupt_contains(Index::open(&path), "canonical v1");
 
-        let duplicate_chunk = test_hash(0xEE);
-        let duplicate_committed = idx.conn.execute(
-            "INSERT INTO chunks
-             (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
-             VALUES (?1, ?2, 0, 4, 1, 36)",
-            params![duplicate_chunk.as_slice(), file_hash.as_slice()],
-        );
-        assert!(
-            duplicate_committed.is_err(),
-            "migration must enforce unique committed file positions"
-        );
-
-        let duplicate_insert = idx.conn.execute(
-            "INSERT INTO pending_chunks
-             (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
-             VALUES (?1, ?2, 1, 4, 1, 40)",
-            params![duplicate_chunk.as_slice(), file_hash.as_slice()],
-        );
-        assert!(
-            duplicate_insert.is_err(),
-            "migration must enforce unique pending file positions"
-        );
+        let connection = Connection::open(&path).expect("reopen retired db");
+        let tables: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .expect("prepare table inventory")
+            .query_map([], |row| row.get(0))
+            .expect("query table inventory")
+            .collect::<std::result::Result<_, _>>()
+            .expect("collect table inventory");
+        assert_eq!(tables, vec!["files"]);
     }
 
     #[test]

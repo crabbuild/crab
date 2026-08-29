@@ -210,6 +210,7 @@ pub async fn materialize_view_with_store_and_credentials(
 
     let parsed = CrabUrl::parse(repo_url).map_err(AuthServerError::from)?;
     let source_router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
+    crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
     let snapshot = read_repository_snapshot(&store, &source_router).await?;
     let manifest = snapshot.manifest;
     let source_manifest_hash = snapshot.journal.state_digest;
@@ -231,19 +232,24 @@ pub async fn materialize_view_with_store_and_credentials(
     };
 
     let view_router = StoreLayout::new(store.clone(), repo_prefix.clone());
-    if read_manifest(&store, &view_router).await.is_ok() {
-        verify_existing_view(
-            &parsed.bucket,
-            &repo_prefix,
-            &store,
-            &parsed.repo_path,
-            git_credentials.as_ref(),
-        )
-        .await?;
-        return Ok(ViewOutput {
-            cache_hit: true,
-            ..output
-        });
+    match read_manifest(&store, &view_router).await {
+        Ok(_) => {
+            crab_metadata::layout_descriptor::read_canonical_layout(&store, &view_router).await?;
+            verify_existing_view(
+                &parsed.bucket,
+                &repo_prefix,
+                &store,
+                &parsed.repo_path,
+                git_credentials.as_ref(),
+            )
+            .await?;
+            return Ok(ViewOutput {
+                cache_hit: true,
+                ..output
+            });
+        }
+        Err(AuthServerError::NotFound { .. }) => {}
+        Err(error) => return Err(error),
     }
 
     build_filtered_view(
@@ -448,6 +454,7 @@ async fn publish_filtered_view(
     crab_objects: ViewCrabObjects,
 ) -> Result<()> {
     let router = view_store_layout(store, repo_prefix);
+    crab_metadata::layout_descriptor::ensure_canonical_layout(store, &router).await?;
     let uploaded_crab = upload_view_crab_objects(store, &router, crab_objects).await?;
     let refs = list_view_refs(filtered_git)?;
     let head = resolve_view_head(filtered_git, &refs)?;
@@ -671,7 +678,7 @@ async fn prepare_view_manifest(
     upload_segmented_bulk(store, router, &bulk).await?;
 
     let mut manifest = Manifest {
-        version: 2,
+        version: crab_metadata::manifests::MANIFEST_VERSION,
         generation,
         created_at: now_rfc3339_millis(),
         pusher: Some("crab-auth-view".to_owned()),

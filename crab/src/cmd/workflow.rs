@@ -204,7 +204,9 @@ pub(crate) async fn build_remote_store_for(
     let crab_url = CrabUrl::parse(&url_str)?;
     let prefix = crab_url.repo_path.clone();
 
-    let store = crate::auth::build_store(config, &crab_url, "workflow-push-cache", cancel).await?;
+    let store =
+        crate::auth::build_repository_url_store(config, &crab_url, "workflow-push-cache", cancel)
+            .await?;
 
     Ok((WorkflowStore::from_storage(store.into_storage()), prefix))
 }
@@ -232,7 +234,7 @@ pub(crate) async fn build_workflow_artifact_stores(
         };
 
         let operation = format!("workflow-artifact-remote-{name}");
-        match crate::auth::build_store(config, &parsed, &operation, cancel).await {
+        match crate::auth::build_repository_url_store(config, &parsed, &operation, cancel).await {
             Ok(store) => {
                 let store = WorkflowStore::from_storage(store.into_storage());
                 if let Err(e) =

@@ -28,7 +28,6 @@ use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
 use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
-use crab_metadata::pack_metadata::PackMetadata;
 
 pub(crate) const AGENT_REBASE_FETCH_REF_FILTERING_ENV: &str =
     "CRAB_INTERNAL_AGENT_FETCH_REF_FILTERING";
@@ -150,10 +149,6 @@ pub fn filter_list_for_push(mut output: ListOutput, for_push: bool) -> ListOutpu
 /// Refs are emitted in the order of the original `specs` slice (important
 /// for git). Missing outcomes are treated as errors. The response is
 /// terminated by a blank line.
-#[allow(
-    deprecated,
-    reason = "pattern-matches the deprecated RefPushOutcome::Error variant for backward compat"
-)]
 pub fn format_push_response(result: &PushResult, specs: &[PushSpec]) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
@@ -161,12 +156,6 @@ pub fn format_push_response(result: &PushResult, specs: &[PushSpec]) -> String {
         match result.outcomes.get(&spec.dst) {
             Some(RefPushOutcome::Ok) => {
                 let _ = writeln!(buf, "ok {}", spec.dst);
-            }
-            Some(RefPushOutcome::Error(reason)) => {
-                // Backward-compat path: opaque string reasons still emit
-                // cleanly. New code should prefer `Rejected` so clients
-                // can parse a stable tag.
-                let _ = writeln!(buf, "error {} {}", spec.dst, one_line_protocol_text(reason));
             }
             Some(RefPushOutcome::Rejected(reason)) => {
                 // Structured reason: emit the stable protocol tag first
@@ -299,12 +288,6 @@ pub struct HelperOptions {
     /// targets are transferred. Crab fetches complete packs, so accepting this
     /// hint requires no separate object-transfer path.
     pub followtags: bool,
-    /// Deprecated field retained for compatibility with the released public
-    /// type and scheduled for removal in the next major version.
-    ///
-    /// Git's remote-helper protocol has no `include-tag` option. Crab leaves
-    /// this false and reports that protocol option as unsupported.
-    pub include_tag: bool,
 }
 
 impl Default for HelperOptions {
@@ -317,7 +300,6 @@ impl Default for HelperOptions {
             filter_requested: false,
             atomic: false,
             followtags: false,
-            include_tag: false,
         }
     }
 }
@@ -397,6 +379,10 @@ enum Batch {
     List { for_push: bool },
     Fetch(Vec<FetchEntry>),
     Push(Vec<PushItem>),
+}
+
+fn batch_requires_repository(batch: &Batch) -> bool {
+    !matches!(batch, Batch::Push(items) if items.iter().all(|item| matches!(item, PushItem::Rejected { .. })))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -664,6 +650,46 @@ pub async fn run_remote_helper(
     // Resolve config early — needed for store construction and CachingStore.
     let config = resolve_remote_helper_config()?;
 
+    let (mut reader, mut writer) = io.split();
+    let mut options = HelperOptions::default();
+    let mut line_buf = String::new();
+    let mut preflight_cache = SessionCache::new(config.clone());
+    let mut preflight_push_state = PushState::default();
+    let first_repository_batch = loop {
+        let Some(batch) = read_batch(
+            &mut reader,
+            &mut line_buf,
+            &mut options,
+            &mut writer,
+            &cancel,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if batch_requires_repository(&batch) {
+            break batch;
+        }
+        Box::pin(dispatch_batch(
+            &batch,
+            &options,
+            &mut writer,
+            None,
+            None,
+            "",
+            &mut preflight_cache,
+            remote_name,
+            &mut preflight_push_state,
+            progress_mode,
+            jsonl_stderr_stream.as_ref(),
+            Some(invocation_url.as_str()),
+            None,
+            None,
+            &cancel,
+        ))
+        .await?;
+    };
+
     // Classify before constructing any store. A corrupt configured profile is
     // an error, never a reason to reinterpret a logical authority as a bucket.
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
@@ -718,7 +744,17 @@ pub async fn run_remote_helper(
         replica_discovery_pending,
     };
 
-    run_remote_helper_with_context(remote_name, io, context, cancel).await
+    Box::pin(run_remote_helper_loop(
+        remote_name,
+        reader,
+        writer,
+        context,
+        cancel,
+        options,
+        line_buf,
+        Some(first_repository_batch),
+    ))
+    .await
 }
 
 struct RemoteHelperContext {
@@ -736,15 +772,41 @@ struct RemoteHelperContext {
     replica_discovery_pending: bool,
 }
 
+#[cfg(test)]
 async fn run_remote_helper_with_context(
     remote_name: &str,
     io: impl StdIo,
     context: RemoteHelperContext,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let (mut reader, mut writer) = io.split();
-    let mut options = HelperOptions::default();
-    let mut line_buf = String::new();
+    let (reader, writer) = io.split();
+    Box::pin(run_remote_helper_loop(
+        remote_name,
+        reader,
+        writer,
+        context,
+        cancel,
+        HelperOptions::default(),
+        String::new(),
+        None,
+    ))
+    .await
+}
+
+async fn run_remote_helper_loop<R, W>(
+    remote_name: &str,
+    mut reader: R,
+    mut writer: W,
+    context: RemoteHelperContext,
+    cancel: tokio_util::sync::CancellationToken,
+    mut options: HelperOptions,
+    mut line_buf: String,
+    mut pending_batch: Option<Batch>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let RemoteHelperContext {
         store,
         staging,
@@ -764,20 +826,26 @@ async fn run_remote_helper_with_context(
     let mut pinned_read_store = None;
 
     loop {
-        let Some(batch) = read_batch(
-            &mut reader,
-            &mut line_buf,
-            &mut options,
-            &mut writer,
-            &cancel,
-        )
-        .await?
-        else {
-            // Save push state on clean exit.
-            if let Err(e) = push_state.save(&push_state_repo_root) {
-                tracing::warn!(error = %e, "failed to save push state");
+        let batch = match pending_batch.take() {
+            Some(batch) => batch,
+            None => {
+                let Some(batch) = read_batch(
+                    &mut reader,
+                    &mut line_buf,
+                    &mut options,
+                    &mut writer,
+                    &cancel,
+                )
+                .await?
+                else {
+                    // Save push state on clean exit.
+                    if let Err(e) = push_state.save(&push_state_repo_root) {
+                        tracing::warn!(error = %e, "failed to save push state");
+                    }
+                    return Ok(());
+                };
+                batch
             }
-            return Ok(());
         };
         let uses_read_routing = match &batch {
             Batch::Capabilities | Batch::List { for_push: false } | Batch::Fetch(_) => true,
@@ -845,7 +913,7 @@ async fn run_remote_helper_with_context(
                 .await?;
             continue;
         }
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &options,
             &mut writer,
@@ -861,7 +929,7 @@ async fn run_remote_helper_with_context(
             managed_repository.as_ref(),
             caching_store.as_ref(),
             &cancel,
-        )
+        ))
         .await?;
     }
 }
@@ -1611,10 +1679,6 @@ fn native_push_config_for_helper(
     native_config
 }
 
-#[allow(
-    deprecated,
-    reason = "remote-helper summaries still report deprecated Error outcomes for compatibility"
-)]
 fn build_push_result_event(
     result: &PushResult,
     ordered_specs: &[PushSpec],
@@ -1625,9 +1689,6 @@ fn build_push_result_event(
             let outcome = result.outcomes.get(&spec.dst);
             let (status, error) = match outcome {
                 Some(RefPushOutcome::Ok) => ("ok".to_owned(), None),
-                Some(RefPushOutcome::Error(reason)) => {
-                    ("internal".to_owned(), Some(reason.clone()))
-                }
                 Some(RefPushOutcome::Rejected(reason)) => {
                     (reason.protocol_tag().to_owned(), Some(reason.to_string()))
                 }
@@ -1707,6 +1768,7 @@ where
             &router,
             entries,
             &options.fetch_options,
+            options.filter_requested,
             remote_url,
             &cfg,
             writer,
@@ -2034,20 +2096,17 @@ async fn read_remote_refs_for_advertisement(
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    match read_remote_refs(store, router, hidden_ref_patterns).await {
-        Ok(output) => Ok(output),
-        Err(CrabError::NotFound { path }) if path == router.manifest_path().as_ref() => {
-            tracing::debug!(
-                manifest_path = %path,
-                "remote manifest missing; advertising empty refs"
-            );
-            Ok(ListOutput {
-                refs: Vec::new(),
-                head_symref: None,
-            })
-        }
-        Err(error) => Err(error),
-    }
+    read_remote_refs(store, router, hidden_ref_patterns)
+        .await
+        .map_err(|error| match error {
+            CrabError::NotFound { path } if path == router.manifest_path().as_ref() => {
+                CrabError::CorruptObject {
+                    path,
+                    reason: "canonical v1 manifest is missing; retry `crab init` for this isolated development repository".to_owned(),
+                }
+            }
+            other => other,
+        })
 }
 
 /// Adapts remote-helper fetch entries to the read-domain upload-pack policy.
@@ -2111,10 +2170,8 @@ struct RemoteFetchStore {
     router: StoreLayout,
     generation: u64,
     packs: Vec<PackManifestEntry>,
-    caching_store: Option<crab_cache_store::CachingStore>,
+    _caching_store: Option<crab_cache_store::CachingStore>,
     pack_list: Arc<tokio::sync::Mutex<Option<PackList>>>,
-    enrich_ref_tips: bool,
-    metadata_concurrency: usize,
 }
 
 impl RemoteFetchStore {
@@ -2124,18 +2181,14 @@ impl RemoteFetchStore {
         generation: u64,
         packs: Vec<PackManifestEntry>,
         caching_store: Option<crab_cache_store::CachingStore>,
-        enrich_ref_tips: bool,
-        metadata_concurrency: usize,
     ) -> Self {
         Self {
             store,
             router,
             generation,
             packs,
-            caching_store,
+            _caching_store: caching_store,
             pack_list: Arc::new(tokio::sync::Mutex::new(None)),
-            enrich_ref_tips,
-            metadata_concurrency: metadata_concurrency.max(1),
         }
     }
 
@@ -2152,15 +2205,8 @@ impl RemoteFetchStore {
             .packs
             .iter()
             .cloned()
-            .map(|entry| PackEntry::with_ref_tips(entry.pack_id, entry.size, entry.ref_tips))
+            .map(|entry| PackEntry::new(entry.pack_id, entry.size, entry.ref_tips))
             .collect();
-
-        let entries =
-            if self.enrich_ref_tips && entries.iter().any(|entry| entry.ref_tips.is_none()) {
-                self.enrich_pack_ref_tips(entries).await
-            } else {
-                entries
-            };
 
         let pack_list = PackList {
             generation: self.generation,
@@ -2168,59 +2214,6 @@ impl RemoteFetchStore {
         };
         *self.pack_list.lock().await = Some(pack_list.clone());
         Ok(pack_list)
-    }
-
-    async fn enrich_pack_ref_tips(&self, entries: Vec<PackEntry>) -> Vec<PackEntry> {
-        use futures_util::StreamExt;
-
-        futures_util::stream::iter(entries.into_iter().map(|entry| {
-            let this = self.clone();
-            async move {
-                match this.fetch_pack_metadata(&entry.pack_id).await {
-                    Some(metadata) => {
-                        PackEntry::with_ref_tips(entry.pack_id, entry.size, metadata.ref_tips)
-                    }
-                    None => entry,
-                }
-            }
-        }))
-        .buffered(self.metadata_concurrency)
-        .collect()
-        .await
-    }
-
-    async fn fetch_pack_metadata(&self, pack_id: &str) -> Option<PackMetadata> {
-        let path = self.router.pack_metadata_path(pack_id);
-        let max_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES;
-        let body = if let Some(cs) = &self.caching_store {
-            cs.get_with_etag_bounded(&path, max_bytes).await.ok()?.0
-        } else {
-            self.store
-                .get_with_etag_bounded(&path, max_bytes)
-                .await
-                .ok()?
-                .0
-        };
-
-        match crab_metadata::pack_metadata::parse_pack_metadata(&body, path.as_ref()) {
-            Ok(metadata) if metadata.pack_id == pack_id => Some(metadata),
-            Ok(metadata) => {
-                tracing::debug!(
-                    pack_id,
-                    metadata_pack_id = %metadata.pack_id,
-                    "pack metadata id mismatch; treating pack as legacy"
-                );
-                None
-            }
-            Err(error) => {
-                tracing::debug!(
-                    pack_id,
-                    error = %error,
-                    "pack metadata unreadable; treating pack as legacy"
-                );
-                None
-            }
-        }
     }
 
     async fn download_pack_to_local_path(
@@ -2391,6 +2384,7 @@ async fn fetch_packs(
     router: &StoreLayout,
     entries: &[FetchEntry],
     fetch_options: &FetchOptions,
+    filter_requested: bool,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
@@ -2403,7 +2397,15 @@ async fn fetch_packs(
         // Git resolves missing partial-clone objects through legacy exact-OID
         // fetches. The catalog planner below authorizes every object against
         // visible ref closure before generating or returning pack bytes.
-        fetch_promisor_objects(store, router.repo_prefix(), entries, config, cancel).await?;
+        fetch_promisor_objects(
+            store,
+            router.repo_prefix(),
+            entries,
+            config,
+            filter_requested,
+            cancel,
+        )
+        .await?;
         return Ok(None);
     }
 
@@ -2416,8 +2418,6 @@ async fn fetch_packs(
         manifest.generation,
         snapshot.journal.packs,
         caching_store.cloned(),
-        config.fetch_ref_filtering,
-        config.download_concurrency,
     ));
 
     // A rejected entry produces a per-entry `error {ref}
@@ -2728,6 +2728,7 @@ async fn fetch_promisor_objects(
     prefix: &str,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
+    filtered_promisor: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let started = std::time::Instant::now();
@@ -2751,6 +2752,22 @@ async fn fetch_promisor_objects(
         .await?;
     let visible_refs =
         crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
+    let visible_tips = repository
+        .refs()
+        .entries
+        .iter()
+        .filter(|reference| visible_refs.contains(&reference.name))
+        .flat_map(|reference| [Some(reference.target), reference.peeled])
+        .flatten()
+        .collect::<std::collections::HashSet<_>>();
+    validate_raw_object_policy(
+        &wants,
+        &visible_tips,
+        config.uploadpack_allow_any_sha_in_want,
+        config.uploadpack_allow_tip_sha_in_want,
+        config.uploadpack_allow_reachable_sha_in_want,
+        filtered_promisor,
+    )?;
     let request = crab_read::UploadPackRequest {
         wants,
         filter: crab_read::UploadPackFilter::None,
@@ -2815,6 +2832,28 @@ async fn fetch_promisor_objects(
         "installed promised Git objects"
     );
     Ok(())
+}
+
+fn validate_raw_object_policy(
+    wants: &[gix_hash::ObjectId],
+    visible_tips: &std::collections::HashSet<gix_hash::ObjectId>,
+    allow_any: bool,
+    allow_tip: bool,
+    allow_reachable: bool,
+    filtered_promisor: bool,
+) -> Result<()> {
+    // A filter option identifies Git's lazy partial-clone object recovery.
+    // Other exact-OID fetches are user wants and must obey upload-pack policy;
+    // the catalog planner still proves visible-ref reachability afterward.
+    if filtered_promisor || allow_any || allow_reachable {
+        return Ok(());
+    }
+    if allow_tip && wants.iter().all(|want| visible_tips.contains(want)) {
+        return Ok(());
+    }
+    Err(CrabError::Protocol(
+        "raw object want is denied by upload-pack policy".to_owned(),
+    ))
 }
 
 static PROMISOR_SIDECAR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2964,7 +3003,7 @@ async fn check_repack_threshold(
                 .packs
                 .iter()
                 .map(|entry| {
-                    crab_metadata::manifests::PackEntry::with_ref_tips(
+                    crab_metadata::manifests::PackEntry::new(
                         &entry.pack_id,
                         entry.size,
                         entry.ref_tips.clone(),
@@ -2984,10 +3023,6 @@ async fn check_repack_threshold(
 }
 
 #[cfg(test)]
-#[allow(
-    deprecated,
-    reason = "tests still construct RefPushOutcome::Error for backward-compat regression coverage"
-)]
 mod tests {
     use super::*;
     use crate::test::git_repo::{CacheDirGuard, CleanGitEnvGuard, GIT_DIR_MUTEX, TEST_GIT_REPO};
@@ -3179,12 +3214,20 @@ mod tests {
         )
     }
 
+    async fn initialize_test_remote(store: &crate::storage::store::Store, prefix: &str) {
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        crate::cmd::init::initialize_remote_repository_store(store, &router, "refs/heads/main")
+            .await
+            .expect("initialize canonical test remote");
+    }
+
     /// Run the production protocol loop with a resolved in-memory context.
     async fn run(input: &str) -> String {
         let push_state_root = tempfile::tempdir().expect("push state tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(
             object_store::memory::InMemory::new(),
         ));
+        initialize_test_remote(&store, "remote-helper-unit").await;
         let context = test_context(
             store,
             "remote-helper-unit",
@@ -3200,7 +3243,7 @@ mod tests {
     async fn capabilities_response() {
         let output = run("capabilities\n").await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -3628,7 +3671,7 @@ mod tests {
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
         let refs = BTreeMap::from([(ref_name.to_owned(), sha.to_owned())]);
         let mut manifest = Manifest {
-            version: 2,
+            version: crate::metadata::manifest::MANIFEST_VERSION,
             generation: 1,
             created_at: "2026-06-16T00:00:00Z".to_owned(),
             pusher: None,
@@ -3665,8 +3708,6 @@ mod tests {
             admitted.generation,
             Vec::new(),
             None,
-            false,
-            1,
         );
 
         let mut newer = admitted;
@@ -3732,8 +3773,6 @@ mod tests {
                 object_count: 1,
             }],
             None,
-            false,
-            1,
         );
 
         let missing = fetch_store
@@ -4023,27 +4062,27 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn push_batch_emits_ok_per_ref() {
         let _guard = GitWorktreeGuard::new();
         let input = "push refs/heads/main:refs/heads/main\n\n";
-        let output = run(input).await;
+        let output = Box::pin(run(input)).await;
         assert_eq!(output, "ok refs/heads/main\n\n");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn push_force_parsed_correctly() {
         let _guard = GitWorktreeGuard::new();
         let input = "push +refs/heads/main:refs/heads/main\n\n";
-        let output = run(input).await;
+        let output = Box::pin(run(input)).await;
         assert_eq!(output, "ok refs/heads/main\n\n");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn multi_push_batch() {
         let _guard = GitWorktreeGuard::new();
         let input = "push refs/heads/main:refs/heads/main\npush refs/heads/dev:refs/heads/dev\n\n";
-        let output = run(input).await;
+        let output = Box::pin(run(input)).await;
         assert_eq!(output, "ok refs/heads/main\nok refs/heads/dev\n\n");
     }
 
@@ -4178,6 +4217,7 @@ mod tests {
         let _git_guard = GitEnvCwdGuard::set(&repo, &git_dir, &repo);
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "remote-helper-dispatch".to_owned());
+        initialize_test_remote(&store, "remote-helper-dispatch").await;
         let staging = Arc::new(
             StagingAreaReadOnly::open(repo.join(".crab/staging"))
                 .await
@@ -4272,7 +4312,7 @@ mod tests {
         let input = "capabilities\noption progress false\nlist\n";
         let output = run(input).await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\nok\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\nok\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -4309,6 +4349,7 @@ mod tests {
             object_store::memory::InMemory::new(),
         ));
         let prefix = "resolved-protocol-session";
+        initialize_test_remote(&store, prefix).await;
 
         let push_context = test_context(store.clone(), prefix, tmp.path().join("push-state-push"));
         let push_input = concat!(
@@ -4319,11 +4360,11 @@ mod tests {
             "push refs/tags/v1:refs/tags/v1\n",
             "\n"
         );
-        let (push_output, push_result) = run_with_context(
+        let (push_output, push_result) = Box::pin(run_with_context(
             push_input,
             push_context,
             tokio_util::sync::CancellationToken::new(),
-        )
+        ))
         .await;
         push_result.expect("push protocol session");
         assert!(push_output.contains("ok refs/heads/main\n"));
@@ -4349,11 +4390,11 @@ mod tests {
         let fetch_input = format!(
             "option followtags true\nlist\nfetch {commit} refs/heads/main\nfetch {commit} refs/heads/dev\n\n"
         );
-        let (fetch_output, fetch_result) = run_with_context(
+        let (fetch_output, fetch_result) = Box::pin(run_with_context(
             &fetch_input,
             fetch_context,
             tokio_util::sync::CancellationToken::new(),
-        )
+        ))
         .await;
         fetch_result.expect("fetch protocol session");
         assert!(fetch_output.contains(&format!("{commit} refs/heads/main\n")));
@@ -4797,14 +4838,16 @@ mod tests {
         outcomes.insert("refs/heads/main".to_owned(), RefPushOutcome::Ok);
         outcomes.insert(
             "refs/heads/dev".to_owned(),
-            RefPushOutcome::Error("non-fast-forward".to_owned()),
+            RefPushOutcome::Rejected(crate::git::push::PushRejectReason::Internal(
+                "non-fast-forward".to_owned(),
+            )),
         );
         let result = PushResult::new(outcomes);
 
         let response = format_push_response(&result, &specs);
         assert_eq!(
             response,
-            "ok refs/heads/main\nerror refs/heads/dev non-fast-forward\n\n"
+            "ok refs/heads/main\nerror refs/heads/dev internal (internal error: non-fast-forward)\n\n"
         );
     }
 
@@ -4821,12 +4864,17 @@ mod tests {
         let mut outcomes = HashMap::new();
         outcomes.insert(
             "refs/heads/main".to_owned(),
-            RefPushOutcome::Error("CAS conflict on ref".to_owned()),
+            RefPushOutcome::Rejected(crate::git::push::PushRejectReason::Internal(
+                "CAS conflict on ref".to_owned(),
+            )),
         );
         let result = PushResult::new(outcomes);
 
         let response = format_push_response(&result, &specs);
-        assert_eq!(response, "error refs/heads/main CAS conflict on ref\n\n");
+        assert_eq!(
+            response,
+            "error refs/heads/main internal (internal error: CAS conflict on ref)\n\n"
+        );
     }
 
     #[test]
@@ -4907,7 +4955,9 @@ mod tests {
         outcomes.insert("refs/heads/main".to_owned(), RefPushOutcome::Ok);
         outcomes.insert(
             "refs/heads/dev".to_owned(),
-            RefPushOutcome::Error("rejected".to_owned()),
+            RefPushOutcome::Rejected(crate::git::push::PushRejectReason::Internal(
+                "rejected".to_owned(),
+            )),
         );
         let result = PushResult::new(outcomes);
 
@@ -4915,7 +4965,10 @@ mod tests {
         let lines: Vec<&str> = response.lines().collect();
         assert_eq!(lines[0], "ok refs/tags/v2.0");
         assert_eq!(lines[1], "ok refs/heads/main");
-        assert_eq!(lines[2], "error refs/heads/dev rejected");
+        assert_eq!(
+            lines[2],
+            "error refs/heads/dev internal (internal error: rejected)"
+        );
     }
 
     #[test]
@@ -5256,6 +5309,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_object_policy_distinguishes_user_wants_from_promisor_recovery() {
+        let tip = gix_hash::ObjectId::from_hex(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("tip OID");
+        let ancestor = gix_hash::ObjectId::from_hex(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("ancestor OID");
+        let tips = std::collections::HashSet::from([tip]);
+
+        assert!(validate_raw_object_policy(&[tip], &tips, false, true, false, false).is_ok());
+        assert!(validate_raw_object_policy(&[ancestor], &tips, false, true, false, false).is_err());
+        assert!(validate_raw_object_policy(&[ancestor], &tips, false, true, true, false).is_ok());
+        assert!(validate_raw_object_policy(&[ancestor], &tips, false, true, false, true).is_ok());
+    }
+
     // --- option atomic parsing ---
 
     #[tokio::test]
@@ -5366,14 +5433,7 @@ mod tests {
         handle_option("include-tag", "true", &mut options, &mut writer)
             .await
             .unwrap();
-        assert!(!options.include_tag);
         assert_eq!(String::from_utf8(writer).unwrap(), "unsupported\n");
-    }
-
-    #[tokio::test]
-    async fn helper_options_default_include_tag_is_false() {
-        let opts = HelperOptions::default();
-        assert!(!opts.include_tag);
     }
 
     // --- read_remote_refs from manifest ---
@@ -5457,7 +5517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_advertisement_treats_missing_manifest_as_empty_remote() {
+    async fn list_advertisement_rejects_missing_manifest() {
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
         use std::sync::Arc;
@@ -5466,12 +5526,13 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_string());
 
-        let output = read_remote_refs_for_advertisement(&store, &router, &[])
+        let error = read_remote_refs_for_advertisement(&store, &router, &[])
             .await
-            .unwrap();
+            .expect_err("missing canonical manifest must fail closed");
 
-        assert!(output.refs.is_empty());
-        assert!(output.head_symref.is_none());
+        assert!(
+            matches!(error, CrabError::CorruptObject { ref reason, .. } if reason.contains("crab init"))
+        );
     }
 
     #[tokio::test]
@@ -5545,7 +5606,7 @@ mod tests {
         );
 
         let mut manifest = Manifest {
-            version: 2,
+            version: crate::metadata::manifest::MANIFEST_VERSION,
             generation: 3,
             created_at: "2025-07-01T00:00:00Z".to_owned(),
             pusher: Some("alice".to_owned()),
@@ -5640,7 +5701,7 @@ mod tests {
             refs.insert((*name).to_owned(), (*sha).to_owned());
         }
         let mut manifest = crate::metadata::manifest::Manifest {
-            version: 2,
+            version: crate::metadata::manifest::MANIFEST_VERSION,
             generation: 1,
             created_at: String::new(),
             pusher: None,

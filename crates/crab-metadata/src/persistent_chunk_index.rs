@@ -23,7 +23,9 @@ use crate::error::{MetadataError, Result};
 use crab_xet::xorb::format::{MerkleHash, XorbRef};
 
 const SCHEMA_VERSION_KEY: &str = "schema_version";
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_DESCRIPTOR_KEY: &str = "schema_descriptor";
+pub const PERSISTENT_CHUNK_INDEX_SCHEMA_VERSION: &str = "1";
+const SCHEMA_DESCRIPTOR: &str = "chunks_v1(chunk_hash,xorb_hash,chunk_index,uncompressed_size);shards_v1(shard_hash);meta_v1(key,value)";
 const CACHE_GC_GENERATION_KEY: &str = "cache_gc_generation";
 
 /// Persistent chunk index backed by a SQLite database file.
@@ -68,20 +70,7 @@ impl PersistentChunkIndex {
         .map_err(map_sqlite_err)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(map_sqlite_err)?;
-        let schema: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta_v1 WHERE key = ?1",
-                params![SCHEMA_VERSION_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_sqlite_err)?;
-        if schema.as_deref() != Some(SCHEMA_VERSION) {
-            return Err(MetadataError::CorruptObject {
-                path: path.display().to_string(),
-                reason: format!("unexpected schema version {schema:?}"),
-            });
-        }
+        validate_schema(&conn, path)?;
         let count = |table: &str| -> Result<u64> {
             let value: i64 = conn
                 .query_row(&format!("SELECT COUNT(1) FROM {table}"), [], |row| {
@@ -145,41 +134,36 @@ impl PersistentChunkIndex {
 
     /// Open an existing index or create a new one at the given path.
     ///
-    /// Corrupt or pre-SQLite cache files are removed and recreated because
-    /// this index is an acceleration tier. Canonical metadata remains in the
-    /// remote `chunk_index_db` and shard metadata.
+    /// Existing non-v1 state is rejected without mutation. Delete that exact
+    /// disposable cache file before retrying to create the canonical v1 shape.
     ///
     /// # Errors
     /// Returns `MetadataError::Io` on filesystem errors, or
     /// `MetadataError::Sqlite` on SQLite failures.
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let path = normalize_index_path(path)?;
-        let conn = match open_sqlite_cache(&path) {
-            Ok(conn) => conn,
-            Err(e) if should_recreate_cache(&e) && path.exists() => {
-                info!(
-                    path = %path.display(),
-                    error = %e,
-                    "persistent chunk index open failed, recreating local cache"
-                );
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(wal_path(&path));
-                let _ = std::fs::remove_file(shm_path(&path));
-                open_sqlite_cache(&path)?
-            }
-            Err(e) => return Err(e),
-        };
+        let existed = path.exists();
+        if existed {
+            let readonly = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(map_sqlite_err)?;
+            validate_schema(&readonly, &path)?;
+        }
+
+        let conn = Connection::open(&path).map_err(map_sqlite_err)?;
+        configure_connection(&conn)?;
+        if existed {
+            validate_schema(&conn, &path)?;
+        } else {
+            initialize_schema(&conn)?;
+        }
 
         let index = Self {
             conn: Mutex::new(conn),
             path,
         };
-
-        if !index.verify_schema()? {
-            info!("schema mismatch in persistent chunk index, reinitializing");
-            index.reinitialize_schema()?;
-        }
-
         Ok(index)
     }
 
@@ -462,7 +446,7 @@ impl PersistentChunkIndex {
 
         tx.execute(
             "INSERT OR REPLACE INTO meta_v1 (key, value) VALUES (?1, ?2)",
-            params![SCHEMA_VERSION_KEY, SCHEMA_VERSION],
+            params![SCHEMA_VERSION_KEY, PERSISTENT_CHUNK_INDEX_SCHEMA_VERSION],
         )
         .map_err(map_sqlite_err)?;
         tx.commit().map_err(map_sqlite_err)?;
@@ -537,41 +521,10 @@ impl PersistentChunkIndex {
         Ok(result)
     }
 
-    /// Check whether the stored schema version matches the expected version.
-    ///
-    /// Returns `true` if the schema is valid, `false` if missing or mismatched.
-    ///
-    /// # Errors
-    /// Returns `MetadataError::Internal` on SQLite read failures.
-    pub fn verify_schema(&self) -> Result<bool> {
+    #[cfg(test)]
+    fn verify_schema(&self) -> Result<()> {
         let conn = self.connection()?;
-        let raw: Option<String> = conn
-            .query_row(
-                "SELECT value FROM meta_v1 WHERE key = ?1",
-                params![SCHEMA_VERSION_KEY],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(map_sqlite_err)?;
-        Ok(raw.as_deref() == Some(SCHEMA_VERSION))
-    }
-
-    fn reinitialize_schema(&self) -> Result<()> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction().map_err(map_sqlite_err)?;
-        tx.execute("DELETE FROM chunks_v1", [])
-            .map_err(map_sqlite_err)?;
-        tx.execute("DELETE FROM shards_v1", [])
-            .map_err(map_sqlite_err)?;
-        tx.execute("DELETE FROM meta_v1", [])
-            .map_err(map_sqlite_err)?;
-        tx.execute(
-            "INSERT INTO meta_v1 (key, value) VALUES (?1, ?2)",
-            params![SCHEMA_VERSION_KEY, SCHEMA_VERSION],
-        )
-        .map_err(map_sqlite_err)?;
-        tx.commit().map_err(map_sqlite_err)?;
-        Ok(())
+        validate_schema(&conn, &self.path)
     }
 
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -579,17 +532,6 @@ impl PersistentChunkIndex {
             .lock()
             .map_err(|_| MetadataError::Internal("persistent chunk index mutex poisoned".into()))
     }
-}
-
-fn open_sqlite_cache(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let conn = Connection::open(path).map_err(map_sqlite_err)?;
-    configure_connection(&conn)?;
-    run_migrations(&conn)?;
-    Ok(conn)
 }
 
 fn configure_connection(conn: &Connection) -> Result<()> {
@@ -602,7 +544,7 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS chunks_v1 (
             chunk_hash BLOB PRIMARY KEY NOT NULL CHECK(length(chunk_hash) = 32),
@@ -620,10 +562,59 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     )
     .map_err(map_sqlite_err)?;
     conn.execute(
-        "INSERT OR IGNORE INTO meta_v1 (key, value) VALUES (?1, ?2)",
-        params![SCHEMA_VERSION_KEY, SCHEMA_VERSION],
+        "INSERT INTO meta_v1 (key, value) VALUES (?1, ?2), (?3, ?4)",
+        params![
+            SCHEMA_VERSION_KEY,
+            PERSISTENT_CHUNK_INDEX_SCHEMA_VERSION,
+            SCHEMA_DESCRIPTOR_KEY,
+            SCHEMA_DESCRIPTOR
+        ],
     )
     .map_err(map_sqlite_err)?;
+    Ok(())
+}
+
+fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
+    let metadata = |key: &str| -> Result<Option<String>> {
+        conn.query_row(
+            "SELECT value FROM meta_v1 WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sqlite_err)
+    };
+    let version = metadata(SCHEMA_VERSION_KEY)?;
+    let descriptor = metadata(SCHEMA_DESCRIPTOR_KEY)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .map_err(map_sqlite_err)?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map_sqlite_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(map_sqlite_err)?;
+    let expected = vec![
+        ("table".to_owned(), "chunks_v1".to_owned()),
+        ("table".to_owned(), "meta_v1".to_owned()),
+        ("table".to_owned(), "shards_v1".to_owned()),
+    ];
+    if version.as_deref() != Some(PERSISTENT_CHUNK_INDEX_SCHEMA_VERSION)
+        || descriptor.as_deref() != Some(SCHEMA_DESCRIPTOR)
+        || objects != expected
+    {
+        return Err(MetadataError::CorruptObject {
+            path: path.display().to_string(),
+            reason: format!(
+                "persistent chunk index is not canonical v1; delete this cache file and retry (version={version:?}, descriptor={descriptor:?})"
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -640,32 +631,6 @@ fn normalize_index_path(path: &Path) -> Result<PathBuf> {
     })?;
 
     Ok(parent.join(file_name))
-}
-
-fn wal_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}-wal", path.display()))
-}
-
-fn shm_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}-shm", path.display()))
-}
-
-fn should_recreate_cache(err: &MetadataError) -> bool {
-    match err {
-        MetadataError::Sqlite { source, .. } => {
-            matches!(
-                source.sqlite_error_code(),
-                Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
-            ) || {
-                let msg = source.to_string();
-                msg.contains("not a database")
-                    || msg.contains("file is not a database")
-                    || msg.contains("database disk image is malformed")
-            }
-        }
-        MetadataError::Internal(msg) => msg.contains("schema mismatch"),
-        _ => false,
-    }
 }
 
 fn hash_bytes(hash: &MerkleHash) -> [u8; 32] {
@@ -780,7 +745,7 @@ mod tests {
     #[test]
     fn open_creates_new_db() {
         let (_dir, idx) = temp_index();
-        assert!(idx.verify_schema().unwrap());
+        idx.verify_schema().unwrap();
         assert!(idx.installed_shards().unwrap().is_empty());
         assert!(idx.load_all().unwrap().is_empty());
     }
@@ -937,12 +902,16 @@ mod tests {
     }
 
     #[test]
-    fn verify_schema_detects_mismatch() {
+    fn open_rejects_schema_mismatch_without_mutation() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("chunk-index.sqlite");
 
         {
-            let conn = open_sqlite_cache(&path).unwrap();
+            let idx = PersistentChunkIndex::open_or_create(&path).unwrap();
+            idx.insert(&hash(1), &xorb_ref(2, 0)).unwrap();
+        }
+        {
+            let conn = Connection::open(&path).unwrap();
             conn.execute(
                 "UPDATE meta_v1 SET value = ?1 WHERE key = ?2",
                 params!["0", SCHEMA_VERSION_KEY],
@@ -950,21 +919,31 @@ mod tests {
             .unwrap();
         }
 
-        let idx = PersistentChunkIndex::open_or_create(&path).unwrap();
-        assert!(idx.verify_schema().unwrap());
-        assert!(idx.load_all().unwrap().is_empty());
+        assert!(PersistentChunkIndex::open_or_create(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta_v1 WHERE key = ?1",
+                params![SCHEMA_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "0");
+        let entries: i64 = conn
+            .query_row("SELECT COUNT(1) FROM chunks_v1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(entries, 1);
     }
 
     #[test]
-    fn open_recreates_non_sqlite_cache_file() {
+    fn open_rejects_non_sqlite_cache_file_without_mutation() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("chunk-index.sqlite");
-        std::fs::write(&path, b"this used to be a different cache engine").unwrap();
+        let retired = b"this used to be a different cache engine";
+        std::fs::write(&path, retired).unwrap();
 
-        let idx = PersistentChunkIndex::open_or_create(&path).unwrap();
-
-        assert!(idx.verify_schema().unwrap());
-        assert!(idx.load_all().unwrap().is_empty());
+        assert!(PersistentChunkIndex::open_or_create(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), retired);
     }
 
     #[test]
@@ -1081,7 +1060,7 @@ mod tests {
         assert!(idx.load_all().unwrap().is_empty());
         assert!(idx.installed_shards().unwrap().is_empty());
         assert!(!idx.has_shard(&shard).unwrap());
-        assert!(idx.verify_schema().unwrap());
+        idx.verify_schema().unwrap();
         assert_eq!(idx.cache_gc_generation().unwrap(), 7);
     }
 

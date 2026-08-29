@@ -8,7 +8,7 @@ use tracing::info;
 
 use crate::core::error::{Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
-use crab_staging::stats::{StagingStats, StagingVerifyStats};
+use crab_staging::stats::{StagingLifecycleHealth, StagingStats, StagingVerifyStats};
 use crab_staging::{StagingArea, StagingAreaReadOnly};
 use crab_types::pointer::hex_encode;
 
@@ -20,6 +20,8 @@ const STAGING_ROOT: &str = ".crab/staging";
 pub struct StagingStatsPayload {
     #[serde(flatten)]
     pub stats: StagingStats,
+    /// Canonical path ownership and immutable push-pin health.
+    pub lifecycle: StagingLifecycleHealth,
     /// Per-file breakdown of staged chunks.
     pub files: Vec<StagedFileEntry>,
 }
@@ -56,6 +58,7 @@ pub async fn run_staging_stats(mode: OutputMode) -> Result<()> {
     let staging = StagingAreaReadOnly::open(root.to_path_buf()).await?;
 
     let stats = staging.stats()?;
+    let lifecycle = staging.lifecycle_health()?;
     let file_list = staging.list_files()?;
 
     if mode == OutputMode::Json {
@@ -71,7 +74,11 @@ pub async fn run_staging_stats(mode: OutputMode) -> Result<()> {
                 segments: f.segments,
             })
             .collect();
-        let payload = StagingStatsPayload { stats, files };
+        let payload = StagingStatsPayload {
+            stats,
+            lifecycle,
+            files,
+        };
         emit_json("staging.stats", "1.0", payload);
         return Ok(());
     }
@@ -88,6 +95,25 @@ pub async fn run_staging_stats(mode: OutputMode) -> Result<()> {
     println!("  Chunk count:           {}", stats.chunk_count);
     println!("  File count:            {}", stats.file_count);
     println!("  Inflight markers:      {}", inflight.len());
+    println!("  Current path heads:    {}", lifecycle.path_heads);
+    println!("  Ordinary path leases:  {}", lifecycle.path_leases);
+    println!(
+        "  Snapshot-pinned bytes: {}",
+        format_size(
+            lifecycle
+                .snapshot_pinned_segment_bytes
+                .saturating_add(lifecycle.snapshot_pinned_prepared_bytes)
+        )
+    );
+    println!(
+        "  Unpublished batches:   {}",
+        lifecycle.open_batches_without_publication
+    );
+    println!(
+        "  Reclaimable leases:    {}",
+        lifecycle.reclaimable_superseded_leases
+    );
+    println!("  Reclaimable files:     {}", lifecycle.reclaimable_files);
 
     if !file_list.is_empty() {
         println!("\n  Files:");

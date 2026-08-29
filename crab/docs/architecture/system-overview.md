@@ -9,6 +9,11 @@ LFS endpoints. Large files are content-defined chunked, deduplicated, and stored
 as compressed xorbs in the object store, while Git sees only lightweight pointer
 blobs.
 
+These are implemented adapters, not equivalent release-support claims. The
+retained [provider qualification matrix](../guides/provider-qualification.md)
+is authoritative; currently RustFS is development-qualified and Amazon S3,
+GCS, and Azure are unqualified.
+
 ## Component Diagram
 
 ```

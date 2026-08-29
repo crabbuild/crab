@@ -747,7 +747,7 @@ fn crab_pointer_for_content(
                 file_hash.hex()
             )));
         }
-        staging.publish_verified_recipe_lease(Path::new(path), &recipe)?;
+        staging.publish_verified_history_recipe(&recipe)?;
         let raw_file_hash: [u8; 32] = file_hash.into();
         return Ok(Pointer {
             file_hash: raw_file_hash,
@@ -790,7 +790,7 @@ fn crab_pointer_for_content(
             staging.flush_pending().await.map_err(CrabError::from)
         })?;
     }
-    staging.publish_verified_recipe_lease(Path::new(path), &recipe)?;
+    staging.publish_verified_history_recipe(&recipe)?;
 
     let raw_file_hash: [u8; 32] = file_hash.into();
     Ok(Pointer {
