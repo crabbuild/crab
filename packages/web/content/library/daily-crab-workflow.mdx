@@ -1,0 +1,222 @@
+---
+title: "How do you work with Crab after the first push?"
+description: "Pull changes, select a working set, coordinate binary edits, review pointers, publish safely, and reclaim local disk space."
+date: "2026-08-29"
+author: "Crab Team"
+category: "tutorial"
+tags: ["beginner", "daily-workflow", "collaboration"]
+excerpt: "A repeatable daily loop for collaborators who share large files through Crab."
+level: "beginner"
+path: "first-workflow"
+order: 4
+concepts: ["pull", "hydration", "file locks", "push", "dehydration"]
+prerequisites: ["How does Crab connect to Git?"]
+outcome: "Complete a collaborative Crab work cycle without confusing Git history, remote data, and local materialization."
+diagramType: "Daily workflow loop"
+knowledgeCheck:
+  question: "Which command should you run before editing a binary file that teammates cannot merge?"
+  options:
+    - "`crab lock path/to/file`"
+    - "`crab gc --scope repo`"
+    - "`crab dehydrate --all`"
+  answer: 0
+  explanation: "An advisory lock makes edit ownership visible before two contributors produce conflicting binary changes."
+meta:
+  contentType: "Tutorial"
+  goal: "Teach the daily pull, materialize, edit, review, publish, and cleanup loop."
+  audience: "Contributors working in an existing Crab repository."
+---
+
+Use this workflow after your team has configured and verified a Crab repository. You will update Git history, materialize only the files you need, publish one change, and leave the working tree understandable for the next task.
+
+<FlowSteps
+  title="The daily collaboration loop"
+  steps={[
+    "Pull the branch and inspect Git and Crab state.",
+    "Hydrate the working set required for this task.",
+    "Lock non-mergeable files before editing them.",
+    "Stage pointers, review the commit, and publish its complete data closure.",
+    "Release locks and dehydrate clean files when local disk matters."
+  ]}
+/>
+
+## Start by separating Git state from Crab state
+
+Git and Crab answer different questions. Git reports branch and worktree changes. Crab reports tracking, pointer, hydration, staging, and remote health.
+
+```bash
+git status --short
+crab status
+crab doctor
+```
+
+Begin with a clean Git worktree. Read `crab status` to see which managed paths contain pointers, full bytes, or local modifications. Run `crab doctor` when credentials, filters, or the remote may have changed.
+
+Use `crab why` when one path behaves differently from its neighbors:
+
+```bash
+crab why models/encoder.safetensors
+git check-attr filter -- models/encoder.safetensors
+```
+
+`crab why` explains the matching tracking rule and current representation. `git check-attr` confirms that Git selects the Crab filter for the path.
+
+## Pull the branch before selecting large files
+
+Pull Git history before hydrating a working set. The current commit determines the exact file identities that Crab reconstructs.
+
+```bash
+crab pull
+git log -1 --oneline
+crab status
+```
+
+`crab pull` runs the Git pull first, then hydrates new pointers that match the repository's hydration policy. Use `crab pull --no-hydrate` when you want to choose every file explicitly.
+
+```bash
+crab pull --no-hydrate
+crab hydrate 'models/current/**' 'data/evaluation/**'
+```
+
+A pointer-only path is not missing data. It is the committed file identity waiting for local materialization.
+
+## Choose the smallest useful working set
+
+Hydrate the files required by the current task. Crab resolves each pointer, reads missing chunk ranges, reconstructs the file, and verifies its complete hash before replacement.
+
+```bash
+crab hydrate models/current/encoder.safetensors
+crab hydrate --manifest .crab/manifests/evaluation.txt
+crab status
+```
+
+Use a committed manifest for continuous integration or another repeatable job. Reviewers can then see which models, datasets, or fixtures the job expects.
+
+Choose the access method by workload:
+
+| Need | Use | Working-tree effect |
+| --- | --- | --- |
+| One known file or pattern | `crab hydrate <patterns>` | Replaces selected pointers with verified bytes |
+| A declared job input set | `crab hydrate --manifest <path>` | Materializes the reviewed manifest entries |
+| Data before a disconnected period | `crab fetch --include <pattern>` | Warms the cache without changing files |
+| Unpredictable reads across a large tree | `crab mount` | Reads files or ranges through a mounted view |
+| A few files without a Git checkout | `crab download` | Writes selected snapshot files to a target directory |
+
+Hydration and mounting solve different access patterns. Hydrate files that tools expect to edit or scan repeatedly. Use a mount when reads are sparse and difficult to predict.
+
+## Lock files that Git cannot merge
+
+Acquire an advisory lock before editing a shared binary that has no meaningful merge operation. Locks live in the repository's remote object storage and identify the current editor to other Crab clients.
+
+```bash
+crab lock models/current/encoder.safetensors
+crab locks --path models/current/encoder.safetensors
+```
+
+The lock coordinates writers, but it does not make the local file read-only. If another contributor owns the lock, contact them before changing or force-releasing it.
+
+Source code and mergeable text files usually do not need Crab locks. Keep Git's normal branching and merge workflow for those paths.
+
+## Stage and review the large-file change
+
+Use `crab add` for tracked large files. It processes files in parallel and stages the same pointer representation that Git's clean filter produces.
+
+```bash
+crab add models/current/encoder.safetensors
+git diff --cached --stat
+git show :models/current/encoder.safetensors
+```
+
+The staged object should contain a Crab pointer with a `file-hash` and `size`. Your working-tree path can remain fully materialized.
+
+Review three surfaces before committing:
+
+| Surface | Check | Expected result |
+| --- | --- | --- |
+| Git index | `git diff --cached --stat` | Only intended paths and attributes are staged |
+| Managed file | `git show :path/to/file` | Git stores a compact Crab pointer |
+| Crab staging | `crab stat` | The recipe and new data are ready for publication |
+
+For a version comparison, use `crab diff` to inspect file and chunk reuse from metadata. It complements a semantic review produced by the file's native application.
+
+## Commit and publish one complete state
+
+Use separate commands when you want a review point between staging, commit, and push:
+
+```bash
+git commit -m "Update evaluation encoder"
+crab push
+```
+
+`crab push` finds reachable Crab pointers, uploads missing chunks and metadata, publishes Git objects, and advances the destination ref after closure checks pass. A retry can reuse immutable objects uploaded by an earlier failed attempt.
+
+Use `crab ship` when one command should stage, commit, and push a known set of paths:
+
+```bash
+crab ship models/current/encoder.safetensors -m "Update evaluation encoder"
+```
+
+After either path, compare the local commit with the remote ref:
+
+```bash
+git rev-parse HEAD
+git ls-remote origin "refs/heads/$(git branch --show-current)"
+crab fsck
+```
+
+Matching commit IDs prove ref publication. `crab fsck` adds repository-structure checks, but a fresh hydration remains the byte-level reconstruction proof.
+
+## Finish the task without discarding remote data
+
+Release any lock after publishing or abandoning the edit:
+
+```bash
+crab unlock models/current/encoder.safetensors
+```
+
+Dehydrate clean files when you want to reclaim working-tree disk space:
+
+```bash
+crab dehydrate models/current/encoder.safetensors
+crab du
+```
+
+Dehydration replaces verified, unmodified bytes with the committed pointer. It does not delete the remote chunks. Crab skips dirty files instead of replacing unpublished work.
+
+Use `crab prune` to reduce the local cache to configured budgets. Do not confuse it with `crab gc`, which evaluates unreachable objects in shared remote storage.
+
+## Apply the loop to common team roles
+
+The same commit can support different local working sets:
+
+| Role | Recommended loop |
+| --- | --- |
+| Source contributor | Pull pointers, hydrate no models, edit code, and push normally |
+| Model contributor | Pull, lock the active checkpoint, hydrate it, publish, then unlock |
+| Evaluation job | Clone lazily and hydrate a committed evaluation manifest |
+| Release job | Hydrate declared artifacts, verify hashes, and record structured command output |
+| Asset browser | Mount a stable snapshot and read only requested ranges |
+
+Keep tracking rules and hydration manifests in Git. Keep cloud credentials, caches, staging data, and machine-specific settings outside commits.
+
+## Diagnose the earliest failed boundary
+
+Daily failures are easier to resolve when you start with the first incorrect state:
+
+| Symptom | Inspect first |
+| --- | --- |
+| A file is not tracked | `crab why`, `.gitattributes`, and `git check-attr` |
+| Pull cannot update the branch | Git merge or rebase state before hydration |
+| Hydration cannot find data | Pointer metadata, credentials, cache, and object-store reads |
+| Staging contains full binary bytes | Filter selection and the `crab add` result |
+| Push rejects the update | Destination ref, advisory locks, and pointer closure |
+| Dehydration skips a file | Uncommitted edits or a file identity mismatch |
+
+Do not repair a later boundary until the earlier one is correct. A wider bucket policy cannot fix the wrong `.gitattributes` rule, and restaging cannot reconcile a stale branch.
+
+<TakeawayBox title="One history, task-specific working sets">
+  Pull and publish Git history for the team. Hydrate, mount, cache, and
+  dehydrate large-file bytes according to each task's local needs.
+</TakeawayBox>
+
+Continue with [Which Crab capability should you use next?](/library/crab-capabilities) to map this core workflow to Crab's collaboration, automation, compatibility, and operations features.

@@ -1,0 +1,224 @@
+---
+title: "Which Crab capability should you use next?"
+description: "Map repository needs to Crab's data, Git, working-set, collaboration, workflow, automation, and operations capabilities."
+date: "2026-08-29"
+author: "Crab Team"
+category: "product"
+tags: ["beginner", "capabilities", "workflow-selection"]
+excerpt: "A task-based map of Crab's major capabilities and the boundary each one owns."
+level: "beginner"
+path: "first-workflow"
+order: 5
+concepts: ["capability map", "lazy materialization", "Git interoperability", "workflows", "operations"]
+prerequisites: ["How do you work with Crab after the first push?"]
+outcome: "Choose the Crab workflow and next guide that match a repository need."
+diagramType: "Capability map"
+knowledgeCheck:
+  question: "Which capability fits a tool that reads unpredictable ranges from a repository larger than local disk?"
+  options:
+    - "A Crab mount"
+    - "`crab hydrate --all`"
+    - "A history rewrite"
+  answer: 0
+  explanation: "A mount exposes a stable snapshot and retrieves files or ranges when the application reads them."
+meta:
+  contentType: "Conceptual"
+  goal: "Explain Crab's major capabilities and route readers to the correct next workflow."
+  audience: "New Crab users choosing how to apply the product beyond a first push."
+---
+
+Crab begins as a large-file path for Git, but the same repository model supports selective working sets, direct object storage, binary collaboration, cached pipelines, experiments, integrity checks, and storage operations. Choose capabilities by the problem you need to solve, not by the number of commands available.
+
+<FlowSteps
+  title="Choose from the repository boundary outward"
+  steps={[
+    "Keep large-file identity in Git and durable bytes in object storage.",
+    "Choose how each client materializes its working set.",
+    "Select the Git compatibility and collaboration model your team needs.",
+    "Add reproducible workflow features only when the repository owns those outputs.",
+    "Operate integrity, recovery, retention, and cost at the storage boundary."
+  ]}
+/>
+
+## Start with the capability map
+
+Each capability protects a distinct boundary. The table routes a repository need to the first command and the detailed documentation.
+
+| Repository need | Crab capability | Start with |
+| --- | --- | --- |
+| Version models, datasets, media, or build artifacts | Native large-file tracking and deduplicated storage | `crab track`, `crab add`, `crab push` |
+| Keep checkouts smaller than repository content | Lazy clone, hydration, dehydration, and manifests | `crab clone`, `crab hydrate`, `crab dehydrate` |
+| Read sparse, unpredictable data | Snapshot mounts and range reads | `crab mount` |
+| Keep a forge as the code-review remote | Mirror mode | `crab init --mirror=origin crab://bucket/repository` |
+| Preserve standard Git Large File Storage pointers | Crab LFS direct-storage mode | `crab lfs install --local` |
+| Prevent conflicting binary edits | Advisory file locks | `crab lock`, `crab unlock`, `crab locks` |
+| Cache data or model pipelines | Workflow stages and remote stage cache | `crab stage`, `crab run`, `crab workflow` |
+| Compare parameterized results | Experiments, queues, parameters, metrics, and plots | `crab exp`, `crab queue`, `crab metrics` |
+| Verify or recover repository state | Health, integrity, audit, and recovery tools | `crab doctor`, `crab fsck`, `crab audit`, `crab recover` |
+| Control storage and transfer cost | Cache budgets, compaction, garbage collection, tiers, and replicas | `crab prune`, `crab gc`, `crab tier`, `crab replica` |
+
+The core large-file workflow may be all your repository needs. Add another capability when its ownership boundary matches a real team requirement.
+
+## Store large files without giving up Git history
+
+Crab-native tracking is the default for a new repository. `.gitattributes` selects managed paths, Git commits a compact Crab pointer, and Crab stores file content as content-addressed chunks in your object storage.
+
+```bash
+crab track '*.safetensors'
+crab track 'datasets/**'
+crab add models/encoder.safetensors datasets/evaluation/
+git commit -m "Add encoder and evaluation data"
+crab push
+```
+
+Content-defined chunking finds byte regions that remain identical across file versions. Durable chunks can be reused across paths, branches, and versions because identity comes from content.
+
+This model is useful when code and large artifacts must share commits, branches, tags, and reviews. It also keeps the object-store account, policies, lifecycle rules, and billing under your organization's control.
+
+Read [How does Crab avoid storing duplicate data?](/library/xet-protocol-deduplication) when you need the chunk, xorb, shard, and file-recipe model. Read [What happens during a Crab push?](/library/push-pipeline-14-steps) when publication ordering or retry behavior matters.
+
+## Give each client a different working set
+
+Crab separates repository identity from local materialization. Two clients can check out the same commit while storing different large-file bytes on disk.
+
+Use hydration for known inputs:
+
+```bash
+crab clone crab://team-data/vision-search
+cd vision-search
+crab hydrate --manifest .crab/manifests/training.txt
+```
+
+Use dehydration to reclaim space from verified, unmodified files:
+
+```bash
+crab dehydrate 'models/archive/**'
+crab prune
+```
+
+Use a mount when applications discover files or byte ranges at runtime. A mount exposes a stable Git snapshot and retrieves content as reads occur.
+
+| Access pattern | Best starting point | Why |
+| --- | --- | --- |
+| Known files edited by local tools | Hydration | Applications receive ordinary files on disk |
+| Fixed inputs for continuous integration | Hydration manifest | The required working set stays committed and reviewable |
+| Repeated reads after a network window | Fetch, then hydrate | The local cache can satisfy later reconstruction |
+| Sparse reads across a larger-than-disk repository | Mount | Only requested files or ranges need local cache space |
+| A few snapshot files without repository history | Download | The caller avoids a full Git checkout |
+
+Read [How do you work with a repository larger than your disk?](/library/lazy-checkout-fuse) for hydration and mount tradeoffs. Read [How does Crab avoid repeated object-store reads?](/library/multi-layer-caching) for the local, shared, and canonical read path.
+
+## Keep the Git collaboration model your team already uses
+
+Crab uses Git's filter-process and remote-helper extension points. Branching, merging, tagging, reverting, and worktrees remain Git concepts.
+
+Choose one remote arrangement:
+
+| Team requirement | Arrangement | Result |
+| --- | --- | --- |
+| Crab owns Git objects and large-file data | `crab://` origin | One object-storage repository contains both lanes |
+| GitHub or GitLab remains the review remote | Mirror mode | Git refs and pointer blobs go to the forge after Crab data is durable |
+| Existing tools require standard LFS pointers | Crab LFS | Git LFS clients use Crab's direct-storage transfer agent |
+
+Mirror mode is for teams that want forge pull requests, checks, and permissions while storing large payloads through Crab. Crab LFS is for compatibility with existing LFS history or tooling. New repositories that do not need standard LFS pointers should prefer Crab-native tracking.
+
+Use advisory file locks for binary formats that collaborators cannot merge:
+
+```bash
+crab lock assets/character.blend
+crab locks --path assets/character.blend
+```
+
+Locks communicate edit ownership and participate in Crab's push checks. They do not replace branch protection or make local files read-only.
+
+Read [How does Crab connect to Git?](/library/git-remote-helpers-filter-processes) for the extension contracts. Read [How does Crab LFS work without a server?](/library/crab-lfs-direct-storage) for the compatibility path.
+
+## Make data workflows reproducible
+
+Crab Workflow connects commands, dependencies, parameters, and outputs to content identity. A matching stage can reuse a verified cached result instead of executing the command again.
+
+```yaml title="crab.yaml"
+stages:
+  train:
+    cmd: python scripts/train.py
+    deps:
+      - scripts/train.py
+      - data/training.parquet
+    outs:
+      - models/encoder.safetensors
+```
+
+Run the stage, then inspect its recorded state:
+
+```bash
+crab run train
+crab status --workflow train
+crab workflow dag
+```
+
+Commit `crab.yaml`, parameter files, and the workflow lockfile. Keep run journals, temporary worktrees, and local cache state under `.crab/`.
+
+Experiments build on the same declared workflow:
+
+- `crab exp` runs and compares parameterized work in isolated worktrees
+- `crab queue` schedules batches of experiment tasks
+- `crab params` compares selected parameter values
+- `crab metrics` compares recorded results
+- `crab plots` renders declared plots and templates
+
+Use this capability when the repository should explain which code and inputs produced an output. Do not add a workflow file merely to wrap a command that has no declared data dependency or reusable result.
+
+Start with the [Workflow quickstart](/docs/cli/workflow/quickstart) for an end-to-end cached pipeline. Use [Automate reproducible workflows](/docs/cli/automation) to choose a stage, experiment, queue, metric, or graph topic.
+
+## Automate with explicit inputs and stable output
+
+Lazy materialization lets each automation job declare only the data it needs. Structured command output lets the caller record progress and terminal results without parsing human text.
+
+```bash
+crab clone crab://team-data/vision-search ci-worktree
+cd ci-worktree
+crab hydrate --manifest .crab/manifests/test.txt --jsonl
+crab fsck --json
+```
+
+Use JSON Lines (JSONL) for progress from a long-running operation. Use JSON when the caller needs one terminal result. A nonzero exit status remains the failure signal in both modes.
+
+Pin the Crab release in build images or installation jobs. Use short-lived cloud credentials and a repository-scoped storage policy. Log the Crab version and Git commit with the job's evidence.
+
+Read [CI/CD Integration](/docs/cli/guides/ci-cd-integration) for installation, credentials, cache reuse, and verification patterns. Read [Structured output](/docs/cli/reference/structured-output) before building a parser.
+
+## Operate the repository by failure domain
+
+Crab does not add a central data server, so clients and object storage share operational responsibility. Use the command that owns the failing boundary.
+
+| Boundary | Inspect | Repair or maintain |
+| --- | --- | --- |
+| Local installation and credentials | `crab doctor`, `crab env` | Fix installation, configuration, identity, or provider access |
+| File representation | `crab status`, `crab why`, `crab ls-files` | Track, hydrate, dehydrate, or restage the selected path |
+| Repository closure | `crab fsck`, fresh hydration | Recover missing content from history, cache, replica, or backup |
+| Local capacity | `crab du`, `crab cache stats` | Dehydrate files or run `crab prune` |
+| Remote reachability | `crab gc --scope repo --dry-run` | Apply retention policy before deleting proven unreachable objects |
+| Storage layout and lifecycle | `crab optimize`, `crab compact`, `crab tier` | Reduce metadata or request overhead with an explicit plan |
+| Geographic or failure-domain reads | `crab replica` | Create and verify repository replicas |
+| Publication evidence | `crab audit`, `crab release` | Inspect audit events or produce a verified release manifest |
+| Interrupted administrative work | `crab recover` | Plan and apply a supported recovery operation |
+
+Always preview destructive or storage-wide work. Repository garbage collection must prove reachability and respect the grace period before deletion. Local `crab prune` only evicts cache data that Crab can retrieve again.
+
+Read [How does Crab reclaim unreferenced data safely?](/library/garbage-collection-serverless) before operating remote retention. Read [How do you control Crab object-storage cost?](/library/cost-optimization-s3-storage) before changing compaction, lifecycle, or replication policy.
+
+## Choose the next learning path
+
+The first workflow gives you the operating vocabulary for the rest of the library:
+
+1. Follow **Core Internals** to understand chunk reuse, push ordering, caching, hydration, and the two data paths.
+2. Follow **Advanced Operations** to understand concurrent pushes, larger-than-disk repositories, garbage collection, cost, migration, and mounts.
+3. Use the [Crab CLI command index](/docs/cli/reference) when you know the task and need exact syntax.
+4. Use [What is Crab?](/docs/cli/getting-started) when onboarding a teammate who needs the shorter product model.
+
+<TakeawayBox title="Choose by boundary">
+  Begin with native large-file tracking. Add materialization, compatibility,
+  workflow, or operations features when the repository has that specific need.
+</TakeawayBox>
+
+Continue with [How does Crab avoid storing duplicate data?](/library/xet-protocol-deduplication) to start the Core Internals path at the byte level.
