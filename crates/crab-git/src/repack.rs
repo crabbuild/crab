@@ -808,8 +808,8 @@ pub fn repack_selected_objects(
 /// Generate the exact self-contained pack for an existing shallow client's negotiation.
 ///
 /// The source packs are one immutable repository inventory. Git evaluates the
-/// requested wants and common haves with the client's shallow boundaries
-/// installed, then the generated index is compared with that exact revision
+/// requested wants while treating common haves and shallow boundaries as
+/// uninteresting, then the generated index is compared with that exact revision
 /// selection so reused deltas cannot add an unauthorized object.
 pub fn repack_shallow_fetch(
     sources: &[RepackSource],
@@ -838,15 +838,6 @@ pub fn repack_shallow_fetch(
         });
     let _ = install_source_packs(&pack_dir, sources, concurrency)?;
 
-    let shallow_path = source_git.join("shallow");
-    let mut shallow_file = File::create(&shallow_path)
-        .map_err(|source| io_error(format!("create {}", shallow_path.display()), source))?;
-    for oid in shallow {
-        writeln!(shallow_file, "{oid}")
-            .map_err(|source| io_error(format!("write {}", shallow_path.display()), source))?;
-    }
-    drop(shallow_file);
-
     let revisions_path = workspace.path().join("shallow-fetch-revisions.txt");
     let mut revisions = File::create(&revisions_path)
         .map_err(|source| io_error(format!("create {}", revisions_path.display()), source))?;
@@ -854,7 +845,15 @@ pub fn repack_shallow_fetch(
         writeln!(revisions, "{oid}")
             .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
     }
-    for oid in common_haves {
+    // Keep the source graph complete while marking the client's haves and shallow
+    // boundaries uninteresting. Making the source repository itself shallow prevents
+    // Git from excluding ancestors reached through another merge path.
+    let excluded = common_haves
+        .iter()
+        .chain(shallow)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for oid in excluded {
         writeln!(revisions, "^{oid}")
             .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
     }
@@ -1565,6 +1564,7 @@ mod tests {
         assert!(objects.contains(&oid(&side_commit)?));
         assert!(objects.contains(&oid(&included_tag)?));
         assert!(!objects.contains(&oid(&shallow_parent)?));
+        assert!(!objects.contains(&oid(&root_commit)?));
         assert!(!objects.contains(&oid(&excluded_tag)?));
         Ok(())
     }
