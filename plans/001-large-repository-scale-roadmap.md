@@ -1260,6 +1260,71 @@ remaining roadmap gates below: independent Kubernetes repeatability, valid
 response-pack SLOs, provider/fault/failover/canary evidence, and the final
 catalog/readiness handoff proof.
 
+### 2026-08-30 producer-path qualification update
+
+PR #120 exercises the native shallow producer and generated-pack fanout against
+the Kubernetes repository on RustFS. The meaningful 100-commit replay completed
+all pushes, and repository maintenance reduced the remote pack inventory from
+92 packs to 2 before clone qualification. The final stale-client request is a
+dense native-Git shallow negotiation: native Git independently selects the same
+closure, so replacing it with the earlier bounded 4,717-object response would
+omit a reachable merge parent and is not a valid optimization.
+
+The measured producer resolved shallow visibility from the pinned commit graph
+in 10 ms without opening the locator database. One producer served 99
+coalesced callers, selected 1,613,477 objects from 1,263,637,043 source bytes,
+downloaded the two source packs in 19,035 ms, and generated a 1,215,020,086-byte
+response in 133,907 ms. Artifact publication and delivery setup completed by
+159,985 ms, so multipart upload was not the long pole. The same run also proved
+that depth-1, depth-10, depth-100, and depth-1,000 requests remain Git-correct;
+the depth-1,000 selection reused the full-content artifact in 12.8 s instead of
+running another roughly 100 s producer.
+
+The fanout exposed four distinct consumer-side failures, all fixed in PR #120:
+
+- generated-pack artifact reads now use bounded product-owned admission, while
+  transient throttling retries preserve the immutable descriptor/cache hit;
+- producer lease renewal remains correctness-critical, but reader renewal and
+  release failures are advisory because read admission is only a performance
+  boundary;
+- session and artifact admission use the supported two-hour transfer lifetime,
+  replacing the five-minute queue timeout that rejected healthy large-pack
+  waves;
+- one canonical lease runner owns cancellation, renewal, and holder-checked
+  release, preventing divergent producer and reader cleanup paths.
+
+The exact-current consumer rerun deliberately started the 96 clients that had
+not already succeeded as ordinary Git processes on one 32 GiB qualification
+host. All 96 hit the immutable cache artifact, completed their Crab/RustFS
+streams before the two-hour deadline, and exited zero. Maximum admission wait
+was 5,372,007 ms and maximum queue-plus-stream latency was 6,018,321 ms; no
+request logged a timeout, throttling failure, remote error, fatal error, or
+renewal warning. Across all 100 clients, refs matched the expected Kubernetes
+tip, the original shallow boundary remained present, and `git fsck --full`
+passed 100/100 in 1,279 s.
+
+Full client wall time is not accepted as a product SLO: 96 concurrent local
+`git index-pack` processes drove the host into swap and saturated the shared
+workspace disk while resolving reused deltas. A stack sample placed Git in
+`threaded_second_pass -> unpack_data -> pread`, after the Crab stream had closed
+and released admission. Once all remote streams were complete, a reversible
+qualification-only scheduler bounded combined indexing and connectivity work
+to 16; every fetch then finalized successfully. The report
+`codex-9153e762-targeted-stale100-20260830` separates server latency from this
+one-host client tail, records exact-prefix cleanup of all 1,141 RustFS objects,
+and does not present the 7,300 s harness duration as a 100-workstation SLO.
+
+The next producer optimization is a measured pack-shape experiment, not a
+larger multipart part size. Benchmark delta depth/reuse candidates against all
+four outcomes: producer CPU, response bytes, client `index-pack` wall time, and
+peak client memory. Accept a new shape only when every selected object and
+shallow boundary matches native Git, the cached artifact remains immutable and
+self-contained, and aggregate developer completion improves without violating
+the response-size SLO. Phase 6 must run that matrix on distributed clients (or
+separate protocol-drain fanout from a bounded set of full Git clients), then
+repeat on S3, GCS, and Azure with cache-service, throttling, failover, retention,
+and canary evidence.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
@@ -2161,11 +2226,11 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT DENSE-READ EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9` | The current 100-replay run ends with 2 active packs, and its dense blob:none clone selects 1,102,159 objects in 24,911 ms with 3,152 storage requests after reusing one locator plan across batches. Large current catalogs avoid pack-count-by-batch lookup amplification, and pack sidecar intake/publication fallback are bounded; exact batches also deduplicate repeated OIDs and pack-index metadata misses share bounded source-size reads. Response-pack egress, fanout, retention, and provider SLOs remain open |
+| 2 | IMPLEMENTED; CURRENT DENSE/FANOUT CORRECTNESS PASS; SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-9153e762-targeted-stale100-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `249dd6ed` | The current meaningful replay ends with 2 active packs. One native shallow producer selected 1,613,477 objects in 133,907 ms, while 99 callers coalesced; 96 exact-current cache consumers then streamed and exited zero under bounded admission. All 100 refs, shallow boundaries, and full fsck checks passed. Distributed-client pack-shape, provider, retention, and sustained response-pack SLOs remain open |
 | 3 | IMPLEMENTED; HIDDEN-TIER REPACK FIXED; REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9`; `de493ab0` | Renewal proof remains valid, but the exact 1,000-replay diagnostic found 92 active packs at checkpoint 100 because a stable tiny tail hid higher-tier collisions. The selector now scans every lower tier and focused regressions pass; exact live proof that checkpoint pack counts remain logarithmic plus the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
-| 4 | CORRECTNESS REGRESSION FIXED; EXACT REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0` | The earlier 100-replay final wave was a no-op and is withdrawn as incremental proof. The exact 1,000-replay run proved all broad reads but failed all 100 stale shallow clients on one omitted merge parent. Native Git contract proof and the centralized traversal fallback fix pass focused/full affected suites; schema 1.3 now rejects no-op fanout evidence. Exact live proof, the 10,000-push shallow differential, response-pack SLO, provider range behavior, and rollout evidence remain open |
+| 4 | CORRECTNESS PASS; DIFFERENTIAL/SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0`; `249dd6ed` | The earlier no-op wave remains withdrawn. The meaningful current replay proves native-Git parity for the dense stale-shallow closure, graph-only authorization in 10 ms without locator access, 96/96 exact-current fetch exits, and 100/100 refs, boundaries, and full fsck. The 10,000-push shallow differential, distributed client SLO, provider range behavior, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; stale membership cleanup now uses bounded scan read-ahead, while pack-sidecar intake, repack publication, and recovery restore are bounded. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL; SEED FANOUT PASS, MEANINGFUL INCREMENTAL REQUALIFICATION PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0` | Descriptor-first waiting has exact 100/100 cold seed-clone proof with one producer and no 503/lease/early-EOF failure. The old 100-replay final fetch was a no-op; schema 1.3 now requires intervening commits. The full diagnostic exposed and the code fixes a stale-shallow closure omission, but exact 100-client requalification, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout gates remain pending |
+| 6 | PARTIAL; MEANINGFUL 100-CLIENT STALE FANOUT PASS; DISTRIBUTED SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0`; `249dd6ed` | The meaningful stale fanout proves one producer, 99 coalesced callers, bounded 16-slot artifact reads, 96/96 exact-current cache-consumer exits, 100/100 refs/boundaries/fsck, and exact-prefix cleanup. Maximum admission wait was 5,372,007 ms without the retired five-minute timeout. The one-host index tail required qualification-only scheduling and is not a team SLO; distributed clients, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout remain pending |
 
 ### Current branch verification evidence
 
