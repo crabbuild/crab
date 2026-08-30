@@ -441,6 +441,19 @@ fn install_pack_file_blocking(
 }
 
 pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
+    verify_pack_file(path, false).map(|(git_sha1, _, _)| git_sha1)
+}
+
+pub(crate) fn verify_and_hash_pack_file(path: &Path) -> Result<(String, [u8; 32], u64)> {
+    let (git_sha1, content_hash, size) = verify_pack_file(path, true)?;
+    let content_hash = content_hash.ok_or_else(|| PackError::InvalidPackFile {
+        path: path.to_owned(),
+        reason: "pack content hash was not computed".to_owned(),
+    })?;
+    Ok((git_sha1, content_hash, size))
+}
+
+fn verify_pack_file(path: &Path, hash_content: bool) -> Result<(String, Option<[u8; 32]>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 
     const HEADER_LEN: u64 = 12;
@@ -472,20 +485,27 @@ pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
         .map_err(|source| io_error(format!("seek {}", path.display()), source))?;
 
     let mut remaining = len - SHA1_LEN_U64;
-    let mut hasher = Sha1::new();
+    let mut pack_hasher = Sha1::new();
+    let mut content_hasher = hash_content.then(blake3::Hasher::new);
     let mut buf = [0u8; 1024 * 1024];
     while remaining > 0 {
         let read_len = remaining.min(buf.len() as u64) as usize;
         file.read_exact(&mut buf[..read_len])
             .map_err(|source| io_error(format!("read {}", path.display()), source))?;
-        hasher.update(&buf[..read_len]);
+        pack_hasher.update(&buf[..read_len]);
+        if let Some(content_hasher) = &mut content_hasher {
+            content_hasher.update(&buf[..read_len]);
+        }
         remaining -= read_len as u64;
     }
 
     let mut expected = [0u8; PACK_SHA1_LEN];
     file.read_exact(&mut expected)
         .map_err(|source| io_error(format!("read {}", path.display()), source))?;
-    let computed = hasher.finalize();
+    if let Some(content_hasher) = &mut content_hasher {
+        content_hasher.update(&expected);
+    }
+    let computed = pack_hasher.finalize();
 
     if computed.as_slice() != expected {
         return Err(PackError::Sha1Mismatch {
@@ -494,7 +514,11 @@ pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
         });
     }
 
-    Ok(to_hex(&expected))
+    Ok((
+        to_hex(&expected),
+        content_hasher.map(|hasher| *hasher.finalize().as_bytes()),
+        len,
+    ))
 }
 
 fn parse_idx_pack_hash(idx_path: &Path) -> Result<String> {
@@ -818,6 +842,23 @@ mod tests {
         assert_eq!(
             verify_pack_index_file(&idx_path).expect("valid pack index"),
             pack_hash
+        );
+    }
+
+    #[test]
+    fn file_verification_computes_git_and_storage_hashes_in_one_pass() {
+        let (_dir, idx_path, pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let bytes = std::fs::read(&pack_path).expect("read fixture pack");
+        let expected = (
+            pack_hash,
+            *blake3::hash(&bytes).as_bytes(),
+            bytes.len() as u64,
+        );
+
+        assert_eq!(
+            verify_and_hash_pack_file(&pack_path).expect("verify and hash pack"),
+            expected
         );
     }
 

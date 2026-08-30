@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use crate::pack::{PackError, install_pack_file_from_path, verify_pack_file_sha1};
+use crate::pack::{
+    PackError, install_pack_file_from_path, verify_and_hash_pack_file, verify_pack_file_sha1,
+};
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 use sha1::{Digest, Sha1};
 
@@ -137,6 +139,12 @@ pub enum RepackError {
     /// A selected-object pack contained an object outside the requested set.
     #[error("selected pack {pack_id} failed exact object-set validation: {reason}")]
     SelectedObjectSet { pack_id: String, reason: String },
+}
+
+#[derive(Clone, Copy)]
+enum GeneratedPackValidation {
+    Structural,
+    Full,
 }
 
 /// Return the number of smallest packs that must be rolled up for geometry.
@@ -483,7 +491,7 @@ pub fn consolidate_pack_suffix_with_concurrency(
             pack_id: "geometric-repack".to_owned(),
             reason: "selected-pack consolidation produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path)?;
+    let generated = verified_generated_pack(pack_path, GeneratedPackValidation::Full)?;
     let mut generated_locations = PackLocationIter::open(
         generated.index_path(),
         generated.reverse_index_path(),
@@ -650,7 +658,7 @@ pub fn concatenate_complete_pack_inventory(
     let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
     let installed =
         install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
-    let generated = verified_generated_pack(installed.pack_path)?;
+    let generated = verified_generated_pack(installed.pack_path, GeneratedPackValidation::Full)?;
     if generated.object_count != total_objects {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id,
@@ -798,6 +806,7 @@ pub fn repack_selected_objects(
         &object_list,
         &selected,
         "pack-crab-selected",
+        GeneratedPackValidation::Full,
     )?;
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
@@ -810,7 +819,10 @@ pub fn repack_selected_objects(
 /// The source packs are one immutable repository inventory. Git evaluates the
 /// requested wants and common haves with the client's shallow boundaries
 /// installed, then the generated index is compared with that exact revision
-/// selection so reused deltas cannot add an unauthorized object.
+/// selection so reused deltas cannot add an unauthorized object. Source packs
+/// must have passed object validation before entering the committed inventory;
+/// the generated transfer pack revalidates its pack, index, reverse-index, and
+/// exact object-set checksums without inflating every object a second time.
 pub fn repack_shallow_fetch(
     sources: &[RepackSource],
     wants: &[gix_hash::ObjectId],
@@ -887,6 +899,7 @@ pub fn repack_shallow_fetch(
         &object_list,
         &selected,
         "pack-crab-shallow",
+        GeneratedPackValidation::Structural,
     )?;
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
@@ -1013,6 +1026,7 @@ fn pack_selected_objects(
     object_list: &Path,
     selected: &[gix_hash::ObjectId],
     output_name: &str,
+    validation: GeneratedPackValidation,
 ) -> Result<GeometricRepackedPack, RepackError> {
     let stdin = File::open(object_list)
         .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
@@ -1047,7 +1061,7 @@ fn pack_selected_objects(
             pack_id: "selected-pack".to_owned(),
             reason: "selected-object packing produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path)?;
+    let generated = verified_generated_pack(pack_path, validation)?;
     let mut generated_locations = PackLocationIter::open(
         &generated.index_path,
         &generated.reverse_index_path,
@@ -1086,7 +1100,10 @@ fn pack_selected_objects(
     Ok(generated)
 }
 
-fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, RepackError> {
+fn verified_generated_pack(
+    pack_path: PathBuf,
+    validation: GeneratedPackValidation,
+) -> Result<GeometricRepackedPack, RepackError> {
     let index_path = pack_path.with_extension("idx");
     let reverse_index_path = pack_path.with_extension("rev");
     if !reverse_index_path.is_file() {
@@ -1104,15 +1121,23 @@ fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, 
     let locations = PackLocationIter::open(&index_path, &reverse_index_path, pack_size)?;
     let object_count = locations.object_count();
     let git_sha1 = locations.pack_checksum().to_string();
-    run_git(
-        Command::new("git")
-            .arg("verify-pack")
-            .arg("-v")
-            .arg(&index_path)
-            .stdout(Stdio::null()),
-        "verify consolidated Git pack",
-    )?;
-    let (pack_hash, hashed_size) = hash_file(&pack_path)?;
+    let (trailer, pack_hash, hashed_size) = verify_and_hash_pack_file(&pack_path)?;
+    if trailer != git_sha1 {
+        return Err(RepackError::SourceIntegrity {
+            pack_id: pack_path.display().to_string(),
+            reason: "generated pack index checksum does not match its pack trailer".to_owned(),
+        });
+    }
+    if matches!(validation, GeneratedPackValidation::Full) {
+        run_git(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(&index_path)
+                .stdout(Stdio::null()),
+            "verify consolidated Git pack",
+        )?;
+    }
     if hashed_size != pack_size {
         return Err(RepackError::SourceIntegrity {
             pack_id: pack_path.display().to_string(),

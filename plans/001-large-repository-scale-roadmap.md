@@ -1325,6 +1325,17 @@ separate protocol-drain fanout from a bounded set of full Git clients), then
 repeat on S3, GCS, and Azure with cache-service, throttling, failover, retention,
 and canary evidence.
 
+A follow-up producer microqualification replayed the exact 1,613,477-object
+selection against the read-only Kubernetes object database. Native
+`pack-objects` generated an equivalent 1.1 GiB response shape in 9.47 s, while
+the subsequent redundant `verify-pack -v` traversal took another 30.51 s.
+PR #120 now reserves that deep second traversal for durable maintenance packs.
+The shallow transfer path still verifies the pack SHA-1, Blake3 storage
+identity, index and reverse-index checksums, and exact selected object set; it
+also computes SHA-1 and Blake3 in one streaming read instead of reading the
+entire response twice. A new RustFS producer run is still required before
+claiming an end-to-end latency reduction from this microqualification.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
