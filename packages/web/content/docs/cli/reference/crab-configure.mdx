@@ -52,8 +52,11 @@ Amazon S3 is the default choice.
 Use flags in scripts or when you already know the remote:
 
 ```bash
-# Amazon S3 or S3-compatible storage
-crab configure s3://team-data/models --provider s3
+# Amazon S3
+crab configure s3://team-data/models
+
+# S3-compatible storage (after exporting credentials and AWS_ENDPOINT_URL)
+crab configure crab://team-data/models --provider s3
 
 # Google Cloud Storage
 crab configure gs://team-data/models --provider gcs
@@ -65,6 +68,11 @@ crab configure azure://team-data/models --provider azure
 Provider-prefixed URLs let Crab infer the provider, so `--provider` is optional
 in those examples. Use it with a canonical `crab://` URL when the provider is
 not S3.
+
+S3-compatible services use the `s3` provider. Export the service's access key,
+secret key, region, and `AWS_ENDPOINT_URL` before configuration; do not put
+credentials in the remote URL. See [Static Credentials](/docs/cli/authentication/static-credentials#s3-compatible-storage)
+for Cloudflare R2 and local MinIO/RustFS examples.
 
 Choose the local bucket-GC listing policy during setup when desired:
 
