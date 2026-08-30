@@ -92,7 +92,10 @@ pub async fn run_configure_at(
         plan.gc_list_profile,
     )
     .await?;
+
+    eprintln!("Verifying bucket access and creating the remote repository...");
     crate::cmd::init::initialize_remote_repository(&plan.remote, root, cancel).await?;
+    eprintln!("{}", style.ok("Remote repository ready"));
 
     crate::cmd::setup::run_setup_at(
         root,

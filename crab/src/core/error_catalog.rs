@@ -1549,17 +1549,23 @@ pub fn error_code(err: &CrabError) -> &'static str {
     }
 }
 
-/// Render a `CrabError` into a user-friendly message with the error code,
-/// description, and a remediation hint.
+/// Render a `CrabError` into a concise message with the next recovery step.
 #[must_use]
 pub fn render(err: &CrabError) -> UserMessage {
     let code = error_code(err);
-    let mut text = format!("ERROR [{code}]: {err}");
+    let mut text = format!("error: {err}");
 
-    if let Some(explanation) = lookup(code) {
-        text.push_str("\n\n");
-        text.push_str("  Hint: ");
-        text.push_str(explanation.remediation.trim());
+    if let Some(hint) = err.hint() {
+        text.push_str("\nhelp: ");
+        text.push_str(hint);
+    } else {
+        use std::fmt::Write as _;
+        let _ = write!(text, "\nhelp: Run `crab errors {code}` for recovery steps.");
+    }
+
+    if let Some(path) = err.docs_anchor() {
+        text.push_str("\ndocs: https://crab.build/docs/");
+        text.push_str(path);
     }
 
     UserMessage { text }
@@ -1639,13 +1645,28 @@ mod tests {
     }
 
     #[test]
-    fn render_includes_code_and_hint() {
+    fn render_includes_code_and_catalog_lookup_for_generic_errors() {
         let err = CrabError::Cancelled;
         let msg = render(&err);
         assert!(
             msg.text.contains("CRAB-E0090"),
             "missing code in render output"
         );
-        assert!(msg.text.contains("Hint:"), "missing hint in render output");
+        assert!(
+            msg.text.contains("crab errors CRAB-E0090"),
+            "missing catalog lookup in render output"
+        );
+    }
+
+    #[test]
+    fn render_includes_action_and_docs_for_setup_errors() {
+        let err = CrabError::NoCredentials;
+        let msg = render(&err);
+
+        assert!(msg.text.contains("crab doctor"));
+        assert!(
+            msg.text
+                .contains("https://crab.build/docs/cli/authentication/")
+        );
     }
 }

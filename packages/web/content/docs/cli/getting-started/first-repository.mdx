@@ -44,6 +44,15 @@ Before creating a Crab repository, you need:
 
 You do **not** need to run `git init` separately — `crab configure` handles that automatically.
 
+The bucket/container itself must already exist. Crab creates the repository
+layout inside it, but it does not create cloud accounts, buckets, IAM roles, or
+long-lived credentials. After signing in to the provider, verify the complete
+setup with:
+
+```bash
+crab doctor
+```
+
 ## Guided configuration
 
 ```bash
@@ -210,7 +219,16 @@ Running `crab init` on an already-initialized repository is safe and idempotent.
 
 **"invalid URL" error** — Ensure the URL follows `crab://<bucket>/<path>`. The bucket name must not contain slashes.
 
-**"access denied" error** — Check that your cloud credentials have read/write access to the bucket. Run `crab auth status` to verify.
+**Bucket not found** — Create the bucket/container or correct the bucket name in
+the remote URL, then rerun `crab configure`.
+
+**Repository not initialized** — The bucket exists, but the Crab layout does
+not. Run `crab configure <REMOTE>` to create it.
+
+**Access denied or no credentials** — Configure the selected provider's
+credentials and grant the active identity the required bucket and
+repository-prefix permissions. Run `crab doctor` to verify access before
+retrying.
 
 **Filter driver not registered** — Run `crab doctor` for a full health check. If the filter is missing, `crab init` or `crab setup` will re-register it.
 

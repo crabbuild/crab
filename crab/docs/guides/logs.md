@@ -84,6 +84,7 @@ crab --log-level debug add '*.bin'
 ```
 
 Levels: `error`, `warn`, `info`, `debug`, `trace`.
+The default is `error`; raise it only while collecting diagnostics.
 
 Module-level filters are also supported:
 

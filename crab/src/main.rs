@@ -2655,12 +2655,13 @@ fn main() -> ExitCode {
     match run_result {
         Ok(code) => code,
         Err((mode, schema, err)) => {
-            tracing::error!(%err, "fatal error");
             match mode {
                 OutputMode::Json => {
+                    tracing::error!(%err, "command failed");
                     emit_error_json(schema, "1.0", &err);
                 }
                 OutputMode::Jsonl => {
+                    tracing::error!(%err, "command failed");
                     // JSONL mode: emit a terminal result event with the
                     // structured error through a JsonlStream so consumers
                     // see a well-formed final event on the stream.
@@ -2670,7 +2671,7 @@ fn main() -> ExitCode {
                     stream.emit_error_info(ErrorInfo::from(&err));
                 }
                 OutputMode::Text => {
-                    eprintln!("ERROR: {err}");
+                    eprintln!("{}", crab::core::error_catalog::render(&err));
                 }
             }
             ExitCode::from(err.exit_code())

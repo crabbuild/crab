@@ -37,7 +37,7 @@ pub fn init_daemon_logging(log_path: &Path) -> Result<WorkerGuard> {
 
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"));
 
     // Foreground/tests may already have root CLI tracing installed.
     // The existing subscriber still writes to redirected stderr in daemon mode.
@@ -59,9 +59,9 @@ pub fn init_daemon_logging(log_path: &Path) -> Result<WorkerGuard> {
 ///
 /// Writes human-readable logs to stderr with colors (when the terminal
 /// supports them). Uses the `RUST_LOG` environment variable for filtering,
-/// defaulting to `info`.
+/// defaulting to `error`.
 pub fn init_foreground_logging() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"));
 
     // Foreground startup can run after root CLI tracing has been installed.
     // Keep coordinator lifecycle commands usable instead of failing startup.

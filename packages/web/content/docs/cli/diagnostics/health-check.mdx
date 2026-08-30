@@ -22,7 +22,7 @@ meta:
 | `.gitattributes` | At least one pattern with `filter=crab` exists |
 | Crab config | `.crab/config.toml` exists and is parseable |
 | Remote URL | `.crab/remote` contains a valid crab URL |
-| Credentials | Can authenticate to the configured bucket |
+| Remote access | Can reach the bucket and open the repository layout |
 | Staging area | `.crab/staging/` exists and is accessible |
 | Cache | Local cache directory exists |
 | Version guard | Repository version is compatible with installed binary |
@@ -43,7 +43,7 @@ crab doctor
   ✓ .gitattributes       2 crab patterns found
   ✓ Crab config          .crab/config.toml valid
   ✓ Remote URL           crab://my-bucket/my-repo
-  ✓ Credentials          authenticated to my-bucket
+  ✓ Remote access        bucket 'my-bucket' and repository 'my-repo' reachable
   ⚠ Staging area         .crab/staging/ (12.3 MB)
   ✓ Cache                ~/.cache/crab (45.6 MB)
   ✓ Version guard        compatible
@@ -60,7 +60,9 @@ crab doctor
 | Filter driver not configured | Run `crab install` or `crab init <url>` |
 | No crab patterns in .gitattributes | Run `crab track '*.bin'` |
 | Remote URL not configured | Run `crab init <url>` |
-| Credentials check failed | Verify supported environment, web identity, ECS task, or EC2 instance credentials and `AWS_REGION` |
+| Bucket not found | Create the configured bucket or correct the remote URL |
+| Repository not initialized | Run `crab configure <REMOTE>` to create it |
+| Access denied | Grant the active identity the required bucket and repository-prefix permissions, then rerun `crab doctor` |
 | Large staging area warning | Run `git push` to upload, then `crab staging clean` |
 
 ## Typical Workflows
