@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crab_git::pack::VerifiedPackIdentity;
 use crab_metadata::git_object_locator::GitPackInventoryEntry;
 use flate2::{Compression, write::ZlibEncoder};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
@@ -40,6 +41,105 @@ const GENERATED_PACK_TAKEOVER_JITTER_MAX: Duration = Duration::from_secs(30);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
+
+pub(crate) struct PackStreamVerifier {
+    git_sha1: Sha1,
+    content_hash: blake3::Hasher,
+    trailer: Vec<u8>,
+    header: [u8; 12],
+    header_len: usize,
+}
+
+impl Default for PackStreamVerifier {
+    fn default() -> Self {
+        Self {
+            git_sha1: Sha1::new(),
+            content_hash: blake3::Hasher::new(),
+            trailer: Vec::new(),
+            header: [0; 12],
+            header_len: 0,
+        }
+    }
+}
+
+impl PackStreamVerifier {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        if self.header_len < self.header.len() {
+            let remaining = self.header.len() - self.header_len;
+            let copied = remaining.min(bytes.len());
+            let end = self.header_len + copied;
+            self.header[self.header_len..end].copy_from_slice(&bytes[..copied]);
+            self.header_len = end;
+        }
+        self.content_hash.update(bytes);
+
+        let hash_len = self
+            .trailer
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(20);
+        if hash_len == 0 {
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+        if hash_len <= self.trailer.len() {
+            self.git_sha1.update(&self.trailer[..hash_len]);
+            self.trailer.drain(..hash_len);
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+
+        self.git_sha1.update(&self.trailer);
+        let bytes_to_hash = hash_len - self.trailer.len();
+        self.git_sha1.update(&bytes[..bytes_to_hash]);
+        self.trailer.clear();
+        self.trailer.extend_from_slice(&bytes[bytes_to_hash..]);
+    }
+
+    pub(crate) fn finish(self) -> Result<VerifiedPackIdentity> {
+        self.finish_with_expected_object_count(None)
+    }
+
+    pub(crate) fn finish_with_expected_object_count(
+        self,
+        expected_object_count: Option<u32>,
+    ) -> Result<VerifiedPackIdentity> {
+        let version = u32::from_be_bytes([
+            self.header[4],
+            self.header[5],
+            self.header[6],
+            self.header[7],
+        ]);
+        let object_count = u32::from_be_bytes([
+            self.header[8],
+            self.header[9],
+            self.header[10],
+            self.header[11],
+        ]);
+        if self.header_len != self.header.len()
+            || &self.header[..4] != b"PACK"
+            || !matches!(version, 2 | 3)
+            || expected_object_count.is_some_and(|expected| object_count != expected)
+            || self.trailer.len() != 20
+        {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        let mut trailer = [0_u8; 20];
+        trailer.copy_from_slice(&self.trailer);
+        let git_sha1: [u8; 20] = self.git_sha1.finalize().into();
+        if git_sha1 != trailer {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        Ok(VerifiedPackIdentity {
+            git_sha1,
+            content_hash: *self.content_hash.finalize().as_bytes(),
+        })
+    }
+}
 
 /// Immutable key for one authorization- and generation-bound response pack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1682,33 +1782,17 @@ async fn load_cached_pack(
     };
     let load = async {
         let file = NamedTempFile::new().map_err(io_error)?;
-        let downloaded = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            result = repository
-                .state
-                .store
-                .download_to_path_bounded(&artifact_path, file.path(), descriptor.size) => result?,
-        };
-        if downloaded != descriptor.size {
-            return Err(Error::Corrupt {
-                stage: crate::CorruptionStage::PackEntry,
-            });
-        }
-        let path = file.path().to_owned();
-        let token = cancellation.clone();
-        tokio::task::spawn_blocking(move || {
-            inspect_cached_pack(
-                &path,
-                descriptor.size,
-                descriptor.object_count,
-                checksum,
-                content_hash,
-                &token,
-            )
-        })
-        .await
-        .map_err(|source| Error::DecodeTask { source })??;
+        download_cached_pack_to_path(
+            repository,
+            &artifact_path,
+            file.path(),
+            descriptor.size,
+            descriptor.object_count,
+            checksum,
+            content_hash,
+            cancellation,
+        )
+        .await?;
         Ok(GeneratedPack {
             file: Arc::new(file),
             size: descriptor.size,
@@ -1725,6 +1809,85 @@ async fn load_cached_pack(
         None => load.await,
     };
     result.map(Some)
+}
+
+async fn download_cached_pack_to_path(
+    repository: &RemoteGitRepository,
+    artifact_path: &object_store::path::Path,
+    destination: &Path,
+    expected_size: u64,
+    expected_objects: u32,
+    expected_checksum: [u8; 20],
+    expected_content_hash: [u8; 32],
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    // Cache artifacts are immutable and descriptor-bound; verify while writing
+    // so a cache hit does not perform a second repository-sized disk traversal.
+    if expected_size < 32 {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let origin_permit = repository.state.runtime.origin_permit(cancellation).await?;
+    let (metadata, range, mut stream) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        result = repository.state.store.get_stream(artifact_path, None) => result?,
+    };
+    if metadata.size > expected_size {
+        return Err(crab_storage::StorageError::CorruptObject {
+            path: artifact_path.to_string(),
+            reason: format!(
+                "object advertises {} bytes, bounded download allows {expected_size} bytes",
+                metadata.size
+            ),
+        }
+        .into());
+    }
+    if metadata.size != expected_size || range != (0..expected_size) {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let mut file = tokio::fs::File::create(destination)
+        .await
+        .map_err(io_error)?;
+    let mut verifier = PackStreamVerifier::default();
+    let mut written = 0_u64;
+    while let Some(chunk) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        chunk = stream.next() => chunk,
+    } {
+        let chunk = chunk?;
+        let next = written
+            .checked_add(chunk.len() as u64)
+            .ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            })?;
+        if next > expected_size {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        verifier.update(&chunk);
+        file.write_all(&chunk).await.map_err(io_error)?;
+        written = next;
+    }
+    file.flush().await.map_err(io_error)?;
+    drop(origin_permit);
+    if written != expected_size {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let identity = verifier.finish_with_expected_object_count(Some(expected_objects))?;
+    if identity.git_sha1 != expected_checksum || identity.content_hash != expected_content_hash {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    Ok(())
 }
 
 fn generated_pack_descriptor_matches_request(
@@ -1850,62 +2013,6 @@ fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<GeneratedPackDescrip
             .map_err(|_| corrupt())?,
         selection_object_count: number("selection_object_count").ok_or_else(corrupt)?,
     })
-}
-
-fn inspect_cached_pack(
-    path: &std::path::Path,
-    expected_size: u64,
-    expected_objects: u32,
-    expected_checksum: [u8; 20],
-    expected_content_hash: [u8; 32],
-    cancellation: &CancellationToken,
-) -> Result<()> {
-    let mut file = std::fs::File::open(path).map_err(io_error)?;
-    if file.metadata().map_err(io_error)?.len() != expected_size {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    let mut header = [0u8; 12];
-    file.read_exact(&mut header).map_err(io_error)?;
-    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
-    let object_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
-    if &header[..4] != b"PACK" || !matches!(version, 2 | 3) || object_count != expected_objects {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut sha1 = Sha1::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut chunk = [0u8; 1024 * 1024];
-    {
-        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            sha1.update(&chunk[..read]);
-            blake3.update(&chunk[..read]);
-        }
-    }
-    let mut trailer = [0u8; 20];
-    file.read_exact(&mut trailer).map_err(io_error)?;
-    blake3.update(&trailer);
-    let actual_sha1: [u8; 20] = sha1.finalize().into();
-    if actual_sha1 != trailer
-        || trailer != expected_checksum
-        || blake3.finalize().as_bytes() != &expected_content_hash
-    {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    Ok(())
 }
 
 fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {

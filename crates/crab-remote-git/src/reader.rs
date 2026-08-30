@@ -16,6 +16,7 @@ use sha1::{Digest, Sha1};
 use tokio_util::sync::CancellationToken;
 
 use crate::budget::OperationBudget;
+use crate::pack::PackStreamVerifier;
 use crate::{BudgetDimension, RemoteGitRuntime, RepositoryIdentity};
 use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result, delta};
 
@@ -1787,73 +1788,6 @@ impl RemoteGitReader {
             let _ = tokio::fs::remove_file(destination).await;
         }
         result
-    }
-}
-
-#[derive(Default)]
-struct PackStreamVerifier {
-    git_sha1: Sha1,
-    content_hash: blake3::Hasher,
-    trailer: Vec<u8>,
-    header: [u8; 4],
-    header_len: usize,
-}
-
-impl PackStreamVerifier {
-    fn update(&mut self, bytes: &[u8]) {
-        if self.header_len < self.header.len() {
-            let remaining = self.header.len() - self.header_len;
-            let copied = remaining.min(bytes.len());
-            let end = self.header_len + copied;
-            self.header[self.header_len..end].copy_from_slice(&bytes[..copied]);
-            self.header_len = end;
-        }
-        self.content_hash.update(bytes);
-
-        let hash_len = self
-            .trailer
-            .len()
-            .saturating_add(bytes.len())
-            .saturating_sub(20);
-        if hash_len == 0 {
-            self.trailer.extend_from_slice(bytes);
-            return;
-        }
-        if hash_len <= self.trailer.len() {
-            self.git_sha1.update(&self.trailer[..hash_len]);
-            self.trailer.drain(..hash_len);
-            self.trailer.extend_from_slice(bytes);
-            return;
-        }
-
-        self.git_sha1.update(&self.trailer);
-        let bytes_to_hash = hash_len - self.trailer.len();
-        self.git_sha1.update(&bytes[..bytes_to_hash]);
-        self.trailer.clear();
-        self.trailer.extend_from_slice(&bytes[bytes_to_hash..]);
-    }
-
-    fn finish(self) -> Result<VerifiedPackIdentity> {
-        if self.header_len != self.header.len()
-            || self.header != *b"PACK"
-            || self.trailer.len() != 20
-        {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            });
-        }
-        let mut trailer = [0_u8; 20];
-        trailer.copy_from_slice(&self.trailer);
-        let git_sha1: [u8; 20] = self.git_sha1.finalize().into();
-        if git_sha1 != trailer {
-            return Err(Error::Corrupt {
-                stage: CorruptionStage::PackEntry,
-            });
-        }
-        Ok(VerifiedPackIdentity {
-            git_sha1,
-            content_hash: *self.content_hash.finalize().as_bytes(),
-        })
     }
 }
 
