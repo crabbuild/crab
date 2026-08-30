@@ -2354,6 +2354,9 @@ mod tests {
         request.filter = UploadPackFilter::BlobNone;
         request.deepen = Some(100);
         assert!(!dense_selected_response(&request));
+
+        request.filter = UploadPackFilter::None;
+        assert!(!dense_selected_response(&request));
     }
 
     #[tokio::test]
