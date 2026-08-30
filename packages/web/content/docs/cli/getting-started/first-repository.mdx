@@ -160,14 +160,28 @@ credential discovery. Its values are case-insensitive:
 
 ### S3-Compatible Endpoints
 
-For S3-compatible stores like MinIO, Cloudflare R2, or Ceph, use the standard `crab://` URL (no prefix) and set the custom endpoint via environment variable:
+For S3-compatible stores like MinIO, Cloudflare R2, or Ceph, select the `s3`
+provider and set the service's S3 API endpoint and credentials before running
+`crab configure`:
 
 ```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
 export AWS_ENDPOINT_URL=https://s3.example.com
-crab init crab://my-bucket/my-project
+export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+
+crab configure crab://my-bucket/my-project --provider s3
+crab doctor
 ```
 
-The S3 builder picks up `AWS_ENDPOINT_URL` automatically — no URL-level distinction is needed.
+Use the region required by the service; Cloudflare R2 uses `auto`. For a trusted
+plain-HTTP development endpoint, also set `AWS_ALLOW_HTTP=true`. Crab reads the
+endpoint from `AWS_ENDPOINT_URL`, so credentials and endpoint URLs do not
+belong in `.crab.toml`.
+
+See [Static Credentials](/docs/cli/authentication/static-credentials#s3-compatible-storage)
+for complete Cloudflare R2 and local MinIO/RustFS examples.
 
 ## After Initialization
 

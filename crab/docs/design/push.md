@@ -313,26 +313,29 @@ SQLite Index (index.db):
 │ pending_chunks(...)  ← pre-flush buffer │
 │ segments(id, status, size_bytes,        │
 │          live_chunk_count)              │
-│ file_push_plans(file_hash, plan_json)   │
-│ prepared_xorbs(...)                     │
-│ prepared_xorb_chunks(chunk_hash, ...)   │
+│ file_recipes + recipe_occurrences       │
+│ recipe_remote_chunks(proof-bearing)     │
+│ prepared_payloads(xorb_hash, digest)    │
+│ prepared_payload_chunks(chunk UNIQUE)   │
+│ prepared_leases(recipe_hash, xorb_hash) │
+│ add_preparations + chunk claims         │
 └─────────────────────────────────────────┘
 ```
 
 ### What the Push Pipeline Reads from Staging
 
-- `load_file_push_plan(file_hash)` → verified add-time plan, when it still
-  matches the staged chunk rows
+- `load_file_push_plan(file_hash)` → runtime authority DTO derived from the
+  published normalized recipe rows
 - `chunks_for_file(file_hash)` → ordered list of chunk hashes for a file
 - `get_chunk(chunk_hash)` → raw chunk bytes (pread + CRC + blake3 verify)
 
-The plan path is a fast path, not the durability boundary. Push may adopt
-prepared xorbs referenced by a verified add-time plan, but segment files remain
-the source of staged bytes for fallback packing and re-verification. If the plan
-row or prepared xorb payload is missing or stale, push reads from `segments/`
-through the chunk locator rows and packs the chunks normally. Successful
-post-push cleanup retires chunk rows and removes the indexed add-time plan and
-prepared-xorb candidates for the pushed file hash.
+Normalized recipe authority is the durability boundary. Push revalidates
+committed remote proofs, then validates each distinct local prepared body once
+and uploads each missing xorb once. A missing or corrupt prepared-only body
+fails closed before ref publication. Segment repacking is allowed only when an
+independent verified segment payload covers every affected occurrence.
+Successful post-push cleanup retires recipe leases and removes a physical
+prepared body only after no recipe, preparation, or push snapshot owns it.
 
 **Source:** `crates/crab-staging/src/lib.rs`,
 `crates/crab-staging/src/index.rs`, `crab/src/git/push.rs`

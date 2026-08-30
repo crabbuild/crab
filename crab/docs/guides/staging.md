@@ -16,10 +16,11 @@ locally between `crab add` and `git push`. The `crab staging` command
 provides subcommands to inspect and clean this area.
 
 The SQLite index records immutable recipes, content-addressed payload locators,
-native-byte path leases, and add batches. Rollback removes only the failed
-batch's leases. A push pins an immutable recipe snapshot so another push cannot
-retire payloads while they are being packed. Optional prepared xorbs are derived
-cache entries; segment payloads remain the recovery source.
+native-byte path leases, normalized prepared authority, add preparations, and
+publication batches. Rollback removes only the failed batch's leases. A push
+pins an immutable recipe snapshot so another push cannot retire payloads while
+they are being packed. Direct-prepared chunks may intentionally have no segment
+copy, so their content-addressed xorb body is authoritative until push commits.
 
 ## Subcommands
 
@@ -66,14 +67,21 @@ The staging root contains three important classes of data:
 
 | Path | Role |
 |------|------|
-| `index.db` | SQLite metadata for schema migration, batches, recipes, occurrences, native-byte path leases, payload locators, push snapshots, and optional prepared-xorb leases |
-| `segments/` | Append-only chunk payload files. These are the authoritative local bytes until push retirement or staging cleanup removes them |
-| `push-plans/xorbs/` | Derived prepared-xorb payload files referenced by indexed add-time plans |
+| `index.db` | Strict canonical v1 SQLite metadata for batches, preparations, claims, recipes, occurrences, remote proofs, native-byte path leases, prepared payloads/leases, and push snapshots |
+| `segments/` | Append-only chunk payload files used when segment authority was selected |
+| `push-plans/payloads/<first-two>/<xorb-hash>.xorb` | One immutable local prepared body shared by all recipe leases; push writes the remote bucket object |
+
+The bucket-global SlateDB under `.crab/chunk_index_db/` is separate. It records
+only origin-bound placements committed by a successful push. It never contains
+pending add claims or local prepared paths.
 
 When manifest CAS succeeds, push marks its recipe snapshot committed and retires
 published leases only when no open snapshot still needs them. A crash leaves
 marker/snapshot state for `crab doctor` and `crab staging clean` to report or
-prune; sole quarantined payload bytes are never deleted by migration.
+prune. Writable staging open aborts unresolved preparations, removes abandoned
+stream temps, and sweeps final prepared bodies that have no SQLite inventory
+row. A staging database from a retired development layout is rejected with
+remove-and-restage guidance; there is no compatibility reader or migration.
 
 ### crab staging clean
 

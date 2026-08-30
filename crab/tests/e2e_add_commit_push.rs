@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -424,6 +425,91 @@ fn assert_prepared_only_recipe_state(
     });
 }
 
+fn assert_partial_overlap_has_canonical_prepared_authority(
+    repo: &Path,
+    first: &Pointer,
+    second: &Pointer,
+) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
+            .await
+            .expect("open staging readonly");
+        let first_hash = MerkleHash::from(first.file_hash);
+        let second_hash = MerkleHash::from(second.file_hash);
+        let first_chunks = staging
+            .chunks_for_file(&first_hash)
+            .expect("first recipe chunks")
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let second_chunks = staging
+            .chunks_for_file(&second_hash)
+            .expect("second recipe chunks")
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let shared = first_chunks
+            .intersection(&second_chunks)
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(shared.len() > 8, "fixture must share multiple CDC chunks");
+
+        let first_plan = staging
+            .load_file_push_plan(&first_hash)
+            .await
+            .expect("first plan")
+            .expect("first canonical authority");
+        let second_plan = staging
+            .load_file_push_plan(&second_hash)
+            .await
+            .expect("second plan")
+            .expect("second canonical authority");
+        let placements = |plan: &crab_staging::push_plan::FilePushPlan| {
+            plan.prepared_xorbs
+                .iter()
+                .flat_map(|xorb| {
+                    xorb.placements
+                        .iter()
+                        .map(|placement| (placement.chunk_hash.clone(), xorb.hash.clone()))
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let first_placements = placements(&first_plan);
+        let second_placements = placements(&second_plan);
+        for chunk_hash in shared {
+            let chunk_hash = chunk_hash.hex();
+            assert_eq!(
+                first_placements.get(&chunk_hash),
+                second_placements.get(&chunk_hash),
+                "shared chunk must have one canonical prepared placement"
+            );
+        }
+
+        let unique_payloads = first_plan
+            .prepared_xorbs
+            .iter()
+            .chain(&second_plan.prepared_xorbs)
+            .map(|xorb| xorb.hash.clone())
+            .collect::<HashSet<_>>();
+        let payload_root = repo.join(".crab/staging/push-plans/payloads");
+        let payload_files = std::fs::read_dir(payload_root)
+            .expect("payload shards")
+            .flat_map(|shard| {
+                std::fs::read_dir(shard.expect("payload shard").path())
+                    .expect("payload files")
+                    .map(|entry| entry.expect("payload file").path())
+            })
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "xorb")
+            })
+            .count();
+        assert_eq!(payload_files, unique_payloads.len());
+    });
+}
+
 fn assert_push_hydrates(repo: &Path, scratch: &Path, refs: &[&str], files: &[(&[u8], &[u8])]) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -618,6 +704,60 @@ fn git_add_multi_batch_file_pushes_and_hydrates_byte_identically() {
         tmp.path(),
         &["refs/heads/main"],
         &[(&pointer_bytes, &content)],
+    );
+}
+
+#[test]
+fn crab_add_partial_overlap_pushes_and_hydrates_byte_identically() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    let cache_dir = tmp.path().join("cache");
+    let _cache_guard = CacheEnvGuard::new(&cache_dir);
+
+    let Some(()) = init_repo(&repo) else {
+        return;
+    };
+    let Some(()) = configure_crab_filter(&repo) else {
+        return;
+    };
+    commit_crab_attributes(&repo);
+
+    let shared = deterministic_content(20 * 1024 * 1024);
+    let first_prefix = deterministic_content(4 * 1024 * 1024);
+    let mut second_prefix = first_prefix.clone();
+    second_prefix.reverse();
+    let first = [first_prefix, shared.clone()].concat();
+    let second = [second_prefix, shared].concat();
+    std::fs::write(repo.join("first.bin"), &first).expect("write first overlap file");
+    std::fs::write(repo.join("second.bin"), &second).expect("write second overlap file");
+
+    let add = Command::new(crab_bin())
+        .args(["add", "--jobs", "2", "first.bin", "second.bin"])
+        .current_dir(&repo)
+        .env("CRAB_CACHE_DIR", &cache_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .expect("spawn crab add");
+    assert!(
+        add.status.success(),
+        "crab add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let (first_pointer, first_pointer_bytes) = indexed_crab_pointer(&repo, "first.bin");
+    let (second_pointer, second_pointer_bytes) = indexed_crab_pointer(&repo, "second.bin");
+    assert_partial_overlap_has_canonical_prepared_authority(&repo, &first_pointer, &second_pointer);
+
+    require_git_ok(&repo, &["commit", "-qm", "add overlapping pointers"]).expect("commit pointers");
+    assert_push_hydrates(
+        &repo,
+        tmp.path(),
+        &["refs/heads/main"],
+        &[
+            (&first_pointer_bytes, &first),
+            (&second_pointer_bytes, &second),
+        ],
     );
 }
 
