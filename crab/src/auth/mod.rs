@@ -29,6 +29,8 @@ use crab_auth_store::{
     AuthStoreError, ManagedRepositoryError, RefreshingObjectStore, RefreshingStoreParts,
 };
 use crab_storage::BuiltObjectStore;
+#[cfg(feature = "tier-s3")]
+use crab_types::storage::StorageProviderKind;
 pub use crab_types::storage::StorageScope;
 pub use managed::{RepositoryStore, build_repository_store};
 
@@ -366,12 +368,7 @@ pub async fn build_store(
 
 #[cfg(feature = "tier-s3")]
 async fn build_aws_sdk_store(config: &Config, bucket: &str) -> Result<Option<BuiltObjectStore>> {
-    if config.auth.provider != AuthProvider::Static
-        || !matches!(
-            config.auth.storage_provider,
-            crate::core::config::StorageProvider::Auto | crate::core::config::StorageProvider::S3
-        )
-    {
+    if !should_build_aws_sdk_store(config)? {
         return Ok(None);
     }
 
@@ -394,6 +391,14 @@ async fn build_aws_sdk_store(config: &Config, bucket: &str) -> Result<Option<Bui
     crab_storage::build_s3_object_store_with_provider(bucket, &region, provider)
         .map(Some)
         .map_err(CrabError::from)
+}
+
+#[cfg(feature = "tier-s3")]
+fn should_build_aws_sdk_store(config: &Config) -> Result<bool> {
+    if config.auth.provider != AuthProvider::Static {
+        return Ok(false);
+    }
+    Ok(static_auth_config(&config.auth)?.storage_provider == StorageProviderKind::S3)
 }
 
 #[cfg(not(feature = "tier-s3"))]
@@ -851,6 +856,23 @@ mod tests {
             create_provider(&cfg),
             Err(CrabError::Configuration { .. })
         ));
+    }
+
+    #[cfg(feature = "tier-s3")]
+    #[test]
+    fn aws_sdk_store_selection_uses_resolved_static_provider() {
+        let _guard = EnvGuard::set("CRAB_STORAGE_PROVIDER", None);
+        let auto = config_with(AuthProvider::Static, StorageProvider::Auto);
+        assert!(should_build_aws_sdk_store(&auto).unwrap());
+
+        _guard.update(Some("gcs"));
+        assert!(!should_build_aws_sdk_store(&auto).unwrap());
+
+        let s3 = config_with(AuthProvider::Static, StorageProvider::S3);
+        assert!(should_build_aws_sdk_store(&s3).unwrap());
+
+        let no_auth = config_with(AuthProvider::None, StorageProvider::S3);
+        assert!(!should_build_aws_sdk_store(&no_auth).unwrap());
     }
 
     // --- Env var guard for test isolation ---
