@@ -352,57 +352,6 @@ impl GitObjectLocatorSession {
         self.lookup_batch_exact(reader, object_ids, inventory).await
     }
 
-    /// Resolve a small caller-selected batch with one bounded catalog scan.
-    ///
-    /// This is intended for latency-sensitive callers that already know a
-    /// point lookup would probe every large immutable SST. The scan remains
-    /// bounded by the pinned inventory object count and falls back to exact
-    /// lookup only if the published catalog violates that bound.
-    pub async fn lookup_batch_bounded_scan(
-        &self,
-        object_ids: &[[u8; 20]],
-        inventory: &HashMap<crab_xet::hash::MerkleHash, GitPackInventoryEntry>,
-    ) -> Result<Vec<GitObjectLookup>> {
-        let Some(reader) = &self.reader else {
-            return Ok(vec![GitObjectLookup::Miss; object_ids.len()]);
-        };
-        let inventory_objects = inventory
-            .values()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-        let row_limit = usize::try_from(inventory_objects).unwrap_or(usize::MAX);
-        tracing::debug!(
-            locator_lookup_mode = "caller_bounded_scan",
-            requested_objects = object_ids.len(),
-            inventory_objects,
-            active_ssts = self.active_ssts,
-            row_limit,
-            "compact Git locator lookup selected"
-        );
-        if let Some(lookups) = self
-            .lookup_batch_by_scan(
-                reader,
-                object_ids,
-                inventory,
-                row_limit,
-                CATALOG_SCAN_READ_AHEAD_BYTES,
-                CATALOG_SCAN_FETCH_TASKS,
-                "caller_bounded_scan",
-            )
-            .await?
-        {
-            return Ok(lookups);
-        }
-        tracing::debug!(
-            locator_lookup_mode = "exact_fallback",
-            requested_objects = object_ids.len(),
-            inventory_objects,
-            active_ssts = self.active_ssts,
-            row_limit,
-            "caller-selected Git locator scan exceeded its inventory bound"
-        );
-        self.lookup_batch_exact(reader, object_ids, inventory).await
-    }
-
     async fn lookup_batch_exact(
         &self,
         reader: &Arc<slatedb::DbReader>,
@@ -1650,27 +1599,6 @@ mod tests {
         assert_eq!(lookups[0], lookups[1]);
         assert_eq!(lookups[0], lookups[3]);
         assert_eq!(lookups[2], GitObjectLookup::Miss);
-        session.close().await.expect("close reader");
-    }
-
-    #[tokio::test]
-    async fn caller_bounded_scan_preserves_order_duplicates_and_misses() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let (object_ids, inventory) = publish_many(Arc::clone(&store), 64).await;
-        let session = GitObjectLocatorSession::open(store, "org/repo")
-            .await
-            .expect("open reader");
-        let requested = [object_ids[37], [0xff; 20], object_ids[3], object_ids[37]];
-
-        let lookups = session
-            .lookup_batch_bounded_scan(&requested, &inventory)
-            .await
-            .expect("caller-selected bounded scan");
-
-        assert!(matches!(lookups[0], GitObjectLookup::Hit(_)));
-        assert_eq!(lookups[1], GitObjectLookup::Miss);
-        assert!(matches!(lookups[2], GitObjectLookup::Hit(_)));
-        assert_eq!(lookups[0], lookups[3]);
         session.close().await.expect("close reader");
     }
 

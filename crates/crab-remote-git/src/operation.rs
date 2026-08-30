@@ -391,24 +391,12 @@ impl OperationContext {
         &self,
         object_ids: &[gix_hash::ObjectId],
     ) -> Result<Vec<Option<GitObjectOrdinal>>> {
-        self.catalog_object_ordinals_with(object_ids, false).await
-    }
-
-    /// Resolve OIDs with one inventory-bounded catalog scan.
-    ///
-    /// Callers should use this only when exact SlateDB lookups would probe
-    /// every large immutable SST for a latency-sensitive small batch.
-    pub async fn catalog_object_ordinals_bounded_scan(
-        &self,
-        object_ids: &[gix_hash::ObjectId],
-    ) -> Result<Vec<Option<GitObjectOrdinal>>> {
-        self.catalog_object_ordinals_with(object_ids, true).await
+        self.catalog_object_ordinals_with(object_ids).await
     }
 
     async fn catalog_object_ordinals_with(
         &self,
         object_ids: &[gix_hash::ObjectId],
-        bounded_scan: bool,
     ) -> Result<Vec<Option<GitObjectOrdinal>>> {
         check_cancelled(&self.cancellation)?;
         let session = self
@@ -426,18 +414,10 @@ impl OperationContext {
                 })
             })
             .collect::<Result<Vec<[u8; 20]>>>()?;
-        let lookups = if bounded_scan {
-            tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => return Err(Error::Cancelled),
-                lookups = session.lookup_batch_bounded_scan(&object_ids, &self.state.inventory) => lookups?,
-            }
-        } else {
-            tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => return Err(Error::Cancelled),
-                lookups = session.lookup_batch(&object_ids, &self.state.inventory) => lookups?,
-            }
+        let lookups = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            lookups = session.lookup_batch(&object_ids, &self.state.inventory) => lookups?,
         };
         if lookups.len() != object_ids.len() {
             return Err(Error::Corrupt {
@@ -454,6 +434,21 @@ impl OperationContext {
                 }),
             })
             .collect()
+    }
+
+    /// Prove which candidate commits are reachable from any pinned graph root.
+    pub fn commits_reachable_from(
+        &self,
+        candidates: &[gix_hash::ObjectId],
+        roots: &[gix_hash::ObjectId],
+    ) -> Result<Option<Vec<bool>>> {
+        check_cancelled(&self.cancellation)?;
+        let Some(graph) = self.state.commit_graph.as_ref() else {
+            return Ok(None);
+        };
+        graph
+            .reachable_from_roots(candidates, roots, &self.cancellation)
+            .map(Some)
     }
 
     /// Resolve dense catalog ordinals to OIDs in the operation's pinned catalog.

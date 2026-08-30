@@ -1448,7 +1448,6 @@ async fn common_haves_catalog(
         visibility,
         &request.haves,
         visible_ref_names,
-        false,
         cancellation,
     )
     .await?;
@@ -1466,20 +1465,13 @@ async fn visible_objects_catalog(
     visibility: &GitCatalogVisibilityIndex,
     object_ids: &[ObjectId],
     visible_ref_names: &[String],
-    bounded_scan: bool,
     cancellation: &CancellationToken,
 ) -> Result<Vec<bool>> {
     let operation = repository
         .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
         .await
         .map_err(remote_error)?;
-    let ordinals = if bounded_scan {
-        operation
-            .catalog_object_ordinals_bounded_scan(object_ids)
-            .await
-    } else {
-        operation.catalog_object_ordinals(object_ids).await
-    };
+    let ordinals = operation.catalog_object_ordinals(object_ids).await;
     let result = ordinals.map(|ordinals| {
         ordinals
             .into_iter()
@@ -1496,9 +1488,8 @@ async fn visible_objects_catalog(
     operation.finish(result).await.map_err(remote_error)
 }
 
-async fn native_shallow_visibility_catalog(
+async fn native_shallow_visibility(
     repository: &RemoteGitRepository,
-    visibility: &GitCatalogVisibilityIndex,
     request: &FetchRequest,
     visible_ref_names: &[String],
     cancellation: &CancellationToken,
@@ -1506,15 +1497,40 @@ async fn native_shallow_visibility_catalog(
     let mut object_ids = Vec::with_capacity(request.haves.len() + request.shallow.len());
     object_ids.extend_from_slice(&request.haves);
     object_ids.extend_from_slice(&request.shallow);
-    let visible = visible_objects_catalog(
-        repository,
-        visibility,
-        &object_ids,
-        visible_ref_names,
-        true,
-        cancellation,
-    )
-    .await?;
+    let visible_ref_names = visible_ref_names.iter().collect::<HashSet<_>>();
+    let roots = repository
+        .refs()
+        .entries
+        .iter()
+        .filter(|reference| visible_ref_names.contains(&reference.name))
+        .flat_map(|reference| [Some(reference.target), reference.peeled])
+        .flatten()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
+        .await
+        .map_err(remote_error)?;
+    let result = operation.commits_reachable_from(&object_ids, &roots);
+    let Some(visible) = operation.finish(result).await.map_err(remote_error)? else {
+        tracing::debug!(
+            candidate_commits = object_ids.len(),
+            visible_roots = roots.len(),
+            "native shallow commit-graph visibility unavailable"
+        );
+        return Ok((Vec::new(), false));
+    };
+    tracing::info!(
+        telemetry_event = "native_shallow_visibility",
+        strategy = "commit_graph",
+        candidate_commits = object_ids.len(),
+        visible_roots = roots.len(),
+        reachable_commits = visible.iter().filter(|visible| **visible).count(),
+        visibility_ms = started.elapsed().as_millis() as u64,
+        "native shallow visibility resolved from commit graph"
+    );
     let (have_visibility, shallow_visibility) = visible.split_at(request.haves.len());
     let common_haves = request
         .haves
@@ -1569,17 +1585,10 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
     tracing::debug!("released upload-pack read admission before request-plan cache wait");
 
     let producer = async {
-        if native_shallow_pack_eligible(request)
-            && let Some(visibility) = proof.as_catalog()
-        {
-            let (common_haves, shallow_visible) = native_shallow_visibility_catalog(
-                repository,
-                visibility,
-                request,
-                visible_ref_names,
-                cancellation,
-            )
-            .await?;
+        if native_shallow_pack_eligible(request) && proof.as_catalog().is_some() {
+            let (common_haves, shallow_visible) =
+                native_shallow_visibility(repository, request, visible_ref_names, cancellation)
+                    .await?;
             if !common_haves.is_empty() && shallow_visible {
                 tracing::info!(
                     protocol_version = 2,
