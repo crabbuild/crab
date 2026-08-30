@@ -47,15 +47,14 @@ pub fn is_cache_disabled() -> bool {
 
 /// Probe the cache directory for writability. If the directory is
 /// read-only (EACCES or EROFS), sets the global `CACHE_DISABLED`
-/// flag and emits a warning. Call this once at startup before any
-/// stage execution.
+/// flag. Call this once at startup before any stage execution.
 pub fn probe_cache_writable(cache_root: &Path) {
     // Ensure the directory exists (or try to create it).
     if let Err(e) = std::fs::create_dir_all(cache_root) {
         if is_permission_or_readonly(&e) {
-            tracing::warn!(
+            tracing::debug!(
                 cache_root = %cache_root.display(),
-                "cache directory not writable; operating without cache"
+                "workflow cache disabled after writability probe"
             );
             CACHE_DISABLED.store(true, Ordering::Relaxed);
             return;
@@ -72,9 +71,9 @@ pub fn probe_cache_writable(cache_root: &Path) {
             let _ = std::fs::remove_file(&probe);
         }
         Err(e) if is_permission_or_readonly(&e) => {
-            tracing::warn!(
+            tracing::debug!(
                 cache_root = %cache_root.display(),
-                "cache directory not writable; operating without cache"
+                "workflow cache disabled after writability probe"
             );
             CACHE_DISABLED.store(true, Ordering::Relaxed);
         }

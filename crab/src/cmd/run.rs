@@ -74,6 +74,7 @@ use crate::core::output::{
     WorkflowStageProduced, WorkflowStageResult, WorkflowStageRetry, WorkflowStageStarted,
     emit_json,
 };
+use crate::core::style::CliStyle;
 use crate::read::{RepositoryOpenOptions, RepositoryReader};
 use crate::workflow::cache::{
     CurrentFile, OverwriteDecision, OverwriteFlags, RemoteArtifactStores, StageCacheEntry,
@@ -521,6 +522,22 @@ pub(crate) async fn run_in_with_options(
     })
 }
 
+fn probe_workflow_cache(cache_root: &Path, mode: OutputMode) {
+    crate::workflow::cache::probe_cache_writable(cache_root);
+    if mode != OutputMode::Text || !crate::workflow::cache::is_cache_disabled() {
+        return;
+    }
+
+    // Cache bypass changes command behavior, so text users need this notice
+    // even when internal diagnostic logs are filtered at the default level.
+    let message = format!(
+        "Workflow cache at '{}' is not writable; continuing without cache. \
+         Fix its permissions to re-enable caching.",
+        cache_root.display()
+    );
+    eprintln!("{}", CliStyle::resolve(mode).warn(&message));
+}
+
 /// Phase-1 inline single-stage path. Kept byte-for-byte equivalent
 /// to the original `run_in` so existing callers are unaffected.
 async fn run_inline_single_stage(
@@ -599,7 +616,7 @@ async fn run_inline_single_stage(
     // Pre-execution planning / cache probe.
     let workflow_root = repo_root.join(".crab").join("workflow");
     let cache_root = repo_root.join(".crab").join("cache");
-    crate::workflow::cache::probe_cache_writable(&cache_root);
+    probe_workflow_cache(&cache_root, mode);
     let cache_lookup_enabled = stage_cache_lookup_enabled(&stage, args);
     let execution_cache_lookup_enabled = stage_execution_cache_lookup_enabled(&stage, args);
     let cached = if cache_lookup_enabled {
@@ -1276,7 +1293,7 @@ async fn run_yaml_single_stage(
 
     let workflow_root = repo_root.join(".crab").join("workflow");
     let cache_root = repo_root.join(".crab").join("cache");
-    crate::workflow::cache::probe_cache_writable(&cache_root);
+    probe_workflow_cache(&cache_root, mode);
     let lockfile = lock_ctx.load(repo_root)?;
 
     // Lock and journal setup mirrors inline single-stage.
@@ -1406,7 +1423,7 @@ async fn run_dag(
 ) -> Result<()> {
     let workflow_root = repo_root.join(".crab").join("workflow");
     let cache_root = repo_root.join(".crab").join("cache");
-    crate::workflow::cache::probe_cache_writable(&cache_root);
+    probe_workflow_cache(&cache_root, mode);
     let mut lockfile = lock_ctx.load(repo_root)?;
 
     // Acquire scheduler lock once for the whole DAG — design's
