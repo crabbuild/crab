@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
 use crab_storage::{Store, StoreLayout};
 use gix_hash::ObjectId;
@@ -71,6 +73,56 @@ impl CommitGraphIndex {
         self.graph
             .record(ordinal)
             .map(|entry| entry.corrected_generation)
+    }
+
+    pub(crate) fn reachable_from_roots(
+        &self,
+        candidates: &[ObjectId],
+        roots: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<bool>> {
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut reachable = vec![false; candidates.len()];
+        let mut candidates_by_ordinal = HashMap::<u32, Vec<usize>>::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            if let Some(ordinal) = sha1_bytes(*candidate).and_then(|oid| self.graph.ordinal(&oid)) {
+                candidates_by_ordinal
+                    .entry(ordinal)
+                    .or_default()
+                    .push(index);
+            }
+        }
+        if candidates_by_ordinal.is_empty() {
+            return Ok(reachable);
+        }
+        let mut pending = roots
+            .iter()
+            .filter_map(|root| sha1_bytes(*root).and_then(|oid| self.graph.ordinal(&oid)))
+            .collect::<Vec<_>>();
+        let mut visited = HashSet::new();
+        while let Some(ordinal) = pending.pop() {
+            if !visited.insert(ordinal) {
+                continue;
+            }
+            if visited.len().is_multiple_of(1024) && cancellation.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if let Some(indices) = candidates_by_ordinal.remove(&ordinal) {
+                for index in indices {
+                    reachable[index] = true;
+                }
+                if candidates_by_ordinal.is_empty() {
+                    break;
+                }
+            }
+            let record = self.graph.record(ordinal).ok_or(Error::Corrupt {
+                stage: CorruptionStage::CommitGraph,
+            })?;
+            pending.extend(record.parents.iter().copied());
+        }
+        Ok(reachable)
     }
 }
 
@@ -161,5 +213,83 @@ mod tests {
             }]),
         };
         assert!(!index.parents_match(ObjectId::Sha1(oid(2)), &[]));
+    }
+
+    #[test]
+    fn reachable_from_roots_preserves_duplicates_and_rejects_other_history() {
+        let index = CommitGraphIndex {
+            graph: graph(vec![
+                CommitGraphRecord {
+                    oid: oid(1),
+                    tree_oid: oid(101),
+                    commit_time: 10,
+                    corrected_generation: 10,
+                    parents: vec![],
+                },
+                CommitGraphRecord {
+                    oid: oid(2),
+                    tree_oid: oid(102),
+                    commit_time: 20,
+                    corrected_generation: 20,
+                    parents: vec![0],
+                },
+                CommitGraphRecord {
+                    oid: oid(3),
+                    tree_oid: oid(103),
+                    commit_time: 30,
+                    corrected_generation: 30,
+                    parents: vec![1],
+                },
+                CommitGraphRecord {
+                    oid: oid(4),
+                    tree_oid: oid(104),
+                    commit_time: 20,
+                    corrected_generation: 20,
+                    parents: vec![0],
+                },
+            ]),
+        };
+        let candidates = [
+            ObjectId::Sha1(oid(1)),
+            ObjectId::Sha1(oid(2)),
+            ObjectId::Sha1(oid(4)),
+            ObjectId::Sha1(oid(9)),
+            ObjectId::Sha1(oid(1)),
+        ];
+
+        assert_eq!(
+            index
+                .reachable_from_roots(
+                    &candidates,
+                    &[ObjectId::Sha1(oid(3))],
+                    &CancellationToken::new(),
+                )
+                .expect("reachability"),
+            vec![true, true, false, false, true]
+        );
+    }
+
+    #[test]
+    fn reachable_from_roots_honors_cancellation_before_work() {
+        let index = CommitGraphIndex {
+            graph: graph(vec![CommitGraphRecord {
+                oid: oid(1),
+                tree_oid: oid(101),
+                commit_time: 10,
+                corrected_generation: 10,
+                parents: vec![],
+            }]),
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            index.reachable_from_roots(
+                &[ObjectId::Sha1(oid(1))],
+                &[ObjectId::Sha1(oid(1))],
+                &cancellation,
+            ),
+            Err(Error::Cancelled)
+        ));
     }
 }

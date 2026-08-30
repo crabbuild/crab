@@ -1279,6 +1279,18 @@ mod tests {
     }
 
     #[test]
+    fn generation_owner_repack_finds_collisions_above_a_stable_tail() {
+        let packs = vec![
+            budget_pack(1_000_000, 1_000_000),
+            budget_pack(100, 100),
+            budget_pack(60, 60),
+            budget_pack(1, 1),
+        ];
+
+        assert_eq!(generation_owner_repack_count(&packs), 3);
+    }
+
+    #[test]
     fn repack_manifest_invalidates_generation_bound_commit_graph() {
         let mut manifest = Manifest::default_for_repo("refs/heads/main");
         manifest

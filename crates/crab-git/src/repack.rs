@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -168,6 +168,8 @@ pub fn geometric_repack_cut(object_counts: &[u64], factor: u64) -> usize {
 /// verified compressed pack bytes. The smallest tier is promoted only after it
 /// has accumulated enough weight to be comparable with its next tier, and the
 /// largest pack is left untouched whenever a lower-tier promotion is possible.
+/// Every lower tier is inspected, so a stable tiny tail cannot hide a collision
+/// between larger packs accumulated since the previous maintenance pass.
 /// Two packs are consolidated only when the smaller pack has reached the next
 /// tier; a tiny tail must not rewrite the repository-sized pack.
 #[must_use]
@@ -186,21 +188,20 @@ pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
         };
     }
 
-    let mut selected_count = 1;
-    let mut selected_weight = weights[weights.len() - 1];
-    for candidate_index in (1..weights.len().saturating_sub(1)).rev() {
-        let candidate_weight = weights[candidate_index];
-        if selected_weight.saturating_mul(factor) <= candidate_weight {
-            break;
-        }
-        selected_count += 1;
-        selected_weight = selected_weight.saturating_add(candidate_weight);
+    let Some(mut start) = (1..weights.len() - 1)
+        .find(|index| weights[*index] < weights[*index + 1].saturating_mul(factor))
+    else {
+        return 0;
+    };
+    let mut selected_weight = weights[start..]
+        .iter()
+        .copied()
+        .fold(0_u64, u64::saturating_add);
+    while start > 1 && selected_weight.saturating_mul(factor) > weights[start - 1] {
+        start -= 1;
+        selected_weight = selected_weight.saturating_add(weights[start]);
     }
-    if selected_count > 1 {
-        selected_count
-    } else {
-        0
-    }
+    weights.len() - start
 }
 
 /// Consolidates source packs using Git's geometric pack policy.
@@ -756,24 +757,7 @@ pub fn repack_selected_objects(
             reason: "no source packs were supplied".to_owned(),
         });
     }
-    let mut selected = selected_oids.to_vec();
-    if selected.is_empty()
-        || selected
-            .iter()
-            .any(|oid| oid.as_bytes().len() != std::mem::size_of::<[u8; 20]>())
-    {
-        return Err(RepackError::SelectedObjectSet {
-            pack_id: "selected-pack".to_owned(),
-            reason: "selected object IDs must be non-empty SHA-1 IDs".to_owned(),
-        });
-    }
-    selected.sort_unstable();
-    if selected.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(RepackError::SelectedObjectSet {
-            pack_id: "selected-pack".to_owned(),
-            reason: "selected object IDs must be unique".to_owned(),
-        });
-    }
+    let selected = normalize_selected_oids(selected_oids, "selected-pack")?;
 
     let workspace =
         tempfile::tempdir().map_err(|source| io_error("create selected-pack workspace", source))?;
@@ -799,9 +783,162 @@ pub fn repack_selected_objects(
             .map_err(|source| io_error(format!("write {}", object_list.display()), source))?;
     }
     drop(input);
-    let stdin = File::open(&object_list)
+    let generated = pack_selected_objects(
+        &source_git,
+        &pack_dir,
+        &object_list,
+        &selected,
+        "pack-crab-selected",
+    )?;
+    Ok(GeometricRepackedRepository {
+        _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
+/// Generate the exact self-contained pack for an existing shallow client's negotiation.
+///
+/// The source packs are one immutable repository inventory. Git evaluates the
+/// requested wants and common haves with the client's shallow boundaries
+/// installed, then the generated index is compared with that exact revision
+/// selection so reused deltas cannot add an unauthorized object.
+pub fn repack_shallow_fetch(
+    sources: &[RepackSource],
+    wants: &[gix_hash::ObjectId],
+    common_haves: &[gix_hash::ObjectId],
+    shallow: &[gix_hash::ObjectId],
+    maximum_objects: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    if sources.is_empty() || wants.is_empty() || common_haves.is_empty() || shallow.is_empty() {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: "shallow-fetch".to_owned(),
+            reason: "shallow fetch requires source packs, wants, common haves, and boundaries"
+                .to_owned(),
+        });
+    }
+
+    let workspace =
+        tempfile::tempdir().map_err(|source| io_error("create shallow-fetch workspace", source))?;
+    let source_git = workspace.path().join("source.git");
+    initialize_bare_repository(&source_git)?;
+    let pack_dir = source_git.join("objects/pack");
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    let _ = install_source_packs(&pack_dir, sources, concurrency)?;
+
+    let shallow_path = source_git.join("shallow");
+    let mut shallow_file = File::create(&shallow_path)
+        .map_err(|source| io_error(format!("create {}", shallow_path.display()), source))?;
+    for oid in shallow {
+        writeln!(shallow_file, "{oid}")
+            .map_err(|source| io_error(format!("write {}", shallow_path.display()), source))?;
+    }
+    drop(shallow_file);
+
+    let revisions_path = workspace.path().join("shallow-fetch-revisions.txt");
+    let mut revisions = File::create(&revisions_path)
+        .map_err(|source| io_error(format!("create {}", revisions_path.display()), source))?;
+    for oid in wants {
+        writeln!(revisions, "{oid}")
+            .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
+    }
+    for oid in common_haves {
+        writeln!(revisions, "^{oid}")
+            .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
+    }
+    drop(revisions);
+
+    let object_list = workspace.path().join("shallow-fetch-objects.txt");
+    let revision_input = File::open(&revisions_path)
+        .map_err(|source| io_error(format!("open {}", revisions_path.display()), source))?;
+    let object_output = File::create(&object_list)
+        .map_err(|source| io_error(format!("create {}", object_list.display()), source))?;
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", source_git.display()))
+            .args(["rev-list", "--stdin", "--objects", "--no-object-names"])
+            .stdin(Stdio::from(revision_input))
+            .stdout(Stdio::from(object_output)),
+        "enumerate shallow fetch objects",
+    )?;
+    let selected = read_selected_oids(&object_list, maximum_objects, "shallow-fetch")?;
+    let generated = pack_selected_objects(
+        &source_git,
+        &pack_dir,
+        &object_list,
+        &selected,
+        "pack-crab-shallow",
+    )?;
+    Ok(GeometricRepackedRepository {
+        _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
+fn normalize_selected_oids(
+    selected_oids: &[gix_hash::ObjectId],
+    pack_id: &str,
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let mut selected = selected_oids.to_vec();
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|oid| oid.as_bytes().len() != std::mem::size_of::<[u8; 20]>())
+    {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: pack_id.to_owned(),
+            reason: "selected object IDs must be non-empty SHA-1 IDs".to_owned(),
+        });
+    }
+    selected.sort_unstable();
+    if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RepackError::SelectedObjectSet {
+            pack_id: pack_id.to_owned(),
+            reason: "selected object IDs must be unique".to_owned(),
+        });
+    }
+    Ok(selected)
+}
+
+fn read_selected_oids(
+    path: &Path,
+    maximum_objects: usize,
+    pack_id: &str,
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let file =
+        File::open(path).map_err(|source| io_error(format!("open {}", path.display()), source))?;
+    let mut selected = Vec::new();
+    for line in BufReader::new(file).lines() {
+        if selected.len() >= maximum_objects {
+            return Err(RepackError::SelectedObjectSet {
+                pack_id: pack_id.to_owned(),
+                reason: format!("selected object count exceeds {maximum_objects}"),
+            });
+        }
+        let line = line.map_err(|source| io_error(format!("read {}", path.display()), source))?;
+        let oid = gix_hash::ObjectId::from_hex(line.as_bytes()).map_err(|error| {
+            RepackError::SelectedObjectSet {
+                pack_id: pack_id.to_owned(),
+                reason: format!("Git returned an invalid object ID: {error}"),
+            }
+        })?;
+        selected.push(oid);
+    }
+    normalize_selected_oids(&selected, pack_id)
+}
+
+fn pack_selected_objects(
+    source_git: &Path,
+    pack_dir: &Path,
+    object_list: &Path,
+    selected: &[gix_hash::ObjectId],
+    output_name: &str,
+) -> Result<GeometricRepackedPack, RepackError> {
+    let stdin = File::open(object_list)
         .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
-    let output_prefix = pack_dir.join("pack-crab-selected");
+    let output_prefix = pack_dir.join(output_name);
     run_git(
         Command::new("git")
             .arg(format!("--git-dir={}", source_git.display()))
@@ -816,7 +953,8 @@ pub fn repack_selected_objects(
             .stdout(Stdio::null()),
         "pack selected Git objects",
     )?;
-    let pack_path = std::fs::read_dir(&pack_dir)
+    let output_prefix_name = format!("{output_name}-");
+    let pack_path = std::fs::read_dir(pack_dir)
         .map_err(|source| io_error(format!("read {}", pack_dir.display()), source))?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
@@ -824,7 +962,7 @@ pub fn repack_selected_objects(
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
-                    name.starts_with("pack-crab-selected-") && name.ends_with(".pack")
+                    name.starts_with(&output_prefix_name) && name.ends_with(".pack")
                 })
         })
         .ok_or_else(|| RepackError::SelectedObjectSet {
@@ -855,7 +993,7 @@ pub fn repack_selected_objects(
     let selected_matches = generated_oids.len() == selected.len()
         && generated_oids
             .iter()
-            .zip(&selected)
+            .zip(selected)
             .all(|(generated, selected)| selected.as_bytes() == generated);
     if !selected_matches {
         return Err(RepackError::SelectedObjectSet {
@@ -867,10 +1005,7 @@ pub fn repack_selected_objects(
             ),
         });
     }
-    Ok(GeometricRepackedRepository {
-        _workspace: workspace,
-        packs: vec![generated],
-    })
+    Ok(generated)
 }
 
 fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, RepackError> {
@@ -1018,11 +1153,28 @@ fn initialize_bare_repository(path: &Path) -> Result<(), RepackError> {
 
 fn run_git(command: &mut Command, operation: &'static str) -> Result<(), RepackError> {
     // Every repack subprocess targets an explicit temporary repository or pack.
-    // Ambient remote-helper overrides would redirect that isolated operation.
-    command
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR");
+    // Local repository overrides could redirect object reads or replace the
+    // installed shallow boundary, invalidating the pinned-inventory proof.
+    for variable in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(variable);
+    }
     let status = command
         .status()
         .map_err(|source| io_error(format!("run {operation}"), source))?;
@@ -1088,6 +1240,15 @@ mod tests {
     }
 
     #[test]
+    fn incremental_cut_scans_past_a_stable_tiny_tail() {
+        assert_eq!(incremental_repack_cut(&[1_000_000, 100, 60, 1], 2), 3);
+        assert_eq!(
+            incremental_repack_cut(&[1_000_000, 900, 600, 100, 60, 1], 2),
+            5
+        );
+    }
+
+    #[test]
     #[expect(
         clippy::same_item_push,
         reason = "the test models one identical tiny pack per developer push"
@@ -1126,6 +1287,162 @@ mod tests {
             RepackError::SelectedObjectSet { reason, .. }
                 if reason == "selected object IDs must be unique"
         ));
+    }
+
+    #[test]
+    fn shallow_fetch_repack_includes_new_side_history_but_not_shallow_parent()
+    -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let repository = root.path().join("repository");
+        run_git(
+            Command::new("git")
+                .arg("init")
+                .arg("--quiet")
+                .arg(&repository),
+            "initialize shallow-fetch test repository",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "config",
+                "user.name",
+                "Crab Test",
+            ]),
+            "configure shallow-fetch test name",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "config",
+                "user.email",
+                "crab@example.invalid",
+            ]),
+            "configure shallow-fetch test email",
+        )?;
+
+        std::fs::write(repository.join("root.txt"), b"root\n")
+            .map_err(|source| io_error("write root file", source))?;
+        commit_all(&repository, "root")?;
+        let root_commit = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve root commit",
+        )?;
+        let main_branch = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["branch", "--show-current"]),
+            "resolve main branch",
+        )?;
+
+        std::fs::write(repository.join("main-parent.txt"), b"main parent\n")
+            .map_err(|source| io_error("write main parent file", source))?;
+        commit_all(&repository, "main parent")?;
+        let shallow_parent = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve shallow parent",
+        )?;
+        std::fs::write(repository.join("shallow-tip.txt"), b"shallow tip\n")
+            .map_err(|source| io_error("write shallow tip file", source))?;
+        commit_all(&repository, "shallow tip")?;
+        let shallow_tip = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve shallow tip",
+        )?;
+
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "checkout",
+                "--quiet",
+                "-b",
+                "side",
+                &root_commit,
+            ]),
+            "create side branch",
+        )?;
+        std::fs::write(repository.join("side.txt"), b"side history\n")
+            .map_err(|source| io_error("write side file", source))?;
+        commit_all(&repository, "side history")?;
+        let side_commit = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve side commit",
+        )?;
+        run_git(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .arg("checkout")
+                .arg("--quiet")
+                .arg(&main_branch),
+            "restore main branch",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "-m",
+                "merge side",
+                "side",
+            ]),
+            "merge side history",
+        )?;
+        let want = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+            "resolve merged tip",
+        )?;
+
+        let source = source_descriptor(snapshot_pack(
+            &repository,
+            root.path(),
+            "shallow-fetch-source",
+        )?)?;
+        let oid = |value: &str| {
+            gix_hash::ObjectId::from_hex(value.as_bytes()).map_err(|error| {
+                io_error(
+                    "decode shallow-fetch object ID",
+                    io::Error::new(io::ErrorKind::InvalidData, error),
+                )
+            })
+        };
+        let generated = repack_shallow_fetch(
+            &[source],
+            &[oid(&want)?],
+            &[oid(&shallow_tip)?],
+            &[oid(&shallow_tip)?],
+            100,
+        )?;
+        let pack = generated
+            .packs()
+            .first()
+            .ok_or_else(|| RepackError::SelectedObjectSet {
+                pack_id: "shallow-fetch".to_owned(),
+                reason: "test generated no pack".to_owned(),
+            })?;
+        let mut locations =
+            PackLocationIter::open(pack.index_path(), pack.reverse_index_path(), pack.pack_size)?;
+        let objects = locations
+            .by_ref()
+            .map(|location| location.map(|location| location.oid))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        assert!(objects.contains(&oid(&want)?));
+        assert!(objects.contains(&oid(&side_commit)?));
+        assert!(!objects.contains(&oid(&shallow_parent)?));
+        Ok(())
     }
 
     #[test]
@@ -1386,6 +1703,12 @@ mod tests {
         command
             .env("GIT_DIR", root.path().join("ambient.git"))
             .env("GIT_WORK_TREE", root.path().join("ambient-worktree"))
+            .env("GIT_OBJECT_DIRECTORY", root.path().join("ambient-objects"))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                root.path().join("ambient-alternates"),
+            )
+            .env("GIT_SHALLOW_FILE", root.path().join("ambient-shallow"))
             .args(["init", "--quiet"])
             .arg(&repository);
 
@@ -1393,6 +1716,7 @@ mod tests {
 
         assert!(repository.join(".git").is_dir());
         assert!(!root.path().join("ambient.git").exists());
+        assert!(!root.path().join("ambient-objects").exists());
         Ok(())
     }
 

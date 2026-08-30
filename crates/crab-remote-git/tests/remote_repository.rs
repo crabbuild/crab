@@ -1363,6 +1363,39 @@ async fn subset_pack_generation_does_not_reuse_the_canonical_pack() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shallow_fetch_pack_uses_pinned_inventory_and_exact_boundary() {
+    let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+    let want = fixture
+        .repository
+        .refs()
+        .entries
+        .iter()
+        .find(|reference| reference.name == "refs/heads/main")
+        .expect("main reference")
+        .target;
+
+    fixture.backend.reset_pack_gets();
+    let generated = fixture
+        .repository
+        .generate_shallow_fetch_pack(
+            &[want],
+            &[fixture.root_commit],
+            &[fixture.root_commit],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("generate shallow fetch pack");
+
+    assert_eq!(fixture.backend.pack_gets(), 1);
+    let (packed_objects, _) = strict_pack_objects(generated.path(), &fixture.source_git_dir);
+    assert!(packed_objects.contains(&want.to_string()));
+    assert!(packed_objects.contains(&fixture.side_commit.to_string()));
+    assert!(!packed_objects.contains(&fixture.root_commit.to_string()));
+    assert!(!packed_objects.contains(&fixture.unreachable.to_string()));
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ref_delta_subset_pack_is_strict_and_contains_exactly_selected_objects() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let mut object_ids = fixture_object_ids(&fixture);

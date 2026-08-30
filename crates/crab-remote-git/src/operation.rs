@@ -391,6 +391,13 @@ impl OperationContext {
         &self,
         object_ids: &[gix_hash::ObjectId],
     ) -> Result<Vec<Option<GitObjectOrdinal>>> {
+        self.catalog_object_ordinals_with(object_ids).await
+    }
+
+    async fn catalog_object_ordinals_with(
+        &self,
+        object_ids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<Option<GitObjectOrdinal>>> {
         check_cancelled(&self.cancellation)?;
         let session = self
             .session
@@ -427,6 +434,21 @@ impl OperationContext {
                 }),
             })
             .collect()
+    }
+
+    /// Prove which candidate commits are reachable from any pinned graph root.
+    pub fn commits_reachable_from(
+        &self,
+        candidates: &[gix_hash::ObjectId],
+        roots: &[gix_hash::ObjectId],
+    ) -> Result<Option<Vec<bool>>> {
+        check_cancelled(&self.cancellation)?;
+        let Some(graph) = self.state.commit_graph.as_ref() else {
+            return Ok(None);
+        };
+        graph
+            .reachable_from_roots(candidates, roots, &self.cancellation)
+            .map(Some)
     }
 
     /// Resolve dense catalog ordinals to OIDs in the operation's pinned catalog.

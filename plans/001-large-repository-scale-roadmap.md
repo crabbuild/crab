@@ -970,13 +970,13 @@ index and repeated canonical repository traversal. The report is therefore
 Its exact remote prefix was subsequently removed and independently listed as
 empty.
 
-Commit `1882108e` distinguishes existing client shallow state from a request to
-change the shallow boundary. An ordinary incremental fetch may now use the
-exact generation-bound visibility transition while still emitting no shallow
-or unshallow update; explicit deepen, relative-deepen, and other contextual
-requests retain the conservative path. The focused regression includes a
-pre-existing shallow boundary and proves the transition object set and empty
-boundary update.
+Commit `1882108e` attempted to distinguish existing client shallow state from
+a request to change the shallow boundary and reused the generation-bound
+visibility transition for ordinary incremental fetches. The later exact
+1,000-replay diagnostic below proved that optimization unsound: a shallow
+`have` proves the boundary commit exists locally, not that all of its remote
+ancestors exist. The optimization and its invalid regression were removed by
+`de493ab0`.
 
 The first exact run on that change, `codex-1882108e-k8s-final-20260829`, found a
 second independent fanout defect before the final incremental wave. One
@@ -1024,12 +1024,54 @@ default 1,000-replay full-profile gate.
   contention produced exactly one winner and 19 typed rejections in 8,193 ms,
   with no unexpected failure.
 
-This closes the two observed RustFS fanout failures and provides current exact
-100-client correctness evidence. It does not convert local single-node RustFS
-latencies into production SLOs, nor does it close a repeated current-head
-1,000-push full-profile pass, the 10,000-push differential, cache-service
+This closes the generated-pack waiter herd and provides exact 100-client seed
+fanout evidence. The final incremental wave was subsequently found to be a
+no-op because the clients were seeded at checkpoint 100 of a 100-replay run;
+it is not incremental-fetch correctness evidence. Report schema 1.3 now
+requires distinct seed/final checkpoints and tips, and the harness seeds the
+fanout at checkpoint 10 for a 100-replay smoke. Production SLOs, repeated
+current-head 1,000-push proof, the 10,000-push differential, cache-service
 fanout, real S3/GCS/Azure matrices, injected interruption/throttling, owner
-failover, retention/GC, or canary/default-on gates.
+failover, retention/GC, and canary/default-on gates remain open.
+
+### Exact 1,000-replay diagnostic and correctness correction
+
+Run `codex-c0047e95-k8s-full1000-20260829` used Kubernetes revision
+`b3bc2ac58fa173967f27ade80f28cc5015b8c1c3`, isolated local RustFS, and the
+release binary built from exact source `c0047e95` with SHA-256
+`09ad60ff99e2c9c17537e6f46ea638aaf3e192f31d65e46974e1fb4b0235bc3f`.
+It is a failed diagnostic report, not acceptance evidence: the exact remote
+prefix was cleaned, but the final 100-client incremental-fetch check failed.
+
+- All 1,001 pushes succeeded. Checkpoint refs, acceleration receipts, full and
+  incremental fetches, cold/warm full clone, `blob:none`, depth-1/10/100/1,000,
+  full fsck, the deterministic 1,000-object byte comparison, and source
+  immutability passed. Final owner maintenance consolidated 992 active packs
+  to 2 and retained healthy lock renewal.
+- Checkpoint 100 exposed a separate maintenance defect. The active inventory
+  remained at 92 packs and the owner selected zero packs even though the
+  unbounded geometric policy predicted 92-to-2 consolidation. The incremental
+  selector stopped at the first stable tiny-tail boundary and never inspected
+  collisions in larger lower tiers. `de493ab0` scans every lower tier and has
+  shared-mechanic plus generation-owner regressions for a collision hidden by
+  a stable tail.
+- The checkpoint-100 cold shallow-clone fanout passed 100/100 with one
+  generated-pack producer. At the final tip, however, all 100 ordinary shallow
+  fetches failed with the same missing merge-parent commit
+  `8d2f2b64757822d7b552dc77d8a2ee37bbb9c9be`; the server had emitted only the
+  visibility difference from the shallow `have`.
+- A native Git protocol-v2 reproduction sent that commit's older side history,
+  completed fsck, and retained the original shallow boundary. It produced a
+  roughly 1.1 GiB incremental pack for this intentionally stale client. This
+  confirms the dependency contract and also shows that bounded latency for a
+  stale shallow client requires an explicit depth/deepen workflow; Crab must
+  not silently change ordinary Git semantics to obtain a smaller response.
+- `de493ab0` centralizes eligibility for the visibility shortcut and rejects
+  every request carrying shallow state. Such requests return to the bounded,
+  generation-pinned traversal while still using the cross-process generated-
+  pack cache. Focused tests and the complete `crab-git` (185 pass, 1 ignored)
+  and `crab-read` (61 pass) suites pass. Exact schema-1.3 live
+  requalification remains required before this phase can claim acceptance.
 
 Implemented on the current branch (pre-lazy qualification evidence at
 `04655f3b`; latest admission hardening at `0ba86693`; qualification-contract
@@ -1040,8 +1082,9 @@ reader-fanout hardening at `fd95e8fd`; owner compaction budgeting at
 `4a8fc34e`; regular locator budgeting at `88deb4e0`; stale owner-plan guard at
 `5465031e`; small-catalog point-read policy at `62d35c14`; bounded pack-hint
 fallback at `1de8e528`; dense locator-plan reuse at `587f4ee9`; direct-CAS
-lease renewal at `0f1757e9`; existing-shallow transition reuse at `1882108e`;
-generated-pack waiter-herd suppression at `5f053721`):
+lease renewal at `0f1757e9`; reverted existing-shallow transition experiment at
+`1882108e`; generated-pack waiter-herd suppression at `5f053721`; shallow-
+closure and hidden-tier repack correction at `de493ab0`):
 
 - Phase 0 qualification/report tooling and scheduled/manual workflow;
 - bitmap-native visibility planning and bounded transfer admission;
@@ -1161,10 +1204,10 @@ generated-pack waiter-herd suppression at `5f053721`):
 - exact catalog batches deduplicate repeated OIDs, and concurrent pack-index
   metadata misses share the immutable source-size `HEAD` through the bounded
   runtime single-flight/cache before fetching the index body.
-- ordinary fetches from an already-shallow clone reuse the exact
-  generation-bound visibility transition when no deepen operation is
-  requested, avoiding repository-wide traversal without changing the client's
-  shallow boundary.
+- ordinary fetches from an already-shallow clone use bounded generation-pinned
+  traversal because the boundary commit does not prove its ancestors are
+  local; identical responses still share the cross-process generated-pack
+  artifact.
 - cross-process generated-pack waiters poll immutable descriptors with a
   jittered 30 s ceiling and probe distributed lease ownership only near owner
   expiry or at a jittered 60 s ceiling; transient follow-up probes preserve the
@@ -2119,10 +2162,10 @@ environment dumps, or credentials.
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
 | 2 | IMPLEMENTED; CURRENT DENSE-READ EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9` | The current 100-replay run ends with 2 active packs, and its dense blob:none clone selects 1,102,159 objects in 24,911 ms with 3,152 storage requests after reusing one locator plan across batches. Large current catalogs avoid pack-count-by-batch lookup amplification, and pack sidecar intake/publication fallback are bounded; exact batches also deduplicate repeated OIDs and pack-index metadata misses share bounded source-size reads. Response-pack egress, fanout, retention, and provider SLOs remain open |
-| 3 | IMPLEMENTED; RENEWAL FAILURE REPAIRED; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9` | The current checkpoint-100 owner completed the previously failing large-catalog pass, including 95-to-2-pack geometric repack, without a renewal-budget error. Direct-CAS renewal and typed retry-source regressions pass; the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
-| 4 | IMPLEMENTED; CURRENT SHALLOW-FANOUT PASS; DIFFERENTIAL SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-5f053721-k8s-fanout100-20260829` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `1882108e`; `5f053721` | The exact current 100-replay run passes incremental and depth-1/10/100/1,000 correctness, the dense filtered clone, and 100/100 existing-shallow incremental fetches in 39,226 ms after removing the repository-wide fallback. Its warm full clone is a verified cache hit with zero origin-storage requests. A broad 1,000-replay diagnostic passed every read/correctness gate before the old final shallow fanout was interrupted; a repeated passing current-head 1,000 profile, the 10,000-push shallow differential, response-pack SLO, provider range behavior, and rollout evidence remain open |
+| 3 | IMPLEMENTED; HIDDEN-TIER REPACK FIXED; REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9`; `de493ab0` | Renewal proof remains valid, but the exact 1,000-replay diagnostic found 92 active packs at checkpoint 100 because a stable tiny tail hid higher-tier collisions. The selector now scans every lower tier and focused regressions pass; exact live proof that checkpoint pack counts remain logarithmic plus the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
+| 4 | CORRECTNESS REGRESSION FIXED; EXACT REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0` | The earlier 100-replay final wave was a no-op and is withdrawn as incremental proof. The exact 1,000-replay run proved all broad reads but failed all 100 stale shallow clients on one omitted merge parent. Native Git contract proof and the centralized traversal fallback fix pass focused/full affected suites; schema 1.3 now rejects no-op fanout evidence. Exact live proof, the 10,000-push shallow differential, response-pack SLO, provider range behavior, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; stale membership cleanup now uses bounded scan read-ahead, while pack-sidecar intake, repack publication, and recovery restore are bounded. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL; CURRENT 100-CLIENT CORRECTNESS PASS | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-5f053721-k8s-fanout100-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `1882108e`; `5f053721` | The exact current 28-check run passes 100/100 cold shallow-clone fanout with one producer, 100/100 existing-shallow incremental fetches, 20/20 independent-ref pushes, exact same-ref 1-winner/19-rejection contention, fsck/ref/object/source checks, and exact-prefix cleanup. Descriptor-first waiters no longer create the lease-probe herd that produced RustFS 503s and 47 early-EOF failures. The 226,388-ms cold-fanout p99 is local correctness evidence, not a production SLO; cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout gates remain pending |
+| 6 | PARTIAL; SEED FANOUT PASS, MEANINGFUL INCREMENTAL REQUALIFICATION PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0` | Descriptor-first waiting has exact 100/100 cold seed-clone proof with one producer and no 503/lease/early-EOF failure. The old 100-replay final fetch was a no-op; schema 1.3 now requires intervening commits. The full diagnostic exposed and the code fixes a stale-shallow closure omission, but exact 100-client requalification, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout gates remain pending |
 
 ### Current branch verification evidence
 

@@ -9,13 +9,16 @@ commits individually, exercises full, filtered, shallow, and incremental
 reads, and verifies the resulting Git object database. Run it twice on the
 same idle host before using its latency results as a baseline.
 
-Add `--team-load` for the release-gate workload. At replay checkpoint 100 it
-creates 100 shallow client clones, then after replay runs 100 concurrent
-incremental fetches, 20 independent-ref pushes, and 20 same-ref pushes. The
-same-ref scenario expects one winner and records only typed retryable lock,
-CAS, or non-fast-forward outcomes for the other callers. The team-load run
-also keeps its generated clients under the run directory and removes them
-with the normal cleanup path.
+Add `--team-load` for the release-gate workload. It creates 100 shallow client
+clones at checkpoint 10 for a 100-replay smoke and checkpoint 100 for longer
+runs, then after replay runs 100 concurrent incremental fetches, 20
+independent-ref pushes, and 20 same-ref pushes. The report records both
+seed/final checkpoints and tips; the verifier rejects a no-op fetch wave. The
+same-ref scenario
+expects one winner and records only typed retryable lock, CAS, or non-fast-
+forward outcomes for the other callers. The team-load run also keeps its
+generated clients under the run directory and removes them with the normal
+cleanup path.
 
 Each upload-pack session acquires one of 16 repository-scoped object-store
 read-admission leases before opening Git metadata. The lease is renewed for
@@ -120,7 +123,7 @@ non-zero; it is never accepted as performance evidence.
 ## Report contract
 
 The versioned JSON report uses schema `crab.large-repository-rustfs`, version
-`1.2`. Its main sections are:
+`1.3`. Its main sections are:
 
 | Field | Evidence |
 |---|---|
@@ -129,7 +132,7 @@ The versioned JSON report uses schema `crab.large-repository-rustfs`, version
 | `commands` | Exit status, duration, process-tree CPU, peak child RSS, aggregate operation telemetry, and redacted logs |
 | `pushes` | Per-commit latency, resource use, and storage/cache counters |
 | `stages` | Clone/fetch measurements, active pack inventory, generation-bound locator/visibility health, and per-owner-pass locator sweep counters |
-| `team_load` | Optional controlled concurrent fetch and push outcomes, including per-client seed-clone failures plus cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
+| `team_load` | Optional controlled concurrent fetch and push outcomes, including distinct seed/final checkpoints and tips, per-client failures, and cold-fanout pack producer, cache-event, and origin-request proof; `--require-team-load` makes it mandatory for a full gate and requires one or two generated-pack producers |
 | `cache_service` | Optional service health/capability proof and aggregate Git-pack cache traffic; `--require-cache-service` makes the service and observed pack traffic mandatory |
 | `store_snapshots` | Physical object, byte, and pack growth at seed/checkpoints/final state |
 | `correctness` | Advertised refs, clone tips, full/incremental fsck evidence, deterministic object sample, and fingerprint |
@@ -139,8 +142,9 @@ The verifier fails closed on missing stages or checks, failed commands,
 negative values, incomplete repository registry, stale Git acceleration
 generations, mismatched pack-index identity, inconsistent refs, too-small
 samples, non-contiguous pushes,
-inconsistent percentiles, cleanup failures, and credential-shaped report
-fields. It records repository-wide generation-receipt and maintenance health
+no-op incremental fanout, inconsistent percentiles, cleanup failures, and
+credential-shaped report fields. It records repository-wide generation-
+receipt and maintenance health
 without treating unrelated file-index repair as a Git acceleration failure.
 
 Remote-operation telemetry is emitted once per bounded operation. It records
