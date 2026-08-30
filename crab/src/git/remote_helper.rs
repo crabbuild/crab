@@ -2612,7 +2612,7 @@ async fn try_fetch_exact_shallow_closure(
     let cache_key =
         repository.generated_pack_cache_key(authorization_digest, &selection.object_ids, false);
     let pack = repository
-        .generate_pack_cached(&selection.object_ids, cache_key, cancel)
+        .generate_pack_cached_with_selected_assembly(&selection.object_ids, cache_key, cancel)
         .await
         .map_err(|error| {
             CrabError::Protocol(format!("shallow fetch pack generation failed: {error}"))

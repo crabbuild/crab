@@ -432,7 +432,7 @@ impl RemoteGitRepository {
         &self,
         object_ids: &[ObjectId],
         thin_bases: &[ObjectId],
-        allow_dense_selected_assembly: bool,
+        allow_selected_assembly: bool,
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
         let operation = self
@@ -481,7 +481,7 @@ impl RemoteGitRepository {
                             {
                                 Some(pack) => Ok(pack),
                                 None => {
-                                    let assembled = if allow_dense_selected_assembly {
+                                    let assembled = if allow_selected_assembly {
                                         Self::try_assemble_selected_pack(
                                             self,
                                             &operation,
@@ -780,11 +780,12 @@ impl RemoteGitRepository {
             .await
     }
 
-    /// Reuse or publish a response pack for a catalog-exact dense filter.
+    /// Reuse or publish a response pack for a planner-proven exact selection.
     ///
-    /// Callers must restrict this entry point to no-have requests using only
-    /// `blob:none` or `object:type` catalog filters without shallow state.
-    pub async fn generate_pack_cached_with_dense_selection(
+    /// Callers must restrict this entry point to no-have requests whose planner
+    /// proves the complete self-contained object set. This includes catalog
+    /// exact dense filters and unfiltered initial shallow clones.
+    pub async fn generate_pack_cached_with_selected_assembly(
         &self,
         object_ids: &[ObjectId],
         cache_key: GeneratedPackCacheKey,
@@ -815,7 +816,7 @@ impl RemoteGitRepository {
         &self,
         object_ids: &[ObjectId],
         cache_key: GeneratedPackCacheKey,
-        allow_dense_selected_assembly: bool,
+        allow_selected_assembly: bool,
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
         if !cache_key.matches_selection(object_ids) {
@@ -849,7 +850,7 @@ impl RemoteGitRepository {
                         &repository,
                         &object_ids,
                         cache_key,
-                        allow_dense_selected_assembly,
+                        allow_selected_assembly,
                         &background_cancellation,
                     )
                     .await
@@ -1073,7 +1074,7 @@ async fn produce_cached_pack(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
-    allow_dense_selected_assembly: bool,
+    allow_selected_assembly: bool,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let Some(provider) = repository.generated_pack_lease_provider.as_ref() else {
@@ -1081,7 +1082,7 @@ async fn produce_cached_pack(
             repository,
             object_ids,
             cache_key,
-            allow_dense_selected_assembly,
+            allow_selected_assembly,
             cancellation,
         )
         .await;
@@ -1163,7 +1164,7 @@ async fn produce_cached_pack(
             repository,
             object_ids,
             cache_key,
-            allow_dense_selected_assembly,
+            allow_selected_assembly,
             lock,
             cancellation,
         )
@@ -1224,7 +1225,7 @@ async fn produce_cached_pack_under_lease(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
-    allow_dense_selected_assembly: bool,
+    allow_selected_assembly: bool,
     lock: Box<dyn GeneratedPackLease>,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
@@ -1241,12 +1242,7 @@ async fn produce_cached_pack_under_lease(
             return Ok(pack);
         }
         let generated = repository
-            .generate_pack_with_bases_mode(
-                object_ids,
-                &[],
-                allow_dense_selected_assembly,
-                cancellation,
-            )
+            .generate_pack_with_bases_mode(object_ids, &[], allow_selected_assembly, cancellation)
             .await?;
         publish_cached_pack(
             repository,
@@ -1265,7 +1261,7 @@ async fn produce_cached_pack_without_lease(
     repository: &RemoteGitRepository,
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
-    allow_dense_selected_assembly: bool,
+    allow_selected_assembly: bool,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     if let Some(pack) = load_cached_pack_retrying_transient(
@@ -1280,7 +1276,7 @@ async fn produce_cached_pack_without_lease(
         return Ok(pack);
     }
     let generated = repository
-        .generate_pack_with_bases_mode(object_ids, &[], allow_dense_selected_assembly, cancellation)
+        .generate_pack_with_bases_mode(object_ids, &[], allow_selected_assembly, cancellation)
         .await?;
     publish_cached_pack(
         repository,
