@@ -25,7 +25,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // the total selection and each coalesced range bounds transient range memory.
 const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-pub const GENERATED_PACK_CACHE_VERSION: u32 = 2;
+pub const GENERATED_PACK_CACHE_VERSION: u32 = 3;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // Generated response packs can require a large catalog lookup plus pack
