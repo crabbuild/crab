@@ -1448,6 +1448,7 @@ async fn common_haves_catalog(
         visibility,
         &request.haves,
         visible_ref_names,
+        false,
         cancellation,
     )
     .await?;
@@ -1465,29 +1466,67 @@ async fn visible_objects_catalog(
     visibility: &GitCatalogVisibilityIndex,
     object_ids: &[ObjectId],
     visible_ref_names: &[String],
+    bounded_scan: bool,
     cancellation: &CancellationToken,
 ) -> Result<Vec<bool>> {
     let operation = repository
         .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
         .await
         .map_err(remote_error)?;
-    let result = operation
-        .catalog_object_ordinals(object_ids)
-        .await
-        .map(|ordinals| {
-            ordinals
-                .into_iter()
-                .map(|ordinal| {
-                    ordinal.is_some_and(|ordinal| {
-                        visibility.contains_ordinal_for_refs(
-                            visible_ref_names.iter().map(String::as_str),
-                            ordinal,
-                        )
-                    })
+    let ordinals = if bounded_scan {
+        operation
+            .catalog_object_ordinals_bounded_scan(object_ids)
+            .await
+    } else {
+        operation.catalog_object_ordinals(object_ids).await
+    };
+    let result = ordinals.map(|ordinals| {
+        ordinals
+            .into_iter()
+            .map(|ordinal| {
+                ordinal.is_some_and(|ordinal| {
+                    visibility.contains_ordinal_for_refs(
+                        visible_ref_names.iter().map(String::as_str),
+                        ordinal,
+                    )
                 })
-                .collect()
-        });
+            })
+            .collect()
+    });
     operation.finish(result).await.map_err(remote_error)
+}
+
+async fn native_shallow_visibility_catalog(
+    repository: &RemoteGitRepository,
+    visibility: &GitCatalogVisibilityIndex,
+    request: &FetchRequest,
+    visible_ref_names: &[String],
+    cancellation: &CancellationToken,
+) -> Result<(Vec<ObjectId>, bool)> {
+    let mut object_ids = Vec::with_capacity(request.haves.len() + request.shallow.len());
+    object_ids.extend_from_slice(&request.haves);
+    object_ids.extend_from_slice(&request.shallow);
+    let visible = visible_objects_catalog(
+        repository,
+        visibility,
+        &object_ids,
+        visible_ref_names,
+        true,
+        cancellation,
+    )
+    .await?;
+    let (have_visibility, shallow_visibility) = visible.split_at(request.haves.len());
+    let common_haves = request
+        .haves
+        .iter()
+        .copied()
+        .zip(have_visibility)
+        .filter_map(|(have, visible)| visible.then_some(have))
+        .collect();
+    Ok((
+        common_haves,
+        shallow_visibility.iter().all(|visible| *visible),
+    ))
 }
 
 async fn write_acknowledgments<W: AsyncWrite + Unpin>(
@@ -1533,7 +1572,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
         if native_shallow_pack_eligible(request)
             && let Some(visibility) = proof.as_catalog()
         {
-            let common_haves = common_haves_catalog(
+            let (common_haves, shallow_visible) = native_shallow_visibility_catalog(
                 repository,
                 visibility,
                 request,
@@ -1541,15 +1580,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
                 cancellation,
             )
             .await?;
-            let shallow_visible = visible_objects_catalog(
-                repository,
-                visibility,
-                &request.shallow,
-                visible_ref_names,
-                cancellation,
-            )
-            .await?;
-            if !common_haves.is_empty() && shallow_visible.into_iter().all(|visible| visible) {
+            if !common_haves.is_empty() && shallow_visible {
                 tracing::info!(
                     protocol_version = 2,
                     request_class,
