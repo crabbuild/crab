@@ -729,27 +729,10 @@ fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 }
 
 fn read_workspace_remote(work_dir: &Path, config: &Config) -> Result<String> {
-    let remote_path = work_dir.join(".crab").join("remote");
-    if remote_path.is_file() {
-        let content =
-            std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
-                key: format!("failed to read {}: {e}", remote_path.display()),
-                origin: remote_path.display().to_string(),
-            })?;
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_owned());
-        }
-    }
-
     if let Some(url) = config.remote_url.as_deref()
         && !url.is_empty()
     {
         return Ok(url.to_owned());
-    }
-
-    if let Some(url) = git_origin_url(work_dir) {
-        return Ok(url);
     }
 
     Err(CrabError::Configuration {
@@ -757,22 +740,9 @@ fn read_workspace_remote(work_dir: &Path, config: &Config) -> Result<String> {
             "no Crab or raw object-store remote configured under {}",
             work_dir.display()
         ),
-        origin: "run `crab init <url>` or set git remote origin before downloading pointer content"
+        origin: "run `crab configure <url>` to create crab.toml before downloading pointer content"
             .to_owned(),
     })
-}
-
-fn git_origin_url(work_dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(work_dir)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if url.is_empty() { None } else { Some(url) }
 }
 
 fn resolve_manifest_rev(manifest: &Manifest, rev: &str) -> Option<String> {

@@ -31,7 +31,7 @@ const SANDBOX_TABS: SandboxTab[] = [
       "# Detected large files — tracking: *.safetensors, *.bin",
       "",
       "✔ Auto-tracked 2 extension(s) in .gitattributes",
-      "✔ Remote configured at .crab/config.toml",
+      "✔ Remote configured at .crab/local.toml",
     ],
   },
   {

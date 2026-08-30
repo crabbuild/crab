@@ -540,12 +540,12 @@ fn checkout_commit_into(
 }
 
 fn copy_repo_config_into_worktree(repo_root: &Path, tmpdir: &Path) -> Result<()> {
-    let src = repo_root.join(".crab").join("config.toml");
+    let src = repo_root.join(".crab").join("local.toml");
     if !src.is_file() {
         return Ok(());
     }
 
-    let dst = tmpdir.join(".crab").join("config.toml");
+    let dst = tmpdir.join(".crab").join("local.toml");
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(CrabError::Io)?;
     }

@@ -41,7 +41,7 @@ fn setup_repo(root: &Path, yaml: &str, parallelism: u32) {
     let crab_dir = root.join(".crab");
     fs::create_dir_all(&crab_dir).unwrap();
     fs::write(
-        crab_dir.join("config.toml"),
+        crab_dir.join("local.toml"),
         format!("[workflow]\nenabled = true\nparallelism = {parallelism}\n"),
     )
     .unwrap();

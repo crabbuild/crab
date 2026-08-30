@@ -39,11 +39,9 @@ fn write_gitattributes(root: &Path, patterns: &[&str]) {
     std::fs::write(root.join(".gitattributes"), content).unwrap();
 }
 
-/// Write `.crab/prefetch.toml` with the given TOML content.
+/// Write committed prefetch profiles to `crab.toml`.
 fn write_prefetch_toml(root: &Path, toml_content: &str) {
-    let crab_dir = root.join(".crab");
-    std::fs::create_dir_all(&crab_dir).unwrap();
-    std::fs::write(crab_dir.join("prefetch.toml"), toml_content).unwrap();
+    std::fs::write(root.join("crab.toml"), toml_content).unwrap();
 }
 
 /// Create a file with deterministic non-pointer content large enough
@@ -71,7 +69,7 @@ fn default_args() -> DehydrateArgs {
 
 /// Set up a temp directory that simulates a fresh clone with:
 ///
-/// - `.crab/prefetch.toml` containing an `always` profile for
+/// - `crab.toml` containing an `always` profile for
 ///   `["README.md", "docs/**/*.md"]`
 /// - `.gitattributes` tracking `*.md`, `*.bin`
 /// - Hydrated files: `README.md`, `docs/guide.md`, `model.bin`,
@@ -86,8 +84,10 @@ fn build_fixture() -> tempfile::TempDir {
         root,
         r#"version = 1
 
-[[profile]]
-name = "always"
+[remote]
+url = "crab://bucket/repo"
+
+[prefetch.profiles.always]
 paths = [
     "README.md",
     "docs/**/*.md",
@@ -108,7 +108,7 @@ paths = [
 // ---------------------------------------------------------------------------
 
 /// The prefetch config parser correctly loads the `always` profile and
-/// its glob patterns from `.crab/prefetch.toml`.
+/// its glob patterns from `crab.toml`.
 #[test]
 fn prefetch_config_parses_always_profile_globs() {
     let dir = build_fixture();

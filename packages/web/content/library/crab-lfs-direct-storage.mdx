@@ -80,7 +80,7 @@ crab init --storage-provider s3 crab://team-bucket/model-repository
 crab lfs install --local
 crab lfs track '*.safetensors'
 
-git add .crab.toml .gitattributes
+git add crab.toml .gitattributes
 git commit -m "Configure direct Crab LFS"
 git push origin main
 ```

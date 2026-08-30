@@ -253,7 +253,7 @@ class Qualification:
             "crab lfs install",
         )
         self.run_lfs(["track", "*.bin"], self.repo, "git lfs track")
-        self.run_git(["add", ".gitattributes", ".crab.toml"], self.repo, "stage LFS configuration")
+        self.run_git(["add", ".gitattributes", "crab.toml"], self.repo, "stage LFS configuration")
 
         self.report["versions"] = {
             "git": self.run_git(["--version"], self.repo, "git version").strip(),
@@ -284,7 +284,7 @@ class Qualification:
             if should_commit:
                 commit_index = (index + 1) * self.args.commit_count // self.args.object_count
                 self.run_git(["add", "*.bin"], self.repo, f"stage objects {index + 1}")
-                self.run_git(["add", ".gitattributes", ".crab.toml"], self.repo, f"stage config {index + 1}")
+                self.run_git(["add", ".gitattributes", "crab.toml"], self.repo, f"stage config {index + 1}")
                 self.run_git(["commit", "-m", f"qualification commit {commit_index}"], self.repo, f"commit {commit_index}")
         self.report["metrics"]["logical_bytes"] = sum(sizes)
         self.report["metrics"]["current_paths"] = len(list(self.repo.glob("*.bin")))

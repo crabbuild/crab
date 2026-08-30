@@ -44,7 +44,7 @@ crab init --mirror=origin crab://my-bucket/my-repo
 This does:
 - Adds a `crab` git remote pointing to your bucket
 - Installs `pre-push`, `post-checkout`, and `post-merge` hooks
-- Writes `[mirror]` section to `.crab.toml`
+- Writes `[mirror]` section to `crab.toml`
 - Auto-tracks large file patterns
 
 Commit and push:
@@ -54,7 +54,7 @@ crab ship -m "enable crab for large files"
 git push origin main
 ```
 
-The `.crab.toml` is now on GitHub. Collaborators will inherit the mirror config.
+The `crab.toml` is now on GitHub. Collaborators will inherit the mirror config.
 
 ## Setup: Collaborator
 
@@ -66,7 +66,7 @@ cd project
 crab init
 ```
 
-Running `crab init` with no URL detects the `[mirror]` section in `.crab.toml`
+Running `crab init` with no URL detects the `[mirror]` section in `crab.toml`
 and automatically:
 - Adds the `crab` remote
 - Installs the mirror hooks
@@ -135,7 +135,7 @@ Mirror: origin ↔ crab (crab://my-bucket/my-repo) | healthy
   Pending push: 0 files
 ```
 
-## `.crab.toml` Mirror Section
+## `crab.toml` Mirror Section
 
 ```toml
 [mirror]
@@ -201,6 +201,6 @@ crab hydrate .
 
 ## Related
 
-- [Project Configuration](project-config.md) — `.crab.toml` reference
+- [Project Configuration](project-config.md) — `crab.toml` reference
 - [Getting Started](getting-started.md) — basic setup without mirror mode
 - [`crab status`](status.md) — includes mirror health reporting

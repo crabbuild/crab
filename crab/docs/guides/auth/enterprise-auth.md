@@ -55,7 +55,7 @@ crab auth refresh
 
 Auth settings live in the `[auth]` section of your crab config. You can set
 them per-user (`~/.config/crab/config.toml`) or per-repo
-(`.crab/config.toml`). The 4-layer config precedence applies:
+(`.crab/local.toml`). The 4-layer config precedence applies:
 compiled defaults → user TOML → repo TOML → remote JSON.
 
 ### Common keys

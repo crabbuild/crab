@@ -35,13 +35,13 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_crab")
 }
 
-/// Write `.crab/config.toml` with the requested `[workflow] enabled`
+/// Write `.crab/local.toml` with the requested `[workflow] enabled`
 /// value. Any prior file at that path is replaced.
 fn write_workflow_config(repo: &Path, enabled: bool) {
     let cfg_dir = repo.join(".crab");
     fs::create_dir_all(&cfg_dir).unwrap();
     let body = format!("[workflow]\nenabled = {enabled}\n");
-    fs::write(cfg_dir.join("config.toml"), body).unwrap();
+    fs::write(cfg_dir.join("local.toml"), body).unwrap();
 }
 
 /// Invoke `crab run` for the canonical single-stage `cp a.txt b.txt`

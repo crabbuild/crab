@@ -154,7 +154,7 @@ pub async fn run_clone_in(
         };
 
     // Step 1: Fetch the repository without populating the worktree yet.
-    // The checkout happens only after .crab/remote and checkout.lazy are
+    // The checkout happens only after local checkout settings are
     // configured, otherwise lazy clones pay the non-lazy smudge cost during
     // their first materialization.
     // Note: git itself prints "Cloning into '...'" via inherited stderr,
@@ -186,7 +186,7 @@ pub async fn run_clone_in(
     if !args.mode.is_machine() {
         eprintln!("Configuring crab...");
     }
-    setup_crab_config(&target_dir, &args.url).await?;
+    setup_crab_config(&target_dir).await?;
 
     check_cancelled(cancel)?;
 
@@ -194,9 +194,9 @@ pub async fn run_clone_in(
     crate::cmd::init::install_filter_driver(&target_dir)?;
 
     // Step 4: Read committed project config before checkout. The worktree is
-    // still empty because we cloned with --no-checkout, so read .crab.toml
+    // still empty because we cloned with --no-checkout, so read crab.toml
     // from HEAD when available.
-    let project_config = project_config_for_checkout(&target_dir);
+    let project_config = project_config_for_checkout(&target_dir)?;
 
     // Determine effective hydration behavior before checkout so the filter
     // process sees the right lazy/eager state during first materialization.
@@ -214,7 +214,7 @@ pub async fn run_clone_in(
 
     // Step 5: Populate the working tree after crab config is ready.
     let phase = PhaseTimer::start("clone", "checkout");
-    checkout_head(&target_dir)?;
+    checkout_head(&target_dir, &args.url)?;
     emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
 
     // Step 3b: Auto-track extensions for any pointer blobs that landed
@@ -379,7 +379,7 @@ pub async fn run_clone_in(
 
     // Step 6: Auto-hydrate the `always` prefetch profile if configured.
     // Runs after the working tree is fully set up (all branches above)
-    // so that prefetch.toml is available on disk. Errors are warnings,
+    // so that crab.toml is available on disk. Errors are warnings,
     // not fatal — the clone itself succeeded.
     auto_hydrate_always_profile(&target_dir, args.mode, cancel).await;
 
@@ -457,9 +457,14 @@ async fn run_post_checkout_hydrate(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let config = crate::core::config::Config::resolve_for_repo(target_dir)?;
-    let remote_path = target_dir.join(".crab").join("remote");
-    let remote = std::fs::read_to_string(&remote_path)?;
-    let parsed = crate::git::url::CrabUrl::parse(remote.trim())?;
+    let remote = config
+        .remote_url
+        .as_deref()
+        .ok_or_else(|| CrabError::Configuration {
+            key: "remote.url".to_owned(),
+            origin: "crab.toml does not declare [remote].url".to_owned(),
+        })?;
+    let parsed = crate::git::url::CrabUrl::parse(remote)?;
     let selection =
         crate::replication::select_read_store(&config, parsed, "hydrate", cancel).await?;
     let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
@@ -688,11 +693,12 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
 }
 
 /// Populate the worktree from HEAD after crab config is ready.
-fn checkout_head(target: &Path) -> Result<()> {
+fn checkout_head(target: &Path, remote_url: &str) -> Result<()> {
     scrub_git_pack_appledouble_files(target)?;
 
     let checkout_status = Command::new("git")
         .args(["checkout", "HEAD"])
+        .env(crate::core::config::CLONE_REMOTE_URL_ENV, remote_url)
         .current_dir(target)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -794,59 +800,59 @@ fn scrub_git_pack_appledouble_files(target: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Load committed `.crab.toml` before checkout when possible.
+/// Load committed `crab.toml` before checkout when possible.
 fn project_config_for_checkout(
     target: &Path,
-) -> Option<crate::core::project_config::ProjectConfig> {
-    project_config_from_head(target)
-        .or_else(|| crate::core::project_config::ProjectConfig::discover(target))
+) -> Result<Option<crate::core::project_config::ProjectConfig>> {
+    match project_config_from_head(target)? {
+        Some(config) => Ok(Some(config)),
+        None => crate::core::project_config::ProjectConfig::load_for_repo(target),
+    }
 }
 
-fn project_config_from_head(target: &Path) -> Option<crate::core::project_config::ProjectConfig> {
+fn project_config_from_head(
+    target: &Path,
+) -> Result<Option<crate::core::project_config::ProjectConfig>> {
     let output = Command::new("git")
-        .args(["show", "HEAD:.crab.toml"])
+        .args(["show", "HEAD:crab.toml"])
         .current_dir(target)
         .output()
-        .ok()?;
+        .map_err(CrabError::Io)?;
 
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
 
-    let content = String::from_utf8(output.stdout).ok()?;
-    toml::from_str(&content).ok()
+    let content = String::from_utf8(output.stdout).map_err(|error| CrabError::Configuration {
+        key: "crab.toml".to_owned(),
+        origin: format!("committed config is not UTF-8: {error}"),
+    })?;
+    crate::core::project_config::ProjectConfig::parse(&content, "HEAD:crab.toml").map(Some)
 }
 
-/// Create the `.crab/` directory and write the remote URL.
-async fn setup_crab_config(target: &Path, url: &str) -> Result<()> {
+/// Create the `.crab/` directory and its local settings file.
+async fn setup_crab_config(target: &Path) -> Result<()> {
     let crab_dir = target.join(".crab");
     tokio::fs::create_dir_all(&crab_dir).await?;
     crate::cmd::init::ensure_crab_dir_excluded(target)?;
 
-    // Write the remote URL.
-    let remote_path = crab_dir.join("remote");
-    tokio::fs::write(&remote_path, url.as_bytes()).await?;
-    tracing::info!(path = %remote_path.display(), "wrote remote URL");
-
-    // Write a default config.toml if one doesn't exist.
-    let config_path = crab_dir.join("config.toml");
+    let config_path = crab_dir.join("local.toml");
     if !config_path.exists() {
-        tokio::fs::write(&config_path, b"# Crab configuration\n").await?;
+        tokio::fs::write(&config_path, b"# Crab local settings (not committed)\n").await?;
     }
-    crate::cmd::config::run_config_set_at("remote.url", url, &config_path)?;
 
     Ok(())
 }
 
 /// Set `checkout.lazy = true` in the local crab config.
 fn configure_lazy_checkout(target: &Path) -> Result<()> {
-    let config_path = target.join(".crab/config.toml");
+    let config_path = target.join(".crab/local.toml");
     crate::cmd::config::run_config_set_at("checkout.lazy", "true", &config_path)
 }
 
 /// Auto-hydrate the `always` prefetch profile after a clone.
 ///
-/// Loads `.crab/prefetch.toml` from the cloned repo. If the `always`
+/// Loads the `prefetch.profiles.always` entry from `crab.toml`. If the `always`
 /// profile exists and `hydrate.auto_prefetch` is not `false` (default
 /// is `true`), expands the profile's globs against the working tree
 /// and hydrates matching pointer files.
@@ -881,7 +887,7 @@ async fn auto_hydrate_always_profile(
             return;
         }
         None => {
-            tracing::debug!("no always profile in prefetch.toml, skipping auto-hydrate");
+            tracing::debug!("no always prefetch profile in crab.toml, skipping auto-hydrate");
             return;
         }
     };
@@ -1006,9 +1012,9 @@ pub(crate) fn autotrack_pointer_extensions(target: &Path, mode: OutputMode) -> R
     Ok(())
 }
 
-/// Resolve effective hydration behavior by merging CLI flags with `.crab.toml` config.
+/// Resolve effective hydration behavior by merging CLI flags with `crab.toml` config.
 ///
-/// Returns `(effective_lazy, effective_include_patterns)`. The `.crab.toml`
+/// Returns `(effective_lazy, effective_include_patterns)`. The `crab.toml`
 /// settings only apply when the user didn't pass explicit CLI flags.
 fn resolve_hydration_from_config(
     user_lazy: bool,
@@ -1028,7 +1034,7 @@ fn resolve_hydration_from_config(
         return (user_lazy, user_include.to_vec());
     }
 
-    // If .crab.toml says eager and user didn't pass explicit --lazy,
+    // If crab.toml says eager and user didn't pass explicit --lazy,
     // hydrate everything (lazy=false).
     let effective_lazy = match hydrate_config.default {
         crate::core::project_config::HydrateMode::Eager => {
@@ -1041,7 +1047,7 @@ fn resolve_hydration_from_config(
         crate::core::project_config::HydrateMode::Lazy => user_lazy,
     };
 
-    // If .crab.toml has auto_patterns, use them as include patterns.
+    // If crab.toml has auto_patterns, use them as include patterns.
     let effective_include = match &hydrate_config.auto_patterns {
         Some(patterns) if !patterns.is_empty() => patterns.clone(),
         _ => vec![],
@@ -1479,18 +1485,16 @@ mod tests {
         let root = dir.path();
         git_in(root, &["init"]);
 
-        setup_crab_config(root, "crab://my-bucket/my-repo")
-            .await
-            .unwrap();
+        setup_crab_config(root).await.unwrap();
 
         let ignored = std::process::Command::new("git")
-            .args(["check-ignore", "-v", ".crab/remote"])
+            .args(["check-ignore", "-v", ".crab/local.toml"])
             .current_dir(root)
             .output()
             .unwrap();
         assert!(
             ignored.status.success(),
-            ".crab/remote should be ignored by local git exclude: {}",
+            ".crab/local.toml should be ignored by local git exclude: {}",
             String::from_utf8_lossy(&ignored.stderr)
         );
 
@@ -1509,25 +1513,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_setup_preserves_checkout_config_and_writes_remote_url() {
+    async fn clone_setup_preserves_local_checkout_settings() {
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git_in(root, &["init"]);
         let crab_dir = root.join(".crab");
         std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("config.toml"), "[checkout]\nlazy = true\n").unwrap();
+        std::fs::write(crab_dir.join("local.toml"), "[checkout]\nlazy = true\n").unwrap();
 
-        let canonical_url = "crab://code.corp.example/acme/models";
-        setup_crab_config(root, canonical_url).await.unwrap();
+        setup_crab_config(root).await.unwrap();
 
-        let remote = std::fs::read_to_string(crab_dir.join("remote")).unwrap();
-        let config = std::fs::read_to_string(crab_dir.join("config.toml")).unwrap();
-        assert_eq!(remote, canonical_url);
+        let config = std::fs::read_to_string(crab_dir.join("local.toml")).unwrap();
         assert!(config.contains("[checkout]"));
         assert!(config.contains("lazy = true"));
-        assert!(config.contains("[remote]"));
-        assert!(config.contains(&format!("url = \"{canonical_url}\"")));
+        assert!(!crab_dir.join("remote").exists());
+        assert!(!config.contains("[remote]"));
         assert!(!config.contains("gateway"));
         assert!(!config.contains("credential"));
     }
@@ -1773,11 +1774,11 @@ mod tests {
         git_in(src_root, &["config", "user.email", "test@example.com"]);
         git_in(src_root, &["config", "user.name", "Test User"]);
         std::fs::write(
-            src_root.join(".crab.toml"),
+            src_root.join("crab.toml"),
             "[remote]\nurl = \"crab://bucket/repo\"\n\n[hydrate]\ndefault = \"eager\"\n",
         )
         .unwrap();
-        git_in(src_root, &["add", ".crab.toml"]);
+        git_in(src_root, &["add", "crab.toml"]);
         git_in(src_root, &["commit", "-m", "add crab config"]);
 
         let dst = tempfile::tempdir().unwrap();
@@ -1793,11 +1794,13 @@ mod tests {
             .expect("git clone should spawn");
         assert!(status.success(), "git clone --no-checkout failed");
         assert!(
-            !target.join(".crab.toml").exists(),
+            !target.join("crab.toml").exists(),
             "worktree should still be empty before checkout"
         );
 
-        let config = project_config_for_checkout(&target).expect("config should load from HEAD");
+        let config = project_config_for_checkout(&target)
+            .expect("config should parse")
+            .expect("config should load from HEAD");
         assert!(matches!(
             config.hydrate.as_ref().unwrap().default,
             crate::core::project_config::HydrateMode::Eager
@@ -1808,7 +1811,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_hydrate_skips_when_no_prefetch_toml() {
-        // When .crab/prefetch.toml doesn't exist, auto-hydrate should
+        // When crab.toml doesn't exist, auto-hydrate should
         // complete silently without error.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1821,15 +1824,13 @@ mod tests {
 
     #[tokio::test]
     async fn auto_hydrate_skips_when_no_always_profile() {
-        // When prefetch.toml exists but has no `always` profile,
+        // When crab.toml has no `always` profile,
         // auto-hydrate should skip silently.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let crab_dir = root.join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
         std::fs::write(
-            crab_dir.join("prefetch.toml"),
-            "version = 1\n\n[[profile]]\nname = \"ci\"\npaths = [\"tests/**\"]\n",
+            root.join("crab.toml"),
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.ci]\npaths = [\"tests/**\"]\n",
         )
         .unwrap();
 
@@ -1843,11 +1844,9 @@ mod tests {
         // auto-hydrate should skip.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let crab_dir = root.join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
         std::fs::write(
-            crab_dir.join("prefetch.toml"),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = []\n",
+            root.join("crab.toml"),
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = []\n",
         )
         .unwrap();
 

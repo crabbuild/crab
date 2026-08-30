@@ -67,7 +67,7 @@ Migrates a monolithic `crab.lock` into per-workflow lockfiles.
 |--------|-------|---------|-------------|
 | `--dry-run` | | `false` | Preview the split without writing anything |
 | `--keep` | | `false` | Keep the monolithic `crab.lock` after writing split files |
-| `--update-config` | | `false` | Also set `[workflow] lockfile = "split"` in `.crab/config.toml` |
+| `--update-config` | | `false` | Also set `[workflow] lockfile = "split"` in `.crab/local.toml` |
 | `--json` | | `false` | Emit structured JSON output |
 
 ## Examples
@@ -105,7 +105,7 @@ crab workflow lockfile split --update-config
 
 Writes per-workflow lockfiles alongside each `*.workflow.yaml`, removes the
 monolithic `crab.lock`, and sets `[workflow] lockfile = "split"` in
-`.crab/config.toml` so subsequent `crab run` invocations use the new layout.
+`.crab/local.toml` so subsequent `crab run` invocations use the new layout.
 
 ## JSON Output
 

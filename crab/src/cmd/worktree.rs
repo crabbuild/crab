@@ -129,7 +129,7 @@ pub struct AddArgs {
         conflicts_with_all = ["hydrate_manifest", "hydrate_profile", "hydrate_include"]
     )]
     pub hydrate_manifest_ref: Option<String>,
-    /// Named profile from `.crab/prefetch.toml` for selective hydration.
+    /// Named profile from `crab.toml` for selective hydration.
     #[arg(
         long = "hydrate-profile",
         value_name = "NAME",
@@ -479,7 +479,7 @@ fn resolve_add_hydration_policy(args: &AddArgs) -> Result<Option<ResolvedHydrati
     let has_crab_policy = args.hydrate.is_some() || explicit_selector.is_some() || args.prefetch;
 
     if !has_crab_policy {
-        let policy = clone_default_hydration_policy(args.no_checkout, false);
+        let policy = clone_default_hydration_policy(args.no_checkout, false)?;
         let policy = finalize_add_hydration_policy(policy);
         if policy.status == HydrationPolicyStatus::Pending
             || clone_default_policy_has_effect(&policy)
@@ -492,7 +492,7 @@ fn resolve_add_hydration_policy(args: &AddArgs) -> Result<Option<ResolvedHydrati
     let checkout_suppressed = args.no_checkout;
 
     if args.prefetch && args.hydrate.is_none() && explicit_selector.is_none() {
-        let defaults = clone_default_hydration_policy(checkout_suppressed, true);
+        let defaults = clone_default_hydration_policy(checkout_suppressed, true)?;
         let policy = ResolvedHydrationPolicy {
             source: HydrationPolicySource::CloneDefaults,
             mode: ResolvedHydrationMode::Lazy,
@@ -601,10 +601,11 @@ fn hydration_selector_from_args(args: &AddArgs) -> Result<Option<HydrationSelect
 fn clone_default_hydration_policy(
     checkout_suppressed: bool,
     prefetch: bool,
-) -> ResolvedHydrationPolicy {
-    let project_config = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| crate::core::project_config::ProjectConfig::discover(&cwd));
+) -> Result<ResolvedHydrationPolicy> {
+    let project_config = match std::env::current_dir() {
+        Ok(cwd) => crate::core::project_config::ProjectConfig::load_for_repo(&cwd)?,
+        Err(_) => None,
+    };
     let (mode, selector) = project_config.and_then(|config| config.hydrate).map_or(
         (
             ResolvedHydrationMode::Lazy,
@@ -634,7 +635,7 @@ fn clone_default_hydration_policy(
         },
     );
 
-    ResolvedHydrationPolicy {
+    Ok(ResolvedHydrationPolicy {
         source: HydrationPolicySource::CloneDefaults,
         mode,
         selector,
@@ -645,7 +646,7 @@ fn clone_default_hydration_policy(
             HydrationPolicyStatus::Applied
         },
         checkout_suppressed,
-    }
+    })
 }
 
 fn validate_add_hydration_policy(policy: Option<&ResolvedHydrationPolicy>) -> Result<()> {
@@ -917,16 +918,8 @@ fn hydrate_args_for_policy(policy: &ResolvedHydrationPolicy) -> Option<HydrateAr
 }
 
 fn read_worktree_crab_remote(ctx: &WorktreeContext) -> Result<crate::git::url::CrabUrl> {
-    let path = ctx.shared_crab_dir.join("remote");
-    let content = fs::read_to_string(&path).map_err(CrabError::Io)?;
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return Err(CrabError::Configuration {
-            key: ".crab/remote".to_owned(),
-            origin: format!("{} is empty", path.display()),
-        });
-    }
-    crate::git::url::CrabUrl::parse(trimmed)
+    let url = crate::core::project_config::ProjectConfig::remote_url(&ctx.current_worktree_root)?;
+    crate::git::url::CrabUrl::parse(&url)
 }
 
 fn format_prefetch_bytes(bytes: u64) -> String {

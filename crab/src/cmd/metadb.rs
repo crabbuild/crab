@@ -311,17 +311,7 @@ async fn resolve_repo_store_in(
     crate::storage::store::BucketIdentity,
     Config,
 )> {
-    let remote_path = root.join(".crab/remote");
-    let url = std::fs::read_to_string(&remote_path)
-        .map_err(|e| CrabError::Internal(format!("could not read {}: {e}", remote_path.display())))?
-        .trim()
-        .to_owned();
-    if url.is_empty() {
-        return Err(CrabError::Internal(format!(
-            "{} is empty; run `crab init <url>`",
-            remote_path.display()
-        )));
-    }
+    let url = crate::core::project_config::ProjectConfig::remote_url(root)?;
     let parsed = CrabUrl::parse(&url)?;
     let config = Config::resolve_for_repo(root)?;
     let store = crate::auth::build_repository_url_store(&config, &parsed, "metadb", cancel).await?;
@@ -3243,14 +3233,10 @@ async fn run_compact(_db: DbSelector, cancel: &CancellationToken) -> Result<()> 
 // --- cache ----------------------------------------------------------
 
 fn default_local_chunk_index_path() -> Result<PathBuf> {
-    let remote = crate::git::discover::resolve_crab_dir()
-        .map(|d| d.join("remote"))
-        .unwrap_or_else(|| {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            cwd.join(".crab/remote")
-        });
-    if let Ok(url) = std::fs::read_to_string(&remote) {
-        if let Ok(parsed) = crate::git::url::ObjectUrl::parse(url.trim()) {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(url) = crate::core::project_config::ProjectConfig::remote_url(&cwd)
+    {
+        if let Ok(parsed) = crate::git::url::ObjectUrl::parse(&url) {
             return Ok(crate::cache::chunk_index_cache_path(
                 &crate::cache::default_cache_root(),
                 &parsed.bucket_identity(),

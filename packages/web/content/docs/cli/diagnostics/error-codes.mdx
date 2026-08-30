@@ -16,8 +16,12 @@ When Crab encounters an error, it prints a structured error code like `CRAB-E001
 After encountering an error:
 
 ```text
-ERROR: CRAB-E0017: non-fast-forward push rejected
+error: non-fast-forward on refs/heads/main [CRAB-E0017]: have abc, want def
+help: Run `crab errors CRAB-E0017` for recovery steps.
 ```
+
+Setup-related failures also print a direct next action and a relevant docs
+link. The stable code remains available for scripts and deeper catalog lookup.
 
 Look it up:
 

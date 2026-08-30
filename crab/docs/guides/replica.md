@@ -89,7 +89,7 @@ crab replica remove <name> [--apply] [--json]
 
 ## Configuration
 
-`crab replica add` writes replication metadata to `.crab.toml`:
+`crab replica add` writes replication metadata to `crab.toml`:
 
 ```toml
 [remote]
@@ -123,7 +123,7 @@ upload-pack session. `crab replica add`, read enable/disable, removal, and
 primary-change operations publish the read-routing subset to
 `{repo}/metadata/replica-discovery.json` in the primary object store. A fresh
 direct-bucket clone reads this bounded, versioned document before its initial
-fetch, so the clone directory does not need an ancestor `.crab.toml`. Explicit
+fetch, so the clone directory does not need an ancestor `crab.toml`. Explicit
 local replication config wins when both sources exist.
 
 Discovery still needs the primary endpoint. The metadata object can remain
@@ -500,7 +500,7 @@ uses ETag CAS to drive active-active push, GC snapshots, and repair after
 control-plane status is verified.
 
 `crab replica coordinator status` reads the configured coordinator from
-`.crab.toml`, or an explicit `--provider --name --region` target. It reports the
+`crab.toml`, or an explicit `--provider --name --region` target. It reports the
 same managed resource checks used by failover status, using the registered
 backend when one is available and otherwise reporting unverified checks.
 `crab replica coordinator remove` renders the drift-checked remove plan;
@@ -625,7 +625,7 @@ for a single command process:
 - `replica:<name>` considers only the named read-enabled replica, with primary
   fallback if that replica is not ready.
 
-The override is intentionally process-local and does not mutate `.crab.toml`.
+The override is intentionally process-local and does not mutate `crab.toml`.
 Write-class operations ignore it and continue to use the primary write path or
 the active-active coordinator path.
 
@@ -805,7 +805,7 @@ live readiness checks, promotion planning, guarded `set-primary`, and final
 promotion gates; active-active mode starts with failover status, coordinator
 fencing, coordinator-backed repair, and explicit resume. The replica-stale,
 failed-backfill, policy-drift, and destination-writes runbooks produce
-copyable commands tied to the current `.crab.toml`; pass `--name <replica>`
+copyable commands tied to the current `crab.toml`; pass `--name <replica>`
 when more than one replica is configured. JSON output includes warning flags,
 whether a step requires external verification, and whether a step is destructive
 if applied to the wrong provider scope.
@@ -1347,7 +1347,7 @@ commands such as `crab replica verify --deep --name <name>`,
 
 `crab replica set-primary <crab-url>` is the lower-level guarded DR operation
 for changing `[remote].url` and `[replication].primary`. It plans by default and
-only writes `.crab.toml` with `--apply`. The target must be a `crab://` endpoint;
+only writes `crab.toml` with `--apply`. The target must be a `crab://` endpoint;
 configured replicas must be read-enabled and free of blocking provider drift,
 while unconfigured targets require `--force` after external DR verification.
 The command is rejected in active-active mode because active-active write

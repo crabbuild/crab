@@ -254,7 +254,7 @@ PY
 git init -b main >"$RUN_ROOT/logs/git-init.log"
 with_test_env "$BIN_DIR/crab" init "$REMOTE_URL" >"$RUN_ROOT/logs/crab-init.log" 2>&1
 with_test_env "$BIN_DIR/crab" track "*.bin" >"$RUN_ROOT/logs/crab-track.log" 2>&1
-git add .crab.toml .gitattributes
+git add crab.toml .gitattributes
 mkdir -p models archive
 
 python3 - "$SEED_MIB" "$RUN_ROOT/seed-model.sha256" <<'PY'

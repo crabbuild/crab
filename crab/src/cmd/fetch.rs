@@ -214,12 +214,8 @@ fn resolve_candidates(
 }
 
 fn read_remote(root: &Path) -> Result<crate::git::url::CrabUrl> {
-    let path = root.join(".crab/remote");
-    let url = std::fs::read_to_string(&path).map_err(|_| CrabError::Configuration {
-        key: "no remote configured".into(),
-        origin: path.display().to_string(),
-    })?;
-    crate::git::url::CrabUrl::parse(url.trim())
+    let url = crate::core::project_config::ProjectConfig::remote_url(root)?;
+    crate::git::url::CrabUrl::parse(&url)
 }
 
 fn elapsed_millis(start: Instant) -> u64 {

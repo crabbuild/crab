@@ -40,7 +40,7 @@ const PROFILE_VAR: &str = "CRAB_PROFILE";
 /// - If stderr is a TTY, uses a human-readable, colored format.
 /// - Otherwise, uses compact JSON (one object per line).
 /// - `cli_level` overrides the filter when present (from `--log-level`).
-///   Otherwise the `CRAB_LOG` env var is used, falling back to `warn`.
+///   Otherwise the `CRAB_LOG` env var is used, falling back to `error`.
 /// - When the `otlp` feature is compiled in and `CRAB_OTLP_ENDPOINT`
 ///   is set, an OTLP exporter layer is added.
 ///
@@ -48,9 +48,9 @@ const PROFILE_VAR: &str = "CRAB_PROFILE";
 pub fn install_tracing_subscriber(cli_level: Option<&str>) -> TracingGuard {
     let env_filter = if let Some(level) = cli_level {
         // CLI flag takes highest priority.
-        EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("error"))
     } else {
-        EnvFilter::try_from_env("CRAB_LOG").unwrap_or_else(|_| EnvFilter::new("warn"))
+        EnvFilter::try_from_env("CRAB_LOG").unwrap_or_else(|_| EnvFilter::new("error"))
     };
 
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());

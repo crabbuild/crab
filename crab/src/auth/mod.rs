@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use object_store::ObjectStore;
+#[cfg(feature = "tier-s3")]
+use object_store::aws::AwsCredential;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::config::{AuthConfig, AuthProvider, Config};
@@ -27,8 +29,38 @@ use crab_auth_store::{
     AuthStoreError, ManagedRepositoryError, RefreshingObjectStore, RefreshingStoreParts,
 };
 use crab_storage::BuiltObjectStore;
+#[cfg(feature = "tier-s3")]
+use crab_types::storage::StorageProviderKind;
 pub use crab_types::storage::StorageScope;
 pub use managed::{RepositoryStore, build_repository_store};
+
+#[cfg(feature = "tier-s3")]
+#[derive(Debug)]
+struct AwsSdkCredentialProvider {
+    inner: aws_credential_types::provider::SharedCredentialsProvider,
+}
+
+#[cfg(feature = "tier-s3")]
+#[async_trait]
+impl object_store::CredentialProvider for AwsSdkCredentialProvider {
+    type Credential = AwsCredential;
+
+    async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
+        use aws_credential_types::provider::ProvideCredentials as _;
+
+        let credentials = self.inner.provide_credentials().await.map_err(|source| {
+            object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(source),
+            }
+        })?;
+        Ok(Arc::new(AwsCredential {
+            key_id: credentials.access_key_id().to_owned(),
+            secret_key: credentials.secret_access_key().to_owned(),
+            token: credentials.session_token().map(str::to_owned),
+        }))
+    }
+}
 
 /// Create the appropriate [`CredentialProvider`] from config.
 ///
@@ -265,29 +297,26 @@ pub async fn build_store(
             },
         ));
     }
-    let provider = create_provider(config)?;
-    let resolution = provider
-        .resolve(&url.bucket, &url.repo_path, operation)
-        .await?;
-    let storage_scope = resolution.storage_scope.clone();
-    let has_storage_scope = storage_scope.is_some();
-    let creds = resolution.credentials;
-
-    // Keep the provider around for credential refresh on auth failures.
-    // Static and None providers don't need rotation — their credentials
-    // come from the environment and don't expire in a crab-managed way.
-    let credential_provider: Option<Arc<dyn CredentialProvider<Error = CrabError>>> =
-        if !config.auth.provider.uses_token_cache() {
-            None
-        } else if has_storage_scope {
-            // View credentials and StoreLayout prefixes are a single effective scope.
-            // Refreshing one without rebuilding the other can only fail closed.
-            None
-        } else {
-            Some(Arc::from(provider))
-        };
-
-    let mut built = build_object_store(&url.bucket, creds)?;
+    let aws_sdk_store = build_aws_sdk_store(config, &url.bucket).await?;
+    let (storage_scope, credential_provider, mut built) = if let Some(built) = aws_sdk_store {
+        (None, None, built)
+    } else {
+        let provider = create_provider(config)?;
+        let resolution = provider
+            .resolve(&url.bucket, &url.repo_path, operation)
+            .await?;
+        let storage_scope = resolution.storage_scope.clone();
+        let credential_provider: Option<Arc<dyn CredentialProvider<Error = CrabError>>> =
+            if !config.auth.provider.uses_token_cache() || storage_scope.is_some() {
+                // View credentials and StoreLayout prefixes are a single effective scope.
+                // Refreshing one without rebuilding the other can only fail closed.
+                None
+            } else {
+                Some(Arc::from(provider))
+            };
+        let built = build_object_store(&url.bucket, resolution.credentials)?;
+        (storage_scope, credential_provider, built)
+    };
 
     // A crab:// URL puts the bucket in the host component, so host
     // and container carry the same value today. A later change that
@@ -335,6 +364,52 @@ pub async fn build_store(
         store = store.with_storage_scope(scope);
     }
     Ok(store)
+}
+
+#[cfg(feature = "tier-s3")]
+async fn build_aws_sdk_store(config: &Config, bucket: &str) -> Result<Option<BuiltObjectStore>> {
+    if !should_build_aws_sdk_store(config)? {
+        return Ok(None);
+    }
+
+    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Some(profile) = config.auth.aws.profile.as_deref() {
+        loader = loader.profile_name(profile);
+    }
+    let sdk_config = loader.load().await;
+    let credentials = sdk_config
+        .credentials_provider()
+        .ok_or(CrabError::NoCredentials)?;
+    let region = config
+        .auth
+        .aws
+        .region
+        .clone()
+        .or_else(|| sdk_config.region().map(|region| region.as_ref().to_owned()))
+        .unwrap_or_else(|| "us-east-1".to_owned());
+    let provider = Arc::new(AwsSdkCredentialProvider { inner: credentials });
+    crab_storage::build_s3_object_store_with_provider(bucket, &region, provider)
+        .map(Some)
+        .map_err(CrabError::from)
+}
+
+#[cfg(feature = "tier-s3")]
+fn should_build_aws_sdk_store(config: &Config) -> Result<bool> {
+    if config.auth.provider != AuthProvider::Static {
+        return Ok(false);
+    }
+    Ok(static_auth_config(&config.auth)?.storage_provider == StorageProviderKind::S3)
+}
+
+#[cfg(not(feature = "tier-s3"))]
+async fn build_aws_sdk_store(config: &Config, _bucket: &str) -> Result<Option<BuiltObjectStore>> {
+    if config.auth.aws.profile.is_some() {
+        return Err(CrabError::Configuration {
+            key: "auth.aws_profile".to_owned(),
+            origin: "this Crab build does not include AWS shared-profile support".to_owned(),
+        });
+    }
+    Ok(None)
 }
 
 /// Build and validate the store for one direct canonical-v1 repository URL.
@@ -781,6 +856,23 @@ mod tests {
             create_provider(&cfg),
             Err(CrabError::Configuration { .. })
         ));
+    }
+
+    #[cfg(feature = "tier-s3")]
+    #[test]
+    fn aws_sdk_store_selection_uses_resolved_static_provider() {
+        let _guard = EnvGuard::set("CRAB_STORAGE_PROVIDER", None);
+        let auto = config_with(AuthProvider::Static, StorageProvider::Auto);
+        assert!(should_build_aws_sdk_store(&auto).unwrap());
+
+        _guard.update(Some("gcs"));
+        assert!(!should_build_aws_sdk_store(&auto).unwrap());
+
+        let s3 = config_with(AuthProvider::Static, StorageProvider::S3);
+        assert!(should_build_aws_sdk_store(&s3).unwrap());
+
+        let no_auth = config_with(AuthProvider::None, StorageProvider::S3);
+        assert!(!should_build_aws_sdk_store(&no_auth).unwrap());
     }
 
     // --- Env var guard for test isolation ---

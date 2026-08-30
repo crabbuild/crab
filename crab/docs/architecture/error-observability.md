@@ -143,6 +143,7 @@ info!(files = count, bytes = total, "push complete");
 
 ### Configuration
 
+- The default log level is `error`.
 - `CRAB_LOG` environment variable: `error`, `warn`, `info`, `debug`, `trace`
 - `--log-level` CLI flag (overrides env var)
 - Module-level filters: `CRAB_LOG=crab::engine=debug`

@@ -11,9 +11,8 @@ crab config set <key> <value>
 
 ## Description
 
-`crab config` reads and writes Crab settings. Most keys are local settings in
-`.crab/config.toml`; repository-sharing keys, such as `auth.storage_provider`,
-are written to `.crab.toml` so collaborators inherit them.
+`crab config` routes machine-specific keys to `.crab/local.toml` and shared
+project policy to `crab.toml`.
 
 ## Subcommands
 
@@ -45,6 +44,7 @@ Keys use dotted notation: `<section>.<key>`. For example:
 - `checkout.lazy` — boolean, whether to use lazy checkout.
 - `hydrate.include` — array, default include patterns for hydration.
 - `hydrate.exclude` — array, default exclude patterns for hydration.
+- `auth.aws_profile` — local AWS shared-config profile selector.
 
 ## Value Types
 
@@ -82,7 +82,16 @@ crab config set checkout.lazy true
 crab config set auth.storage_provider gcs
 ```
 
-This writes the committed `.crab.toml` project config, not just local state.
+This writes the committed `crab.toml` project config, not just local state.
+
+### Select a local AWS profile
+
+```bash
+crab config set auth.aws_profile ml-team
+```
+
+This writes `.crab/local.toml`; it never commits a machine-specific profile
+name or credentials.
 
 ### Set default hydration patterns
 
@@ -110,7 +119,7 @@ crab config get nonexistent.key
 
 ## Configuration Files
 
-Local configuration lives at `.crab/config.toml` in the repository root. It uses
+Local configuration lives at `.crab/local.toml` in the repository root. It uses
 TOML format:
 
 ```toml
@@ -121,20 +130,20 @@ lazy = true
 include = ["*.safetensors", "*.bin"]
 exclude = ["archive/*"]
 
-[workflow]
-enabled = true
-discover = "recursive"
-lockfile = "split"
+[auth]
+aws_profile = "ml-team"
 ```
 
-Project configuration lives at `.crab.toml` and is safe to commit. Use it for
-settings the whole team must share, such as `auth.storage_provider`.
+Project configuration lives at `crab.toml` and is safe to commit. Use it for
+settings the whole team must share, such as `auth.storage_provider` and
+`workflow.*`.
 
 ## Available Configuration Keys
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `auth.storage_provider` | string | `auto` | Object-store backend: `s3`, `gcs`, `azure`, or `auto` |
+| `auth.aws_profile` | string | AWS default chain | Local AWS shared-config profile selector |
 | `checkout.lazy` | bool | `false` | Leave files as pointers on checkout |
 | `hydrate.include` | array | `[]` | Default include patterns for `crab hydrate` |
 | `hydrate.exclude` | array | `[]` | Default exclude patterns for `crab hydrate` |

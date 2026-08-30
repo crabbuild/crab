@@ -123,69 +123,7 @@ pub fn parse_restore_tier(raw: &str) -> Result<RestoreTier> {
 }
 
 fn read_crab_remote_url(repo_root: &Path) -> Result<String> {
-    if let Some(url) = git_origin_crab_url(repo_root) {
-        return Ok(url);
-    }
-
-    let crab_dir = repo_root.join(".crab");
-    let config_path = crab_dir.join("config.toml");
-    if config_path.is_file() {
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| CrabError::Configuration {
-                key: format!("failed to read {}: {e}", config_path.display()),
-                origin: config_path.display().to_string(),
-            })?;
-        let table: toml::Table = content.parse().map_err(|e| CrabError::Configuration {
-            key: format!("failed to parse {}: {e}", config_path.display()),
-            origin: config_path.display().to_string(),
-        })?;
-        if let Some(url) = table
-            .get("remote")
-            .and_then(|v| v.get("url"))
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.to_owned());
-        }
-    }
-
-    let remote_path = crab_dir.join("remote");
-    if remote_path.is_file() {
-        let remote =
-            std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
-                key: format!("failed to read {}: {e}", remote_path.display()),
-                origin: remote_path.display().to_string(),
-            })?;
-        let trimmed = remote.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_owned());
-        }
-    }
-
-    Err(CrabError::Configuration {
-        key: "no crab remote configured".into(),
-        origin: repo_root.display().to_string(),
-    })
-}
-
-fn git_origin_crab_url(repo_root: &Path) -> Option<String> {
-    let mut command = std::process::Command::new("git");
-    command
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_root)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_QUARANTINE_PATH")
-        .env_remove("GIT_NAMESPACE");
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    url.starts_with("crab://").then_some(url)
+    crate::core::project_config::ProjectConfig::remote_url(repo_root)
 }
 
 fn aws_region(config: &Config) -> String {

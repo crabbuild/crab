@@ -22,7 +22,7 @@
 //! ```
 //!
 //! The span is emitted at `debug` level so it stays silent at
-//! production log levels (which default to `warn`). Flamegraph
+//! production log levels (which default to `error`). Flamegraph
 //! tooling opts into `debug` explicitly.
 
 /// Re-export of the `gix_boundary!` macro under this module path.

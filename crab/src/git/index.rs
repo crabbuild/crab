@@ -51,10 +51,10 @@ mod tests {
             return;
         }
 
-        std::fs::write(dir.path().join(".crab.toml"), "[remote]\n").unwrap();
+        std::fs::write(dir.path().join("crab.toml"), "[remote]\n").unwrap();
         std::fs::write(dir.path().join(".git/index.lock"), "locked").unwrap();
 
-        let error = stage_paths(dir.path(), &[".crab.toml"])
+        let error = stage_paths(dir.path(), &["crab.toml"])
             .expect_err("Git index lock must reject metadata staging");
 
         assert!(

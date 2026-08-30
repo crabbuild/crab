@@ -22,8 +22,8 @@ crab config set <KEY> <VALUE>
 ## Description
 
 `crab config` reads and writes repository-local settings in
-`.crab/config.toml`. Project settings that are safe to commit, such as the
-object-store provider, live in `.crab.toml` and can also be addressed by the
+`.crab/local.toml`. Project settings that are safe to commit, such as the
+object-store provider, live in `crab.toml` and can also be addressed by the
 same dotted-key commands.
 
 For conceptual background, see [Configuration](/docs/cli/authentication/configuration).
@@ -36,6 +36,7 @@ For conceptual background, see [Configuration](/docs/cli/authentication/configur
 | `hydrate.include` | array | `[]` | Default include patterns for `crab hydrate`. |
 | `hydrate.exclude` | array | `[]` | Default exclude patterns for `crab hydrate`. |
 | `hydrate.auto` | boolean | `false` | Automatically hydrate matching files. |
+| `auth.aws_profile` | string | AWS default chain | Local AWS shared-config profile selector. |
 | `workflow.enabled` | boolean | `true` | Enable workflow, stage, experiment, metric, plot, and queue commands. Set `false` for an explicit opt-out. |
 | `workflow.discover` | enum | `root` | Use `root` discovery, or `recursive` for nested `crab.yaml` and `*.workflow.yaml` files. |
 | `workflow.lockfile` | enum | `single` | Use one `crab.lock`, or `split` for per-workflow lockfiles. |
@@ -68,7 +69,9 @@ crab config set auth.storage_provider s3
 ```
 
 `auth.storage_provider` is a project-level key and is written to
-`.crab.toml`; the internal workflow keys are written to `.crab/config.toml`.
+`crab.toml`; workflow keys are shared project policy and are also written to
+`crab.toml`. `auth.aws_profile` and runtime tuning remain in
+`.crab/local.toml`.
 
 ### JSON output
 

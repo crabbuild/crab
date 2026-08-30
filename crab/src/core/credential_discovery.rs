@@ -1,7 +1,7 @@
 //! Credential discovery chain for cloud storage backends.
 //!
 //! Probes credentials in priority order:
-//! 1. Project config (`[auth]` section in `.crab.toml`)
+//! 1. Local AWS profile selection (`.crab/local.toml` or `AWS_PROFILE`)
 //! 2. Environment variables (AWS web identity, GCP ADC, Azure workload identity)
 //! 3. Supported cloud SDK default configs (gcloud and Azure CLI)
 //! 4. Instance metadata (EC2 IMDS with 200ms timeout)
@@ -11,8 +11,6 @@
 
 use std::path::PathBuf;
 
-use crate::core::project_config::ProjectAuthConfig;
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -20,8 +18,8 @@ use crate::core::project_config::ProjectAuthConfig;
 /// Where the discovered credential came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialSource {
-    /// Explicit `[auth]` section in `.crab.toml`.
-    ProjectConfig,
+    /// Explicit AWS profile in `.crab/local.toml`.
+    LocalConfig,
     /// Environment variables supported by the active object-store provider.
     Environment,
     /// Cloud SDK config files (~/.aws/config, gcloud, az).
@@ -73,19 +71,14 @@ fn detect_provider(url: &str) -> Option<CloudProvider> {
 // Check: project config
 // ---------------------------------------------------------------------------
 
-fn check_project_config(auth: Option<&ProjectAuthConfig>) -> Option<DiscoveryResult> {
-    let auth = auth?;
-
-    if auth.provider.is_none() && auth.profile.is_none() {
-        return Option::None;
+fn check_local_profile(profile: Option<&str>) -> Option<DiscoveryResult> {
+    let profile = profile?.trim();
+    if profile.is_empty() {
+        return None;
     }
-
-    let provider = auth.provider.as_deref().unwrap_or("unknown");
-    let profile = auth.profile.as_deref().unwrap_or("default");
-
     Some(DiscoveryResult {
-        source: CredentialSource::ProjectConfig,
-        description: format!("project config: provider={provider}, profile={profile}"),
+        source: CredentialSource::LocalConfig,
+        description: format!("AWS shared-config profile '{profile}'"),
         valid: true,
     })
 }
@@ -229,8 +222,16 @@ fn dirs_or_env() -> Option<PathBuf> {
 }
 
 fn check_aws_sdk() -> Option<DiscoveryResult> {
-    // object_store 0.14 does not read shared AWS config/profile files.
-    Option::None
+    let home = home_dir()?;
+    let aws_dir = home.join(".aws");
+    if !aws_dir.join("config").is_file() && !aws_dir.join("credentials").is_file() {
+        return None;
+    }
+    Some(DiscoveryResult {
+        source: CredentialSource::CloudSdk,
+        description: "AWS SDK default credential chain from ~/.aws/".to_owned(),
+        valid: true,
+    })
 }
 
 fn check_gcp_sdk() -> Option<DiscoveryResult> {
@@ -318,19 +319,16 @@ async fn check_aws_imds() -> Option<DiscoveryResult> {
 /// Probe credentials in priority order, returning the first that works.
 ///
 /// Priority:
-/// 1. Project config (`[auth]` section)
+/// 1. Explicit local AWS profile (`[auth] aws_profile` or `AWS_PROFILE`)
 /// 2. Environment variables
 /// 3. Cloud SDK config files
 /// 4. Instance metadata (IMDS)
 ///
 /// Returns `CredentialSource::None` with a helpful message if nothing found.
-pub async fn discover_credentials(
-    url: &str,
-    project_auth: Option<&ProjectAuthConfig>,
-) -> DiscoveryResult {
-    // 1. Project config
-    if let Some(result) = check_project_config(project_auth) {
-        tracing::debug!(source = "project_config", "credential discovered");
+pub async fn discover_credentials(url: &str, aws_profile: Option<&str>) -> DiscoveryResult {
+    // 1. Local profile selection
+    if let Some(result) = check_local_profile(aws_profile) {
+        tracing::debug!(source = "local_config", "credential discovered");
         return result;
     }
 
@@ -360,7 +358,7 @@ pub async fn discover_credentials(
     let provider = detect_provider(url);
     let instructions = match provider {
         Some(CloudProvider::Aws) => {
-            "No supported AWS credentials found. Use web identity, an ECS/EC2 role, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN for temporary credentials)"
+            "No supported AWS credentials found. Try `crab configure --aws-profile <PROFILE>`, set AWS_PROFILE, use web identity/ECS/EC2, or set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY"
         }
         Some(CloudProvider::Gcp) => {
             "No GCP credentials found. Try: gcloud auth application-default login, or set GOOGLE_APPLICATION_CREDENTIALS"
@@ -601,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_sdk_aws_profile_is_not_supported_by_storage_provider() {
+    fn cloud_sdk_aws_shared_config_is_detected() {
         let dir = tempfile::TempDir::new().unwrap();
         let aws_dir = dir.path().join(".aws");
         std::fs::create_dir_all(&aws_dir).unwrap();
@@ -614,7 +612,14 @@ mod tests {
 
         // Override HOME to point to our temp dir
         let _guard = EnvGuard::apply(&[("HOME", dir.path().to_str().unwrap())], &["USERPROFILE"]);
-        assert!(check_cloud_sdk("crab://bucket/repo").is_none());
+        let result = check_cloud_sdk("crab://bucket/repo").unwrap();
+        assert_eq!(result.source, CredentialSource::CloudSdk);
+        assert!(result.valid);
+        assert!(
+            result
+                .description
+                .contains("AWS SDK default credential chain")
+        );
     }
 
     #[test]
@@ -662,45 +667,23 @@ mod tests {
     }
 
     #[test]
-    fn project_config_check_with_auth() {
-        let auth = ProjectAuthConfig {
-            provider: Some("aws".to_string()),
-            profile: Some("production".to_string()),
-            storage_provider: None,
-        };
-        let result = check_project_config(Some(&auth)).unwrap();
-        assert_eq!(result.source, CredentialSource::ProjectConfig);
+    fn local_profile_check_with_profile() {
+        let result = check_local_profile(Some("production")).unwrap();
+        assert_eq!(result.source, CredentialSource::LocalConfig);
         assert!(result.valid);
-        assert!(result.description.contains("aws"));
         assert!(result.description.contains("production"));
     }
 
     #[test]
-    fn project_config_check_none_without_auth() {
-        let result = check_project_config(None);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn project_config_storage_provider_is_not_credentials() {
-        let auth = ProjectAuthConfig {
-            provider: None,
-            profile: None,
-            storage_provider: Some(crate::core::config::StorageProvider::Gcs),
-        };
-        let result = check_project_config(Some(&auth));
+    fn local_profile_check_none_without_profile() {
+        let result = check_local_profile(None);
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn discover_returns_project_config_first() {
-        let auth = ProjectAuthConfig {
-            provider: Some("aws".to_string()),
-            profile: Some("dev".to_string()),
-            storage_provider: None,
-        };
-        let result = discover_credentials("crab://bucket/repo", Some(&auth)).await;
-        assert_eq!(result.source, CredentialSource::ProjectConfig);
+    async fn discover_returns_local_profile_first() {
+        let result = discover_credentials("crab://bucket/repo", Some("dev")).await;
+        assert_eq!(result.source, CredentialSource::LocalConfig);
         assert!(result.valid);
     }
 

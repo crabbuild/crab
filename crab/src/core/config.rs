@@ -106,7 +106,7 @@ pub struct HydrateConfig {
     /// When false, hydrate fails immediately with `ArchiveRestoreRequired`.
     pub auto_restore: bool,
     /// When true (default), `crab clone` auto-hydrates the `always`
-    /// prefetch profile from `.crab/prefetch.toml` after the working
+    /// prefetch profile from `crab.toml` after the working
     /// tree is set up. Set to `false` to skip post-clone prefetch.
     pub auto_prefetch: bool,
     /// When true, the filter driver records co-access events and
@@ -795,6 +795,8 @@ impl StorageProvider {
 /// AWS-specific auth settings from `[auth.aws]`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AwsAuthConfig {
+    /// Named profile from the shared AWS config and credentials files.
+    pub profile: Option<String>,
     /// IAM role ARN to assume via `AssumeRoleWithWebIdentity`.
     pub role_arn: Option<String>,
     /// STS endpoint region (default: `AWS_REGION` or `us-east-1`).
@@ -811,6 +813,7 @@ fn default_aws_session_duration() -> u64 {
 impl Default for AwsAuthConfig {
     fn default() -> Self {
         Self {
+            profile: None,
             role_arn: None,
             region: None,
             session_duration_secs: default_aws_session_duration(),
@@ -1337,7 +1340,10 @@ impl Default for Config {
 const USER_CONFIG_REL: &str = ".config/crab/config.toml";
 
 /// Per-repo config path relative to the repo root.
-const REPO_CONFIG_REL: &str = ".crab/config.toml";
+pub const REPO_CONFIG_REL: &str = ".crab/local.toml";
+
+/// Remote passed only to filter processes during the first clone checkout.
+pub const CLONE_REMOTE_URL_ENV: &str = "CRAB_CLONE_REMOTE_URL";
 
 /// Resolve the absolute paths to the per-repo and project config files.
 ///
@@ -1345,8 +1351,8 @@ const REPO_CONFIG_REL: &str = ".crab/config.toml";
 /// worktree root (the parent of the common git dir), not in the linked
 /// worktree's working directory. This function discovers the git dir,
 /// resolves `commondir` for linked worktrees, and returns the absolute
-/// path to `.crab/config.toml` in the main worktree. The project config
-/// stays rooted in the current worktree so branch-specific `.crab.toml`
+/// path to `.crab/local.toml` in the main worktree. The project config
+/// stays rooted in the current worktree so branch-specific `crab.toml`
 /// files resolve the same way Git resolves tracked files.
 ///
 /// Returns `None` if discovery fails (e.g. not inside a git repo),
@@ -1358,8 +1364,9 @@ fn resolve_repo_config_paths() -> Option<(PathBuf, PathBuf)> {
 fn repo_config_paths_for_root(start: &Path) -> Option<(PathBuf, PathBuf)> {
     if let Ok(ctx) = crate::git::worktree::WorktreeContext::resolve_from_path(start) {
         return Some((
-            ctx.shared_crab_dir.join("config.toml"),
-            ctx.current_worktree_root.join(".crab.toml"),
+            ctx.shared_crab_dir.join("local.toml"),
+            ctx.current_worktree_root
+                .join(crate::core::project_config::CONFIG_FILE_NAME),
         ));
     }
 
@@ -1376,7 +1383,7 @@ fn repo_config_paths_for_root(start: &Path) -> Option<(PathBuf, PathBuf)> {
 
     Some((
         repo_root.join(REPO_CONFIG_REL),
-        current_worktree_root.join(".crab.toml"),
+        current_worktree_root.join(crate::core::project_config::CONFIG_FILE_NAME),
     ))
 }
 
@@ -1700,6 +1707,7 @@ pub struct ShardOverlay {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthOverlay {
+    pub aws_profile: Option<String>,
     pub provider: Option<AuthProvider>,
     pub storage_provider: Option<StorageProvider>,
     pub issuer_url: Option<String>,
@@ -1713,9 +1721,10 @@ pub struct AuthOverlay {
 }
 
 /// Partial AWS auth configuration overlay from `[auth.aws]`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AwsAuthOverlay {
+    pub profile: Option<String>,
     pub role_arn: Option<String>,
     pub region: Option<String>,
     pub session_duration_secs: Option<u64>,
@@ -1740,7 +1749,7 @@ pub struct AzureAuthOverlay {
 }
 
 /// Partial workflow configuration overlay from the `[workflow]` section.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowOverlay {
     pub enabled: Option<bool>,
@@ -1779,7 +1788,7 @@ impl Config {
         let user_path = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(USER_CONFIG_REL));
         let (repo_path, project_path) = match resolve_repo_config_paths() {
             Some(paths) => paths,
-            None => (PathBuf::from(REPO_CONFIG_REL), PathBuf::from(".crab.toml")),
+            None => (PathBuf::from(REPO_CONFIG_REL), PathBuf::from("crab.toml")),
         };
 
         Self::resolve_local_from_with_project(user_path, repo_path, Some(project_path))
@@ -1789,13 +1798,8 @@ impl Config {
     /// process working directory.
     pub fn resolve_for_repo(repo_root: &std::path::Path) -> super::error::Result<Self> {
         let user_path = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(USER_CONFIG_REL));
-        let (repo_path, project_path) =
-            repo_config_paths_for_root(repo_root).unwrap_or_else(|| {
-                (
-                    repo_root.join(REPO_CONFIG_REL),
-                    repo_root.join(".crab.toml"),
-                )
-            });
+        let (repo_path, project_path) = repo_config_paths_for_root(repo_root)
+            .unwrap_or_else(|| (repo_root.join(REPO_CONFIG_REL), repo_root.join("crab.toml")));
         Self::resolve_local_from_with_project(user_path, repo_path, Some(project_path))
     }
 
@@ -1830,21 +1834,29 @@ impl Config {
             config.apply_overlay(overlay, repo_path.display().to_string())?;
         }
 
-        if let Some(project_path) = project_path
-            && project_path.is_file()
-            && let Ok(project) = crate::core::project_config::ProjectConfig::load(&project_path)
-        {
-            if config.remote_url.is_none() {
+        if let Some(project_path) = project_path {
+            if project_path.is_file() {
+                let project = crate::core::project_config::ProjectConfig::load(&project_path)?;
                 config.remote_url = Some(project.remote.url);
+                if let Some(replication) = project.replication {
+                    config.replication = Some(replication);
+                }
+                if let Some(auth) = project.auth
+                    && let Some(storage_provider) = auth.storage_provider
+                {
+                    config.auth.storage_provider = storage_provider;
+                }
+                if let Some(workflow) = project.workflow {
+                    config.apply_workflow_overlay(workflow);
+                }
             }
-            if let Some(replication) = project.replication {
-                config.replication = Some(replication);
-            }
-            if let Some(auth) = project.auth
-                && let Some(storage_provider) = auth.storage_provider
-            {
-                config.auth.storage_provider = storage_provider;
-            }
+        }
+
+        if config.remote_url.is_none()
+            && let Ok(remote_url) = std::env::var(CLONE_REMOTE_URL_ENV)
+            && !remote_url.trim().is_empty()
+        {
+            config.remote_url = Some(remote_url);
         }
 
         // Layer 5: env allowlist — only CRAB_LOG, CRAB_OTLP_ENDPOINT,
@@ -1858,6 +1870,11 @@ impl Config {
         config.gc.apply_env_overrides();
         config.metadb.apply_env_overrides();
         config.cache.apply_env_overrides();
+        if let Ok(profile) = std::env::var("AWS_PROFILE")
+            && !profile.trim().is_empty()
+        {
+            config.auth.aws.profile = Some(profile);
+        }
 
         config.validate_resolved()?;
         Ok(config)
@@ -2459,6 +2476,9 @@ impl Config {
     }
 
     fn apply_auth_overlay(&mut self, overlay: AuthOverlay) {
+        if let Some(v) = overlay.aws_profile {
+            self.auth.aws.profile = Some(v);
+        }
         if let Some(v) = overlay.provider {
             self.auth.provider = v;
         }
@@ -2481,6 +2501,9 @@ impl Config {
             self.auth.token_cache_path = v;
         }
         if let Some(aws) = overlay.aws {
+            if let Some(v) = aws.profile {
+                self.auth.aws.profile = Some(v);
+            }
             if let Some(v) = aws.role_arn {
                 self.auth.aws.role_arn = Some(v);
             }
@@ -2702,7 +2725,7 @@ impl Config {
 fn project_config_path_from_repo_config(repo_path: &Path) -> Option<PathBuf> {
     let crab_dir = repo_path.parent()?;
     let repo_root = crab_dir.parent()?;
-    Some(repo_root.join(".crab.toml"))
+    Some(repo_root.join("crab.toml"))
 }
 
 /// Build a [`crate::metadata::MetaDbConfig`] for a session anchored
@@ -3073,6 +3096,30 @@ mod tests {
             Config::resolve_local_from(Some(user_toml), repo_toml).expect("should merge layers");
         assert_eq!(cfg.upload_concurrency, 4);
         assert_eq!(cfg.max_retries, 10);
+    }
+
+    #[test]
+    fn project_config_applies_shared_workflow_policy() {
+        let _guard = WORKFLOW_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_workflow_env();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("crab.toml");
+        std::fs::write(
+            &project,
+            "[remote]\nurl = \"crab://bucket/repo\"\n\n[workflow]\nenabled = false\nparallelism = 7\n",
+        )
+        .unwrap();
+
+        let config = Config::resolve_local_from_with_project(
+            None,
+            dir.path().join(".crab/local.toml"),
+            Some(project),
+        )
+        .unwrap();
+
+        assert!(!config.workflow.enabled);
+        assert_eq!(config.workflow.parallelism, 7);
+        clear_workflow_env();
     }
 
     #[test]
@@ -3607,7 +3654,7 @@ mod tests {
 
         std::fs::create_dir_all(repo.join(".crab")).unwrap();
         std::fs::write(
-            repo.join(".crab").join("config.toml"),
+            repo.join(".crab").join("local.toml"),
             "[remote]\nurl = \"crab://bucket/shared-config\"\n",
         )
         .unwrap();
@@ -3629,7 +3676,7 @@ mod tests {
             return;
         }
 
-        assert!(!linked.join(".crab.toml").exists());
+        assert!(!linked.join("crab.toml").exists());
         let cfg = Config::resolve_for_repo(&linked).expect("linked config");
         assert_eq!(
             cfg.remote_url.as_deref(),
@@ -3646,7 +3693,7 @@ mod tests {
         let git_config = git_dir.join("config");
         std::fs::write(&git_config, "").unwrap();
         std::fs::write(
-            repo.join(".crab.toml"),
+            repo.join("crab.toml"),
             r#"[remote]
 url = "crab://primary-bucket/org/repo"
 
@@ -3685,7 +3732,7 @@ region = "us-west-2"
         let git_config = git_dir.join("config");
         std::fs::write(&git_config, "").unwrap();
         std::fs::write(
-            repo.join(".crab.toml"),
+            repo.join("crab.toml"),
             r#"[remote]
 url = "crab://gcs-bucket/org/repo"
 
@@ -3946,6 +3993,21 @@ storage_provider = "gcs"
         assert!(cfg.auth.client_id.is_none());
         assert_eq!(cfg.auth.scopes, "openid email profile");
         assert_eq!(cfg.auth.aws.session_duration_secs, 3600);
+    }
+
+    #[test]
+    fn auth_overlay_selects_local_aws_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[auth]\naws_profile = \"ml-team\"\n").unwrap();
+        let overlay = read_toml_overlay(&path).unwrap();
+        let mut config = Config::default();
+
+        config
+            .apply_overlay(overlay, path.display().to_string())
+            .unwrap();
+
+        assert_eq!(config.auth.aws.profile.as_deref(), Some("ml-team"));
     }
 
     #[test]
@@ -5708,7 +5770,7 @@ const DEFAULT_WORKFLOW_MAX_OUT_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const DEFAULT_WORKFLOW_LOCK_TIMEOUT_SECS: u64 = 600;
 
 /// Stage-discovery mode from `[workflow] discover`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowDiscover {
     /// Only `crab.yaml` at the repo root is parsed. Nested yaml files
@@ -5728,7 +5790,7 @@ impl Default for WorkflowDiscover {
 /// Lockfile storage mode. Mirrors
 /// [`crate::workflow::lockfile_split::LockfileMode`] so callers can
 /// thread it through from config without a second conversion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowLockfile {
     /// One monolithic `crab.lock` at the repo root. Default.
@@ -5746,7 +5808,7 @@ impl Default for WorkflowLockfile {
 }
 
 /// Named workflow remote.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRemoteConfig {
     /// URL used for outputs declaring `remote: <name>` when this is

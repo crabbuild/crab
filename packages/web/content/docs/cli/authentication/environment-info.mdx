@@ -64,8 +64,8 @@ are visible to the current process. Secret values are still your
 responsibility: avoid sharing raw keys, tokens, service account JSON, SAS
 tokens, or connection strings.
 
-`AWS_PROFILE` is displayed for diagnostics, but the current S3 provider does
-not consume profiles or shared AWS configuration files. Use one of the
+`AWS_PROFILE` selects a shared AWS profile. Crab also supports a machine-local
+selector through `crab config set auth.aws_profile <name>` and the other
 credential sources documented under [Static Credentials](static-credentials).
 
 ### Include in a bug report

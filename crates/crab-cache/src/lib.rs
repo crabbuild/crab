@@ -9,7 +9,6 @@ pub mod key;
 #[cfg(feature = "local-cache")]
 pub mod local_cache;
 pub mod path_class;
-pub mod prefetch_profile;
 pub mod root;
 pub mod service;
 #[cfg(feature = "local-cache")]
@@ -32,10 +31,6 @@ pub use local_cache::{
     PrunedCacheObject, VerifyReport,
 };
 pub use path_class::cache_key_for_path;
-pub use prefetch_profile::{
-    PREFETCH_TOML_FILE, PrefetchConfig, load_prefetch_from_crab_dir, load_prefetch_path,
-    parse_prefetch,
-};
 pub use root::default_cache_root;
 pub use service::{
     CacheObjectHead, CacheObjectRange, CacheServiceAuth, CacheServiceCapabilities,

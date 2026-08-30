@@ -106,7 +106,7 @@ repack complete: 15 → 6 packs, 2400000000 → 2300000000 bytes, 4.2s
 
 ## Configuration
 
-The following settings in `.crab/config.toml` affect repack behavior:
+The following settings in `.crab/local.toml` affect repack behavior:
 
 | Key | Default | Description |
 |-----|---------|-------------|

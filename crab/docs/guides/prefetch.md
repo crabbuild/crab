@@ -10,20 +10,22 @@ but your editor can't open a pointer. Prefetch profiles solve this: you declare
 which files should be hydrated automatically so the working tree is usable the
 moment a clone finishes.
 
-Profiles live in `.crab/prefetch.toml`, committed alongside the code. The
+Profiles live in `crab.toml`, committed alongside the code. The
 special `always` profile is auto-hydrated on every clone and protected from
 `crab dehydrate --all`. Named profiles (`ci`, `dev`, etc.) are opt-in and
 hydrated on demand.
 
-## `.crab/prefetch.toml` Format
+## `crab.toml` Format
 
-The file uses TOML with a `version` key and one or more `[[profile]]` entries:
+Add one table per profile under `[prefetch.profiles.<name>]`:
 
 ```toml
 version = 1
 
-[[profile]]
-name = "always"
+[remote]
+url = "crab://my-bucket/my-repo"
+
+[prefetch.profiles.always]
 paths = [
   "README.md",
   "docs/**/*.md",
@@ -31,15 +33,13 @@ paths = [
   "src/**/*.rs",
 ]
 
-[[profile]]
-name = "ci"
+[prefetch.profiles.ci]
 paths = [
   "tests/fixtures/small/**",
   "scripts/*.sh",
 ]
 
-[[profile]]
-name = "dev"
+[prefetch.profiles.dev]
 paths = [
   "src/**/*.rs",
   "*.toml",
@@ -53,9 +53,8 @@ paths = [
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `version` | integer | Yes | Schema version. Currently `1`. |
-| `[[profile]]` | table array | Yes | One or more profile entries. |
-| `profile.name` | string | Yes | Profile identifier. `"always"` is special. |
-| `profile.paths` | array of strings | Yes | Glob patterns relative to repo root. |
+| `[prefetch.profiles.<name>]` | table | Yes | Named profile. `always` is special. |
+| `paths` | array of strings | Yes | Glob patterns relative to repo root. |
 
 Paths follow the same glob syntax as manifest files: `*` matches within a
 directory, `**` matches across directories, `?` matches a single character.
@@ -78,8 +77,7 @@ code you actively edit.
 ### Example
 
 ```toml
-[[profile]]
-name = "always"
+[prefetch.profiles.always]
 paths = [
   "README.md",
   "*.toml",
@@ -96,15 +94,13 @@ Named profiles define sets of files for specific workflows. They are not
 auto-hydrated — you activate them explicitly with `--profile`.
 
 ```toml
-[[profile]]
-name = "ci"
+[prefetch.profiles.ci]
 paths = [
   "tests/fixtures/small/**",
   "scripts/*.sh",
 ]
 
-[[profile]]
-name = "ml-train"
+[prefetch.profiles.ml-train]
 paths = [
   "data/train/**/*.parquet",
   "configs/training/*.yaml",
@@ -124,7 +120,7 @@ hydrating hundreds of files is fast.
 Requesting an unknown profile name produces a clear error:
 
 ```
-error: prefetch profile 'staging' not found in .crab/prefetch.toml
+error: prefetch profile 'staging' not found in crab.toml
   available profiles: always, ci, ml-train
 ```
 
@@ -201,7 +197,7 @@ archiving a working copy or on a CI runner that's done with the repo.
 By default, `crab clone` auto-hydrates the `always` profile. To disable
 this (useful on bandwidth-metered connections or when you want full control):
 
-Add to `.crab/config.toml`:
+Add to `.crab/local.toml`:
 
 ```toml
 [hydrate]
@@ -222,15 +218,13 @@ crab hydrate --profile=always
 A CI job that only needs test fixtures and build scripts:
 
 ```toml
-# .crab/prefetch.toml
+# crab.toml
 version = 1
 
-[[profile]]
-name = "always"
+[prefetch.profiles.always]
 paths = ["README.md", "*.toml", "Cargo.lock"]
 
-[[profile]]
-name = "ci"
+[prefetch.profiles.ci]
 paths = [
   "src/**/*.rs",
   "tests/**",
@@ -253,8 +247,7 @@ Keep source code and config always on disk so your editor works immediately:
 ```toml
 version = 1
 
-[[profile]]
-name = "always"
+[prefetch.profiles.always]
 paths = [
   "README.md",
   "*.toml",
@@ -275,12 +268,10 @@ In a monorepo, different teams need different subsets:
 ```toml
 version = 1
 
-[[profile]]
-name = "always"
+[prefetch.profiles.always]
 paths = ["README.md", "*.toml"]
 
-[[profile]]
-name = "frontend"
+[prefetch.profiles.frontend]
 paths = [
   "services/web/**",
   "packages/ui/**",
@@ -288,16 +279,14 @@ paths = [
   "yarn.lock",
 ]
 
-[[profile]]
-name = "backend"
+[prefetch.profiles.backend]
 paths = [
   "services/api/**",
   "packages/shared/**",
   "Cargo.lock",
 ]
 
-[[profile]]
-name = "ml"
+[prefetch.profiles.ml]
 paths = [
   "models/**/*.py",
   "configs/training/**",

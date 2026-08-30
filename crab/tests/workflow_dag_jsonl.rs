@@ -39,7 +39,7 @@ fn scaffold_two_stage_repo(root: &Path) {
 
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();

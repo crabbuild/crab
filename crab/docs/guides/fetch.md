@@ -29,7 +29,7 @@ connection, then hydrate files later when offline or on a slower link.
 
 ## How It Works
 
-1. Reads the remote URL from `.crab/remote`.
+1. Reads the remote URL from `crab.toml`.
 2. Resolves pointer blobs from the index/HEAD, or every local ref with `--all`.
 3. Applies `--include` and `--exclude` to repository paths before reading blob
    bodies. Git blob sizes are batch-checked so large non-pointer blobs are not

@@ -14,7 +14,7 @@ use serde_yaml::{Mapping, Value};
 use crate::materialize::write_atomic;
 use crate::{Result, WorkflowError as CrabError};
 
-const CONFIG_REL: &str = ".crab/config.toml";
+const CONFIG_REL: &str = ".crab/local.toml";
 const DEFAULT_CONFIG_DIR: &str = "conf";
 const DEFAULT_CONFIG_NAME: &str = "config.yaml";
 const DEFAULT_OUTPUT: &str = "params.yaml";

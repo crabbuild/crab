@@ -104,7 +104,7 @@ Patterns are resolved in this order of precedence:
 2. `--include` / `--exclude` flags
 3. `--all` flag (overrides all patterns)
 4. If none specified, falls back to `hydrate.include` / `hydrate.exclude` from
-   `.crab/config.toml`
+   `.crab/local.toml`
 5. If still nothing, prints help and exits
 
 ## Performance Tips
@@ -116,7 +116,7 @@ Patterns are resolved in this order of precedence:
   clone when a sibling already has the same pointer hydrated. Unsupported or
   cross-filesystem cases fall back to normal chunk/Xorb hydration.
 - The hydrator uses concurrent downloads. Configure
-  `download_concurrency` in `.crab/config.toml` to tune parallelism.
+  `download_concurrency` in `.crab/local.toml` to tune parallelism.
 - For very large files, ensure sufficient disk space — the full file is
   written atomically, so you need space for both the pointer and the
   reconstructed file briefly.

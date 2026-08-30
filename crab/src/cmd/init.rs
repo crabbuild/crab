@@ -1,7 +1,6 @@
 //! `crab init {url}` — initialize a new crab repository.
 //!
-//! Parses the remote URL, creates the local `.crab/` directory with a
-//! `config.toml` pointing at the remote, registers the crab git drivers
+//! Parses the remote URL, creates the local `.crab/` directory, registers the crab git drivers
 //! in the local git config, and logs the prefixes used by the remote layout.
 
 use std::io::{IsTerminal, Write};
@@ -77,7 +76,7 @@ pub async fn run_init(url: &str, cancel: &CancellationToken) -> Result<()> {
 
 /// Initialize a crab repository rooted at `root`.
 ///
-/// Creates `{root}/.crab/config.toml` with the remote URL. The command entry
+/// Creates `{root}/crab.toml` and `{root}/.crab/local.toml`. The command entry
 /// point publishes the canonical remote layout and generation-0 manifest
 /// after this local setup succeeds.
 ///
@@ -184,6 +183,7 @@ pub async fn run_init_with_storage_provider(
         mode,
         storage_provider,
         gc_list_profile,
+        None,
         true,
     )
     .await
@@ -196,6 +196,7 @@ pub(crate) async fn run_init_for_configure(
     cancel: &CancellationToken,
     storage_provider: Option<StorageProvider>,
     gc_list_profile: Option<GcListProfile>,
+    aws_profile: Option<&str>,
 ) -> Result<()> {
     run_init_inner(
         url,
@@ -204,6 +205,7 @@ pub(crate) async fn run_init_for_configure(
         OutputMode::Text,
         storage_provider,
         gc_list_profile,
+        aws_profile,
         false,
     )
     .await
@@ -216,6 +218,7 @@ async fn run_init_inner(
     mode: OutputMode,
     storage_provider: Option<StorageProvider>,
     gc_list_profile: Option<GcListProfile>,
+    aws_profile: Option<&str>,
     show_next_steps: bool,
 ) -> Result<()> {
     check_cancelled(cancel)?;
@@ -262,7 +265,7 @@ async fn run_init_inner(
 
     check_cancelled(cancel)?;
 
-    let project_config_path = root.join(".crab.toml");
+    let project_config_path = root.join("crab.toml");
     let existing_project_config = if project_config_path.exists() {
         Some(ProjectConfig::load(&project_config_path)?)
     } else {
@@ -278,7 +281,7 @@ async fn run_init_inner(
         remote.inferred_storage_provider,
         url,
     )?;
-    let config_path = crab_dir.join("config.toml");
+    let config_path = crab_dir.join("local.toml");
     let gc_list_profile = match gc_list_profile {
         Some(profile) => Some(profile),
         None => existing_gc_list_profile(&config_path)?,
@@ -287,33 +290,25 @@ async fn run_init_inner(
     tokio::fs::create_dir_all(&crab_dir).await?;
     ensure_crab_dir_excluded(root)?;
 
-    // Write .crab/remote with the remote URL (separate from config.toml
-    // to avoid conflicts with the config parser).
-    let remote_path = crab_dir.join("remote");
-    tokio::fs::write(&remote_path, remote_url.as_bytes()).await?;
-    tracing::info!(path = %remote_path.display(), "wrote remote URL");
-
-    // Write .crab/config.toml with the [remote] section so the config
-    // resolver can find the URL.
-    let config_content = render_local_config(
-        &remote_url,
-        selected_storage_provider.as_ref(),
-        gc_list_profile,
-    );
-    tokio::fs::write(&config_path, config_content.as_bytes()).await?;
-    tracing::info!(path = %config_path.display(), "wrote config.toml");
+    // Preserve machine-specific settings owned by other commands when init
+    // is re-run. Project URL and provider live in the committed config.
+    if !config_path.exists() || gc_list_profile.is_some() || aws_profile.is_some() {
+        let config_content = merge_local_config(&config_path, gc_list_profile, aws_profile)?;
+        tokio::fs::write(&config_path, config_content.as_bytes()).await?;
+        tracing::info!(path = %config_path.display(), "wrote local settings");
+    }
 
     check_cancelled(cancel)?;
 
-    // Generate or update .crab.toml so the project config travels with the repo.
+    // Generate or update crab.toml so the project config travels with the repo.
     // No [track] section — auto-tracking is deferred to `crab setup`.
-    let (project_config, config_written) = if let Some(mut existing) = existing_project_config {
+    let config_written = if let Some(mut existing) = existing_project_config {
         // Load existing config and update URL if it changed.
         let mut config_written = false;
         if existing.remote.url != remote_url {
             let old_url = existing.remote.url.clone();
             existing.remote.url = remote_url.clone();
-            eprintln!("Updated .crab.toml remote URL from {old_url} to {remote_url}");
+            eprintln!("Updated crab.toml remote URL from {old_url} to {remote_url}");
             config_written = true;
         }
         if apply_storage_provider(&mut existing, selected_storage_provider.clone()) {
@@ -322,9 +317,10 @@ async fn run_init_inner(
         if config_written {
             ProjectConfig::write(&project_config_path, &existing)?;
         }
-        (existing, config_written)
+        config_written
     } else {
         let config = ProjectConfig {
+            version: 1,
             remote: RemoteConfig {
                 url: remote_url.clone(),
             },
@@ -335,21 +331,23 @@ async fn run_init_inner(
             auth: selected_storage_provider
                 .clone()
                 .map(project_auth_config_with_storage_provider),
+            prefetch: None,
+            workflow: None,
         };
         ProjectConfig::write(&project_config_path, &config)?;
-        (config, true)
+        true
     };
 
-    // Stage .crab.toml so it's included in the user's first commit.
+    // Stage crab.toml so it's included in the user's first commit.
     // Only run when the config was actually written/updated — a no-op
     // re-init with an unchanged URL leaves the file byte-identical, so
     // `git add` would just spawn the filter process for nothing. Running
     // this BEFORE `install_filter_driver` matters only on the first init
     // (when the driver is unregistered and `git add` can't spawn it); on
-    // a URL update the driver is already registered but `.crab.toml`
+    // a URL update the driver is already registered but `crab.toml`
     // doesn't match any `filter=crab` pattern, so no filter spawns.
     if config_written && root.join(".git").exists() {
-        crate::git::index::stage_paths(root, &[".crab.toml"])?;
+        crate::git::index::stage_paths(root, &["crab.toml"])?;
     }
 
     // Register the git drivers so `*.ext filter=crab diff=crab` in
@@ -381,7 +379,9 @@ async fn run_init_inner(
 
     // Run credential discovery and report the result.
     let credential_url = credential_discovery_url(&parsed, selected_storage_provider.as_ref());
-    let cred_result = discover_credentials(&credential_url, project_config.auth.as_ref()).await;
+    let resolved_config = Config::resolve_for_repo(root)?;
+    let cred_result =
+        discover_credentials(&credential_url, resolved_config.auth.aws.profile.as_deref()).await;
 
     let credential_status = if cred_result.source == CredentialSource::None {
         let style = CliStyle::resolve(mode);
@@ -445,32 +445,66 @@ async fn run_init_inner(
     if !mode.is_machine() && show_next_steps {
         eprintln!("\nNext:");
         eprintln!("  1. crab setup            # detect large files and write .gitattributes");
-        eprintln!("  2. git status            # review .crab.toml and tracking rules");
+        eprintln!("  2. git status            # review crab.toml and tracking rules");
         eprintln!("  3. crab ship -m 'init'   # commit and push to Crab");
     }
 
     Ok(())
 }
 
-fn render_local_config(
-    url: &str,
-    storage_provider: Option<&StorageProvider>,
+fn merge_local_config(
+    path: &Path,
     gc_list_profile: Option<GcListProfile>,
-) -> String {
-    let mut config = format!("# Crab configuration\n\n[remote]\nurl = \"{url}\"\n");
-    if let Some(provider) = storage_provider {
-        use std::fmt::Write as _;
-        let _ = write!(
-            config,
-            "\n[auth]\nstorage_provider = \"{}\"\n",
-            provider.toml_value()
+    aws_profile: Option<&str>,
+) -> Result<String> {
+    let mut table = match std::fs::read_to_string(path) {
+        Ok(content) => {
+            content
+                .parse::<toml::Table>()
+                .map_err(|error| CrabError::Configuration {
+                    key: format!("failed to parse TOML: {error}"),
+                    origin: path.display().to_string(),
+                })?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Some(profile) = gc_list_profile {
+        let gc = table
+            .entry("gc")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "gc must be a table".to_owned(),
+                origin: path.display().to_string(),
+            })?;
+        gc.insert(
+            "list_profile".to_owned(),
+            toml::Value::String(profile.as_str().to_owned()),
         );
     }
-    if let Some(profile) = gc_list_profile {
-        use std::fmt::Write as _;
-        let _ = write!(config, "\n[gc]\nlist_profile = \"{}\"\n", profile.as_str());
+
+    if let Some(profile) = aws_profile {
+        let auth = table
+            .entry("auth")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| CrabError::Configuration {
+                key: "auth must be a table".to_owned(),
+                origin: path.display().to_string(),
+            })?;
+        auth.insert(
+            "aws_profile".to_owned(),
+            toml::Value::String(profile.to_owned()),
+        );
     }
-    config
+
+    let body = toml::to_string_pretty(&table).map_err(|error| CrabError::Configuration {
+        key: format!("failed to serialize TOML: {error}"),
+        origin: path.display().to_string(),
+    })?;
+    Ok(format!("# Crab local settings (not committed)\n\n{body}"))
 }
 
 fn existing_gc_list_profile(path: &Path) -> Result<Option<GcListProfile>> {
@@ -498,8 +532,6 @@ fn project_auth_config_with_storage_provider(
     storage_provider: StorageProvider,
 ) -> ProjectAuthConfig {
     ProjectAuthConfig {
-        provider: None,
-        profile: None,
         storage_provider: Some(storage_provider),
     }
 }
@@ -653,7 +685,7 @@ pub fn auto_track_large_files(root: &Path) -> Result<Vec<String>> {
 }
 
 /// Collect the patterns that auto-tracking would produce, without writing
-/// anything. Used to populate `.crab.toml` `[track]` patterns.
+/// anything. Used to populate `crab.toml` `[track]` patterns.
 #[allow(dead_code)]
 pub(crate) fn collect_auto_track_patterns(root: &Path) -> Vec<String> {
     use std::collections::BTreeSet;
@@ -890,7 +922,7 @@ const DRIVER_CONFIG: &[(&str, &str)] = &[
 ///
 /// Skips silently (with a debug log) when `root` is not a git
 /// repository. `crab init` is legitimately callable on a bare
-/// directory to pre-populate `.crab/config.toml`; the git drivers
+/// directory to pre-populate `.crab/local.toml`; the git drivers
 /// can be registered later via `crab install` once the user runs
 /// `git init`. Failing here would make the `init` UX worse for no
 /// correctness benefit — the drivers can't fire without a git repo
@@ -1010,7 +1042,7 @@ fn add_or_update_git_remote(root: &Path, url: &str) -> Option<String> {
 /// Set up mirror mode for a repository.
 ///
 /// Validates that the specified git remote exists, adds a `crab` remote
-/// pointing to the crab URL, writes the `[mirror]` section to `.crab.toml`,
+/// pointing to the crab URL, writes the `[mirror]` section to `crab.toml`,
 /// installs mirror hooks, and prints a summary.
 pub fn setup_mirror_mode(root: &Path, crab_url: &str, mirror_remote: &str) -> Result<()> {
     let crab_url = parse_init_remote(crab_url)?.canonical_url;
@@ -1061,12 +1093,13 @@ pub fn setup_mirror_mode(root: &Path, crab_url: &str, mirror_remote: &str) -> Re
             .status();
     }
 
-    // Write [mirror] section to .crab.toml.
-    let config_path = root.join(".crab.toml");
+    // Write [mirror] section to crab.toml.
+    let config_path = root.join("crab.toml");
     let mut config = if config_path.exists() {
         ProjectConfig::load(&config_path)?
     } else {
         ProjectConfig {
+            version: 1,
             remote: RemoteConfig {
                 url: crab_url.clone(),
             },
@@ -1075,6 +1108,8 @@ pub fn setup_mirror_mode(root: &Path, crab_url: &str, mirror_remote: &str) -> Re
             mirror: None,
             replication: None,
             auth: None,
+            prefetch: None,
+            workflow: None,
         }
     };
 
@@ -1205,20 +1240,20 @@ pub fn prompt_init_url_interactive(mode: OutputMode) -> Result<String> {
     if mode.is_machine() {
         return Err(CrabError::Configuration {
             key: "url".into(),
-            origin: "No URL provided and no .crab.toml found. Usage: crab init <url>".into(),
+            origin: "No URL provided and no crab.toml found. Usage: crab init <url>".into(),
         });
     }
 
     if !std::io::stdin().is_terminal() {
         return Err(CrabError::Configuration {
             key: "url".into(),
-            origin: "No URL provided and no .crab.toml found. Usage: crab init <url>".into(),
+            origin: "No URL provided and no crab.toml found. Usage: crab init <url>".into(),
         });
     }
 
     let term = console::Term::stderr();
 
-    eprintln!("No .crab.toml found. Let's set up your repository.\n");
+    eprintln!("No crab.toml found. Let's set up your repository.\n");
     eprintln!("Supported URL formats:");
     eprintln!("  crab://bucket/repo     (Crab Git remote)");
     eprintln!("  s3://bucket/repo       (initializes as crab://bucket/repo)");
@@ -1321,14 +1356,16 @@ mod tests {
         let result = run_init_in("crab://my-bucket/my-repo", dir.path(), &cancel).await;
         assert!(result.is_ok(), "run_init failed: {result:?}");
 
-        let config_path = dir.path().join(".crab/config.toml");
-        assert!(config_path.exists(), ".crab/config.toml should exist");
+        let config_path = dir.path().join(".crab/local.toml");
+        assert!(config_path.exists(), ".crab/local.toml should exist");
 
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(
-            content.contains("crab://my-bucket/my-repo"),
-            "config should contain the remote URL, got: {content}",
+            !content.contains("crab://my-bucket/my-repo"),
+            "local config must not duplicate the remote URL, got: {content}",
         );
+        let project = ProjectConfig::load(&dir.path().join("crab.toml")).unwrap();
+        assert_eq!(project.remote.url, "crab://my-bucket/my-repo");
     }
 
     #[tokio::test]
@@ -1347,13 +1384,13 @@ mod tests {
         .await
         .expect("init should succeed");
 
-        let local_config = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
+        let local_config = std::fs::read_to_string(dir.path().join(".crab/local.toml")).unwrap();
         assert!(
-            local_config.contains("storage_provider = \"gcs\""),
-            "local config should persist storage provider, got: {local_config}",
+            !local_config.contains("storage_provider"),
+            "local config must not duplicate the project provider, got: {local_config}",
         );
 
-        let project_config = ProjectConfig::load(&dir.path().join(".crab.toml")).unwrap();
+        let project_config = ProjectConfig::load(&dir.path().join("crab.toml")).unwrap();
         assert_eq!(
             project_config
                 .auth
@@ -1384,21 +1421,7 @@ mod tests {
                 .expect("init should accept provider-prefixed URL");
 
             let parsed = parse_init_remote(input_url).expect("test input should parse");
-            let local_config =
-                std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
-            assert!(
-                local_config.contains(&format!("url = \"{}\"", parsed.canonical_url)),
-                "local config should store canonical Crab URL for {input_url}, got: {local_config}",
-            );
-            assert!(
-                local_config.contains(&format!(
-                    "storage_provider = \"{}\"",
-                    expected_provider.toml_value()
-                )),
-                "local config should persist inferred provider for {input_url}, got: {local_config}",
-            );
-
-            let project_config = ProjectConfig::load(&dir.path().join(".crab.toml")).unwrap();
+            let project_config = ProjectConfig::load(&dir.path().join("crab.toml")).unwrap();
             assert_eq!(project_config.remote.url, parsed.canonical_url);
             assert_eq!(
                 project_config
@@ -1429,7 +1452,7 @@ mod tests {
         let dir = temp_git_repo();
         let cancel = CancellationToken::new();
         std::fs::write(
-            dir.path().join(".crab.toml"),
+            dir.path().join("crab.toml"),
             r#"[remote]
 url = "crab://my-bucket/my-repo"
 
@@ -1443,11 +1466,13 @@ storage_provider = "azure"
             .await
             .expect("init should succeed");
 
-        let local_config = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
+        let local_config = std::fs::read_to_string(dir.path().join(".crab/local.toml")).unwrap();
         assert!(
-            local_config.contains("storage_provider = \"azure\""),
-            "local config should inherit project storage provider, got: {local_config}",
+            !local_config.contains("storage_provider"),
+            "local config must not duplicate the project provider, got: {local_config}",
         );
+        let resolved = Config::resolve_for_repo(dir.path()).unwrap();
+        assert_eq!(resolved.auth.storage_provider, StorageProvider::Azure);
     }
 
     #[tokio::test]
@@ -1476,9 +1501,36 @@ storage_provider = "azure"
         .await
         .expect("re-init should preserve GC profile");
 
-        let local_config = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
+        let local_config = std::fs::read_to_string(dir.path().join(".crab/local.toml")).unwrap();
 
         assert!(local_config.contains("list_profile = \"cost\""));
+    }
+
+    #[tokio::test]
+    async fn configure_init_persists_aws_profile_without_erasing_local_settings() {
+        let dir = temp_git_repo();
+        let local_dir = dir.path().join(".crab");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("local.toml"), "[checkout]\nlazy = true\n").unwrap();
+
+        run_init_for_configure(
+            "crab://my-bucket/my-repo",
+            dir.path(),
+            &CancellationToken::new(),
+            Some(StorageProvider::S3),
+            None,
+            Some("ml-team"),
+        )
+        .await
+        .unwrap();
+
+        let local_config = std::fs::read_to_string(local_dir.join("local.toml")).unwrap();
+        let local_config: toml::Value = toml::from_str(&local_config).unwrap();
+        assert_eq!(
+            local_config["auth"]["aws_profile"].as_str(),
+            Some("ml-team")
+        );
+        assert_eq!(local_config["checkout"]["lazy"].as_bool(), Some(true));
     }
 
     #[tokio::test]
@@ -1486,7 +1538,7 @@ storage_provider = "azure"
         let dir = temp_git_repo();
         let local_dir = dir.path().join(".crab");
         std::fs::create_dir_all(&local_dir).unwrap();
-        let config_path = local_dir.join("config.toml");
+        let config_path = local_dir.join("local.toml");
         let invalid = "[gc]\nlist_profile = \"fast\"\n";
         std::fs::write(&config_path, invalid).unwrap();
 
@@ -1533,8 +1585,8 @@ storage_provider = "azure"
             "local .crab state must not be tracked after git add ., got: {tracked}",
         );
         assert!(
-            tracked.lines().any(|path| path == ".crab.toml"),
-            ".crab.toml should remain trackable project config, got: {tracked}",
+            tracked.lines().any(|path| path == "crab.toml"),
+            "crab.toml should remain trackable project config, got: {tracked}",
         );
 
         let exclude = std::fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
@@ -1591,7 +1643,7 @@ storage_provider = "azure"
         );
 
         assert!(
-            !dir.path().join(".crab/config.toml").exists(),
+            !dir.path().join(".crab/local.toml").exists(),
             "rejected init must not write local Crab config",
         );
 
@@ -1631,11 +1683,8 @@ storage_provider = "azure"
         assert!(r1.is_ok(), "first init failed: {r1:?}");
         assert!(r2.is_ok(), "second init failed: {r2:?}");
 
-        let content = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
-        assert!(
-            content.contains("crab://bucket/repo-v2"),
-            "config should reflect the latest URL, got: {content}",
-        );
+        let project = ProjectConfig::load(&dir.path().join("crab.toml")).unwrap();
+        assert_eq!(project.remote.url, "crab://bucket/repo-v2");
     }
 
     #[tokio::test]
@@ -1722,10 +1771,10 @@ storage_provider = "azure"
 
         // .git should now exist.
         assert!(dir.path().join(".git").exists(), ".git should be created");
-        // .crab/config.toml should exist.
+        // .crab/local.toml should exist.
         assert!(
-            dir.path().join(".crab/config.toml").exists(),
-            ".crab/config.toml should exist"
+            dir.path().join(".crab/local.toml").exists(),
+            ".crab/local.toml should exist"
         );
         // Filter driver should be registered.
         let output = Command::new("git")

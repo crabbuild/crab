@@ -31,8 +31,8 @@ export CRAB_CACHE_PSK="replace-with-shared-secret"
 
 Crab resolves cache settings from:
 
-1. User config: `~/.crab/config.toml`
-2. Repository config: `.crab/config.toml`
+1. User config: `~/.config/crab/config.toml`
+2. Repository config: `.crab/local.toml`
 3. Environment overrides for cache secrets
 
 Use repository config for the cache URL when every checkout of a repository should use the same service. Use user config or environment variables for secrets.
@@ -94,8 +94,8 @@ service_client_key = "/etc/crab/cache-client-key.pem"
 ```yaml
 - name: Configure Crab cache
   run: |
-    mkdir -p ~/.crab
-    cat > ~/.crab/config.toml <<EOF
+    mkdir -p ~/.config/crab
+    cat > ~/.config/crab/config.toml <<EOF
     [cache]
     service_mode = "cache+dedup"
     service_auth = "psk"

@@ -169,8 +169,8 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
     if repo_root.join(".gitattributes").exists() {
         metadata_paths.push(".gitattributes");
     }
-    if repo_root.join(".crab.toml").exists() {
-        metadata_paths.push(".crab.toml");
+    if repo_root.join("crab.toml").exists() {
+        metadata_paths.push("crab.toml");
     }
     crate::git::index::stage_paths(repo_root, &metadata_paths)?;
 

@@ -153,7 +153,7 @@ pub fn run_install_in(root: &Path, args: &InstallArgs) -> Result<()> {
         eprintln!(
             "{}",
             CliStyle::resolve(OutputMode::Text)
-                .ok("Global setup complete. Any repo with .crab.toml will work automatically.")
+                .ok("Global setup complete. Any repo with crab.toml will work automatically.")
         );
     }
 

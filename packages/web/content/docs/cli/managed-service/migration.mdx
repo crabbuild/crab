@@ -28,7 +28,7 @@ flowchart LR
 ```
 
 Changing a URL performs neither migration. Do not use `git remote set-url`,
-edit `.crab/remote`, or install a managed profile as a substitute for copying
+edit `crab.toml`, or install a managed profile as a substitute for copying
 and verifying data.
 
 ## Direct storage to managed storage
@@ -114,11 +114,11 @@ instructions to the canonical managed URL and create fresh clones:
 ```bash
 crab clone crab://crab.build/acme/models models-managed
 git -C models-managed remote get-url origin
-cat models-managed/.crab/remote
+cat models-managed/crab.toml
 ```
 
 Both identities must be `crab://crab.build/acme/models`. Re-cloning avoids a
-mixed worktree whose Git remote, `.crab/remote`, project configuration, and
+mixed worktree whose Git remote, `crab.toml`, project configuration, and
 cached physical state disagree. Keep old direct clones read-only during the
 rollback window.
 

@@ -192,17 +192,9 @@ pub async fn run_locks(
 
 /// Build a `LockManager` from the repo's remote config and an S3 store.
 async fn setup() -> Result<(LockManager, String)> {
-    let remote_path = crate::git::discover::resolve_crab_dir().map_or_else(
-        || std::path::PathBuf::from(".crab/remote"),
-        |d| d.join("remote"),
-    );
-    let url = std::fs::read_to_string(&remote_path).map_err(|_| CrabError::Configuration {
-        key: "no remote configured — run `crab init <url>`".into(),
-        origin: remote_path.display().to_string(),
-    })?;
-    let url = url.trim();
-
-    let parsed = crate::git::url::CrabUrl::parse(url)?;
+    let cwd = std::env::current_dir()?;
+    let url = crate::core::project_config::ProjectConfig::remote_url(&cwd)?;
+    let parsed = crate::git::url::CrabUrl::parse(&url)?;
     let config = crate::core::config::Config::resolve_local().unwrap_or_default();
     let cancel = tokio_util::sync::CancellationToken::new();
     let store = crate::auth::build_repository_url_store(&config, &parsed, "lock", &cancel).await?;

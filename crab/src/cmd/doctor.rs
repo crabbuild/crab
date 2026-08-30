@@ -262,17 +262,9 @@ pub async fn run_cost_report(
     if cancel.is_cancelled() {
         return Err(CrabError::Cancelled);
     }
-    let remote_path = crate::git::discover::resolve_crab_dir()
-        .map_or_else(|| PathBuf::from(".crab/remote"), |dir| dir.join("remote"));
-    let remote =
-        std::fs::read_to_string(&remote_path).map_err(|error| CrabError::Configuration {
-            key: "remote".to_string(),
-            origin: format!(
-                "failed to read {}: {error}; run `crab init <url>` first",
-                remote_path.display()
-            ),
-        })?;
-    let remote = crate::git::url::CrabUrl::parse(remote.trim())?;
+    let cwd = std::env::current_dir()?;
+    let remote_url = ProjectConfig::remote_url(&cwd)?;
+    let remote = crate::git::url::CrabUrl::parse(&remote_url)?;
     let store =
         crate::auth::build_repository_url_store(config, &remote, "doctor.cost", cancel).await?;
     let report = crate::cost::engine::build_report(
@@ -325,7 +317,7 @@ pub async fn run_doctor_in(
     results.push(check_crab_config(root));
     results.push(check_remote_url(root));
     results.push(check_auth());
-    results.push(check_credentials(root).await);
+    results.push(check_remote_access(root).await);
     results.push(check_credential_discovery(root).await);
     results.push(check_staging(root).await);
     results.push(check_cache());
@@ -519,47 +511,62 @@ fn check_gitattributes(root: &Path) -> CheckResult {
     }
 }
 
-/// Check that .crab/config.toml exists and parses.
+/// Check that the committed and local configuration files parse.
 fn check_crab_config(root: &Path) -> CheckResult {
-    let config_path = root.join(".crab/config.toml");
+    if root.join(".crab.toml").is_file() && !root.join("crab.toml").is_file() {
+        return CheckResult::fail(
+            "crab config",
+            "Crab no longer reads .crab.toml — rename it to crab.toml and commit the rename",
+        );
+    }
+    match ProjectConfig::load_for_repo(root) {
+        Ok(Some(config)) if config.remote.url.trim().is_empty() => {
+            return CheckResult::fail("crab config", "crab.toml has an empty [remote].url");
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return CheckResult::warn(
+                "crab config",
+                "crab.toml not found — run `crab configure <REMOTE>`",
+            );
+        }
+        Err(error) => return CheckResult::fail("crab config", error.to_string()),
+    }
+    let config_path = root.join(".crab/local.toml");
     if !config_path.exists() {
         return CheckResult::warn(
             "crab config",
-            ".crab/config.toml not found — run `crab init <url>`",
+            "crab.toml valid; .crab/local.toml not found (using defaults)",
         );
     }
 
-    match Config::resolve_local() {
-        Ok(_) => CheckResult::ok("crab config", ".crab/config.toml valid"),
+    match Config::resolve_for_repo(root) {
+        Ok(_) => CheckResult::ok("crab config", "crab.toml and .crab/local.toml valid"),
         Err(e) => CheckResult::fail("crab config", format!("parse error: {e}")),
     }
 }
 
-/// Check that .crab/remote exists and contains a valid URL.
+/// Check that `crab.toml` contains a valid remote URL.
 fn check_remote_url(root: &Path) -> CheckResult {
-    let remote_path = root.join(".crab/remote");
-    match std::fs::read_to_string(&remote_path) {
-        Ok(url) => {
-            let url = url.trim();
-            match crate::git::url::CrabUrl::parse(url) {
-                Ok(parsed) => CheckResult::ok(
-                    "remote URL",
-                    format!("crab://{}/{}", parsed.bucket, parsed.repo_path),
-                ),
-                Err(e) => CheckResult::fail("remote URL", format!("invalid: {e}")),
-            }
-        }
-        Err(_) => CheckResult::warn(
+    match ProjectConfig::load_for_repo(root) {
+        Ok(Some(config)) => match crate::git::url::CrabUrl::parse(&config.remote.url) {
+            Ok(parsed) => CheckResult::ok(
+                "remote URL",
+                format!("crab://{}/{}", parsed.bucket, parsed.repo_path),
+            ),
+            Err(e) => CheckResult::fail("remote URL", format!("invalid: {e}")),
+        },
+        Ok(None) => CheckResult::warn(
             "remote URL",
-            ".crab/remote not found — run `crab init <url>`",
+            "crab.toml not found — run `crab configure <REMOTE>`",
         ),
+        Err(error) => CheckResult::fail("remote URL", error.to_string()),
     }
 }
 
 fn cache_service_repo_path(root: &Path) -> std::result::Result<String, String> {
-    let remote = std::fs::read_to_string(root.join(".crab/remote"))
-        .map_err(|_| "cache-service authz requires .crab/remote".to_string())?;
-    crate::git::url::CrabUrl::parse(remote.trim())
+    let remote = ProjectConfig::remote_url(root).map_err(|error| error.to_string())?;
+    crate::git::url::CrabUrl::parse(&remote)
         .map(|parsed| parsed.repo_path)
         .map_err(|e| format!("cache-service authz requires a valid crab remote: {e}"))
 }
@@ -739,74 +746,110 @@ fn parse_token_expiry(id_token: &str) -> (Option<String>, bool) {
     (Some(expiry_str), is_expired)
 }
 
-/// Check that credentials are available and the remote bucket is reachable.
-async fn check_credentials(root: &Path) -> CheckResult {
-    let remote_path = root.join(".crab/remote");
-    let url = match std::fs::read_to_string(&remote_path) {
-        Ok(u) => u.trim().to_owned(),
-        Err(_) => return CheckResult::warn("credentials", "skipped (no remote configured)"),
+/// Check that the bucket is reachable and the Crab repository exists.
+async fn check_remote_access(root: &Path) -> CheckResult {
+    let url = match ProjectConfig::remote_url(root) {
+        Ok(url) => url,
+        Err(error) => return CheckResult::fail("remote access", error.to_string()),
     };
 
     let Ok(parsed) = crate::git::url::CrabUrl::parse(&url) else {
-        return CheckResult::warn("credentials", "skipped (invalid remote URL)");
+        return CheckResult::warn("remote access", "skipped (invalid remote URL)");
     };
 
-    let config = Config::resolve_local().unwrap_or_default();
+    let config = match Config::resolve_for_repo(root) {
+        Ok(config) => config,
+        Err(error) => {
+            return CheckResult::fail(
+                "remote access",
+                format!("cannot load repository config: {error}; run `crab configure`"),
+            );
+        }
+    };
     let cancel = tokio_util::sync::CancellationToken::new();
     let store =
         match crate::auth::build_repository_url_store(&config, &parsed, "doctor", &cancel).await {
             Ok(s) => s,
-            Err(e) => {
-                return CheckResult::fail("credentials", format!("failed to build store: {e}"));
+            Err(error) => {
+                return remote_access_failure(&parsed.bucket, Some(&parsed.repo_path), &error);
             }
         };
 
     let prefix = object_store::path::Path::from(parsed.repo_path.as_str());
 
-    // Try listing a single object under the repo prefix to verify access.
+    // Listing distinguishes a missing bucket from a missing repository object.
     let mut stream = store.inner().list(Some(&prefix));
-    match stream.try_next().await {
+    if let Err(error) = stream.try_next().await {
+        let error = CrabError::from(crab_storage::map_object_store_error(error, prefix.as_ref()));
+        return remote_access_failure(&parsed.bucket, None, &error);
+    }
+
+    let layout = crate::storage::StoreLayout::new(store.clone(), parsed.repo_path.clone());
+    match store.head(&layout.layout_descriptor_path()).await {
         Ok(_) => CheckResult::ok(
-            "credentials",
-            format!("bucket '{}' reachable", parsed.bucket),
+            "remote access",
+            format!(
+                "bucket '{}' and repository '{}' reachable",
+                parsed.bucket, parsed.repo_path
+            ),
         ),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("403") || msg.contains("Forbidden") {
-                CheckResult::fail("credentials", "access denied — check credentials")
-            } else if msg.contains("404") || msg.contains("NoSuchBucket") {
-                CheckResult::fail(
-                    "credentials",
-                    format!("bucket '{}' not found", parsed.bucket),
-                )
-            } else {
-                CheckResult::warn("credentials", format!("could not reach remote: {e}"))
-            }
-        }
+        Err(error) => remote_access_failure(&parsed.bucket, Some(&parsed.repo_path), &error),
+    }
+}
+
+fn remote_access_failure(bucket: &str, repo: Option<&str>, error: &CrabError) -> CheckResult {
+    let scope = repo.map_or_else(
+        || format!("bucket '{bucket}'"),
+        |repo| format!("repository '{repo}' in bucket '{bucket}'"),
+    );
+
+    match error {
+        CrabError::NotFound { .. } if repo.is_some() => CheckResult::fail(
+            "remote access",
+            format!("{scope} is not initialized — run `crab configure <REMOTE>` to create it"),
+        ),
+        CrabError::NotFound { .. } => CheckResult::fail(
+            "remote access",
+            format!("bucket '{bucket}' not found — create it or correct the remote URL"),
+        ),
+        CrabError::NoCredentials => CheckResult::fail(
+            "remote access",
+            "no cloud credentials found — configure provider credentials, then rerun `crab doctor`",
+        ),
+        CrabError::Forbidden { .. }
+        | CrabError::AuthFailed { .. }
+        | CrabError::AuthExpired { .. } => CheckResult::fail(
+            "remote access",
+            format!(
+                "access denied to {scope} — grant the active identity the required bucket and repository-prefix permissions"
+            ),
+        ),
+        CrabError::Configuration { .. } => CheckResult::fail(
+            "remote access",
+            format!("storage configuration is invalid: {error}; run `crab configure`"),
+        ),
+        _ => CheckResult::warn(
+            "remote access",
+            format!("could not verify {scope}: {error}"),
+        ),
     }
 }
 
 /// Check credential discovery chain for the configured remote.
 ///
-/// Reads the remote URL from `.crab/config.toml` or `.crab.toml` and runs
+/// Reads the remote URL from `crab.toml` and runs
 /// the credential discovery chain. Reports which credential source was
 /// found (or warns if none).
 async fn check_credential_discovery(root: &Path) -> CheckResult {
-    // Try .crab/remote first (internal state), then fall back to .crab.toml.
-    let url = std::fs::read_to_string(root.join(".crab/remote"))
-        .map(|s| s.trim().to_owned())
-        .ok()
-        .or_else(|| ProjectConfig::discover(root).map(|c| c.remote.url));
-
-    let url = match url {
-        Some(u) if !u.is_empty() => u,
-        _ => {
-            return CheckResult::warn("credential discovery", "skipped (no remote URL configured)");
-        }
+    let url = match ProjectConfig::remote_url(root) {
+        Ok(url) => url,
+        Err(error) => return CheckResult::fail("credential discovery", error.to_string()),
     };
 
-    let project_auth = ProjectConfig::discover(root).and_then(|c| c.auth);
-    let result = discover_credentials(&url, project_auth.as_ref()).await;
+    let aws_profile = Config::resolve_for_repo(root)
+        .ok()
+        .and_then(|config| config.auth.aws.profile);
+    let result = discover_credentials(&url, aws_profile.as_deref()).await;
 
     match result.source {
         CredentialSource::None => CheckResult::warn("credential discovery", result.description),
@@ -2396,7 +2439,7 @@ fn cache_service_push_warming_label(enabled: bool) -> &'static str {
 
 /// Check the required_cli_version guard from the remote config.
 fn check_version_guard(root: &Path) -> CheckResult {
-    let config_path = root.join(".crab/config.toml");
+    let config_path = root.join(".crab/local.toml");
     if !config_path.exists() {
         return CheckResult::ok("version guard", "no config (skipped)");
     }
@@ -2544,9 +2587,11 @@ mod tests {
     #[test]
     fn check_remote_url_valid() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("remote"), "crab://bucket/repo").unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://bucket/repo\"\n",
+        )
+        .unwrap();
 
         let result = check_remote_url(dir.path());
         assert_eq!(result.status, CheckStatus::Ok);
@@ -2556,12 +2601,63 @@ mod tests {
     #[test]
     fn check_remote_url_invalid() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("remote"), "https://not-crab").unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"https://not-crab\"\n",
+        )
+        .unwrap();
 
         let result = check_remote_url(dir.path());
         assert_eq!(result.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn bucket_not_found_names_the_bucket_and_next_action() {
+        let result = remote_access_failure(
+            "team-data",
+            None,
+            &CrabError::NotFound {
+                path: "models".into(),
+            },
+        );
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("bucket 'team-data' not found"));
+        assert!(result.detail.contains("create it"));
+    }
+
+    #[test]
+    fn repository_not_found_is_distinct_from_bucket_not_found() {
+        let result = remote_access_failure(
+            "team-data",
+            Some("models"),
+            &CrabError::NotFound {
+                path: "models/layout".into(),
+            },
+        );
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result
+                .detail
+                .contains("repository 'models' in bucket 'team-data' is not initialized")
+        );
+        assert!(result.detail.contains("crab configure"));
+    }
+
+    #[test]
+    fn permission_failure_names_the_denied_scope() {
+        let result = remote_access_failure(
+            "team-data",
+            Some("models"),
+            &CrabError::Forbidden {
+                path: "models/layout".into(),
+            },
+        );
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("repository 'models'"));
+        assert!(result.detail.contains("active identity"));
     }
 
     #[tokio::test]
@@ -2876,9 +2972,11 @@ mod tests {
     #[test]
     fn cache_service_active_probe_path_uses_remote_repo_scope() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("remote"), "crab://bucket/org/repo").unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://bucket/org/repo\"\n",
+        )
+        .unwrap();
 
         let probe = build_cache_service_active_probe(dir.path()).unwrap();
 
@@ -2897,7 +2995,7 @@ mod tests {
 
         let err = build_cache_service_active_probe(dir.path()).unwrap_err();
 
-        assert!(err.contains(".crab/remote"));
+        assert!(err.contains("crab.toml"));
     }
 
     #[test]

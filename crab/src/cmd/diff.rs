@@ -424,14 +424,9 @@ pub async fn create_store_and_prefix(
     config: &Config,
     cancel: &CancellationToken,
 ) -> Result<(crab_cache_store::CachingStore, String)> {
-    let remote_path = crate::git::discover::resolve_crab_dir()
-        .map_or_else(|| PathBuf::from(".crab/remote"), |d| d.join("remote"));
-    let url = std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
-        key: format!("failed to read .crab/remote: {e}"),
-        origin: remote_path.display().to_string(),
-    })?;
-    let url = url.trim();
-    let parsed = crate::git::url::CrabUrl::parse(url)?;
+    let cwd = std::env::current_dir()?;
+    let url = crate::core::project_config::ProjectConfig::remote_url(&cwd)?;
+    let parsed = crate::git::url::CrabUrl::parse(&url)?;
 
     let selection = crate::replication::select_read_store(config, &parsed, "diff", cancel).await?;
     let prefix = selection.router.repo_prefix().to_owned();

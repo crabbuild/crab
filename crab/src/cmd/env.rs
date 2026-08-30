@@ -58,11 +58,11 @@ fn collect_env_payload(root: &Path) -> EnvPayload {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
 
-    let remote_url = root
-        .join(".crab/remote")
-        .pipe_read()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
+    let remote_url = crate::core::project_config::ProjectConfig::load_for_repo(root)
+        .ok()
+        .flatten()
+        .map(|config| config.remote.url)
+        .filter(|url| !url.trim().is_empty());
 
     EnvPayload {
         crab_version: env!("CRAB_BUILD_VERSION").to_owned(),
@@ -71,17 +71,6 @@ fn collect_env_payload(root: &Path) -> EnvPayload {
         git_version,
         remote_url,
         platform: current_platform(),
-    }
-}
-
-/// Read a file to string, returning `None` on any error.
-trait PipeRead {
-    fn pipe_read(&self) -> Option<String>;
-}
-
-impl PipeRead for Path {
-    fn pipe_read(&self) -> Option<String> {
-        std::fs::read_to_string(self).ok()
     }
 }
 
@@ -115,12 +104,11 @@ fn print_git_version() {
 }
 
 fn print_remote_info(root: &Path) {
-    let remote_path = root.join(".crab/remote");
-    match std::fs::read_to_string(&remote_path) {
-        Ok(url) => {
-            let url = url.trim();
+    match crate::core::project_config::ProjectConfig::load_for_repo(root) {
+        Ok(Some(config)) => {
+            let url = config.remote.url;
             println!("Remote={url}");
-            match crate::git::url::CrabUrl::parse(url) {
+            match crate::git::url::CrabUrl::parse(&url) {
                 Ok(parsed) => {
                     println!("  Bucket={}", parsed.bucket);
                     println!("  RepoPath={}", parsed.repo_path);
@@ -128,7 +116,8 @@ fn print_remote_info(root: &Path) {
                 Err(e) => println!("  (parse error: {e})"),
             }
         }
-        Err(_) => println!("Remote=<not configured>"),
+        Ok(None) => println!("Remote=<not configured>"),
+        Err(error) => println!("Remote=<invalid: {error}>"),
     }
 }
 
@@ -198,16 +187,18 @@ mod tests {
         assert!(!payload.git_sha.is_empty());
         assert!(!payload.build_timestamp.is_empty());
         assert!(!payload.platform.is_empty());
-        // No .crab/remote → remote_url is None.
+        // No crab.toml means the remote URL is unavailable.
         assert!(payload.remote_url.is_none());
     }
 
     #[test]
     fn collect_env_payload_reads_remote_url() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("remote"), "crab://bucket/repo\n").unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://bucket/repo\"\n",
+        )
+        .unwrap();
 
         let payload = collect_env_payload(dir.path());
         assert_eq!(payload.remote_url.as_deref(), Some("crab://bucket/repo"));

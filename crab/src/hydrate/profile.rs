@@ -1,32 +1,66 @@
 //! CLI-facing prefetch profile adapter.
 //!
-//! The `.crab/prefetch.toml` format and parser live in `crab-cache`; this
-//! module preserves the existing `CrabError`-shaped hydrate Interface and the
-//! linked-worktree path resolution used by CLI callers.
+//! Shared prefetch profiles live in the committed `crab.toml`. This module
+//! compiles their path patterns for hydrate callers.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::Path;
 
-pub use crab_cache::prefetch_profile::PrefetchConfig;
+use globset::Glob;
 
 use crate::core::Result;
 
-const PREFETCH_TOML_PATH: &str = ".crab/prefetch.toml";
+/// Named prefetch profiles with validated glob patterns.
+#[derive(Debug)]
+pub struct PrefetchConfig {
+    pub profiles: BTreeMap<String, Vec<Glob>>,
+}
 
-/// Load `.crab/prefetch.toml` from the given repo root.
+impl PrefetchConfig {
+    /// Return the patterns for a named profile.
+    pub fn profile(&self, name: &str) -> Result<&[Glob]> {
+        self.profiles.get(name).map(Vec::as_slice).ok_or_else(|| {
+            crate::core::error::CrabError::PrefetchProfileNotFound {
+                name: name.to_owned(),
+            }
+        })
+    }
+}
+
+/// Load shared prefetch profiles from `crab.toml` at the given repo root.
 ///
 /// Returns an empty [`PrefetchConfig`] if the file does not exist. Returns an
 /// error for invalid TOML, unsupported schema versions, or invalid glob
 /// patterns.
 pub fn load_prefetch(repo_root: &Path) -> Result<PrefetchConfig> {
-    let path = prefetch_config_path(repo_root);
-    crab_cache::load_prefetch_path(&path).map_err(Into::into)
-}
+    let Some(project) = crate::core::project_config::ProjectConfig::load_for_repo(repo_root)?
+    else {
+        return Ok(PrefetchConfig {
+            profiles: BTreeMap::new(),
+        });
+    };
+    let Some(prefetch) = project.prefetch else {
+        return Ok(PrefetchConfig {
+            profiles: BTreeMap::new(),
+        });
+    };
 
-fn prefetch_config_path(repo_root: &Path) -> PathBuf {
-    crate::git::worktree::WorktreeContext::resolve_from_path(repo_root).map_or_else(
-        |_| repo_root.join(PREFETCH_TOML_PATH),
-        |ctx| ctx.shared_crab_dir.join(crab_cache::PREFETCH_TOML_FILE),
-    )
+    let mut profiles = BTreeMap::new();
+    for (name, profile) in prefetch.profiles {
+        let globs = profile
+            .paths
+            .into_iter()
+            .map(|pattern| {
+                Glob::new(&pattern).map_err(|error| crab_cache::CacheError::PrefetchParse {
+                    reason: format!(
+                        "invalid glob in prefetch profile '{name}': pattern '{pattern}': {error}"
+                    ),
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        profiles.insert(name, globs);
+    }
+    Ok(PrefetchConfig { profiles })
 }
 
 #[cfg(test)]
@@ -43,11 +77,10 @@ mod tests {
     #[test]
     fn load_from_temp_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
+        let project_path = dir.path().join("crab.toml");
         std::fs::write(
-            crab_dir.join("prefetch.toml"),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.md\"]\n",
+            project_path,
+            "[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.md\"]\n",
         )
         .unwrap();
 

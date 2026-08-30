@@ -11,6 +11,19 @@ use crate::core::output::OutputMode;
 /// Marker file name written after the welcome message is shown.
 const MARKER_FILE: &str = ".first-run-seen";
 
+const WELCOME: &str = "\
+  Welcome to Crab — serverless Git for large files.
+
+  Get to your first push:
+    1. Create a cloud bucket/container and sign in to its provider
+    2. crab configure <provider://bucket/repository>
+    3. crab ship . -m 'Initial commit'
+
+  Joining an existing repository?  crab clone <remote>
+  Setup not working?              crab doctor
+
+  Guide: https://crab.build/docs/cli/getting-started/first-repository";
+
 /// Check and display the first-run welcome if needed.
 ///
 /// Called at CLI entry before command dispatch. Suppressed when the
@@ -30,16 +43,7 @@ pub fn maybe_show_welcome(mode: OutputMode) {
         return;
     }
 
-    eprintln!();
-    eprintln!("  Welcome to Crab — serverless Git for large files.");
-    eprintln!();
-    eprintln!("  Get started:");
-    eprintln!("    crab configure       Guided cloud and repository setup");
-    eprintln!("    crab clone <remote>  Join an existing repository");
-    eprintln!("    crab --help          Browse commands by task");
-    eprintln!();
-    eprintln!("  Docs: https://crab.build/docs/cli");
-    eprintln!();
+    eprintln!("\n{WELCOME}\n");
 
     // Best-effort marker creation — failure is non-fatal.
     let _ = std::fs::create_dir_all(&crab_dir);
@@ -54,4 +58,17 @@ fn home_crab_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(".crab"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WELCOME;
+
+    #[test]
+    fn welcome_leads_to_a_real_first_push() {
+        assert!(WELCOME.contains("cloud bucket/container"));
+        assert!(WELCOME.contains("crab configure"));
+        assert!(WELCOME.contains("crab ship"));
+        assert!(WELCOME.contains("crab doctor"));
+    }
 }

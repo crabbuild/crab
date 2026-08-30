@@ -70,7 +70,7 @@ profiling = ["dep:tracing-flame"]
 tier = ["tier-s3", "tier-gcs", "tier-azure"]
 
 # Per-provider lifecycle/restore SDKs (object_store lacks these APIs).
-tier-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+tier-s3 = ["dep:aws-config", "dep:aws-credential-types", "dep:aws-sdk-s3"]
 tier-gcs = ["dep:google-cloud-storage"]
 tier-azure = ["dep:azure_core", "dep:azure_mgmt_storage", "dep:azure_storage", "dep:azure_storage_blobs"]
 
@@ -363,6 +363,7 @@ dashmap = "6"
 # Provider SDKs for lifecycle/restore APIs not exposed by object_store.
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
 aws-sdk-dynamodb = { workspace = true, optional = true }
 aws-sdk-iam = { workspace = true, optional = true }
 aws-sdk-s3control = { workspace = true, optional = true }

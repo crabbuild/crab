@@ -11811,6 +11811,7 @@ fn load_project_config_or_default(path: &Path, primary: &str) -> Result<ProjectC
         return ProjectConfig::load(path);
     }
     Ok(ProjectConfig {
+        version: 1,
         remote: RemoteConfig {
             url: primary.to_owned(),
         },
@@ -11819,6 +11820,8 @@ fn load_project_config_or_default(path: &Path, primary: &str) -> Result<ProjectC
         mirror: None,
         replication: None,
         auth: None,
+        prefetch: None,
+        workflow: None,
     })
 }
 
@@ -19685,8 +19688,9 @@ mod tests {
     #[test]
     fn set_primary_apply_updates_remote_and_replication_primary() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".crab.toml");
+        let path = dir.path().join("crab.toml");
         let mut project = ProjectConfig {
+            version: 1,
             remote: RemoteConfig {
                 url: "crab://primary/org/repo".into(),
             },
@@ -19699,6 +19703,8 @@ mod tests {
                 ..Default::default()
             }),
             auth: None,
+            prefetch: None,
+            workflow: None,
         };
 
         write_primary_to_project_config(&path, &mut project, "crab://replica/org/repo").unwrap();
@@ -19999,6 +20005,7 @@ mod tests {
     #[test]
     fn coordinator_plan_from_config_reports_configured_dynamodb() {
         let project = ProjectConfig {
+            version: 1,
             remote: RemoteConfig {
                 url: "crab://primary/org/repo".into(),
             },
@@ -20007,6 +20014,8 @@ mod tests {
             mirror: None,
             replication: Some(active_active_replication()),
             auth: None,
+            prefetch: None,
+            workflow: None,
         };
 
         let (plan, configured) =
@@ -20020,8 +20029,9 @@ mod tests {
     #[test]
     fn remove_coordinator_from_project_config_disables_active_active() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".crab.toml");
+        let path = dir.path().join("crab.toml");
         let project = ProjectConfig {
+            version: 1,
             remote: RemoteConfig {
                 url: "crab://primary/org/repo".into(),
             },
@@ -20030,6 +20040,8 @@ mod tests {
             mirror: None,
             replication: Some(active_active_replication()),
             auth: None,
+            prefetch: None,
+            workflow: None,
         };
         ProjectConfig::write(&path, &project).unwrap();
 
@@ -20044,7 +20056,7 @@ mod tests {
     #[test]
     fn add_replica_writes_project_config() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".crab.toml");
+        let path = dir.path().join("crab.toml");
         add_replica_to_project_config(
             &path,
             &add_args("s3://replica/org/repo"),
@@ -20068,7 +20080,7 @@ mod tests {
     #[test]
     fn add_replica_records_backfill_requirement() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".crab.toml");
+        let path = dir.path().join("crab.toml");
         let mut args = add_args("s3://replica/org/repo");
         args.backfill = true;
 
@@ -20168,7 +20180,7 @@ mod tests {
     #[test]
     fn remove_replica_deletes_matching_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".crab.toml");
+        let path = dir.path().join("crab.toml");
         add_replica_to_project_config(
             &path,
             &add_args("s3://replica/org/repo"),

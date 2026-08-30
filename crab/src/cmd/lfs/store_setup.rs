@@ -19,7 +19,7 @@ pub struct LfsRemoteContext {
     pub prefix: String,
 }
 
-/// Resolve the remote store from `.crab/config.toml`.
+/// Resolve the remote store from committed `crab.toml` project configuration.
 ///
 /// Reads the remote URL, parses it, routes read-class operations through
 /// replica-aware selection, and wraps the selected Store in an LfsObjectStore.
@@ -202,7 +202,7 @@ fn resolve_lfs_remote_url(remote: Option<&str>, repo_root: &Path) -> Result<Stri
     }
 }
 
-/// Read the remote URL from `.crab/config.toml`.
+/// Read the remote URL from `crab.toml`.
 pub(crate) fn read_repo_remote_url() -> Result<String> {
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
     let repo_root =
@@ -211,57 +211,7 @@ pub(crate) fn read_repo_remote_url() -> Result<String> {
 }
 
 pub(super) fn read_repo_remote_url_from(repo_root: &Path) -> Result<String> {
-    let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
-    let config_path = worktree.shared_crab_dir.join("config.toml");
-    if config_path.is_file() {
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| CrabError::Configuration {
-                key: format!("failed to read .crab/config.toml: {e}"),
-                origin: config_path.display().to_string(),
-            })?;
-        let table: toml::Table = content.parse().map_err(|e| CrabError::Configuration {
-            key: format!("failed to parse .crab/config.toml: {e}"),
-            origin: config_path.display().to_string(),
-        })?;
-        if let Some(url) = table
-            .get("remote")
-            .and_then(|v| v.get("url"))
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.to_owned());
-        }
-    }
-
-    let remote_path = worktree.shared_crab_dir.join("remote");
-    if remote_path.is_file() {
-        let url = std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
-            key: format!("failed to read .crab/remote: {e}"),
-            origin: remote_path.display().to_string(),
-        })?;
-        let trimmed = url.trim().to_owned();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
-
-    let output = git_command(repo_root)
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo_root)
-        .output()
-        .ok();
-    if let Some(o) = output
-        && o.status.success()
-    {
-        let url = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-        if url.starts_with("crab://") {
-            return Ok(url);
-        }
-    }
-
-    Err(CrabError::Configuration {
-        key: "no crab remote configured".into(),
-        origin: "run `crab init <bucket-url>` to set up a remote".into(),
-    })
+    crate::core::project_config::ProjectConfig::remote_url(repo_root)
 }
 
 fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {

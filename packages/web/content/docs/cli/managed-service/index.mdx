@@ -106,7 +106,7 @@ After clone, verify that the public identity was retained:
 
 ```bash
 git remote get-url origin
-cat .crab/remote
+cat crab.toml
 ```
 
 Both values remain `crab://crab.build/acme/models`. A default clone leaves
@@ -151,7 +151,7 @@ crab hydrate 'models/*.safetensors'
 ```
 
 `git fetch` negotiates Git refs and packs through the remote helper. `crab
-fetch` does not replace it; `crab fetch` reads `.crab/remote` and downloads
+fetch` does not replace it; `crab fetch` reads `crab.toml` and downloads
 Crab shards and xorbs into the local cache so later hydration is faster.
 
 ## 6. Log out

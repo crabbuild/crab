@@ -48,7 +48,7 @@ clone/fetch sessions. Protocol v2 selects the ready replica before capability
 advertisement and pins its storage location for the upload-pack session.
 Replica configuration changes also publish a bounded discovery document under
 the primary repository prefix. A fresh direct-bucket clone reads that document
-before its initial fetch, so it does not need an ancestor `.crab.toml`.
+before its initial fetch, so it does not need an ancestor `crab.toml`.
 
 The primary endpoint remains the discovery trust anchor. Its discovery object
 must be reachable even when Git packs or Crab payloads are unavailable there;

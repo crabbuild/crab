@@ -68,9 +68,12 @@ crab --log-level debug add '*.bin'
 
 ### Log Levels
 
+Crab defaults to `error`, so normal commands do not print internal warning,
+retry, or fallback logs. Raise the level for one diagnostic run when needed.
+
 | Level | What it captures |
 |-------|-----------------|
-| `error` | User-visible failures only |
+| `error` (default) | User-visible failures only |
 | `warn` | Degraded behavior (retries, fallbacks) |
 | `info` | Lifecycle events (one per command) |
 | `debug` | Operation flow, decisions made |

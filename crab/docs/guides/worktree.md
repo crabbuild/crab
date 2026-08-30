@@ -61,10 +61,10 @@ worktree:
 | `--hydrate-include <glob>` | Hydrate selected Crab pointer files after creation |
 | `--hydrate-manifest <path>` | Hydrate paths selected by a manifest file |
 | `--hydrate-manifest-ref <ref:path>` | Hydrate paths selected by a manifest stored in Git |
-| `--hydrate-profile <name>` | Hydrate paths selected by `.crab/prefetch.toml` profile |
+| `--hydrate-profile <name>` | Hydrate paths selected by `crab.toml` profile |
 
 When no explicit hydration policy is passed, Crab reuses the same project
-defaults that `crab clone` would resolve from `.crab.toml`. For example,
+defaults that `crab clone` would resolve from `crab.toml`. For example,
 `[hydrate] default = "eager"` becomes full hydration, and
 `hydrate.auto_patterns` becomes selective hydration.
 

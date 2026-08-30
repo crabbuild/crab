@@ -733,7 +733,7 @@ class AddCommitPushSmoke:
             repo, ["init", remote_url], name=f"{case_name} crab init"
         )
         self.run_crab(repo, ["track", "*.bin"], name=f"{case_name} crab track")
-        self.run_git(repo, ["add", ".crab.toml", ".gitattributes"], name=f"{case_name} add config")
+        self.run_git(repo, ["add", "crab.toml", ".gitattributes"], name=f"{case_name} add config")
         return repo, remote_url, repo_prefix
 
     def prepare_git_repo(self, case_name: str) -> tuple[Path, str, str]:
@@ -1058,7 +1058,7 @@ class AddCommitPushSmoke:
             denied.exit_code != 0,
             {"exit_code": denied.exit_code, "sha": first},
         )
-        with (raw_fetch / ".crab" / "config.toml").open("a", encoding="utf-8") as config:
+        with (raw_fetch / ".crab" / "local.toml").open("a", encoding="utf-8") as config:
             config.write("\n[uploadpack]\nallow_reachable_sha_in_want = true\n")
         self.run_git(
             raw_fetch,

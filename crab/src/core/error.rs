@@ -3612,25 +3612,49 @@ impl CrabError {
     }
 }
 
-// ── Hint / docs-anchor seam ──
-//
-// Forward-compatible accessors for `crab-ux-polish`. Both return
-// `None` for every variant today; the UX-polish spec will fill in
-// actual hint text and documentation anchors per error code.
-
 impl CrabError {
     /// Human-readable remediation hint for CLI display.
-    ///
-    /// Returns `None` for all variants until `crab-ux-polish` lands.
     pub fn hint(&self) -> Option<&'static str> {
-        None
+        match self {
+            Self::NotFound { .. } => Some(
+                "Check the requested path and remote. For a new repository, run `crab configure <REMOTE>`; otherwise run `crab doctor`.",
+            ),
+            Self::Forbidden { .. } => Some(
+                "Grant the active cloud identity access to this bucket and repository prefix, then run `crab doctor` to verify it.",
+            ),
+            Self::NoCredentials => Some(
+                "Configure credentials for the selected cloud provider, then run `crab doctor` to verify bucket access.",
+            ),
+            Self::AuthFailed { .. } => Some(
+                "Refresh or replace the active cloud credentials, then run `crab doctor` to verify them.",
+            ),
+            Self::AuthExpired { .. } => Some(
+                "Refresh the expired cloud credentials, then run `crab doctor` to verify them.",
+            ),
+            Self::Configuration { .. } => Some(
+                "Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.",
+            ),
+            Self::Storage(_) => Some(
+                "Run `crab doctor` to check the remote, credentials, and repository. Retry with `--log-level debug` if the cause is still unclear.",
+            ),
+            _ => None,
+        }
     }
 
-    /// Docs-site anchor fragment (e.g. `"errors#e0300"`) for deep-linking.
-    ///
-    /// Returns `None` for all variants until `crab-ux-polish` lands.
+    /// Docs-site path and optional anchor for deep-linking.
     pub fn docs_anchor(&self) -> Option<&'static str> {
-        None
+        match self {
+            Self::NotFound { .. } => Some("cli/diagnostics/error-codes"),
+            Self::Forbidden { .. }
+            | Self::NoCredentials
+            | Self::AuthFailed { .. }
+            | Self::AuthExpired { .. } => {
+                Some("cli/authentication/static-credentials#troubleshooting")
+            }
+            Self::Configuration { .. } => Some("cli/reference/crab-configure"),
+            Self::Storage(_) => Some("cli/diagnostics/health-check"),
+            _ => None,
+        }
     }
 }
 
@@ -4739,8 +4763,6 @@ mod tests {
         ]
     }
 
-    // --- hint() / docs_anchor() seam tests ---
-
     #[test]
     fn hint_returns_none_for_storage_economy_variants() {
         let cases: Vec<CrabError> = vec![
@@ -4775,14 +4797,29 @@ mod tests {
     }
 
     #[test]
-    fn hint_and_docs_anchor_none_for_all_variants() {
-        let variants = all_variants();
-        for err in &variants {
-            assert_eq!(err.hint(), None, "hint() should be None for {}", err.code());
-            assert_eq!(
-                err.docs_anchor(),
-                None,
-                "docs_anchor() should be None for {}",
+    fn setup_failures_have_actionable_help() {
+        let cases = [
+            CrabError::NotFound {
+                path: "team/models/layout".into(),
+            },
+            CrabError::Forbidden {
+                path: "team/models/layout".into(),
+            },
+            CrabError::NoCredentials,
+            CrabError::AuthExpired {
+                path: "team/models/layout".into(),
+            },
+            CrabError::Configuration {
+                key: "remote".into(),
+                origin: "crab.toml".into(),
+            },
+        ];
+
+        for err in &cases {
+            assert!(err.hint().is_some(), "{} should have a hint", err.code());
+            assert!(
+                err.docs_anchor().is_some(),
+                "{} should have a docs path",
                 err.code()
             );
         }

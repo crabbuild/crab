@@ -240,7 +240,7 @@ contains large datasets or models.
 crab init crab://ml-platform/fraud-detection
 crab track "data/**/*.csv"
 crab track "models/**/*.pkl"
-git add .gitattributes .crab.toml
+git add .gitattributes crab.toml
 git commit -m "configure Crab storage policy"
 crab push
 crab workflow push-cache --all --json

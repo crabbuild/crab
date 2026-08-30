@@ -499,11 +499,11 @@ crab clone crab://your-bucket/secret/forbidden-repo
 
 ### 6a. Create a shared config file
 
-Create a `.crab.toml` at the root of your crab repositories (or distribute
+Create a `crab.toml` at the root of your crab repositories (or distribute
 via your config management system):
 
 ```toml
-# .crab.toml — checked into the repo or distributed via config management
+# crab.toml — checked into the repo or distributed via config management
 [auth]
 provider = "crab-auth"
 issuer_url = "https://yourcompany.okta.com"

@@ -32,11 +32,11 @@ fn scaffold_repo(root: &Path) {
     .unwrap();
     fs::write(root.join("a.txt"), b"hello").unwrap();
 
-    // Workflow layer opt-in. The gate lives in `.crab/config.toml`
+    // Workflow layer opt-in. The gate lives in `.crab/local.toml`
     // and mirrors the other integration tests in this directory.
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -52,7 +52,7 @@ fn scaffold_pipeline_repo(root: &Path) {
     fs::write(root.join("clean.txt"), b"clean").unwrap();
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -286,7 +286,7 @@ fn reports_stale_after_param_modification() {
     fs::write(root.join("params.yaml"), b"model:\n  lr: 0.01\n").unwrap();
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -341,7 +341,7 @@ fn reports_stale_after_wdir_param_modification() {
     fs::write(training.join("params.yaml"), b"model:\n  lr: 0.01\n").unwrap();
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -393,7 +393,7 @@ fn reports_stale_after_python_param_modification() {
     fs::write(root.join("params.py"), b"model = {'lr': 0.01}\n").unwrap();
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -445,7 +445,7 @@ fn reports_stale_after_file_scoped_param_modification() {
     fs::write(root.join("custom.yaml"), b"model:\n  lr: 0.01\n").unwrap();
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();

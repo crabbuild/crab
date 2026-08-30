@@ -13,7 +13,7 @@ Source: `crab/src/core/config.rs`
 ```
 Highest priority:
   1. Remote config (JSON from S3, repo-level overrides)
-  2. Repository TOML (.crab/config.toml)
+  2. Repository TOML (.crab/local.toml)
   3. User TOML (~/.config/crab/config.toml)
   4. Compiled defaults
 Lowest priority
@@ -70,7 +70,7 @@ struct Config {
 
 ## Configuration File Format
 
-### Repository Config (`.crab/config.toml`)
+### Repository Config (`.crab/local.toml`)
 
 ```toml
 [remote]
@@ -201,7 +201,7 @@ impl Config {
         }
 
         // Layer 2: repo config
-        if let Ok(repo_toml) = read_toml(".crab/config.toml") {
+        if let Ok(repo_toml) = read_toml(".crab/local.toml") {
             config.apply_overlay(repo_toml);
         }
 

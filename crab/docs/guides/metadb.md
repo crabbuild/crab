@@ -251,7 +251,7 @@ the problem to one database.
 ## Configuration
 
 All tunables live under the `[metadb]` section of the crab config
-(`.crab/config.toml` or the user-level config at
+(`.crab/local.toml` or the user-level config at
 `~/.config/crab/config.toml`) and can be overridden by
 `CRAB_METADB_*` environment variables.
 

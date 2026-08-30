@@ -497,7 +497,7 @@ def create_source_repo(path: Path, repo_url: str, env: dict[str, str]) -> None:
     write_text(path / "src" / "allowed.bin", "allowed v1")
     write_text(path / "secret" / "hidden.bin", "secret v1")
     run_crab(["add", "src/allowed.bin", "secret/hidden.bin"], env, path)
-    for candidate in [".gitattributes", ".crab.toml"]:
+    for candidate in [".gitattributes", "crab.toml"]:
         if (path / candidate).exists():
             run(["git", "add", candidate], env, path)
     git_commit(path, "initial", env)

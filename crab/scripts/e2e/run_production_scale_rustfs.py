@@ -402,7 +402,7 @@ class ProductionScaleRunner:
 
     def stage_paths(self, repo: Path, paths: list[str], name: str) -> None:
         self.run_crab(repo, ["add", *paths, "--jobs", str(self.args.jobs), "--jsonl"], f"{name} crab add", timeout=12 * 60 * 60)
-        self.run_git(repo, ["add", "--", ".crab.toml", ".gitattributes", ".gitignore"], f"{name} git add metadata")
+        self.run_git(repo, ["add", "--", "crab.toml", ".gitattributes", ".gitignore"], f"{name} git add metadata")
         self.run_git(repo, ["add", "-A", "--", *paths], f"{name} git add pointers")
 
     def commit(self, repo: Path, message: str) -> None:
