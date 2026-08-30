@@ -7,7 +7,7 @@ use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
 };
-use crab_storage::{Store, repo_pack_index_path, repo_pack_path};
+use crab_storage::{Store, repo_pack_index_path, repo_pack_path, repo_pack_reverse_index_path};
 use crab_xet::hash::MerkleHash;
 use futures_util::stream::{self, StreamExt};
 use gix_pack::data::entry::Header;
@@ -1642,6 +1642,136 @@ impl RemoteGitReader {
             });
         }
         Ok(())
+    }
+
+    pub(crate) async fn download_pack_index_to_path(
+        &self,
+        pack_id: MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        self.download_pack_artifact_to_path(
+            repo_pack_index_path(&self.repo_prefix, &pack_id),
+            maximum_size,
+            destination,
+            budget,
+            cancellation,
+            "pack_index_stream",
+            "pack index bytes",
+        )
+        .await
+    }
+
+    pub(crate) async fn download_pack_reverse_index_to_path(
+        &self,
+        pack_id: MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        self.download_pack_artifact_to_path(
+            repo_pack_reverse_index_path(&self.repo_prefix, &pack_id),
+            maximum_size,
+            destination,
+            budget,
+            cancellation,
+            "pack_reverse_index_stream",
+            "pack reverse-index bytes",
+        )
+        .await
+    }
+
+    async fn download_pack_artifact_to_path(
+        &self,
+        path: object_store::path::Path,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+        storage_request: &'static str,
+        limit: &'static str,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let result = async {
+            let (metadata, range, mut stream) = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = self.store.get_stream(&path, None) => result?,
+            };
+            if range != (0..metadata.size) {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                });
+            }
+            check_limit(limit, metadata.size, maximum_size)?;
+            budget
+                .charge(BudgetDimension::FetchedBytes, metadata.size)
+                .await?;
+            tracing::debug!(
+                storage_request,
+                storage_bytes = metadata.size,
+                "remote Git sidecar object-store request"
+            );
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(destination)
+                .await
+                .map_err(|source| {
+                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                })?;
+            let mut written = 0_u64;
+            while let Some(chunk) = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                chunk = stream.next() => chunk,
+            } {
+                let chunk = chunk?;
+                let next = written
+                    .checked_add(chunk.len() as u64)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+                if next > metadata.size {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    });
+                }
+                if next > maximum_size {
+                    return Err(Error::LimitExceeded {
+                        limit,
+                        actual: next,
+                        maximum: maximum_size,
+                    });
+                }
+                file.write_all(&chunk).await.map_err(|source| {
+                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                })?;
+                written = next;
+            }
+            file.flush().await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            if written != metadata.size {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                });
+            }
+            Ok(())
+        }
+        .await;
+        drop(origin_permit);
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(destination).await;
+        }
+        result
     }
 }
 

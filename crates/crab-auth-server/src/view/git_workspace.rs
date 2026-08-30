@@ -106,7 +106,13 @@ pub(super) fn clone_bare(
     )
 }
 
-pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<Vec<u8>> {
+pub(super) struct GeneratedViewPack {
+    pub(super) bytes: Vec<u8>,
+    pub(super) index: Vec<u8>,
+    pub(super) reverse_index: Vec<u8>,
+}
+
+pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<GeneratedViewPack> {
     let object_list = run_git_capture_bytes(
         [
             "--git-dir",
@@ -118,7 +124,11 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<Vec<u8>> {
         None,
     )?;
     if object_list.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GeneratedViewPack {
+            bytes: Vec::new(),
+            index: Vec::new(),
+            reverse_index: Vec::new(),
+        });
     }
 
     let mut pack_objects = Command::new("git")
@@ -166,7 +176,15 @@ pub(super) fn generate_view_pack(filtered_git: &Path) -> Result<Vec<u8>> {
         ],
         None,
     )?;
-    Ok(output.stdout)
+    let index_path = validation_pack.with_extension("idx");
+    let reverse_index_path = validation_pack.with_extension("rev");
+    crab_git::pack_locator::write_pack_reverse_index(&index_path, &reverse_index_path)
+        .map_err(crab_git::pack::PackError::from)?;
+    Ok(GeneratedViewPack {
+        bytes: output.stdout,
+        index: std::fs::read(index_path)?,
+        reverse_index: std::fs::read(reverse_index_path)?,
+    })
 }
 
 pub(super) fn list_view_refs(filtered_git: &Path) -> Result<BTreeMap<String, String>> {

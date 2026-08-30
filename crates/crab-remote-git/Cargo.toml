@@ -22,6 +22,7 @@ gix-features = { workspace = true, features = ["crc32", "zlib"] }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
 gix-pack = { workspace = true, features = ["sha1"] }
+object_store = { workspace = true }
 futures-util = { workspace = true }
 sha1 = "0.10"
 serde_json = { workspace = true }

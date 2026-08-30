@@ -81,6 +81,33 @@ pub enum PackError {
         source: crate::pack_locator::PackLocatorError,
     },
 
+    /// A pack sidecar exceeded the bound implied by its object count.
+    #[error("git pack sidecar {path} is too large: {size} bytes exceeds limit {limit}")]
+    SidecarTooLarge {
+        /// Sidecar path that exceeded its bound.
+        path: PathBuf,
+        /// Observed sidecar size.
+        size: u64,
+        /// Maximum permitted sidecar size.
+        limit: u64,
+    },
+
+    /// The object-count-derived sidecar bound could not be represented.
+    #[error("git pack sidecar size bound overflowed for {path}")]
+    SidecarSizeOverflow {
+        /// Sidecar path whose bound overflowed.
+        path: PathBuf,
+    },
+
+    /// The pack content did not match its canonical storage identifier.
+    #[error("git pack content hash mismatch: expected {expected}, computed {computed}")]
+    ContentHashMismatch {
+        /// Canonical content identifier supplied by the caller.
+        expected: String,
+        /// Content identifier computed from the pack bytes.
+        computed: String,
+    },
+
     /// Git could not return validated object kinds for a local object database.
     #[error("git object-kind query failed for {path}: {detail}")]
     ObjectKindQuery { path: PathBuf, detail: String },
@@ -276,6 +303,214 @@ pub fn install_pack_file_from_path(
         &final_rev,
         fsck_objects,
     )
+}
+
+/// Install a pack together with its already-verified Git index sidecars.
+///
+/// The pack body is content-hash and trailer validated once. The supplied
+/// index and reverse-index are checked against the pack before immutable
+/// hard-link-or-copy staging and atomic per-file installation. This avoids
+/// re-running `git index-pack` when a committed Crab inventory already
+/// contains both sidecars.
+///
+/// # Errors
+///
+/// Returns [`PackError::SidecarTooLarge`] when either sidecar exceeds the
+/// object-count-derived bound, [`PackError::SidecarSizeOverflow`] when that
+/// bound cannot be represented, or a validation error when the sidecars do not
+/// describe the supplied pack.
+pub fn install_pack_files_from_paths(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+) -> Result<InstalledPack> {
+    let pack_size = std::fs::metadata(pack_tmp_path)
+        .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
+        .len();
+    if max_input_size > 0 && pack_size > max_input_size {
+        return Err(PackError::PackTooLarge {
+            size: pack_size,
+            limit: max_input_size,
+        });
+    }
+    if !valid_canonical_pack_name(canonical_name) {
+        return Err(PackError::InvalidCanonicalName {
+            name: canonical_name.to_owned(),
+        });
+    }
+
+    let (git_sha1, content_hash, verified_size) = verify_and_hash_pack_file(pack_tmp_path)?;
+    if verified_size != pack_size {
+        return Err(PackError::InvalidPackFile {
+            path: pack_tmp_path.to_owned(),
+            reason: "pack changed while its size was being verified".to_owned(),
+        });
+    }
+    let computed_content_hash = blake3::Hash::from_bytes(content_hash).to_hex().to_string();
+    if !computed_content_hash.eq_ignore_ascii_case(canonical_name) {
+        return Err(PackError::ContentHashMismatch {
+            expected: canonical_name.to_owned(),
+            computed: computed_content_hash,
+        });
+    }
+
+    let index_limit =
+        crate::pack_locator::max_pack_index_size(expected_object_count).ok_or_else(|| {
+            PackError::SidecarSizeOverflow {
+                path: index_tmp_path.to_owned(),
+            }
+        })?;
+    let index_size = std::fs::metadata(index_tmp_path)
+        .map_err(|source| io_error(format!("metadata {}", index_tmp_path.display()), source))?
+        .len();
+    if index_size > index_limit {
+        return Err(PackError::SidecarTooLarge {
+            path: index_tmp_path.to_owned(),
+            size: index_size,
+            limit: index_limit,
+        });
+    }
+    let reverse_limit = crate::pack_locator::pack_reverse_index_size(expected_object_count)
+        .ok_or_else(|| PackError::SidecarSizeOverflow {
+            path: reverse_index_tmp_path.to_owned(),
+        })?;
+    let reverse_index_size = std::fs::metadata(reverse_index_tmp_path)
+        .map_err(|source| {
+            io_error(
+                format!("metadata {}", reverse_index_tmp_path.display()),
+                source,
+            )
+        })?
+        .len();
+    if reverse_index_size > reverse_limit {
+        return Err(PackError::SidecarTooLarge {
+            path: reverse_index_tmp_path.to_owned(),
+            size: reverse_index_size,
+            limit: reverse_limit,
+        });
+    }
+
+    let locations = crate::pack_locator::PackLocationIter::open(
+        index_tmp_path,
+        reverse_index_tmp_path,
+        pack_size,
+    )?;
+    if locations.object_count() != expected_object_count {
+        return Err(PackError::InvalidPackFile {
+            path: index_tmp_path.to_owned(),
+            reason: format!(
+                "index has {} objects but caller expects {expected_object_count}",
+                locations.object_count()
+            ),
+        });
+    }
+    let indexed_sha1 = locations.pack_checksum().to_string();
+    if indexed_sha1 != git_sha1 {
+        return Err(PackError::PackHashMismatch {
+            trailer: git_sha1,
+            index: indexed_sha1,
+        });
+    }
+
+    std::fs::create_dir_all(pack_dir)
+        .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
+    let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
+    let final_idx = pack_dir.join(format!("pack-{canonical_name}.idx"));
+    let final_rev = pack_dir.join(format!("pack-{canonical_name}.rev"));
+    if final_pack.exists() || final_idx.exists() || final_rev.exists() {
+        return Err(PackError::InvalidPackFile {
+            path: final_pack,
+            reason: "pack installation destination already exists".to_owned(),
+        });
+    }
+
+    let staged_pack = stage_source_artifact(pack_dir, pack_tmp_path, ".pack")?;
+    let staged_idx = stage_source_artifact(pack_dir, index_tmp_path, ".idx")?;
+    let staged_rev = stage_source_artifact(pack_dir, reverse_index_tmp_path, ".rev")?;
+    let staged_pack_path: &Path = staged_pack.as_ref();
+    let staged_idx_path: &Path = staged_idx.as_ref();
+    let staged_rev_path: &Path = staged_rev.as_ref();
+    if let Err(source) = std::fs::rename(staged_idx_path, &final_idx) {
+        return Err(io_error(
+            format!("rename {}", staged_idx_path.display()),
+            source,
+        ));
+    }
+    if let Err(source) = std::fs::rename(staged_rev_path, &final_rev) {
+        let _ = std::fs::remove_file(&final_idx);
+        return Err(io_error(
+            format!("rename {}", staged_rev_path.display()),
+            source,
+        ));
+    }
+    if let Err(source) = std::fs::rename(staged_pack_path, &final_pack) {
+        let _ = std::fs::remove_file(&final_idx);
+        let _ = std::fs::remove_file(&final_rev);
+        return Err(io_error(
+            format!("rename {}", staged_pack_path.display()),
+            source,
+        ));
+    }
+
+    Ok(InstalledPack {
+        git_sha1,
+        pack_path: final_pack,
+        idx_path: final_idx,
+        rev_path: final_rev,
+    })
+}
+
+fn stage_source_artifact(
+    pack_dir: &Path,
+    source: &Path,
+    suffix: &str,
+) -> Result<tempfile::TempPath> {
+    let staged = tempfile::Builder::new()
+        .prefix(".crab-pack-source-")
+        .suffix(suffix)
+        .tempfile_in(pack_dir)
+        .map_err(|source_error| {
+            io_error(
+                format!("create source artifact tempfile in {}", pack_dir.display()),
+                source_error,
+            )
+        })?;
+    let staged_path = staged.into_temp_path();
+    std::fs::remove_file(&staged_path).map_err(|source_error| {
+        io_error(
+            format!("prepare source artifact tempfile {}", staged_path.display()),
+            source_error,
+        )
+    })?;
+    match std::fs::hard_link(source, &staged_path) {
+        Ok(()) => {}
+        Err(source_error)
+            if matches!(
+                source_error.kind(),
+                std::io::ErrorKind::CrossesDevices
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            std::fs::copy(source, &staged_path).map_err(|copy_error| {
+                io_error(
+                    format!("copy source artifact {}", source.display()),
+                    copy_error,
+                )
+            })?;
+        }
+        Err(source_error) => {
+            return Err(io_error(
+                format!("stage source artifact {}", source.display()),
+                source_error,
+            ));
+        }
+    }
+    Ok(staged_path)
 }
 
 fn copy_pack_to_install_temp(pack_dir: &Path, source: &Path) -> Result<tempfile::NamedTempFile> {
@@ -859,6 +1094,50 @@ mod tests {
         assert_eq!(
             verify_and_hash_pack_file(&pack_path).expect("verify and hash pack"),
             expected
+        );
+    }
+
+    #[test]
+    fn indexed_pack_install_reuses_verified_sidecars() {
+        let (dir, idx_path, _pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let reverse_path = idx_path.with_extension("rev");
+        crate::pack_locator::write_pack_reverse_index(&idx_path, &reverse_path)
+            .expect("write fixture reverse index");
+        let pack_size = std::fs::metadata(&pack_path)
+            .expect("fixture pack metadata")
+            .len();
+        let locations =
+            crate::pack_locator::PackLocationIter::open(&idx_path, &reverse_path, pack_size)
+                .expect("open fixture indexes");
+        let object_count = locations.object_count();
+        let canonical_id = blake3::hash(&std::fs::read(&pack_path).expect("read fixture pack"))
+            .to_hex()
+            .to_string();
+        let destination = dir.path().join("installed");
+
+        let installed = install_pack_files_from_paths(
+            &destination,
+            &pack_path,
+            &idx_path,
+            &reverse_path,
+            &canonical_id,
+            pack_size,
+            object_count,
+        )
+        .expect("install indexed pack");
+
+        assert_eq!(
+            std::fs::read(&installed.idx_path).expect("read installed index"),
+            std::fs::read(&idx_path).expect("read source index")
+        );
+        assert_eq!(
+            std::fs::read(&installed.rev_path).expect("read installed reverse index"),
+            std::fs::read(&reverse_path).expect("read source reverse index")
+        );
+        assert_eq!(
+            std::fs::read(&installed.pack_path).expect("read installed pack"),
+            std::fs::read(&pack_path).expect("read source pack")
         );
     }
 

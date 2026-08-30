@@ -8,7 +8,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::pack::{
-    PackError, install_pack_file_from_path, verify_and_hash_pack_file, verify_pack_file_sha1,
+    PackError, install_pack_file_from_path, install_pack_files_from_paths,
+    verify_and_hash_pack_file,
 };
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 use sha1::{Digest, Sha1};
@@ -23,6 +24,10 @@ pub struct RepackSource {
     pub canonical_id: String,
     /// Local path containing the complete pack body.
     pub path: PathBuf,
+    /// Local path containing the committed Git pack index.
+    pub index_path: PathBuf,
+    /// Local path containing the committed Git reverse index.
+    pub reverse_index_path: PathBuf,
     /// Size committed by the source manifest.
     pub size: u64,
     /// Object count committed by the source manifest.
@@ -234,28 +239,11 @@ pub fn repack_repository_geometric(
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    for source in sources {
-        validate_source(source)?;
-        let installed = install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-        let locations =
-            PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-        if locations.object_count() != source.object_count {
-            return Err(RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!(
-                    "index has {} objects but manifest records {}",
-                    locations.object_count(),
-                    source.object_count
-                ),
-            });
-        }
-    }
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
     pin_refs_and_fsck(&source_git, refs, "validate source repository")?;
     run_git(
         Command::new("git")
@@ -415,7 +403,7 @@ pub fn consolidate_pack_suffix_with_concurrency(
     let pack_dir = source_git.join("objects/pack");
     let install_started = Instant::now();
     let (mut source_oids, source_indexes) =
-        install_source_packs(&pack_dir, sources, index_concurrency)?;
+        install_source_packs(&pack_dir, sources, index_concurrency, true)?;
     tracing::debug!(
         source_pack_count = sources.len(),
         index_concurrency = index_concurrency.max(1).min(sources.len()),
@@ -557,7 +545,6 @@ pub fn concatenate_complete_pack_inventory(
             });
         }
         validate_source(source)?;
-        verify_pack_file_sha1(&source.path)?;
         let mut input = File::open(&source.path)
             .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
         let mut header = [0_u8; 12];
@@ -683,7 +670,11 @@ fn install_source_packs(
     pack_dir: &Path,
     sources: &[RepackSource],
     index_concurrency: usize,
+    collect_oids: bool,
 ) -> Result<(Vec<[u8; 20]>, Vec<PathBuf>), RepackError> {
+    if sources.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let batch_size = index_concurrency.max(1).min(sources.len());
     let mut source_oids = Vec::new();
     let mut source_indexes = Vec::with_capacity(sources.len());
@@ -691,7 +682,9 @@ fn install_source_packs(
         let results = std::thread::scope(|scope| {
             let handles = batch
                 .iter()
-                .map(|source| scope.spawn(move || install_source_pack(pack_dir, source)))
+                .map(|source| {
+                    scope.spawn(move || install_source_pack(pack_dir, source, collect_oids))
+                })
                 .collect::<Vec<_>>();
             handles
                 .into_iter()
@@ -719,40 +712,36 @@ fn install_source_packs(
 fn install_source_pack(
     pack_dir: &Path,
     source: &RepackSource,
+    collect_oids: bool,
 ) -> Result<InstalledSourcePack, RepackError> {
-    validate_source(source)?;
-    let installed = install_pack_file_from_path(
+    let installed = install_pack_files_from_paths(
         pack_dir,
         &source.path,
+        &source.index_path,
+        &source.reverse_index_path,
         &source.canonical_id,
         source.size,
-        false,
+        source.object_count,
     )?;
-    let mut locations =
-        PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-    if locations.object_count() != source.object_count {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: source.canonical_id.clone(),
-            reason: format!(
-                "index has {} objects but manifest records {}",
-                locations.object_count(),
-                source.object_count
-            ),
-        });
-    }
-    let mut oids = Vec::new();
-    for location in &mut locations {
-        let location = location?;
-        let oid = location
-            .oid
-            .as_bytes()
-            .try_into()
-            .map_err(|_| RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: "selected pack contains a non-SHA1 object".to_owned(),
-            })?;
-        oids.push(oid);
-    }
+    let oids =
+        if collect_oids {
+            let mut locations =
+                PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
+            let mut oids = Vec::new();
+            for location in &mut locations {
+                let location = location?;
+                let oid = location.oid.as_bytes().try_into().map_err(|_| {
+                    RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "selected pack contains a non-SHA1 object".to_owned(),
+                    }
+                })?;
+                oids.push(oid);
+            }
+            oids
+        } else {
+            Vec::new()
+        };
     Ok(InstalledSourcePack {
         index_path: installed.idx_path,
         oids,
@@ -781,16 +770,11 @@ pub fn repack_selected_objects(
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    for source in sources {
-        validate_source(source)?;
-        install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-    }
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
 
     let object_list = workspace.path().join("selected-objects.txt");
     let mut input = File::create(&object_list)
@@ -848,7 +832,7 @@ pub fn repack_shallow_fetch(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    let _ = install_source_packs(&pack_dir, sources, concurrency)?;
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
 
     let shallow_path = source_git.join("shallow");
     let mut shallow_file = File::create(&shallow_path)
@@ -1164,7 +1148,7 @@ fn verified_generated_pack(
 }
 
 fn validate_source(source: &RepackSource) -> Result<(), RepackError> {
-    let (hash, size) = hash_file(&source.path)?;
+    let (_, hash, size) = verify_and_hash_pack_file(&source.path)?;
     if size != source.size {
         return Err(RepackError::SourceIntegrity {
             pack_id: source.canonical_id.clone(),
@@ -1380,6 +1364,8 @@ mod tests {
         let source = RepackSource {
             canonical_id: "source".to_owned(),
             path: PathBuf::new(),
+            index_path: PathBuf::new(),
+            reverse_index_path: PathBuf::new(),
             size: 0,
             object_count: 0,
         };
@@ -1936,21 +1922,35 @@ mod tests {
                 )
             })?;
         let target = destination.join(format!("{name}.pack"));
-        std::fs::copy(source, &target).map_err(|error| io_error("copy test pack", error))?;
+        let target_index = target.with_extension("idx");
+        let target_reverse_index = target.with_extension("rev");
+        std::fs::copy(&source, &target).map_err(|error| io_error("copy test pack", error))?;
+        std::fs::copy(source.with_extension("idx"), &target_index)
+            .map_err(|error| io_error("copy test pack index", error))?;
+        let source_reverse_index = source.with_extension("rev");
+        if source_reverse_index.is_file() {
+            std::fs::copy(source_reverse_index, &target_reverse_index)
+                .map_err(|error| io_error("copy test pack reverse index", error))?;
+        } else {
+            write_pack_reverse_index(&target_index, &target_reverse_index)?;
+        }
         Ok(target)
     }
 
     fn source_descriptor(path: PathBuf) -> Result<RepackSource, RepackError> {
         let (hash, size) = hash_file(&path)?;
-        let installed =
-            tempfile::tempdir().map_err(|error| io_error("create index root", error))?;
         let canonical_id = blake3::Hash::from_bytes(hash).to_hex().to_string();
-        let pack =
-            install_pack_file_from_path(installed.path(), &path, &canonical_id, size, false)?;
-        let locations = PackLocationIter::open(&pack.idx_path, &pack.rev_path, size)?;
+        let index_path = path.with_extension("idx");
+        let reverse_index_path = path.with_extension("rev");
+        if !reverse_index_path.is_file() {
+            write_pack_reverse_index(&index_path, &reverse_index_path)?;
+        }
+        let locations = PackLocationIter::open(&index_path, &reverse_index_path, size)?;
         Ok(RepackSource {
             canonical_id,
             path,
+            index_path,
+            reverse_index_path,
             size,
             object_count: locations.object_count(),
         })

@@ -378,8 +378,16 @@ async fn run_repack_locked(
     let shallow_closure = read_current_shallow_closure(store, router, &manifest).await?;
 
     std::fs::create_dir_all(&config.workspace_root).map_err(CrabError::Io)?;
+    let sidecar_bytes = selected_pack_sidecar_bytes(&selected_packs)?;
+    // Hard-link staging is normally zero-copy, but a cross-device workspace
+    // can require a second local copy of every downloaded artifact.
     let required_space = bytes_read
         .checked_mul(2)
+        .and_then(|bytes| {
+            sidecar_bytes
+                .checked_mul(2)
+                .and_then(|sidecars| bytes.checked_add(sidecars))
+        })
         .and_then(|bytes| bytes.checked_add(REPACK_DISK_RESERVE))
         .ok_or_else(|| CrabError::Internal("repack workspace size overflow".to_owned()))?;
     let available = crate::workflow::cache::available_disk_space(&config.workspace_root)
@@ -425,6 +433,9 @@ async fn run_repack_locked(
             .map(|pack| crab_git::repack::RepackSource {
                 canonical_id: pack.pack_id.clone(),
                 path: download_dir_for_pack.join(format!("pack-{}.pack", pack.pack_id)),
+                index_path: download_dir_for_pack.join(format!("pack-{}.idx", pack.pack_id)),
+                reverse_index_path: download_dir_for_pack
+                    .join(format!("pack-{}.rev", pack.pack_id)),
                 size: pack.size,
                 object_count: pack.object_count,
             })
@@ -920,15 +931,15 @@ async fn download_source_packs(
         let store = store.clone();
         let cancel = cancel.clone();
         let pack_path = repo_pack_path(router.repo_prefix(), &pack.pack_id);
+        let index_path = repo_pack_index_path(router.repo_prefix(), &pack.pack_id);
+        let reverse_index_path = repo_pack_reverse_index_path(router.repo_prefix(), &pack.pack_id);
         let local_pack = pack_dir.join(format!("pack-{}.pack", pack.pack_id));
+        let local_index = pack_dir.join(format!("pack-{}.idx", pack.pack_id));
+        let local_reverse_index = pack_dir.join(format!("pack-{}.rev", pack.pack_id));
         async move {
             if cancel.is_cancelled() {
                 return Err(CrabError::Cancelled);
             }
-            // The committed manifest supplies the exact body bound; disk
-            // admission above limits aggregate temporary space. The pack
-            // index is a derived object and the repack worker rebuilds it
-            // while installing the body, avoiding a second validation path.
             let pack_size = tokio::select! {
                 result = store.download_to_path_bounded(&pack_path, &local_pack, pack.size) => result?,
                 () = cancel.cancelled() => return Err(CrabError::Cancelled),
@@ -937,6 +948,36 @@ async fn download_source_packs(
                 return Err(CrabError::CorruptObject {
                     path: pack_path.as_ref().to_owned(),
                     reason: format!("pack has {pack_size} bytes, manifest records {}", pack.size),
+                });
+            }
+            let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: index_path.as_ref().to_owned(),
+                    reason: "pack index size bound overflowed".to_owned(),
+                })?;
+            tokio::select! {
+                result = store.download_to_path_bounded(&index_path, &local_index, index_maximum) => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
+            let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: reverse_index_path.as_ref().to_owned(),
+                    reason: "pack reverse-index size bound overflowed".to_owned(),
+                })?;
+            let reverse_size = tokio::select! {
+                result = store.download_to_path_bounded(
+                    &reverse_index_path,
+                    &local_reverse_index,
+                    reverse_maximum,
+                ) => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
+            if reverse_size != reverse_maximum {
+                return Err(CrabError::CorruptObject {
+                    path: reverse_index_path.as_ref().to_owned(),
+                    reason: format!(
+                        "reverse index has {reverse_size} bytes, expected {reverse_maximum}"
+                    ),
                 });
             }
             Ok(())
@@ -950,6 +991,25 @@ async fn download_source_packs(
         result?;
     }
     Ok(())
+}
+
+fn selected_pack_sidecar_bytes(packs: &[PackManifestEntry]) -> Result<u64> {
+    packs.iter().try_fold(0_u64, |total, pack| {
+        let index_size = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("pack-{}/idx", pack.pack_id),
+                reason: "pack index size bound overflowed".to_owned(),
+            })?;
+        let reverse_index_size = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("pack-{}/rev", pack.pack_id),
+                reason: "pack reverse-index size bound overflowed".to_owned(),
+            })?;
+        total
+            .checked_add(index_size)
+            .and_then(|value| value.checked_add(reverse_index_size))
+            .ok_or_else(|| CrabError::Internal("repack sidecar byte total overflow".to_owned()))
+    })
 }
 
 fn validate_pack_inventory(router: &StoreLayout, packs: &[PackManifestEntry]) -> Result<()> {
@@ -1358,7 +1418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repack_source_download_requires_only_the_committed_pack_body() -> Result<()> {
+    async fn repack_source_download_requires_committed_pack_artifacts() -> Result<()> {
         let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(backend);
         let router = StoreLayout::new(store.clone(), "org/repack-download".to_owned());
@@ -1388,6 +1448,18 @@ mod tests {
                 Bytes::from(std::fs::read(&pack.pack_path)?),
             )
             .await?;
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&pack.index_path)?),
+            )
+            .await?;
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&reverse_index)?),
+            )
+            .await?;
         let download_dir = source.path().join("downloads");
         std::fs::create_dir_all(&download_dir)?;
 
@@ -1404,6 +1476,14 @@ mod tests {
         assert_eq!(
             std::fs::read(download_dir.join(format!("pack-{pack_id}.pack")))?,
             std::fs::read(pack.pack_path)?,
+        );
+        assert_eq!(
+            std::fs::read(download_dir.join(format!("pack-{pack_id}.idx")))?,
+            std::fs::read(pack.index_path)?,
+        );
+        assert_eq!(
+            std::fs::read(download_dir.join(format!("pack-{pack_id}.rev")))?,
+            std::fs::read(reverse_index)?,
         );
         Ok(())
     }
@@ -1756,6 +1836,12 @@ mod tests {
             .put(
                 &router.pack_index_path(&pack_id),
                 Bytes::from(std::fs::read(&pack.index_path)?),
+            )
+            .await?;
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&reverse_index_path)?),
             )
             .await?;
         Ok(PackManifestEntry {

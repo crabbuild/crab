@@ -1336,6 +1336,21 @@ also computes SHA-1 and Blake3 in one streaming read instead of reading the
 entire response twice. A new RustFS producer run is still required before
 claiming an end-to-end latency reduction from this microqualification.
 
+The next producer patch removes the source-side index bottleneck rather than
+changing pack shape blindly. Large producers now download the committed pack
+body together with its `.idx` and `.rev` sidecars, validate both sidecars
+against the pack trailer, object count, offsets, CRC table, and checksums, then
+hard-link the verified artifacts into the temporary Git object database when
+the filesystems permit it. Cross-device staging falls back to bounded copies.
+The shallow path no longer materializes and walks an OID vector from every
+source pack when Git's native reachability walk is the only consumer. The ACL
+view publisher now emits the same sidecars, closing the sibling producer gap.
+Focused Crab, crab-git, crab-remote-git, and auth-view tests pass for this
+contract; a fresh RustFS run is still required to measure the end-to-end
+improvement and confirm that existing repositories have complete committed
+sidecars before the optimization is treated as the default large-repository
+path.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary

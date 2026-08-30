@@ -29,8 +29,8 @@ mod objects;
 mod repack;
 
 use git_workspace::{
-    ViewGitWorkspace, clone_bare, count_pack_objects, generate_view_pack, list_view_refs,
-    resolve_view_head, scan_reachable_pointers,
+    GeneratedViewPack, ViewGitWorkspace, clone_bare, count_pack_objects, generate_view_pack,
+    list_view_refs, resolve_view_head, scan_reachable_pointers,
 };
 use objects::{commit_view_metadb, upload_view_crab_objects};
 use repack::{ViewCrabObjects, ViewCrabRepacker, materialize_crab_pointers_in_fast_export};
@@ -599,7 +599,11 @@ async fn upload_view_git_pack(
         return Ok(None);
     }
 
-    let pack_bytes = generate_view_pack(filtered_git)?;
+    let GeneratedViewPack {
+        bytes: pack_bytes,
+        index,
+        reverse_index,
+    } = generate_view_pack(filtered_git)?;
     verify_pack_sha1(&pack_bytes).map_err(AuthServerError::from)?;
     let object_count = count_pack_objects(&pack_bytes);
     if object_count == 0 {
@@ -610,6 +614,15 @@ async fn upload_view_git_pack(
     let pack_path = router.pack_path(&pack_id);
     let pack_size = pack_bytes.len() as u64;
     store.put(&pack_path, Bytes::from(pack_bytes)).await?;
+    store
+        .put(&router.pack_index_path(&pack_id), Bytes::from(index))
+        .await?;
+    store
+        .put(
+            &router.pack_reverse_index_path(&pack_id),
+            Bytes::from(reverse_index),
+        )
+        .await?;
 
     let ref_tips: Vec<String> = refs.values().cloned().collect();
     let mut metadata = PackMetadata {
@@ -1017,6 +1030,14 @@ mod tests {
             .unwrap();
         assert_eq!(packs.len(), 1);
 
+        store
+            .head(&view_router.pack_index_path(&packs[0].pack_id))
+            .await
+            .unwrap();
+        store
+            .head(&view_router.pack_reverse_index_path(&packs[0].pack_id))
+            .await
+            .unwrap();
         let pack_path = view_router.pack_path(&packs[0].pack_id);
         let (pack_bytes, _) = store.get_with_etag(&pack_path).await.unwrap();
         let view_git = temp.path().join("view.git");

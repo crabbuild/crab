@@ -582,6 +582,42 @@ impl OperationContext {
             .await
     }
 
+    pub(crate) async fn download_pack_index_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_index_to_path(
+                pack_id,
+                maximum_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
+    }
+
+    pub(crate) async fn download_pack_reverse_index_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_reverse_index_to_path(
+                pack_id,
+                maximum_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
+    }
+
     /// Read one verified Git object from the pinned repository generation.
     pub async fn read_object(&self, oid: gix_hash::ObjectId) -> Result<crate::RemoteGitObject> {
         check_cancelled(&self.cancellation)?;

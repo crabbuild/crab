@@ -399,10 +399,11 @@ impl RemoteGitRepository {
             let inventory_bytes = inventory
                 .iter()
                 .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
-            if inventory_bytes > operation.max_fetched_bytes() {
+            let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
+            if source_artifact_bytes > operation.max_fetched_bytes() {
                 return Err(Error::LimitExceeded {
                     limit: "native shallow source bytes",
-                    actual: inventory_bytes,
+                    actual: source_artifact_bytes,
                     maximum: operation.max_fetched_bytes(),
                 });
             }
@@ -634,9 +635,7 @@ impl RemoteGitRepository {
         let inventory_objects = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-        let inventory_bytes = inventory
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+        let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
         if !Self::complete_pack_consolidation_candidate(
             inventory.len(),
             inventory_objects,
@@ -644,7 +643,7 @@ impl RemoteGitRepository {
         ) {
             return Ok(None);
         }
-        if inventory_bytes > operation.max_fetched_bytes() {
+        if source_artifact_bytes > operation.max_fetched_bytes() {
             return Ok(None);
         }
 
@@ -743,11 +742,12 @@ impl RemoteGitRepository {
         let inventory_bytes = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+        let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
         if !Self::selected_pack_repack_candidate(
             inventory_objects,
             object_ids.len(),
             SELECTED_PACK_REPACK_MIN_OBJECTS,
-        ) || inventory_bytes > operation.max_fetched_bytes()
+        ) || source_artifact_bytes > operation.max_fetched_bytes()
         {
             return Ok(None);
         }
@@ -958,6 +958,28 @@ async fn download_repack_sources(
         |pack, path| async move {
             operation
                 .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
+                .await?;
+            let index_maximum =
+                crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                })?;
+            operation
+                .download_pack_index_to_path(
+                    pack.pack_id,
+                    index_maximum,
+                    &path.with_extension("idx"),
+                )
+                .await?;
+            let reverse_maximum =
+                crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                })?;
+            operation
+                .download_pack_reverse_index_to_path(
+                    pack.pack_id,
+                    reverse_maximum,
+                    &path.with_extension("rev"),
+                )
                 .await
         },
     )
@@ -978,18 +1000,24 @@ where
     let concurrency = inventory.len().min(max_concurrency.max(1)).max(1);
     let mut sources = stream::iter(inventory.into_iter().enumerate().map(|(index, pack)| {
         let path = download_dir.join(format!("pack-{index}-{}.pack", pack.pack_id));
+        let index_path = path.with_extension("idx");
+        let reverse_index_path = path.with_extension("rev");
         let download = &download;
         async move {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             std::fs::File::create(&path).map_err(io_error)?;
+            std::fs::File::create(&index_path).map_err(io_error)?;
+            std::fs::File::create(&reverse_index_path).map_err(io_error)?;
             download(pack, path.clone()).await?;
             Ok::<_, Error>((
                 index,
                 crab_git::repack::RepackSource {
                     canonical_id: pack.pack_id.to_string(),
                     path,
+                    index_path,
+                    reverse_index_path,
                     size: pack.pack_size,
                     object_count: pack.object_count,
                 },
@@ -1001,6 +1029,26 @@ where
     .await?;
     sources.sort_unstable_by_key(|(index, _)| *index);
     Ok(sources.into_iter().map(|(_, source)| source).collect())
+}
+
+fn repack_source_artifact_bytes(inventory: &[GitPackInventoryEntry]) -> Result<u64> {
+    inventory.iter().try_fold(0_u64, |total, pack| {
+        let index_size =
+            crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })?;
+        let reverse_index_size =
+            crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })?;
+        total
+            .checked_add(pack.pack_size)
+            .and_then(|value| value.checked_add(index_size))
+            .and_then(|value| value.checked_add(reverse_index_size))
+            .ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })
+    })
 }
 
 fn generated_pack_cache_key(
@@ -2681,6 +2729,12 @@ mod tests {
                         tokio::fs::write(&path, pack.pack_id.as_bytes())
                             .await
                             .map_err(io_error)?;
+                        tokio::fs::write(path.with_extension("idx"), b"index")
+                            .await
+                            .map_err(io_error)?;
+                        tokio::fs::write(path.with_extension("rev"), b"reverse")
+                            .await
+                            .map_err(io_error)?;
                         active.fetch_sub(1, Ordering::SeqCst);
                         Ok(())
                     }
@@ -2699,6 +2753,12 @@ mod tests {
             (1..=8).collect::<Vec<_>>()
         );
         assert!(sources.iter().all(|source| source.path.is_file()));
+        assert!(sources.iter().all(|source| source.index_path.is_file()));
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.reverse_index_path.is_file())
+        );
     }
 
     fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {

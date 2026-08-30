@@ -757,6 +757,8 @@ async fn publish_with_runtime_and_summary(
     let fixture = PackFixture::new(delta_kind);
     let pack_bytes = Bytes::from(fs::read(&fixture.pack).expect("read fixture pack"));
     let index_bytes = Bytes::from(fs::read(&fixture.index).expect("read fixture index"));
+    let reverse_index_bytes =
+        Bytes::from(fs::read(&fixture.reverse).expect("read fixture reverse index"));
     let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str())
         .expect("raw BLAKE3 pack identity");
     let pack_size = pack_bytes.len() as u64;
@@ -772,6 +774,13 @@ async fn publish_with_runtime_and_summary(
         .put(&layout.pack_index_path(&pack_id), index_bytes.into())
         .await
         .expect("upload index");
+    inner
+        .put(
+            &layout.pack_reverse_index_path(&pack_id),
+            reverse_index_bytes.into(),
+        )
+        .await
+        .expect("upload reverse index");
 
     let locations = PackLocationIter::open(&fixture.index, &fixture.reverse, pack_size)
         .expect("open fixture locations")

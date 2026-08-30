@@ -99,6 +99,14 @@ GC resolves recent descriptors with bounded list-concurrency and streams
 validated pairs, keeping response-cache cleanup from turning into an
 unbounded read or memory wave as request history grows.
 
+Large response producers download committed source `.pack`, `.idx`, and `.rev`
+artifacts. The pack body and both sidecars are validated against the pinned
+inventory, then staged with hard links when the workspace permits it, avoiding
+the CPU and I/O cost of rebuilding a source index. Shallow selection also keeps
+the source installation bounded by skipping an OID enumeration that the
+selection planner does not consume; exact response-set validation remains in
+place.
+
 Directory listing reads only the selected tree. Child sizes are absent unless
 the caller requests bounded page-only metadata. Comparison prunes equal tree
 IDs. History, diff, blame, archive, storage, inflation, and response work have
