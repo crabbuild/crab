@@ -201,6 +201,18 @@ pub fn run_dehydrate_in(
     // that will be invalidated lazily on the next clean (stat
     // mismatch detection).
     if summary.dehydrated > 0 {
+        let dehydrated_paths = to_dehydrate
+            .iter()
+            .filter(|path| is_working_tree_pointer(path).unwrap_or(false))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Err(error) = crate::git::worktree::refresh_index_stats(root, &dehydrated_paths) {
+            warn!(
+                files = dehydrated_paths.len(),
+                error = %error,
+                "failed to refresh dehydrated file index stat metadata"
+            );
+        }
         let invalidations: Vec<String> = to_dehydrate
             .iter()
             .map(|path| {
