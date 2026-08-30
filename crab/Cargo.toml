@@ -39,6 +39,7 @@ default = [
     "watch",
     "nfs",
     "fuse",
+    "gix-pathmatch",
 ]
 
 # SIMD-accelerated boundary scanning in the gearhash chunker.
@@ -103,9 +104,9 @@ watch = ["crab-workflow/watch"]
 # --- Gitoxide adoption per-requirement feature flags ---
 #
 # Most flags gate one requirement's staged adoption path in the
-# `crab-gitoxide-adoption` spec. Flags default OFF so the legacy path keeps
-# running; individual flags flip default-on after one release cycle of green
-# E2E. `gix-transport` is the released compatibility API gate only; the local
+# `crab-gitoxide-adoption` spec. `gix-pathmatch` is the canonical product path;
+# the remaining flags stay opt-in until their release evidence is complete.
+# `gix-transport` is the released compatibility API gate only; the local
 # protocol-v2 upload-pack owner is not the gix client transport.
 #
 # The `gix-all` meta-flag activates every per-requirement adoption

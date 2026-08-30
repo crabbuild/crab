@@ -3838,7 +3838,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "gix-pathmatch")]
     fn classifier_matches_root_pathspec_for_nested_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
