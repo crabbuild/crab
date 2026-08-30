@@ -258,46 +258,6 @@ impl GeneratedPack {
             .collect()
     }
 
-    fn verify_checksum(&self) -> Result<()> {
-        let mut file = std::fs::File::open(self.file.path()).map_err(io_error)?;
-        if self.size < 20 {
-            return Err(Error::Metadata(
-                crab_metadata::error::MetadataError::CorruptObject {
-                    path: self.file.path().display().to_string(),
-                    reason: "generated pack is shorter than its checksum".to_owned(),
-                },
-            ));
-        }
-        let mut body = Read::by_ref(&mut file).take(self.size - 20);
-        let mut hash = Sha1::new();
-        let mut content_hash = blake3::Hasher::new();
-        let mut chunk = [0u8; 64 * 1024];
-        loop {
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            hash.update(&chunk[..read]);
-            content_hash.update(&chunk[..read]);
-        }
-        let mut trailer = [0u8; 20];
-        file.read_exact(&mut trailer).map_err(io_error)?;
-        content_hash.update(&trailer);
-        let actual: [u8; 20] = hash.finalize().into();
-        if actual != trailer
-            || actual != self.checksum
-            || content_hash.finalize().as_bytes() != &self.content_hash
-        {
-            return Err(Error::Metadata(
-                crab_metadata::error::MetadataError::CorruptObject {
-                    path: self.file.path().display().to_string(),
-                    reason: "generated pack checksum verification failed".to_owned(),
-                },
-            ));
-        }
-        Ok(())
-    }
-
     /// Stream the pack through protocol-v2 sideband channel 1.
     pub async fn write_sideband<W: AsyncWrite + Unpin>(
         &self,
@@ -940,7 +900,9 @@ async fn adopt_repacked_pack(
         })?,
     };
     drop(repacked);
-    pack.verify_checksum()?;
+    // `verified_generated_pack` already validated these bytes and computed both
+    // digests before ownership transfer. Rehashing here would scan the response
+    // pack a second time before it can be published or streamed.
     Ok(pack)
 }
 
