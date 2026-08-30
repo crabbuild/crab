@@ -71,10 +71,15 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackReadPermit 
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
-            self.read_admission
-                .renew()
-                .await
-                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+            if let Err(error) = self.read_admission.renew().await {
+                // Admission bounds load but does not protect artifact correctness.
+                // A transient renewal failure must not discard a verified pack.
+                tracing::warn!(
+                    error = %error,
+                    "generated-pack cache read admission renewal failed; continuing read"
+                );
+            }
+            Ok(())
         })
     }
 
@@ -85,10 +90,15 @@ impl crab_remote_git::GeneratedPackLease for ObjectStoreGeneratedPackReadPermit 
         std::result::Result<(), crab_remote_git::GeneratedPackLeaseError>,
     > {
         Box::pin(async move {
-            self.read_admission
-                .release()
-                .await
-                .map_err(crab_remote_git::GeneratedPackLeaseError::new)
+            if let Err(error) = self.read_admission.release().await {
+                // Slots are crash-reclaimable, so release failure is load leakage
+                // until TTL expiry rather than a reason to fail a completed fetch.
+                tracing::warn!(
+                    error = %error,
+                    "generated-pack cache read admission release failed"
+                );
+            }
+            Ok(())
         })
     }
 }
