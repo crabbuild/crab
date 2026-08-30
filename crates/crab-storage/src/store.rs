@@ -30,7 +30,6 @@ use object_store::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
-use tracing::debug;
 
 use crab_types::storage::StorageScope;
 
@@ -362,8 +361,9 @@ impl Store {
     /// # Errors
     ///
     /// Returns [`StorageError::StateConflict`] if an object with different
-    /// content already occupies `path`; transient errors are surfaced
-    /// after the retry budget is exhausted.
+    /// content already occupies `path`. Providers that cannot honor
+    /// create-only writes fail closed; Crab never retries them as an
+    /// unconditional overwrite.
     pub async fn put(&self, path: &Path, bytes: Bytes) -> Result<()> {
         let expected_hash = *blake3::hash(&bytes).as_bytes();
 
@@ -468,25 +468,6 @@ impl Store {
                 {
                     // Someone (possibly us on a previous retry) wrote the
                     // same content; treat as success.
-                    self.record_staged_write(path, &write_path, expected_hash, size);
-                    return Ok(());
-                }
-                // MinIO returns `NoSuchKey` (mapped to `NotFound`) when a
-                // conditional PUT (`If-None-Match: *`) targets a key that
-                // does not exist. Real S3 would succeed. Fall back to an
-                // unconditional PUT since the key genuinely doesn't exist.
-                if matches!(mapped, StorageError::NotFound { .. }) {
-                    debug!(
-                        path = %write_path,
-                        "PutMode::Create returned NotFound; \
-                         falling back to unconditional PUT \
-                         (S3-compatible backend may not support If-None-Match)"
-                    );
-                    write_inner
-                        .put_opts(&write_path, bytes.into(), PutOptions::default())
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| map_object_store_error(e, write_path.as_ref()))?;
                     self.record_staged_write(path, &write_path, expected_hash, size);
                     return Ok(());
                 }
@@ -1316,10 +1297,11 @@ impl Store {
         let read_inner = self.read_inner_for(prefix);
         let mut stream = read_inner.list(Some(prefix));
         while let Some(item) = stream.next().await {
+            let item = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
             if objects.len() == limit {
                 return Ok(None);
             }
-            objects.push(item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?);
+            objects.push(item);
         }
         Ok(Some(objects))
     }

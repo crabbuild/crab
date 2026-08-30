@@ -35,7 +35,7 @@ crab.lock + stage cache + run journal
 
 The parser rejects unknown keys and invalid stage names early. `Graph::build`
 rejects duplicate outputs, undefined explicit stage outputs, and cycles before
-anything executes. Lockfiles use schema version 2 and the `crab.stage.v3`
+anything executes. Lockfiles use schema version 1 and the `crab.stage.v1`
 hash algorithm, save atomically, and preserve deterministic stage/input
 resolution. Status helpers expose stable exit codes for scripts.
 

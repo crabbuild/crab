@@ -340,7 +340,9 @@ class ProductionScaleRunner:
         self.run_git(self.source, ["config", "user.name", "Crab Production Scale"], "git config name")
         self.run_git(self.source, ["config", "commit.gpgsign", "false"], "git disable commit signing")
         (self.source / ".gitignore").write_text("._*\n**/._*\n.DS_Store\n", encoding="utf-8")
-        self.run_crab(self.source, ["init", self.remote_url], "crab init source")
+        self.run_crab(
+            self.source, ["init", self.remote_url], "crab init source"
+        )
         for pattern in ("*.safetensors", "*.parquet", "*.arrow", "*.bin", "*.jsonl", "*.ckpt"):
             self.run_crab(self.source, ["track", pattern], f"crab track {pattern}")
 

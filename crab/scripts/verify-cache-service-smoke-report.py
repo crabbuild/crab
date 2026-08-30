@@ -15,7 +15,7 @@ from typing import Any
 DEFAULT_PSK_BLAKE3 = "4fb898757c4c93662343bbbb25419f8c4f9c979352d40ff896578cabf620cf6e"
 DEFAULT_FORBIDDEN_SECRETS = ("cache-smoke-psk", DEFAULT_PSK_BLAKE3)
 EVIDENCE_MANIFEST_SCHEMA = "crab-cache-service.evidence-manifest.v1"
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v1"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
@@ -1580,14 +1580,14 @@ class Verifier:
 
     def verify_cli_dedup_traffic(self) -> None:
         record = self.record("cli_push_dedup", "cli-dedup-push")
-        self.check("cli-dedup-queries-observed", self.int_value(record, "dedup_queries_delta") > 0, {
+        self.check("cli-dedup-advisory-queries-bypassed", self.int_value(record, "dedup_queries_delta") == 0, {
             "dedup_queries_delta": record.get("dedup_queries_delta"),
         })
-        self.check("cli-dedup-known-chunks-observed", self.int_value(record, "dedup_known_chunks_delta") > 0, {
+        self.check("cli-dedup-advisory-known-chunks-empty", self.int_value(record, "dedup_known_chunks_delta") == 0, {
             "dedup_known_chunks_delta": record.get("dedup_known_chunks_delta"),
         })
         self.check(
-            "cli-dedup-no-unknown-chunks",
+            "cli-dedup-advisory-unknown-chunks-empty",
             self.int_value(record, "dedup_unknown_chunks_delta") == 0,
             {"dedup_unknown_chunks_delta": record.get("dedup_unknown_chunks_delta")},
         )

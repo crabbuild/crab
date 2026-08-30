@@ -456,7 +456,9 @@ integration. See §19 for details.
 
 crab stores Git packs in Git’s standard format. Users can, in principle, download packs from a crab bucket and reconstruct a normal `.git` directory manually. This is a deliberate escape hatch: users are not locked in.
 
-Hash algorithm: SHA-1 in v1. SHA-256 support (Git’s object-format=sha256) is a v2 feature; the `config` object’s `hash_algorithm` field is forward-compatible.
+Canonical v1 currently supports Git SHA-1 repositories. Future Git
+`object-format=sha256` support must extend the same v1 product contract only
+after its repository semantics are fully qualified.
 
 -----
 
@@ -775,7 +777,9 @@ Caveat: true atomic multi-ref pushes across multiple S3 conditional writes are i
 - Multi-ref pushes are typically “main + tag” patterns where either order is acceptable.
 - Recovery via push-manifest reconciliation handles the edge cases on next operation.
 
-For users who need strict atomic multi-ref, v2 will offer a “staged ref” mode where refs are updated through an indirection object with true transactional semantics using a coordination service (e.g., a small Lambda + DynamoDB table). This is outside the v1 pure-client scope.
+Strict atomic multi-ref publication may later use a staged-ref indirection and
+a coordination service. That feature would remain part of canonical v1; it is
+outside the current pure-client scope.
 
 ### 8.6 Read Consistency
 
@@ -1217,7 +1221,7 @@ Effect: if two repos contain the same 10 GB checkpoint, it’s stored once. Fine
 
 **Caveat**: GC becomes cross-repo. A xorb cannot be deleted while any repo references any of its chunks. The GC algorithm (§13) computes the reference set across all repos sharing the prefix.
 
-### 10.5 Global Dedup Across Buckets (Optional v2)
+### 10.5 Global Dedup Across Buckets (Future canonical-v1 extension)
 
 When organizations have multiple buckets or want dedup across tenants, a coordination service is needed. Xet’s original design uses a CAS service with HMAC-protected chunk hashes for privacy. crab can adopt the same approach with a small Lambda + DynamoDB deployment:
 
@@ -1441,7 +1445,9 @@ S3 SSE (server-side encryption) with SSE-S3 or SSE-KMS is transparent and enable
 
 Client-side encryption is **not** supported in v1 because it would break dedup: two users encrypting the same 10 GB file with different keys produce uncorrelated ciphertext.
 
-Convergent encryption (key derived from plaintext hash) preserves dedup but has well-known weaknesses (confirmation-of-a-file attacks). crab may add this in v2 with appropriate warnings.
+Convergent encryption (key derived from plaintext hash) preserves dedup but
+has well-known weaknesses (confirmation-of-a-file attacks). Crab may evaluate
+it as a future canonical-v1 extension with appropriate warnings.
 
 -----
 

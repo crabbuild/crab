@@ -621,7 +621,17 @@ Footer:
 
 ### 7.2 Shard Granularity
 
-**One shard per push.** Contains all files and all xorbs touched by that push.
+**One or more dependency-closed shards per push.** Each file is added as one
+bundle with the complete xorb-info blocks referenced by all of its
+reconstruction terms. A shard containing a file therefore reconstructs that
+file without consulting another shard. Producers sort files by file hash and
+each bundle's xorb dependencies by xorb hash, so identical inputs produce the
+same partitions and shard hashes.
+
+Xorb metadata is serialized once when several files in the same shard share
+it. The same full xorb-info block may appear again in another shard when files
+on both sides of a partition reference it. That deliberate repetition keeps
+every partition independently complete.
 
 Alternatives considered:
 
@@ -629,13 +639,16 @@ Alternatives considered:
 - One shard per repo (ever): shards grow unboundedly; every push rewrites a monster file.
 - One shard per commit: unclear mapping if a push is multiple commits.
 
-Per-push is the natural unit: all the chunks in a shard were generated in one coherent operation, and the shard can be uploaded atomically.
+The push remains the publication unit, while complete file bundles are the
+partition unit.
 
 ### 7.3 Shard Size Bounds
 
 - Typical AI repo push: ~1 KiB to 10 MiB shards.
 - Upper bound: one file per 200 bytes of file-info + xorb info. A push of 100,000 files with 1000 xorbs → ~50 MiB shard.
-- Action at bounds: if a push shard would exceed 100 MiB, split into multiple shards at file boundaries. Rare in practice.
+- Action at bounds: 100 MiB is a soft cap. Rotation happens only after a
+  complete file/dependency bundle has been added, so one unusually large
+  bundle may exceed the cap but is never split into an invalid shard.
 
 ### 7.4 Shard Load Performance
 

@@ -66,14 +66,15 @@ const DEFAULT_WAL_FLUSH_SIZE: u64 = 4 * 1024 * 1024;
 /// lookups.
 const DEFAULT_BLOOM_BITS_PER_KEY: u32 = 10;
 
+const METADB_FORMAT_VERSION: u32 = 1;
+
 /// Aggregated snapshot of `sys:*` keys in one database.
 ///
 /// Returned by [`MetaDb::file_index_system_keys`] and
-/// [`MetaDb::chunk_index_system_keys`]. Every field is `Option`: a
-/// missing key reads as `None`, which is the expected state for a
-/// freshly opened SlateDB where only content keys have been written.
-/// Wrong-length values surface as [`MetaDbError::CorruptValue`] from
-/// the accessor, never as `None`.
+/// [`MetaDb::chunk_index_system_keys`]. Every field is `Option`, although
+/// `format_version` is always present after a canonical session opens.
+/// Wrong-length values surface as [`MetaDbError::CorruptValue`] from the
+/// accessor, never as `None`.
 ///
 /// `created_at_unix_ms` is the raw u64 milliseconds-since-epoch value
 /// as it sits in the DB; callers render it however their UI needs.
@@ -587,8 +588,8 @@ impl MetaDb {
     /// Read the four `sys:*` keys tracked in the per-repo
     /// `file_index_db` as a single snapshot.
     ///
-    /// Opens `file_index_db` lazily; a never-written sys key reads
-    /// as `None`. Every decode error surfaces as
+    /// Opens `file_index_db` lazily; optional sys keys read as `None`.
+    /// Every decode error surfaces as
     /// [`MetaDbError::CorruptValue`] with `db = "file_index_db"` and
     /// the offending key name so operators can locate the damage
     /// without inspecting the source chain.
@@ -772,52 +773,21 @@ impl MetaDb {
         let handle = self
             .file_index_db
             .get_or_init(|| async {
-                let path = ObjectPath::from(self.config.file_index_path.as_str());
-                let db = match (self.config.read_only, self.metrics.as_ref()) {
-                    (false, Some(m)) => {
-                        let db = Db::open_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::file_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.file_index,
-                        )
-                        .await?;
-                        m.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(m))
+                let db = open_canonical_metadb(
+                    Arc::clone(&self.store),
+                    ObjectPath::from(self.config.file_index_path.as_str()),
+                    stores::file_index::DB_LABEL,
+                    Arc::clone(&self.db_cache),
+                    &self.config.file_index,
+                    self.config.read_only,
+                )
+                .await?;
+                let db = match self.metrics.as_ref() {
+                    Some(metrics) => {
+                        metrics.inc_metadb_open_count();
+                        db.with_metrics(Arc::clone(metrics))
                     }
-                    (false, None) => {
-                        Db::open_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::file_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.file_index,
-                        )
-                        .await?
-                    }
-                    (true, Some(m)) => {
-                        let db = Db::open_readonly_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::file_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.file_index,
-                        )
-                        .await?;
-                        m.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(m))
-                    }
-                    (true, None) => {
-                        Db::open_readonly_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::file_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.file_index,
-                        )
-                        .await?
-                    }
+                    None => db,
                 };
                 Ok(Arc::new(db))
             })
@@ -834,52 +804,21 @@ impl MetaDb {
         let handle = self
             .chunk_index_db
             .get_or_init(|| async {
-                let path = ObjectPath::from(self.config.chunk_index_path.as_str());
-                let db = match (self.config.read_only, self.metrics.as_ref()) {
-                    (false, Some(m)) => {
-                        let db = Db::open_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::chunk_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.chunk_index,
-                        )
-                        .await?;
-                        m.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(m))
+                let db = open_canonical_metadb(
+                    Arc::clone(&self.store),
+                    ObjectPath::from(self.config.chunk_index_path.as_str()),
+                    stores::chunk_index::DB_LABEL,
+                    Arc::clone(&self.db_cache),
+                    &self.config.chunk_index,
+                    self.config.read_only,
+                )
+                .await?;
+                let db = match self.metrics.as_ref() {
+                    Some(metrics) => {
+                        metrics.inc_metadb_open_count();
+                        db.with_metrics(Arc::clone(metrics))
                     }
-                    (false, None) => {
-                        Db::open_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::chunk_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.chunk_index,
-                        )
-                        .await?
-                    }
-                    (true, Some(m)) => {
-                        let db = Db::open_readonly_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::chunk_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.chunk_index,
-                        )
-                        .await?;
-                        m.inc_metadb_open_count();
-                        db.with_metrics(Arc::clone(m))
-                    }
-                    (true, None) => {
-                        Db::open_readonly_with_cache(
-                            Arc::clone(&self.store),
-                            path,
-                            stores::chunk_index::DB_LABEL,
-                            Arc::clone(&self.db_cache),
-                            &self.config.chunk_index,
-                        )
-                        .await?
-                    }
+                    None => db,
                 };
                 Ok(Arc::new(db))
             })
@@ -911,6 +850,88 @@ impl MetaDb {
             .await?;
         Ok(Arc::clone(handle))
     }
+}
+
+async fn open_canonical_metadb(
+    store: Arc<dyn ObjectStore>,
+    path: ObjectPath,
+    label: &'static str,
+    cache: Arc<dyn slatedb::db_cache::DbCache>,
+    config: &MetaDbEngineConfig,
+    read_only: bool,
+) -> Result<Db> {
+    if read_only {
+        let reader = Db::open_readonly_with_cache(store, path, label, cache, config).await?;
+        if let Err(error) = validate_metadb_format(&reader, label).await {
+            reader.close().await?;
+            return Err(error);
+        }
+        return Ok(reader);
+    }
+
+    let fresh = match Db::open_readonly_with_cache(
+        Arc::clone(&store),
+        path.clone(),
+        label,
+        Arc::clone(&cache),
+        config,
+    )
+    .await
+    {
+        Ok(reader) => {
+            let validation = validate_metadb_format(&reader, label).await;
+            reader.close().await?;
+            validation?;
+            false
+        }
+        Err(CrabError::MetaDb(MetaDbError::ReadOnlyUninitialized { .. })) => true,
+        Err(error) => return Err(error),
+    };
+
+    let writer = Db::open_with_cache(store, path, label, cache, config).await?;
+    if fresh {
+        let initialization = async {
+            let format_key = key_codec::encode_system_key(key_codec::SYS_FORMAT_VERSION);
+            match writer.get(&format_key).await? {
+                Some(value) => validate_metadb_format_value(label, &value),
+                None => {
+                    let mut batch = slatedb::WriteBatch::new();
+                    batch.put(format_key, METADB_FORMAT_VERSION.to_le_bytes());
+                    writer.write(batch).await
+                }
+            }
+        }
+        .await;
+        if let Err(error) = initialization {
+            writer.close().await?;
+            return Err(error);
+        }
+    }
+    Ok(writer)
+}
+
+async fn validate_metadb_format(db: &Db, label: &'static str) -> Result<()> {
+    let key = key_codec::encode_system_key(key_codec::SYS_FORMAT_VERSION);
+    let Some(value) = db.get(&key).await? else {
+        return Err(MetaDbError::UnsupportedFormat {
+            db: label.to_owned(),
+            found: None,
+        }
+        .into());
+    };
+    validate_metadb_format_value(label, &value)
+}
+
+fn validate_metadb_format_value(label: &'static str, value: &[u8]) -> Result<()> {
+    let found = decode_u32_le_value(Some(value), label, key_codec::SYS_FORMAT_VERSION)?;
+    if found != Some(METADB_FORMAT_VERSION) {
+        return Err(MetaDbError::UnsupportedFormat {
+            db: label.to_owned(),
+            found,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Issue the four `sys:*` reads against `db` in parallel and stitch
@@ -1340,6 +1361,10 @@ mod tests {
         .expect("open seed");
         let mut batch = slatedb::WriteBatch::new();
         batch.put(
+            key_codec::encode_system_key(key_codec::SYS_FORMAT_VERSION).as_slice(),
+            METADB_FORMAT_VERSION.to_le_bytes(),
+        );
+        batch.put(
             key_codec::encode_system_key(key_codec::SYS_GC_GENERATION).as_slice(),
             value_codec::encode_gc_generation_value(generation).as_slice(),
         );
@@ -1601,10 +1626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_keys_missing_returns_none_fields() {
-        // A freshly-opened chunk_index_db has no sys:* keys written.
-        // Every field should come back `None`; no corrupt-value
-        // errors, no spurious zero defaults.
+    async fn fresh_metadb_publishes_canonical_v1_descriptor() {
         let (metadb, _cache_dir) = test_metadb(stub_store());
 
         let snapshot = metadb
@@ -1612,12 +1634,35 @@ mod tests {
             .await
             .expect("snapshot on fresh db");
 
-        assert_eq!(snapshot.format_version, None);
+        assert_eq!(snapshot.format_version, Some(METADB_FORMAT_VERSION));
         assert_eq!(snapshot.epoch, None);
         assert_eq!(snapshot.created_at_unix_ms, None);
         assert_eq!(snapshot.gc_generation, None);
 
         metadb.close_all().await.expect("close_all");
+    }
+
+    #[tokio::test]
+    async fn initialized_metadb_without_v1_descriptor_fails_closed() {
+        let store = stub_store();
+        let (metadb, _cache_dir) = test_metadb(Arc::clone(&store));
+        seed_raw_sys_values(
+            Arc::clone(&store),
+            &metadb.config.file_index_path,
+            stores::file_index::DB_LABEL,
+            &[(key_codec::SYS_EPOCH, 1u64.to_le_bytes().to_vec())],
+        )
+        .await;
+
+        let error = match metadb.file_index().await {
+            Ok(_) => panic!("retired descriptor-less database must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CrabError::MetaDb(MetaDbError::UnsupportedFormat { found: None, .. })
+        ));
     }
 
     #[tokio::test]
@@ -1667,7 +1712,13 @@ mod tests {
             Arc::clone(&store),
             &metadb.config.chunk_index_path,
             stores::chunk_index::DB_LABEL,
-            &[(key_codec::SYS_EPOCH, vec![0xAAu8, 0xBB, 0xCC])],
+            &[
+                (
+                    key_codec::SYS_FORMAT_VERSION,
+                    METADB_FORMAT_VERSION.to_le_bytes().to_vec(),
+                ),
+                (key_codec::SYS_EPOCH, vec![0xAAu8, 0xBB, 0xCC]),
+            ],
         )
         .await;
 

@@ -41,11 +41,11 @@ pub struct ExtractedFileRecipe {
 /// File recipes and chunk-index entries extracted from one metadata shard.
 pub type ExtractedFileAndChunkEntries = (Vec<ExtractedFileRecipe>, Vec<(MerkleHash, XorbRef)>);
 
-/// Magic bytes at the end of a v2 shard.
-const SHARD_V2_MAGIC: &[u8; 4] = b"SH02";
+/// Magic bytes at the end of Crab's canonical v1 bloom trailer.
+const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
 
-/// Size of the v2 trailer: `bloom_offset (u64 LE)` + `magic (4 bytes)`.
-const SHARD_V2_TRAILER_SIZE: usize = 12;
+/// Size of the v1 bloom trailer: `bloom_offset (u64 LE)` + `magic (4 bytes)`.
+const SHARD_V1_TRAILER_SIZE: usize = 12;
 
 /// Maximum shard body accepted by the in-memory Xet readers.
 ///
@@ -60,15 +60,11 @@ pub const MAX_SHARD_FILE_ENTRIES: usize = 1_000_000;
 /// Maximum number of chunk records accepted from one shard.
 pub const MAX_SHARD_CHUNK_ENTRIES: usize = 1_000_000;
 
-/// Strip the v2 bloom trailer from shard bytes, returning the v1 portion.
-///
-/// For v1 shards (no bloom trailer), returns the full slice unchanged.
-/// For v2 shards, returns the prefix up to `bloom_offset`, which is
-/// the payload the xet-core deserializers understand.
+/// Return the xet shard body without Crab's optional canonical v1 bloom trailer.
 #[must_use]
-pub fn strip_v2_trailer(data: &[u8]) -> &[u8] {
-    if data.len() >= SHARD_V2_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V2_MAGIC {
-        let offset_start = data.len() - SHARD_V2_TRAILER_SIZE;
+pub fn strip_bloom_trailer(data: &[u8]) -> &[u8] {
+    if data.len() >= SHARD_V1_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V1_MAGIC {
+        let offset_start = data.len() - SHARD_V1_TRAILER_SIZE;
         if let Ok(bytes) = data[offset_start..offset_start + 8].try_into() {
             let bloom_offset = u64::from_le_bytes(bytes) as usize;
             if bloom_offset <= data.len() {
@@ -100,7 +96,7 @@ pub fn extract_chunk_entries_streaming(data: &Bytes) -> Vec<(MerkleHash, XorbRef
         );
         return Vec::new();
     }
-    let v1_data = strip_v2_trailer(data);
+    let v1_data = strip_bloom_trailer(data);
     let mut cursor = std::io::Cursor::new(v1_data);
 
     match extract_chunk_entries_from_reader(&mut cursor) {
@@ -429,7 +425,7 @@ pub fn extract_file_recipes(data: &Bytes) -> Result<Vec<ExtractedFileRecipe>> {
             ),
         });
     }
-    let v1_data = strip_v2_trailer(data);
+    let v1_data = strip_bloom_trailer(data);
     let mut cursor = std::io::Cursor::new(v1_data);
     extract_file_recipes_from_reader(&mut cursor)
 }
@@ -457,7 +453,7 @@ pub fn extract_file_entries_streaming(
         );
         return Vec::new();
     }
-    let v1_data = strip_v2_trailer(data);
+    let v1_data = strip_bloom_trailer(data);
     let mut cursor = std::io::Cursor::new(v1_data);
 
     if let Err(e) = MDBShardFileHeader::deserialize(&mut cursor) {
@@ -653,9 +649,9 @@ mod tests {
     }
 
     #[test]
-    fn strip_v2_trailer_passes_v1_unchanged() {
+    fn strip_bloom_trailer_passes_plain_v1_unchanged() {
         let data = vec![0u8; 64];
-        let stripped = strip_v2_trailer(&data);
+        let stripped = strip_bloom_trailer(&data);
         assert_eq!(stripped.len(), data.len());
     }
 

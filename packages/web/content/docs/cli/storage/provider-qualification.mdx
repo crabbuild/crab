@@ -1,0 +1,56 @@
+---
+title: "Provider Qualification"
+description: "See which object stores have retained proof for Crab's canonical v1 write and recovery contracts."
+meta:
+  contentType: Reference
+  goal: "Distinguish an available provider adapter from a release-qualified provider."
+  audience: "Repository operators choosing an object store for Crab."
+---
+
+# Provider Qualification
+
+Crab exposes adapters for multiple object stores, but an adapter is
+release-supported only after the exact release commit passes the retained
+provider contract matrix. Credential discovery or a successful basic upload is
+not qualification evidence.
+
+## Current status
+
+| Provider | Status | Evidence |
+| --- | --- | --- |
+| S3-compatible RustFS | Development-qualified | Canonical local harness passes; a retained release artifact is still required for a release claim |
+| Amazon S3 | Unqualified | No retained real-service artifact for the current release commit |
+| Google Cloud Storage | Unqualified | Secret-gated qualification job exists; no retained real-service artifact |
+| Azure Blob Storage | Unqualified | Secret-gated qualification job exists; no retained real-service artifact |
+
+<Callout type="warning" title="Adapter availability is not release support">
+  Do not deploy an unqualified provider for production Crab repositories. Use
+  an isolated development prefix to exercise its adapter, then retain a passing
+  qualification report for the exact release commit before changing this
+  status.
+</Callout>
+
+## Required evidence
+
+Every provider must independently prove:
+
+- create-only and stale-token conflict behavior;
+- match-token writes and usable ETag or version identity;
+- multipart completion, abort, and file-backed staged upload;
+- exact range reads and paginated listing without gaps or duplicates;
+- retry/error mapping and cancellation without a visible object;
+- a canonical v1 origin receipt bound to the durable payload identity;
+- generated-prefix isolation and prefix-only cleanup.
+
+The retained report records provider/service identity, region or emulator,
+dependency version, Crab commit, workflow identity, commands, request and byte
+metrics, per-row duration, and results. It never records credential values.
+
+## Canonical v1 boundary
+
+Provider qualification uses one Crab-owned v1 repository layout. Missing,
+unknown, or non-v1 repository state fails closed. Crab does not infer an old
+layout, migrate it, or publish through a compatibility writer. For disposable
+development data, reset the exact isolated repository prefix, run canonical
+`crab init`, re-add and push the source files, then verify a fresh hydrated
+clone byte-for-byte.

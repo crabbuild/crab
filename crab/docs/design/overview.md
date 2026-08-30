@@ -374,7 +374,7 @@ to missing data).
 - Push locks (short-TTL leases in S3) serialize concurrent pushes with
   overlapping destination refs. A full ref maps to `locks/{full_ref}/lock`, so
   `refs/heads/main` maps to `locks/refs/heads/main/lock`. See
-  [Object Storage Layout V2](../architecture/object-storage-layout.md#lock-namespaces)
+  [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md#lock-namespaces)
   for the normative key and hard-cutover rules.
 - Manifest updates (pack-list, shard-list) use compare-and-swap (CAS) loops:
   read current value + ETag → mutate → conditional PUT with `If-Match`. On
@@ -1177,16 +1177,16 @@ coordinator. In practice, most pushes update a single ref. Multi-ref pushes
 
 ### 13.5 Why Segment-Based Staging Instead of Per-Chunk Files?
 
-The v1 staging layout stored each chunk as a separate file. On repos with
-millions of chunks, this caused:
+An early disposable prototype stored each chunk as a separate file. On repos
+with millions of chunks, this caused:
 
 - Filesystem inode exhaustion
 - Slow directory listings
 - Poor I/O performance (many small random writes)
 
-The v2 segment-based layout appends chunks to large segment files and indexes
-them in SQLite. This reduces inode usage by ~1000x and converts random writes
-to sequential appends.
+Canonical v1 appends chunks to large segment files and indexes them in SQLite.
+This reduces inode usage by ~1000x and converts random writes to sequential
+appends. Crab has no per-chunk compatibility reader.
 
 ### 13.6 Why No `git add` Network I/O?
 

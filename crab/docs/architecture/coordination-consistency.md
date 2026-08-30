@@ -33,7 +33,7 @@ Push locks serialize concurrent pushes with overlapping destination refs. They
 are short-TTL leases stored in the configured object store:
 
 The key grammar and shipped-client transition are normative in
-[Object Storage Layout V2](object-storage-layout.md#lock-namespaces).
+[Canonical Object Storage Layout V1](object-storage-layout.md#lock-namespaces).
 
 ```
 Path:    {repo_prefix}/locks/{full_ref}/lock

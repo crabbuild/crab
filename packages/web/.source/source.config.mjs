@@ -60,6 +60,7 @@ var guideSchema = pageSchema.extend({
   path: z.enum([
     "start-here",
     "first-workflow",
+    "ml-workflows",
     "core-internals",
     "advanced-operations",
     "migration"

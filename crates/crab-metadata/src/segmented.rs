@@ -32,7 +32,7 @@ impl SegmentKind {
 /// Segment index object stored by content hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SegmentIndex {
-    /// Format version. Hard-cut v2 metadata starts at 1 for this object.
+    /// Canonical v1 format version.
     pub version: u32,
     /// Monotonic metadata generation.
     pub generation: u64,

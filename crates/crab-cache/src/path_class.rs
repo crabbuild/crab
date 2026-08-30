@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::key::CacheKey;
 
 /// Schema identifier for the cache-service route taxonomy.
-pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v3";
+pub const CACHE_ROUTE_CONTRACT_SCHEMA: &str = "crab-cache-service.routes.v1";
 
 /// Whether a request path refers to an immutable (content-addressed) or
 /// mutable (refs, HEAD, manifests, config, locks) object.

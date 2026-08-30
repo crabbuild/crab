@@ -336,6 +336,16 @@ pub trait ChunkStager: Send {
         Ok(())
     }
 
+    /// Preserve a locally staged recipe already referenced by Git history.
+    fn preserve_committed_recipe(
+        &self,
+        _repo_root: &Path,
+        _path: &Path,
+        _new_file_hash: &[u8; 32],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Return whether the exact recipe already has durable local payload rows.
     fn has_recipe(&self, _recipe: &FileRecipe) -> Result<bool> {
         Ok(false)
@@ -457,10 +467,10 @@ impl ChunkStager for StagingChunkStager {
 
     fn publish_recipe(&self, path: &Path, recipe: &FileRecipe) -> Result<()> {
         let batch_id = self.staging.create_batch()?;
-        let file_hash = recipe.sequence().file_hash;
+        let file_hash = recipe.file_hash();
         let publish = (|| -> Result<()> {
             self.staging
-                .pre_register_file(&file_hash, recipe.sequence().file_size)?;
+                .pre_register_file(&file_hash, recipe.file_size())?;
             self.staging
                 .record_verified_recipe_lease(&batch_id, path, recipe)?;
             self.staging
@@ -476,11 +486,36 @@ impl ChunkStager for StagingChunkStager {
         Ok(())
     }
 
+    fn preserve_committed_recipe(
+        &self,
+        repo_root: &Path,
+        path: &Path,
+        new_file_hash: &[u8; 32],
+    ) -> Result<()> {
+        let path = path.to_path_buf();
+        let pointers = crate::git::worktree::committed_pointers_for_paths(
+            repo_root,
+            std::slice::from_ref(&path),
+        )?;
+        let Some(pointers) = pointers.get(&path) else {
+            return Ok(());
+        };
+        for pointer in pointers {
+            if pointer.file_hash == *new_file_hash {
+                continue;
+            }
+            self.staging.preserve_published_history_recipe(
+                &MerkleHash::from(pointer.file_hash),
+                pointer.size,
+            )?;
+        }
+        Ok(())
+    }
+
     fn has_recipe(&self, recipe: &FileRecipe) -> Result<bool> {
-        Ok(self
-            .staging
-            .published_recipe_for_file(&recipe.sequence().file_hash)?
-            .is_some_and(|published| published == *recipe))
+        self.staging
+            .has_verified_local_recipe(recipe)
+            .map_err(CrabError::from)
     }
 
     fn adopt_staged_file(
@@ -1285,6 +1320,18 @@ impl CleanSession {
         self.repo_root.as_deref()
     }
 
+    fn preserve_committed_recipe_before_publication(
+        &self,
+        pathname: &str,
+        new_file_hash: &[u8; 32],
+    ) -> Result<()> {
+        let Some(root) = self.repo_root.as_ref() else {
+            return Ok(());
+        };
+        self.chunk_stager
+            .preserve_committed_recipe(root, Path::new(pathname), new_file_hash)
+    }
+
     /// Return the resolved local LFS storage directory for this session.
     #[must_use]
     pub fn lfs_storage_dir(&self) -> Option<&Path> {
@@ -1718,6 +1765,7 @@ impl CleanSession {
 
         let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
         if self.chunk_stager.has_recipe(&recipe)? {
+            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
             self.chunk_stager
                 .publish_recipe(Path::new(pathname), &recipe)?;
             let pointer = self.build_pointer(file_hash, file_size, None);
@@ -1728,6 +1776,7 @@ impl CleanSession {
         let mut provisional = ProvisionalChunkStager::new(pathname);
         batch_stager.spill_into(&mut provisional, &mut self.chunk_stager)?;
         provisional.checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
+        self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
         self.chunk_stager
             .publish_recipe(Path::new(pathname), &recipe)?;
 
@@ -1998,6 +2047,7 @@ impl CleanSession {
             let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
             if self.chunk_stager.has_recipe(&recipe)? {
                 discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
+                self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
                 self.chunk_stager
                     .publish_recipe(Path::new(pathname), &recipe)?;
                 let pointer = self.build_pointer(file_hash, file_size, None);
@@ -2014,6 +2064,7 @@ impl CleanSession {
                 .as_mut()
                 .ok_or_else(|| CrabError::Internal("missing clean staging attempt".to_owned()))?
                 .checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
+            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
             self.chunk_stager
                 .publish_recipe(Path::new(pathname), &recipe)?;
 

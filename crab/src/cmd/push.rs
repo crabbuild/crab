@@ -169,10 +169,10 @@ struct PushAttemptFailure {
 }
 
 #[derive(Debug)]
-struct PushTarget {
-    remote: String,
-    url: String,
-    parsed_url: CrabUrl,
+pub(crate) struct PushTarget {
+    pub(crate) remote: String,
+    pub(crate) url: String,
+    pub(crate) parsed_url: CrabUrl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,13 +337,8 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
         let Some(outcome) = result.outcomes.get(&spec.dst) else {
             continue;
         };
-        #[expect(
-            deprecated,
-            reason = "preserves the deprecated outcome until its callers are migrated"
-        )]
         match outcome {
             RefPushOutcome::Ok => {}
-            RefPushOutcome::Error(message) => return CrabError::Internal(message.clone()),
             RefPushOutcome::Rejected(PushRejectReason::NonFastForward { have, want }) => {
                 return CrabError::NonFastForward {
                     ref_name: spec.dst.clone(),
@@ -1251,16 +1246,9 @@ fn build_push_summary(
         .iter()
         .map(|spec| {
             let outcome = result.outcomes.get(&spec.dst);
-            #[allow(
-                deprecated,
-                reason = "pattern-matches the deprecated Error variant for backward compat"
-            )]
             let (status, error, retryable, retry_after_secs) = match outcome {
                 Some(crate::git::push::RefPushOutcome::Ok) | None => {
                     ("ok".to_owned(), None, None, None)
-                }
-                Some(crate::git::push::RefPushOutcome::Error(msg)) => {
-                    ("error".to_owned(), Some(msg.clone()), Some(false), None)
                 }
                 Some(crate::git::push::RefPushOutcome::Rejected(reason)) => {
                     // Structured reject reasons expose a stable tag
@@ -1412,7 +1400,7 @@ fn select_default_crab_remote(
     }
 }
 
-fn resolve_push_target(explicit: Option<&str>) -> Result<PushTarget> {
+pub(crate) fn resolve_push_target(explicit: Option<&str>) -> Result<PushTarget> {
     let remote = resolve_remote_name(explicit)?;
     if remote.contains("://") {
         let parsed_url = CrabUrl::parse(&remote)?;

@@ -28,8 +28,8 @@ pub fn current_crab_url() -> Result<CrabUrl> {
 }
 
 /// Resolve the tier provider from auth/storage config.
-pub fn resolve_provider(config: &Config) -> Provider {
-    match config.auth.provider {
+pub fn resolve_provider(config: &Config) -> Result<Provider> {
+    let provider = match config.auth.provider {
         AuthProvider::AwsOidc => Provider::S3,
         AuthProvider::GcpWorkloadIdentity => Provider::Gcs,
         AuthProvider::AzureEntra => Provider::Azure,
@@ -38,10 +38,11 @@ pub fn resolve_provider(config: &Config) -> Provider {
                 .auth
                 .storage_provider
                 .storage_provider_kind()
-                .unwrap_or_else(crab_storage::resolve_static_env_provider);
+                .map_or_else(crab_storage::resolve_static_env_provider, Ok)?;
             tier_provider_from_storage_kind(provider)
         }
-    }
+    };
+    Ok(provider)
 }
 
 fn tier_provider_from_storage_kind(provider: StorageProviderKind) -> Provider {
@@ -58,7 +59,7 @@ pub async fn build_lifecycle_provider(
     config: &Config,
     url: &CrabUrl,
 ) -> Result<Box<dyn LifecycleProvider>> {
-    match resolve_provider(config) {
+    match resolve_provider(config)? {
         Provider::S3 => build_s3_lifecycle_provider(config, url),
         Provider::Gcs => build_gcs_lifecycle_provider(url).await,
         Provider::Azure => build_azure_lifecycle_provider(config, url),
@@ -70,7 +71,7 @@ pub async fn build_restore_backend(
     config: &Config,
     url: &CrabUrl,
 ) -> Result<Arc<dyn RestoreBackend>> {
-    match resolve_provider(config) {
+    match resolve_provider(config)? {
         Provider::S3 => build_s3_restore_backend(config, url),
         Provider::Gcs => build_gcs_restore_backend(url).await,
         Provider::Azure => build_azure_restore_backend(config, url),

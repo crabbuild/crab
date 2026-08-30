@@ -595,7 +595,7 @@ impl RemoteGitRepository {
         Ok(available)
     }
 
-    /// Read and validate a V5 visibility proof without materializing its OID dictionary.
+    /// Read and validate a catalog-bound v1 proof without materializing its OID dictionary.
     ///
     /// Ref tips are checked with small exact catalog lookups. Later upload-pack
     /// planning resolves only the ordinals selected by the request through its
@@ -629,7 +629,7 @@ impl RemoteGitRepository {
                 &self.state.git_validation_digest,
             ) => result.map_err(Error::Metadata)?,
         };
-        if read.format != crab_metadata::git_visibility::GitVisibilityFormat::V5 {
+        if read.format != crab_metadata::git_visibility::GitVisibilityFormat::CatalogV1 {
             return Err(Error::RepositoryState {
                 reason: RepositoryStateError::VisibilityProofMismatch,
             });
@@ -731,7 +731,7 @@ impl RemoteGitRepository {
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
                 result = read => {
                     let read = result.map_err(Error::Metadata)?;
-                    if read.format != crab_metadata::git_visibility::GitVisibilityFormat::V5 {
+                    if read.format != crab_metadata::git_visibility::GitVisibilityFormat::CatalogV1 {
                         return Err(Error::RepositoryState {
                             reason: RepositoryStateError::VisibilityProofMismatch,
                         });

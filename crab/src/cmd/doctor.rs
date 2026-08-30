@@ -273,7 +273,8 @@ pub async fn run_cost_report(
             ),
         })?;
     let remote = crate::git::url::CrabUrl::parse(remote.trim())?;
-    let store = crate::auth::build_store(config, &remote, "doctor.cost", cancel).await?;
+    let store =
+        crate::auth::build_repository_url_store(config, &remote, "doctor.cost", cancel).await?;
     let report = crate::cost::engine::build_report(
         config,
         &store,
@@ -752,12 +753,13 @@ async fn check_credentials(root: &Path) -> CheckResult {
 
     let config = Config::resolve_local().unwrap_or_default();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let store = match crate::auth::build_store(&config, &parsed, "doctor", &cancel).await {
-        Ok(s) => s,
-        Err(e) => {
-            return CheckResult::fail("credentials", format!("failed to build store: {e}"));
-        }
-    };
+    let store =
+        match crate::auth::build_repository_url_store(&config, &parsed, "doctor", &cancel).await {
+            Ok(s) => s,
+            Err(e) => {
+                return CheckResult::fail("credentials", format!("failed to build store: {e}"));
+            }
+        };
 
     let prefix = object_store::path::Path::from(parsed.repo_path.as_str());
 
@@ -829,8 +831,8 @@ async fn check_staging(root: &Path) -> CheckResult {
             return CheckResult::warn(
                 "staging area",
                 holder_pid.map_or_else(
-                    || "active writer; lifecycle migration check deferred".to_owned(),
-                    |pid| format!("active writer PID {pid}; lifecycle migration check deferred"),
+                    || "active writer; lifecycle check deferred".to_owned(),
+                    |pid| format!("active writer PID {pid}; lifecycle check deferred"),
                 ),
             );
         }
@@ -838,7 +840,7 @@ async fn check_staging(root: &Path) -> CheckResult {
             return CheckResult::fail(
                 "staging area",
                 format!(
-                    "cannot open or migrate staging lifecycle metadata: {error}; run `crab staging verify`"
+                    "cannot open canonical staging lifecycle metadata: {error}; recreate staging and re-add affected paths"
                 ),
             );
         }
@@ -867,12 +869,57 @@ async fn check_staging(root: &Path) -> CheckResult {
             ),
         );
     }
+    if health.unresolved_publications > 0 {
+        let intent_ids = staging
+            .unresolved_publication_intents()
+            .map(|intents| {
+                intents
+                    .into_iter()
+                    .map(|intent| intent.intent_id.as_str().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|error| format!("unreadable intent ids: {error}"));
+        return CheckResult::fail(
+            "staging area",
+            format!(
+                "layout v{} has {} unresolved Git-index publication(s) ({intent_ids}); rerun `crab add` to reconcile the exact index state",
+                health.layout_version, health.unresolved_publications
+            ),
+        );
+    }
+    if health.reclaimable_superseded_leases > 0 || health.reclaimable_files > 0 {
+        return CheckResult::fail(
+            "staging area",
+            format!(
+                "layout v{} has {} published superseded lease(s) and {} unowned file(s) without a canonical path head; run `crab staging clean --prune-abandoned`",
+                health.layout_version,
+                health.reclaimable_superseded_leases,
+                health.reclaimable_files
+            ),
+        );
+    }
     if health.open_push_snapshots > 0 || health.committed_push_snapshots > 0 {
         return CheckResult::warn(
             "staging area",
             format!(
-                "layout v{} has {} open and {} committed push snapshot(s); retry push or run `crab staging clean --prune-abandoned`",
-                health.layout_version, health.open_push_snapshots, health.committed_push_snapshots
+                "layout v{} has {} open and {} committed push snapshot(s), with {} superseded lease pin(s) retaining {} bytes safely; retry push or run `crab staging clean --prune-abandoned`",
+                health.layout_version,
+                health.open_push_snapshots,
+                health.committed_push_snapshots,
+                health.snapshot_pinned_superseded_leases,
+                health
+                    .snapshot_pinned_segment_bytes
+                    .saturating_add(health.snapshot_pinned_prepared_bytes)
+            ),
+        );
+    }
+    if health.open_batches_without_publication > 0 {
+        return CheckResult::warn(
+            "staging area",
+            format!(
+                "layout v{} has {} unpublished staging batch(es) without a Git-index publication intent; complete `git add`/`crab add` or run `crab staging clean --prune-abandoned`",
+                health.layout_version, health.open_batches_without_publication
             ),
         );
     }
@@ -2402,6 +2449,8 @@ mod tests {
     use super::*;
 
     use crab_cache::path_class::cache_route_contract;
+    use crab_staging::stream::{StreamStageProgress, stage_file_streaming_as};
+    use crab_staging::{PublicationIntentEntry, StagingArea, StagingAreaReadOnly};
 
     #[test]
     fn check_git_version_succeeds() {
@@ -2520,6 +2569,100 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = check_staging(dir.path()).await;
         assert_eq!(result.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_staging_distinguishes_safe_snapshot_pin_from_leak() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging_root = dir.path().join(".crab/staging");
+        let logical_path = Path::new("models/model.bin");
+        let first_source = dir.path().join("first-source.bin");
+        let second_source = dir.path().join("second-source.bin");
+        std::fs::write(&first_source, vec![0x41; 256 * 1024]).unwrap();
+        std::fs::write(&second_source, vec![0x42; 256 * 1024]).unwrap();
+
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let first = stage_file_streaming_as(
+            &first_source,
+            dir.path(),
+            logical_path,
+            &staging,
+            StreamStageProgress::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&first.batch_id).unwrap();
+        staging.close().await.unwrap();
+
+        let reader = StagingAreaReadOnly::open(staging_root.clone())
+            .await
+            .unwrap();
+        reader
+            .create_push_snapshot("doctor-push", std::slice::from_ref(&first.recipe))
+            .unwrap();
+        drop(reader);
+
+        let staging = StagingArea::open(staging_root).await.unwrap();
+        let second = stage_file_streaming_as(
+            &second_source,
+            dir.path(),
+            logical_path,
+            &staging,
+            StreamStageProgress::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&second.batch_id).unwrap();
+        staging.close().await.unwrap();
+
+        let result = check_staging(dir.path()).await;
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert!(result.detail.contains("1 superseded lease pin"));
+        assert!(result.detail.contains("retaining"));
+        assert!(result.detail.contains("safely"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_staging_reports_unpublished_batch_and_ambiguous_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging_root = dir.path().join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        staging.create_batch().unwrap();
+        staging.close().await.unwrap();
+
+        let result = check_staging(dir.path()).await;
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert!(result.detail.contains("unpublished staging batch"));
+
+        let source = dir.path().join("intent-source.bin");
+        std::fs::write(&source, vec![0x51; 128 * 1024]).unwrap();
+        let staging = StagingArea::open(staging_root).await.unwrap();
+        let staged = stage_file_streaming_as(
+            &source,
+            dir.path(),
+            Path::new("models/intent.bin"),
+            &staging,
+            StreamStageProgress::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging
+            .create_publication_intent(&[PublicationIntentEntry {
+                batch_id: staged.batch_id,
+                path: PathBuf::from("models/intent.bin"),
+                expected_pointer_oid: "expected-pointer".to_owned(),
+                previous_index_state: "absent".to_owned(),
+            }])
+            .unwrap();
+        staging.close().await.unwrap();
+
+        let result = check_staging(dir.path()).await;
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.detail.contains("unresolved Git-index publication"));
+        assert!(result.detail.contains("rerun `crab add`"));
     }
 
     #[test]

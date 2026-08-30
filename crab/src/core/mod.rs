@@ -15,6 +15,7 @@ pub mod output;
 pub mod pattern;
 pub mod perf_phase;
 pub mod project_config;
+pub mod remote_layout;
 pub mod style;
 pub mod tracing;
 pub mod tracing_init;

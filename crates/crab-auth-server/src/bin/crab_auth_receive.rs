@@ -54,7 +54,7 @@ enum CommandKind {
 #[derive(Serialize)]
 struct PrepareOutput {
     status: String,
-    source_generation: Option<u64>,
+    source_generation: u64,
 }
 
 #[derive(Serialize)]

@@ -1,0 +1,271 @@
+name: Provider contract qualification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/pb-provider-qualification.yml"
+      - "crab/tests/provider_qualification.rs"
+      - "crab/scripts/verify-provider-qualification-report.py"
+      - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
+      - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crates/crab-storage/**"
+      - "crates/crab-metadata/src/pack_origin.rs"
+      - "crates/crab-metadata/src/receipts.rs"
+      - "crab/docs/guides/provider-qualification.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/pb-provider-qualification.yml"
+      - "crab/tests/provider_qualification.rs"
+      - "crab/scripts/verify-provider-qualification-report.py"
+      - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
+      - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crates/crab-storage/**"
+      - "crates/crab-metadata/src/pack_origin.rs"
+      - "crates/crab-metadata/src/receipts.rs"
+      - "crab/docs/guides/provider-qualification.md"
+  schedule:
+    - cron: "17 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider contract to qualify
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - s3
+          - gcs
+          - azure
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+jobs:
+  evidence-contract:
+    name: Evidence contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify evidence schema tests
+        run: |
+          python3 -m unittest crab/scripts/e2e/test_verify_provider_qualification_report.py
+          python3 -m py_compile \
+            crab/scripts/verify-provider-qualification-report.py \
+            crab/scripts/e2e/test_verify_provider_qualification_report.py
+
+  rustfs:
+    name: S3-compatible RustFS
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.provider == 'all' || inputs.provider == 's3'))
+    needs: evidence-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: "true"
+      CRAB_S3_FORCE_PATH_STYLE: "true"
+      CRAB_PROVIDER_QUALIFICATION_PROVIDER: s3
+      CRAB_PROVIDER_QUALIFICATION_BUCKET: crab-provider-qualification
+      CRAB_PROVIDER_QUALIFICATION_SERVICE: rustfs-1.0.0-beta.8-glibc
+      CRAB_PROVIDER_QUALIFICATION_REGION: local
+      CRAB_PROVIDER_QUALIFICATION_SOURCE_SHA: ${{ github.sha }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-s3
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/s3/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-s3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start pinned RustFS
+        run: |
+          set -euo pipefail
+          data_root="${RUNNER_TEMP}/rustfs-data"
+          mkdir -p "$data_root"
+          sudo chown 10001:10001 "$data_root"
+          docker pull "$RUSTFS_IMAGE"
+          docker run -d \
+            --name crab-provider-rustfs \
+            -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab \
+            -e RUSTFS_SECRET_KEY=crab \
+            -v "$data_root:/data" \
+            "$RUSTFS_IMAGE" server /data --address :9000
+          for _ in $(seq 1 90); do
+            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then
+              aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket \
+                --bucket "$CRAB_PROVIDER_QUALIFICATION_BUCKET"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs crab-provider-rustfs >&2 || true
+          exit 1
+
+      - name: Run provider contract
+        run: |
+          cargo test -p crab --test provider_qualification --locked \
+            -- --ignored --exact provider_contracts --nocapture
+
+      - name: Build release canary binary
+        run: cargo build -p crab --release --locked
+
+      - name: Run canonical v1 cutover and add-push-clone canary
+        run: |
+          python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
+            --bucket "$CRAB_PROVIDER_QUALIFICATION_BUCKET" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --crab-bin "$CARGO_TARGET_DIR/release/crab" \
+            --root "$RUNNER_TEMP/provider-qualification/s3/canary" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --size-mib 4
+
+      - name: Verify retained evidence
+        run: |
+          python3 crab/scripts/verify-provider-qualification-report.py \
+            "$CRAB_PROVIDER_QUALIFICATION_REPORT" \
+            --provider s3 \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Capture service log
+        if: always()
+        run: |
+          mkdir -p "$(dirname "$CRAB_PROVIDER_QUALIFICATION_REPORT")"
+          docker logs crab-provider-rustfs \
+            > "$(dirname "$CRAB_PROVIDER_QUALIFICATION_REPORT")/service.log" 2>&1 || true
+          docker rm -f crab-provider-rustfs >/dev/null 2>&1 || true
+
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-qualification-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci/provider-qualification/s3/**
+          if-no-files-found: error
+          retention-days: 90
+
+  gcs:
+    name: Google Cloud Storage
+    if: >-
+      vars.CRAB_PROVIDER_GCS_ENABLED == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (inputs.provider == 'all' || inputs.provider == 'gcs')))
+    needs: evidence-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.CRAB_PROVIDER_GCS_SERVICE_ACCOUNT_KEY }}
+      CRAB_PROVIDER_QUALIFICATION_PROVIDER: gcs
+      CRAB_PROVIDER_QUALIFICATION_BUCKET: ${{ vars.CRAB_PROVIDER_GCS_BUCKET }}
+      CRAB_PROVIDER_QUALIFICATION_SERVICE: google-cloud-storage
+      CRAB_PROVIDER_QUALIFICATION_REGION: ${{ vars.CRAB_PROVIDER_GCS_REGION }}
+      CRAB_PROVIDER_QUALIFICATION_SOURCE_SHA: ${{ github.sha }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-gcs
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/gcs/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-gcs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run provider contract
+        run: |
+          test -n "$GOOGLE_SERVICE_ACCOUNT_KEY"
+          test -n "$CRAB_PROVIDER_QUALIFICATION_BUCKET"
+          test -n "$CRAB_PROVIDER_QUALIFICATION_REGION"
+          cargo test -p crab --test provider_qualification --locked \
+            -- --ignored --exact provider_contracts --nocapture
+
+      - name: Verify retained evidence
+        run: |
+          python3 crab/scripts/verify-provider-qualification-report.py \
+            "$CRAB_PROVIDER_QUALIFICATION_REPORT" \
+            --provider gcs \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-qualification-gcs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci/provider-qualification/gcs/**
+          if-no-files-found: error
+          retention-days: 90
+
+  azure:
+    name: Azure Blob Storage
+    if: >-
+      vars.CRAB_PROVIDER_AZURE_ENABLED == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (inputs.provider == 'all' || inputs.provider == 'azure')))
+    needs: evidence-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AZURE_STORAGE_ACCOUNT_NAME: ${{ vars.CRAB_PROVIDER_AZURE_ACCOUNT }}
+      AZURE_STORAGE_ACCOUNT_KEY: ${{ secrets.CRAB_PROVIDER_AZURE_ACCOUNT_KEY }}
+      CRAB_PROVIDER_QUALIFICATION_PROVIDER: azure
+      CRAB_PROVIDER_QUALIFICATION_BUCKET: ${{ vars.CRAB_PROVIDER_AZURE_CONTAINER }}
+      CRAB_PROVIDER_QUALIFICATION_SERVICE: azure-blob-storage
+      CRAB_PROVIDER_QUALIFICATION_REGION: ${{ vars.CRAB_PROVIDER_AZURE_REGION }}
+      CRAB_PROVIDER_QUALIFICATION_SOURCE_SHA: ${{ github.sha }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      CRAB_PROVIDER_QUALIFICATION_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+      CRAB_PROVIDER_QUALIFICATION_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-azure
+      CRAB_PROVIDER_QUALIFICATION_REPORT: ${{ github.workspace }}/.ci/provider-qualification/azure/report.json
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci/cargo-target-provider-qualification-azure
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run provider contract
+        run: |
+          test -n "$AZURE_STORAGE_ACCOUNT_NAME"
+          test -n "$AZURE_STORAGE_ACCOUNT_KEY"
+          test -n "$CRAB_PROVIDER_QUALIFICATION_BUCKET"
+          test -n "$CRAB_PROVIDER_QUALIFICATION_REGION"
+          cargo test -p crab --test provider_qualification --locked \
+            -- --ignored --exact provider_contracts --nocapture
+
+      - name: Verify retained evidence
+        run: |
+          python3 crab/scripts/verify-provider-qualification-report.py \
+            "$CRAB_PROVIDER_QUALIFICATION_REPORT" \
+            --provider azure \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-qualification-azure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.ci/provider-qualification/azure/**
+          if-no-files-found: error
+          retention-days: 90

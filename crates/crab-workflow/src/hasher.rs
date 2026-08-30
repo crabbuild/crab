@@ -7,7 +7,7 @@
 //! prefixed framing so that permutations of declared sets produce the
 //! same hash and distinct inputs never collide.
 //!
-//! The format is versioned via the literal prefix `b"crab.stage.v3\n"`.
+//! The format is bound to the literal prefix `b"crab.stage.v1\n"`.
 //! Changing any framing rule requires bumping that prefix, which
 //! invalidates every existing stage cache entry — treat as
 //! semver-relevant.
@@ -41,7 +41,7 @@ pub struct ResolvedStage {
 }
 
 /// Version prefix. Bumping this invalidates every existing cache entry.
-const V3_PREFIX: &[u8] = b"crab.stage.v3\n";
+const V1_STAGE_PREFIX: &[u8] = b"crab.stage.v1\n";
 
 /// Discriminator bytes placed ahead of each structured section. Fixed
 /// values so adding new sections in a future version bump doesn't
@@ -76,7 +76,7 @@ fn compute_with_policy_version(
     hermetic_policy_version: u16,
 ) -> StageHash {
     let mut h = blake3::Hasher::new();
-    h.update(V3_PREFIX);
+    h.update(V1_STAGE_PREFIX);
 
     push_platform(&mut h);
     push_name(&mut h, resolved.stage.name.as_str());

@@ -44,6 +44,7 @@ use crab::cmd::dehydrate::{DehydrateArgs, run_dehydrate_in};
 use crab::cmd::hydrate::{HydrateArgs, ShardHydrator, run_hydrate_in};
 use crab::core::config::{CacheConfig, Config};
 use crab::core::context::AppContext;
+use crab::core::error::CrabError;
 use crab::core::metrics::Metrics;
 use crab::core::output::OutputMode;
 use crab::git::clean::{CleanSession, StagingChunkStager};
@@ -496,6 +497,21 @@ fn make_router(store: Store, prefix: &str) -> StoreLayout {
     StoreLayout::new(store, prefix.to_owned())
 }
 
+async fn initialize_remote(store: &Store, router: &StoreLayout) {
+    crab::core::remote_layout::initialize(store, router)
+        .await
+        .expect("initialize canonical remote layout");
+    match crab::cmd::init::create_initial_manifest(store, router, "refs/heads/main").await {
+        Ok(()) => {}
+        Err(CrabError::CasConflict { .. }) => {
+            crab::metadata::manifest::read_manifest(store, router)
+                .await
+                .expect("read concurrently initialized manifest");
+        }
+        Err(error) => panic!("initialize canonical remote manifest: {error}"),
+    }
+}
+
 fn make_specs() -> Vec<PushSpec> {
     vec![PushSpec {
         force: false,
@@ -692,6 +708,7 @@ async fn push_ref_from_git_dir(
     config.color = false;
     config.incremental = false;
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    initialize_remote(&store, &router).await;
     let result = run_native_push(
         &config,
         &make_specs_for_ref(ref_name),
@@ -766,6 +783,7 @@ async fn linked_worktree_push_uploads_staged_xorbs_before_pack() {
     let inner: Arc<dyn ObjectStore> = Arc::new(recording.clone());
     let store = Store::new(inner);
     let router = StoreLayout::new(store.clone(), "linked-push".to_owned());
+    initialize_remote(&store, &router).await;
     let mut config = NativePushConfig::new(PushConfig::default());
     config.progress = false;
     config.color = false;
@@ -833,6 +851,7 @@ async fn linked_worktree_push_lock_contention_is_per_destination_ref() {
     let inner: Arc<dyn ObjectStore> = Arc::new(recording.clone());
     let store = Store::new(inner);
     let router = StoreLayout::new(store.clone(), "linked-lock".to_owned());
+    initialize_remote(&store, &router).await;
     let held_lock = PushLock::acquire_ref(
         store.inner(),
         router.repo_prefix(),
@@ -1248,6 +1267,7 @@ async fn second_push_discovers_only_modified_pointers() {
 
     let store = make_store();
     let router = make_router(store.clone(), "test-repo");
+    initialize_remote(&store, &router).await;
     let config = NativePushConfig::new(PushConfig::default());
     let cancel = CancellationToken::new();
     let metrics: Option<Arc<Metrics>> = None;
@@ -1361,6 +1381,7 @@ async fn prepopulated_walk_receives_tree_diff_pointer_set() {
 
     let store = make_store();
     let router = make_router(store.clone(), "test-repo");
+    initialize_remote(&store, &router).await;
     let config = NativePushConfig::new(PushConfig::default());
     let cancel = CancellationToken::new();
 

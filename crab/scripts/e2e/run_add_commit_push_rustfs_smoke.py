@@ -22,6 +22,7 @@ import http.client
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -689,6 +690,28 @@ class AddCommitPushSmoke:
             return 0
         return sum(1 for path in staging.rglob("*") if path.is_file() and path.stat().st_size > 0)
 
+    def staging_payload_inventory(self, repo: Path) -> dict[str, int]:
+        index_path = repo / ".crab" / "staging" / "index.db"
+        if not index_path.is_file():
+            raise SmokeError(f"staging index does not exist: {index_path}")
+        connection = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        try:
+            tables = (
+                "chunks",
+                "chunk_payloads",
+                "prepared_xorbs",
+                "prepared_payloads",
+                "recipe_remote_chunks",
+            )
+            return {
+                table: int(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                )
+                for table in tables
+            }
+        finally:
+            connection.close()
+
     def sqlite_cache_files(self) -> list[str]:
         return sorted(path.name for path in self.cache_dir.rglob("*.sqlite"))
 
@@ -706,7 +729,9 @@ class AddCommitPushSmoke:
         remote_url, repo_prefix = self.remote_for_case(case_name)
         self.run_git(repo, ["init", "-b", "main"])
         self.configure_git_identity(repo, case_name)
-        self.run_crab(repo, ["init", remote_url], name=f"{case_name} crab init")
+        self.run_crab(
+            repo, ["init", remote_url], name=f"{case_name} crab init"
+        )
         self.run_crab(repo, ["track", "*.bin"], name=f"{case_name} crab track")
         self.run_git(repo, ["add", ".crab.toml", ".gitattributes"], name=f"{case_name} add config")
         return repo, remote_url, repo_prefix
@@ -718,7 +743,9 @@ class AddCommitPushSmoke:
         remote_url, repo_prefix = self.remote_for_case(case_name)
         self.run_git(repo, ["init", "-b", "main"])
         self.configure_git_identity(repo, case_name)
-        self.run_crab(repo, ["init", remote_url], name=f"{case_name} crab init")
+        self.run_crab(
+            repo, ["init", remote_url], name=f"{case_name} crab init"
+        )
         return repo, remote_url, repo_prefix
 
     @staticmethod
@@ -768,32 +795,36 @@ class AddCommitPushSmoke:
 
     def run_missing_manifest_case(self) -> None:
         case_name = "missing-manifest"
-        remote_url, repo_prefix = self.remote_for_case(case_name)
-        refs = self.ls_remote(remote_url, name=f"{case_name} git ls-remote")
+        _repo, remote_url, repo_prefix = self.prepare_git_repo(case_name)
+        self.run_aws(
+            "delete canonical manifest fixture",
+            [
+                "delete-object",
+                "--bucket",
+                self.args.bucket,
+                "--key",
+                f"{repo_prefix}/manifest",
+            ],
+        )
+        listing = self.run_git(
+            self.run_root,
+            ["ls-remote", remote_url],
+            name=f"{case_name} git ls-remote",
+            check=False,
+        )
         self.check(
-            f"{case_name}-lists-empty-repository",
-            not refs,
-            {"repo_prefix": repo_prefix, "refs": refs},
+            f"{case_name}-list-fails-closed",
+            listing.exit_code != 0,
+            {"repo_prefix": repo_prefix, "exit_code": listing.exit_code},
         )
         clone_dir = self.run_root / case_name / "clone"
         clone = self.clone_git(
             remote_url, clone_dir, name=f"{case_name} git clone", check=False
         )
         self.check(
-            f"{case_name}-clone-succeeds",
-            clone.exit_code == 0,
+            f"{case_name}-clone-fails-closed",
+            clone.exit_code != 0,
             {"exit_code": clone.exit_code},
-        )
-        head = self.run_git(
-            clone_dir,
-            ["rev-parse", "--verify", "HEAD"],
-            name=f"{case_name} verify no HEAD",
-            check=False,
-        )
-        self.check(
-            f"{case_name}-has-no-committed-head",
-            head.exit_code != 0,
-            {"exit_code": head.exit_code},
         )
 
     def run_ref_update_delete_force_and_tag_case(self) -> None:
@@ -1375,6 +1406,83 @@ class AddCommitPushSmoke:
         )
         return pointer
 
+    def run_v1_hard_cutover_reset_case(self) -> None:
+        case_name = "v1-hard-cutover-reset"
+        remote_url, repo_prefix = self.remote_for_case(case_name)
+        probe = self.run_root / "v1-reset-probe"
+        probe.mkdir(parents=True)
+        self.run_git(probe, ["init", "-b", "main"], name="v1 reset probe git init")
+        self.configure_git_identity(probe, "v1-reset-probe")
+
+        fixture = self.artifacts / "non-v1-layout.json"
+        fixture.write_text('{"schema_version":2}\n', encoding="utf-8")
+        layout_key = f"{repo_prefix}/layout"
+        self.run_aws(
+            "seed non-v1 layout",
+            [
+                "put-object",
+                "--bucket",
+                self.args.bucket,
+                "--key",
+                layout_key,
+                "--body",
+                str(fixture),
+            ],
+        )
+
+        refused = self.run_crab(
+            probe,
+            ["init", remote_url],
+            name="non-v1 remote open is refused",
+            check=False,
+        )
+        refusal_text = (
+            Path(refused.stdout_log).read_text(encoding="utf-8", errors="replace")
+            + Path(refused.stderr_log).read_text(encoding="utf-8", errors="replace")
+        )
+        self.check(
+            "non-v1-layout-fails-closed",
+            refused.exit_code != 0
+            and "canonical v1" in refusal_text
+            and "reset this isolated development repository" in refusal_text,
+            {"exit_code": refused.exit_code},
+        )
+        missing_manifest = self.run_aws(
+            "non-v1 fixture did not create manifest",
+            [
+                "head-object",
+                "--bucket",
+                self.args.bucket,
+                "--key",
+                f"{repo_prefix}/manifest",
+            ],
+            check=False,
+        )
+        self.check(
+            "non-v1-open-creates-no-manifest",
+            missing_manifest.exit_code != 0,
+            {"exit_code": missing_manifest.exit_code},
+        )
+
+        seeded = self.list_keys(f"{repo_prefix}/")
+        self.check(
+            "v1-reset-scope-is-exact",
+            seeded == {layout_key},
+            {"repo_prefix": repo_prefix, "objects": sorted(seeded)},
+        )
+        self.run_aws(
+            "delete exact non-v1 repository fixture",
+            ["delete-object", "--bucket", self.args.bucket, "--key", layout_key],
+        )
+        self.check(
+            "v1-reset-prefix-is-empty",
+            not self.list_keys(f"{repo_prefix}/"),
+            {"repo_prefix": repo_prefix},
+        )
+
+        shutil.rmtree(probe)
+        self.run_case(case_name, use_crab_add=True)
+
     def run_case(self, case_name: str, use_crab_add: bool) -> None:
         repo, remote_url, repo_prefix = self.prepare_repo(case_name)
         file_size = self.args.size_mib * 1024 * 1024
@@ -1525,8 +1633,235 @@ class AddCommitPushSmoke:
         self.report.cases.append(asdict(case))
         self.write_report()
 
+    def run_cross_repository_remote_duplicate_case(self) -> None:
+        case_name = "cross-repository-remote-duplicate"
+        file_size = self.args.size_mib * 1024 * 1024
+        content = deterministic_bytes(file_size, f"{self.run_id}:{case_name}:shared")
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+
+        source, _source_url, source_prefix = self.prepare_repo(f"{case_name}-source")
+        (source / "model.bin").write_bytes(content)
+        self.run_crab(source, ["add", "model.bin"], name=f"{case_name} source add")
+        source_pointer = self.assert_index_pointer(source, "model.bin", file_size)
+        self.run_git(source, ["commit", "-m", "publish shared payload"])
+        self.run_crab(
+            source,
+            ["push", "origin", "HEAD:refs/heads/main"],
+            name=f"{case_name} source push",
+            timeout=self.args.push_timeout,
+        )
+        self.head_key(f"{source_prefix}/manifest")
+        source_xorbs = self.list_keys(".crab/xorbs/")
+
+        consumer, consumer_url, consumer_prefix = self.prepare_repo(
+            f"{case_name}-consumer"
+        )
+        (consumer / "model.bin").write_bytes(content)
+        before_add_xorbs = self.list_keys(".crab/xorbs/")
+        self.run_crab(
+            consumer,
+            ["add", "model.bin"],
+            name=f"{case_name} consumer add",
+        )
+        consumer_pointer = self.assert_index_pointer(consumer, "model.bin", file_size)
+        self.check(
+            f"{case_name}-same-content-has-same-file-hash",
+            consumer_pointer.file_hash == source_pointer.file_hash,
+            {
+                "source_file_hash": source_pointer.file_hash,
+                "consumer_file_hash": consumer_pointer.file_hash,
+            },
+        )
+        inventory = self.staging_payload_inventory(consumer)
+        self.check(
+            f"{case_name}-add-records-proof-bearing-remote-authority",
+            inventory["recipe_remote_chunks"] > 0,
+            inventory,
+        )
+        self.check(
+            f"{case_name}-add-keeps-no-local-segment-payload",
+            inventory["chunks"] == 0 and inventory["chunk_payloads"] == 0,
+            inventory,
+        )
+        self.check(
+            f"{case_name}-add-builds-no-prepared-xorb",
+            inventory["prepared_xorbs"] == 0
+            and inventory["prepared_payloads"] == 0,
+            inventory,
+        )
+        after_add_xorbs = self.list_keys(".crab/xorbs/")
+        self.check(
+            f"{case_name}-add-writes-no-remote-xorb",
+            after_add_xorbs == before_add_xorbs == source_xorbs,
+            {
+                "before": len(before_add_xorbs),
+                "after": len(after_add_xorbs),
+            },
+        )
+
+        self.run_git(consumer, ["commit", "-m", "reuse shared payload"])
+        consumer_push = self.run_crab(
+            consumer,
+            [
+                "push",
+                "--log-level",
+                "debug",
+                "origin",
+                "HEAD:refs/heads/main",
+            ],
+            name=f"{case_name} consumer push",
+            timeout=self.args.push_timeout,
+        )
+        push_stderr = Path(consumer_push.stderr_log).read_text(
+            encoding="utf-8", errors="replace"
+        )
+        remote_chunk_count = inventory["recipe_remote_chunks"]
+        self.check(
+            f"{case_name}-push-revalidates-staged-proof-directly",
+            "revalidated staged remote placement proofs" in push_stderr
+            and f'"planned":{remote_chunk_count}' in push_stderr
+            and f'"matched":{remote_chunk_count}' in push_stderr
+            and f'"generation_verified":{remote_chunk_count}' in push_stderr
+            and f'"payload_verified":{remote_chunk_count}' in push_stderr
+            and '"stale_existing":0' in push_stderr
+            and '"global_existing":0' in push_stderr,
+            {"remote_chunks": remote_chunk_count},
+        )
+        self.head_key(f"{consumer_prefix}/manifest")
+        after_push_xorbs = self.list_keys(".crab/xorbs/")
+        self.check(
+            f"{case_name}-push-uploads-no-new-xorb",
+            after_push_xorbs == source_xorbs,
+            {
+                "before": len(source_xorbs),
+                "after": len(after_push_xorbs),
+            },
+        )
+
+        clone_dir = self.run_root / case_name / "consumer-clone"
+        self.run_cmd(
+            f"{case_name} consumer clone",
+            [self.crab_bin, "clone", consumer_url, str(clone_dir), "--jsonl"],
+            self.run_root,
+        )
+        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate")
+        self.check(
+            f"{case_name}-fresh-hydrate-is-byte-identical",
+            sha256_file(clone_dir / "model.bin") == expected_sha256,
+            {"expected_sha256": expected_sha256},
+        )
+
+    def run_committed_restage_before_first_push_case(self) -> None:
+        case_name = "committed-restage-before-first-push"
+        repo, remote_url, repo_prefix = self.prepare_repo(case_name)
+        file_size = self.args.size_mib * 1024 * 1024
+        first_content = deterministic_bytes(file_size, f"{self.run_id}:{case_name}:first")
+        second_content = deterministic_bytes(file_size, f"{self.run_id}:{case_name}:second")
+        model = repo / "model.bin"
+
+        model.write_bytes(first_content)
+        self.run_crab(repo, ["add", "model.bin"], name=f"{case_name} add first version")
+        first_pointer = self.assert_index_pointer(repo, "model.bin", file_size)
+        self.run_git(repo, ["commit", "-m", "commit first staged version"])
+        first_commit = self.rev_parse(repo, "HEAD")
+        self.run_git(repo, ["branch", "-m", "history-a"])
+        self.run_git(repo, ["checkout", "--orphan", "main"])
+        self.run_git(repo, ["rm", "-rf", "."])
+
+        model.write_bytes(second_content)
+        self.run_crab(
+            repo,
+            ["add", "--skip-git-add", "model.bin"],
+            name=f"{case_name} prepare second version",
+        )
+        self.run_git(repo, ["add", "model.bin"], name=f"{case_name} promote second version")
+        second_pointer = self.assert_index_pointer(repo, "model.bin", file_size)
+        self.check(
+            f"{case_name}-versions-have-distinct-file-hashes",
+            first_pointer.file_hash != second_pointer.file_hash,
+        )
+        self.run_git(repo, ["commit", "-m", "commit second staged version"])
+
+        before_push_record = self.run_crab(
+            repo,
+            ["staging", "stats", "--json"],
+            name=f"{case_name} staging ownership before push",
+        )
+        before_push = json.loads(self.read_stdout(before_push_record))["data"]["lifecycle"]
+        self.check(
+            f"{case_name}-retains-current-and-committed-history-owners",
+            before_push["path_heads"] == 2
+            and before_push["path_leases"] == 2
+            and before_push["open_batches_without_publication"] == 0
+            and before_push["reclaimable_superseded_leases"] == 0
+            and before_push["reclaimable_files"] == 0,
+            before_push,
+        )
+
+        self.run_crab(
+            repo,
+            [
+                "push",
+                "origin",
+                "refs/heads/history-a:refs/heads/history-a",
+                "refs/heads/main:refs/heads/main",
+            ],
+            name=f"{case_name} push both versions",
+            timeout=self.args.push_timeout,
+        )
+        self.head_key(f"{repo_prefix}/manifest")
+
+        after_push_record = self.run_crab(
+            repo,
+            ["staging", "stats", "--json"],
+            name=f"{case_name} staging ownership after push",
+        )
+        after_push = json.loads(self.read_stdout(after_push_record))["data"]["lifecycle"]
+        self.check(
+            f"{case_name}-retires-both-pushed-version-owners",
+            after_push["path_heads"] == 0
+            and after_push["path_leases"] == 0
+            and after_push["open_batches_without_publication"] == 0
+            and after_push["reclaimable_superseded_leases"] == 0
+            and after_push["reclaimable_files"] == 0,
+            after_push,
+        )
+
+        clone_dir = self.run_root / case_name / "clone"
+        self.run_cmd(
+            f"{case_name} crab clone",
+            [self.crab_bin, "clone", remote_url, str(clone_dir), "--jsonl"],
+            self.run_root,
+        )
+        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate second")
+        self.check(
+            f"{case_name}-latest-version-is-byte-identical",
+            sha256_file(clone_dir / "model.bin") == hashlib.sha256(second_content).hexdigest(),
+        )
+
+        history_clone = self.run_root / case_name / "history-clone"
+        self.run_cmd(
+            f"{case_name} history crab clone",
+            [self.crab_bin, "clone", remote_url, str(history_clone), "--jsonl"],
+            self.run_root,
+        )
+        (history_clone / ".gitattributes").unlink(missing_ok=True)
+        self.run_git(history_clone, ["checkout", "--detach", first_commit])
+        self.run_crab(history_clone, ["hydrate", "--all"], name=f"{case_name} hydrate first")
+        self.check(
+            f"{case_name}-committed-prior-version-is-byte-identical",
+            sha256_file(history_clone / "model.bin") == hashlib.sha256(first_content).hexdigest(),
+        )
+
     def run(self) -> None:
         self.preflight()
+        if self.args.only_cross_repo_duplicate:
+            self.run_cross_repository_remote_duplicate_case()
+            self.check_credential_disclosure()
+            self.report.status = "passed"
+            self.write_report()
+            return
+        self.run_v1_hard_cutover_reset_case()
         self.run_missing_manifest_case()
         self.run_corrupt_manifest_case()
         self.run_ref_update_delete_force_and_tag_case()
@@ -1536,6 +1871,8 @@ class AddCommitPushSmoke:
         self.run_immutable_object_failure_case("idx")
         self.run_corrupt_index_failure_case()
         self.run_concurrent_push_case()
+        self.run_committed_restage_before_first_push_case()
+        self.run_cross_repository_remote_duplicate_case()
         self.run_case("crab-add-crab-push", use_crab_add=True)
         self.run_case("git-add-git-push", use_crab_add=False)
         self.check_credential_disclosure()
@@ -1586,6 +1923,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--size-mib", type=positive_int, default=4)
     parser.add_argument("--timeout", type=positive_int, default=120)
     parser.add_argument("--push-timeout", type=positive_int, default=240)
+    parser.add_argument("--only-cross-repo-duplicate", action="store_true")
     return parser.parse_args()
 
 

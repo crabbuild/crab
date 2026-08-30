@@ -19,9 +19,10 @@ crab init [OPTIONS] [URL]
 
 ## Description
 
-`crab init` connects a local Git repository to a Crab remote. It creates or
-updates `.crab/` and `.crab.toml`, registers the Crab filter and diff drivers,
-and adds a Git remote. It does not scan the working tree.
+`crab init` creates or validates the canonical v1 remote layout and empty
+generation-0 manifest, then connects a local Git repository to that remote. It
+creates or updates `.crab/` and `.crab.toml`, registers the Crab filter and
+diff drivers, and adds a Git remote. It does not scan the working tree.
 
 If no git repository exists in the current directory, `crab init` automatically
 runs `git init` first — no need to initialize git separately.
@@ -45,7 +46,6 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 | `--storage-provider <PROVIDER>` | `auto` | Storage backend: `s3`, `gcs`, `azure`, or `auto` |
 | `--gc-list-profile <PROFILE>` | `adaptive` | Local bucket-GC policy: `adaptive`, `cost`, or `latency` |
 | `--mirror <REMOTE>` | — | Configure mirror mode using an existing Git remote |
-| `--remote` | `false` | Create the generation-0 manifest in object storage |
 | `--json` | `false` | Emit structured JSON output |
 | `--jsonl` | `false` | Emit streaming JSONL output |
 | `--log-level` | — | Set log verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
@@ -56,11 +56,14 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 2. **Creates `.crab/config.toml`** with the remote URL
 3. **Registers the filter and diff drivers** in `.git/config`
 4. **Adds or updates a Git remote** for the canonical `crab://` URL
+5. **Creates or validates the canonical v1 layout descriptor** remotely
+6. **Creates the generation-0 manifest atomically**, or adopts the existing
+   canonical manifest on repeat or concurrent initialization
 
-By default, init only changes local state. Pass `--remote` when provisioning a
-new remote repository; Crab creates the empty generation-0 manifest with an
-atomic create and safely adopts an existing manifest on repeat or concurrent
-initialization.
+There is no local-only selector. A non-empty prefix without a descriptor, a
+non-v1 descriptor, or a missing manifest during normal repository use fails
+closed. Reset isolated development data explicitly; push and clone do not
+convert or synthesize repository state.
 
 ## Examples
 
@@ -83,12 +86,6 @@ crab init s3://team-bucket/my-repo
 # ✓ Created .crab/config.toml
 # ✓ Registered filter.crab driver
 # Next: crab setup
-```
-
-### Provision the remote repository
-
-```bash
-crab init --remote crab://my-bucket/my-repo
 ```
 
 ### Configure tracking separately

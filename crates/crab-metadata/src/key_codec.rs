@@ -26,8 +26,6 @@ use crate::error::{MetadataError, Result};
 pub const PREFIX_CONTENT: u8 = 0x01;
 
 /// Prefix byte for generation- or receipt-pinned committed records.
-/// Legacy unversioned content keys remain candidates during migration and
-/// are never read through this namespace.
 pub const PREFIX_COMMITTED: u8 = 0x02;
 
 /// Prefix byte for the point-readable latest committed chunk receipt.

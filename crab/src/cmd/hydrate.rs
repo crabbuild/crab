@@ -1057,7 +1057,7 @@ impl ShardHydrator {
     ///
     /// The file-index points `file_hash → shard_hash`, but that mapping
     /// can be stale (the shard has been repacked since the pointer was
-    /// written) or corrupt. A small Range-GET on the shard's v2 bloom
+    /// written) or corrupt. A small Range-GET on the shard's v1 bloom
     /// trailer can prove the file is absent before we pay for the full
     /// shard body. A definitive-absent result surfaces as a
     /// [`CrabError::CorruptObject`] so the caller can fall back to a
@@ -2519,8 +2519,7 @@ async fn try_hydrate_from_staging(
     let Some(recipe) = staging.published_recipe_for_file(&file_hash)? else {
         return Ok(None);
     };
-    let sequence = recipe.sequence();
-    if sequence.file_hash != file_hash || sequence.file_size != ptr.size {
+    if recipe.file_hash() != file_hash || recipe.file_size() != ptr.size {
         return Err(error::CrabError::StagingCorrupt(format!(
             "published recipe for {} does not match pointer size {}",
             file_hash.hex(),
@@ -2532,23 +2531,30 @@ async fn try_hydrate_from_staging(
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     let mut hasher = blake3::Hasher::new();
     let mut written = 0u64;
-    for spans in sequence.spans.chunks(STAGING_HYDRATE_BATCH_CHUNKS) {
+    let mut next_occurrence = 0u64;
+    while next_occurrence < recipe.chunk_count() {
         error::check_cancelled(cancel)?;
-        let hashes = spans.iter().map(|span| span.chunk_hash).collect::<Vec<_>>();
-        let chunks = staging.get_chunks_batch(&hashes).await?;
-        for (span, (chunk_hash, data)) in spans.iter().zip(chunks) {
-            if chunk_hash != span.chunk_hash || data.len() as u64 != span.len {
-                return Err(error::CrabError::StagingCorrupt(format!(
-                    "staged chunk {} does not match the published recipe",
-                    span.chunk_hash.hex()
-                )));
+        let page = staging.recipe_page(&recipe, next_occurrence)?;
+        for spans in page.chunks.chunks(STAGING_HYDRATE_BATCH_CHUNKS) {
+            let hashes = spans.iter().map(|span| span.chunk_hash).collect::<Vec<_>>();
+            let chunks = staging.get_chunks_batch(&hashes).await?;
+            for (span, (chunk_hash, data)) in spans.iter().zip(chunks) {
+                if chunk_hash != span.chunk_hash || data.len() as u64 != span.len {
+                    return Err(error::CrabError::StagingCorrupt(format!(
+                        "staged chunk {} does not match the published recipe",
+                        span.chunk_hash.hex()
+                    )));
+                }
+                tmp.write_all(&data)?;
+                hasher.update(&data);
+                written = written.checked_add(data.len() as u64).ok_or_else(|| {
+                    error::CrabError::StagingCorrupt(
+                        "staging hydrate byte count overflow".to_owned(),
+                    )
+                })?;
             }
-            tmp.write_all(&data)?;
-            hasher.update(&data);
-            written = written.checked_add(data.len() as u64).ok_or_else(|| {
-                error::CrabError::StagingCorrupt("staging hydrate byte count overflow".to_owned())
-            })?;
         }
+        next_occurrence = page.next_occurrence();
     }
     if written != ptr.size || hasher.finalize().as_bytes() != &ptr.file_hash {
         return Err(error::CrabError::StagingCorrupt(format!(
@@ -3184,7 +3190,7 @@ pub async fn run_hydrate_in(
     let filter = if manifest_entries.is_some() {
         // Manifest mode: match everything — filtering is done by the
         // manifest entries themselves during the walk.
-        Some(build_filter(&["*".to_owned()], &[])?)
+        Some(build_all_filter()?)
     } else {
         resolve_patterns(args, config)?
     };
@@ -3663,7 +3669,7 @@ pub fn resolve_git_pointer_prefetch_candidates(
 ) -> Result<Vec<(PathBuf, Pointer)>> {
     let manifest_entries = resolve_manifest(args, root)?;
     let filter = if manifest_entries.is_some() {
-        build_filter(&["*".to_owned()], &[])?
+        build_all_filter()?
     } else {
         let Some(filter) = resolve_patterns(args, config)? else {
             return Ok(Vec::new());
@@ -4402,7 +4408,7 @@ fn build_manifest_filter(
 fn resolve_patterns(args: &HydrateArgs, config: &Config) -> Result<Option<PatternFilter>> {
     // --all: match everything.
     if args.all {
-        let filter = build_filter(&["*".to_owned()], &[])?;
+        let filter = build_all_filter()?;
         return Ok(Some(filter));
     }
 
@@ -4436,6 +4442,12 @@ fn resolve_patterns(args: &HydrateArgs, config: &Config) -> Result<Option<Patter
 
     // Nothing specified — caller should print help.
     Ok(None)
+}
+
+fn build_all_filter() -> Result<PatternFilter> {
+    // Git pathspec `**/*` excludes repository-root files; bare `*`
+    // matches both root and nested paths.
+    build_filter(&["*".to_owned()], &[])
 }
 
 /// Print a help message when no patterns are provided.
@@ -5122,6 +5134,11 @@ mod tests {
         run_git_without_crab_filter(fixture.work_tree(), &["add", ".gitattributes", "model.bin"]);
         run_git(fixture.work_tree(), &["commit", "-m", "pointer"]);
 
+        let router = StoreLayout::new(store.clone(), TEST_REPLICA_PREFIX.to_owned());
+        crate::cmd::init::initialize_remote_repository_store(&store, &router, "refs/heads/main")
+            .await
+            .expect("initialize canonical command-path repository");
+
         let result = run_push_batch(
             &[PushSpec {
                 force: false,
@@ -5132,7 +5149,7 @@ mod tests {
             Some(store.clone()),
             None,
             Some(Arc::new(staging)),
-            StoreLayout::new(store.clone(), TEST_REPLICA_PREFIX.to_owned()),
+            router,
             None,
             CancellationToken::new(),
             None,
@@ -5314,7 +5331,7 @@ mod tests {
         };
         let config = Config::default();
         let filter = resolve_patterns(&args, &config).unwrap().unwrap();
-        assert!(filter.matches("file.bin"));
+        assert!(filter.matches("root.bin"));
         assert!(filter.matches("any/path/file.bin"));
     }
 

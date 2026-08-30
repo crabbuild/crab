@@ -8,4 +8,8 @@ pub trait StagingMetrics: Send + Sync {
     fn inc_staging_segments_compacted(&self) {}
     fn inc_staging_fsyncs(&self) {}
     fn inc_staging_compactions_skipped_inflight(&self) {}
+    fn inc_prepared_source_xorb_open(&self) {}
+    fn add_prepared_source_xorb_bytes_read(&self, _value: u64) {}
+    fn prepared_source_reader_started(&self) {}
+    fn prepared_source_reader_finished(&self) {}
 }

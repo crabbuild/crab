@@ -1163,7 +1163,11 @@ class LargeRepositoryQualification:
         self.run_git(self.replay_repo, ["checkout", "--detach", base], "checkout replay base")
         self.run_git(self.replay_repo, ["branch", "-f", "main", base], "create replay main")
         self.run_git(self.replay_repo, ["switch", "main"], "switch replay main")
-        self.run_crab(self.replay_repo, ["init", self.remote_url], "initialize Crab remote")
+        self.run_crab(
+            self.replay_repo,
+            ["init", self.remote_url],
+            "initialize Crab remote",
+        )
 
     def push_commit(self, commit: str, ordinal: int, name: str) -> dict[str, Any]:
         record = self.run_crab(

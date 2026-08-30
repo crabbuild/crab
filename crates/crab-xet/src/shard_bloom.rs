@@ -1,6 +1,6 @@
 //! Shard bloom filter for fast membership pre-checks on file and chunk hashes.
 //!
-//! Each shard can carry an optional bloom footer (footer version 2) containing
+//! Each canonical v1 shard can carry an optional bloom footer containing
 //! two sub-blooms — one for file hashes and one for chunk hashes — both
 //! targeting a 1% false-positive rate. The bloom is appended after the
 //! standard shard data and referenced by a `bloom_offset` in the extended

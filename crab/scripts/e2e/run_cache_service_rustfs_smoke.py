@@ -54,7 +54,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v3"
+EXPECTED_ROUTE_SCHEMA = "crab-cache-service.routes.v1"
 EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
@@ -1688,7 +1688,11 @@ class CacheServiceRustfsSmoke:
         repo.mkdir(parents=True, exist_ok=True)
         remote_url = f"crab://{self.args.bucket}/{REMOTE_PREFIX}/{self.run_id}/client-config"
         self.run_cmd("git init client config", ["git", "init", "-b", "main"], repo)
-        self.run_cmd("crab init client config", [self.crab_bin, "init", remote_url], repo)
+        self.run_cmd(
+            "crab init client config",
+            [self.crab_bin, "init", remote_url],
+            repo,
+        )
         self.configure_repo_cache_service(repo)
         config_path = repo / ".crab" / "config.toml"
         config = config_path.read_text(encoding="utf-8")
@@ -4197,7 +4201,12 @@ class CacheServiceRustfsSmoke:
         remote_url = f"crab://{self.args.bucket}/{REMOTE_PREFIX}/{self.run_id}/cli-hydrate"
         self.run_cmd("cli source git init", ["git", "init", "-b", "main"], repo, env=env)
         self.configure_git_identity(repo, "cli-source")
-        self.run_cmd("cli source crab init", [self.crab_bin, "init", remote_url], repo, env=env)
+        self.run_cmd(
+            "cli source crab init",
+            [self.crab_bin, "init", remote_url],
+            repo,
+            env=env,
+        )
         self.configure_repo_cache_service(repo, env=env)
         self.run_cmd("cli source crab track", [self.crab_bin, "track", "*.bin"], repo, env=env)
         tracked_config = [
@@ -4314,7 +4323,12 @@ class CacheServiceRustfsSmoke:
         remote_url = f"crab://{self.args.bucket}/{REMOTE_PREFIX}/{self.run_id}/cli-dedup"
         self.run_cmd("cli dedup git init", ["git", "init", "-b", "main"], repo, env=env)
         self.configure_git_identity(repo, "cli-dedup")
-        self.run_cmd("cli dedup crab init", [self.crab_bin, "init", remote_url], repo, env=env)
+        self.run_cmd(
+            "cli dedup crab init",
+            [self.crab_bin, "init", remote_url],
+            repo,
+            env=env,
+        )
         self.configure_repo_cache_service(repo, env=env)
         self.run_cmd("cli dedup crab track", [self.crab_bin, "track", "*.bin"], repo, env=env)
         tracked_config = [
@@ -4329,6 +4343,14 @@ class CacheServiceRustfsSmoke:
             )
 
         (repo / "model.bin").write_bytes(data)
+        # Deduplication now happens while `crab add` prepares the staged xorb.
+        # Measure the complete add-to-push pipeline so this qualification proves
+        # both the cache-service classification and push-time proof reuse.
+        before_stats = self.cache_admin_stats()
+        before_gets = state.total_get_count()
+        before_get_counts = state.counts_snapshot()
+        before_puts = state.total_put_count()
+        before_put_counts = state.put_counts_snapshot()
         self.run_cmd(
             "cli dedup crab add model",
             [self.crab_bin, "add", "--jobs", "0", "model.bin"],
@@ -4343,11 +4365,6 @@ class CacheServiceRustfsSmoke:
             env=env,
         )
 
-        before_stats = self.cache_admin_stats()
-        before_gets = state.total_get_count()
-        before_get_counts = state.counts_snapshot()
-        before_puts = state.total_put_count()
-        before_put_counts = state.put_counts_snapshot()
         self.run_cmd(
             "cli dedup crab push",
             [
@@ -4410,13 +4427,13 @@ class CacheServiceRustfsSmoke:
         self.write_report()
 
         self.check(
-            "cli-dedup-push-cache-service-queried",
-            record.dedup_queries_delta > 0,
+            "cli-dedup-add-push-advisory-query-bypassed",
+            record.dedup_queries_delta == 0,
             {"delta": record.dedup_queries_delta},
         )
         self.check(
-            "cli-dedup-push-cache-service-returned-known-chunks",
-            record.dedup_known_chunks_delta > 0 and record.dedup_unknown_chunks_delta == 0,
+            "cli-dedup-add-push-advisory-results-empty",
+            record.dedup_known_chunks_delta == 0 and record.dedup_unknown_chunks_delta == 0,
             {
                 "known_delta": record.dedup_known_chunks_delta,
                 "unknown_delta": record.dedup_unknown_chunks_delta,
@@ -5914,20 +5931,20 @@ def audit_cli_dedup(report: dict[str, Any], errors: list[str]) -> None:
         return
     audit_require(
         errors,
-        int(record.get("dedup_queries_delta", 0)) > 0,
-        "dedup queried cache service",
+        int(record.get("dedup_queries_delta", -1)) == 0,
+        "add/push bypassed advisory dedup query",
         record,
     )
     audit_require(
         errors,
-        int(record.get("dedup_known_chunks_delta", 0)) > 0,
-        "dedup returned known chunks",
+        int(record.get("dedup_known_chunks_delta", -1)) == 0,
+        "add/push did not consume advisory known chunks",
         record,
     )
     audit_require(
         errors,
-        int(record.get("dedup_unknown_chunks_delta", 0)) == 0,
-        "dedup avoided unknown chunks",
+        int(record.get("dedup_unknown_chunks_delta", -1)) == 0,
+        "add/push did not consume advisory unknown chunks",
         record,
     )
     cacheable_keys = record.get("cacheable_origin_get_key_delta", {})

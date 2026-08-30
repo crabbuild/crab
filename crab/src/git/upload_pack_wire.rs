@@ -11,7 +11,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use crab_metadata::git_visibility::GitVisibilityIndex;
-use crab_metadata::manifest_store::read_manifest;
 #[cfg(test)]
 use crab_read::plan_upload_pack;
 use crab_read::{
@@ -275,18 +274,21 @@ async fn capability_snapshot_is_stable(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<bool> {
+    // Capability discovery proves that terminal admission can establish an
+    // exact snapshot. `serve_admitted` performs any bounded repair before its
+    // positive handoff, so requiring derived catalogs here would strand v2.
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let (manifest, _) = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(RemoteGitError::Cancelled),
-        result = read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
+        result = crab_metadata::manifest_store::read_manifest(store, &layout) => result.map_err(|source| RemoteGitError::Manifest { source })?,
     };
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let active_marker_present = store
         .list_prefix_bounded(&layout.ref_journal_active_prefix(), 1)
         .await?
-        .map_or(true, |objects| !objects.is_empty());
+        .is_none_or(|objects| !objects.is_empty());
     let owner_active =
         match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
             Ok(active) => active,
@@ -2357,6 +2359,26 @@ mod tests {
                 .await
                 .expect("read empty capability snapshot"),
             true
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_capability_rejects_refs_without_a_visibility_proof() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.refs.insert(
+            "refs/heads/main".to_owned(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        );
+        manifest.seal_git_validation();
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .expect("create incomplete manifest");
+
+        assert!(
+            !snapshot_available(&store, "org/repo", &CancellationToken::new()).await,
+            "terminal protocol v2 must not be advertised without repairable visibility evidence"
         );
     }
 

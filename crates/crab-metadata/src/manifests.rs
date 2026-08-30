@@ -7,11 +7,14 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{MetadataError, Result};
 use crate::segmented::{self, SegmentKind, SegmentWrite, ShardSegmentEntry};
 use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
+
+/// Canonical Crab manifest format version.
+pub const MANIFEST_VERSION: u32 = 1;
 
 /// A compacted repository snapshot.
 ///
@@ -19,8 +22,9 @@ use crate::validation::{corrupt_object, validate_content_hash, validate_sha1};
 /// pointing to immutable segmented indexes. Committed journal transactions
 /// newer than this snapshot are materialized on reads until compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Format version. Always 2 for segmented metadata.
+    /// Format version. Always [`MANIFEST_VERSION`].
     pub version: u32,
     /// Monotonically increasing generation number.
     pub generation: u64,
@@ -33,7 +37,6 @@ pub struct Manifest {
     /// Complete ref map: ref name to SHA.
     pub refs: BTreeMap<String, String>,
     /// Peeled-target map for annotated tags: ref name to target-commit SHA.
-    #[serde(default)]
     pub peeled_refs: BTreeMap<String, String>,
     /// HEAD symref target, such as `refs/heads/main`.
     pub head: String,
@@ -54,7 +57,7 @@ impl Manifest {
     #[must_use]
     pub fn default_for_repo(head: &str) -> Self {
         let mut manifest = Self {
-            version: 2,
+            version: MANIFEST_VERSION,
             generation: 0,
             created_at: String::new(),
             pusher: None,
@@ -105,8 +108,11 @@ impl Manifest {
 /// Returns [`MetadataError::CorruptObject`] when the manifest version, ref OIDs,
 /// HEAD target, or metadata content hashes are malformed.
 pub fn validate_manifest_payload(manifest: &Manifest) -> Result<()> {
-    if manifest.version != 2 {
-        return Err(corrupt_object("manifest", "manifest must use version 2"));
+    if manifest.version != MANIFEST_VERSION {
+        return Err(corrupt_object(
+            "manifest",
+            format!("manifest must use version {MANIFEST_VERSION}"),
+        ));
     }
     for oid in manifest.refs.values() {
         validate_sha1(oid, "manifest ref oid", "manifest")?;
@@ -159,6 +165,7 @@ fn validate_optional_content_hash(value: &str, field: &str, path: &str) -> Resul
 
 /// A single entry in the segmented pack index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PackManifestEntry {
     /// Pack ID.
     pub pack_id: String,
@@ -403,55 +410,25 @@ impl<T: Default> Default for Versioned<T> {
     }
 }
 
-/// Extended pack entry with optional ref-tip metadata.
-///
-/// Legacy packs (pushed before ref-based filtering) have `ref_tips: None`
-/// and are downloaded unconditionally during fetch. Newer packs carry
-/// ref tips so the fetch pipeline can skip irrelevant packs.
+/// Canonical pack entry with the ref tips reachable from the pack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PackEntry {
     /// Pack ID (SHA hash).
     pub pack_id: String,
     /// Pack size in bytes.
     pub size: u64,
-    /// Ref tips reachable from this pack (`None` for legacy packs).
-    #[serde(
-        default,
-        deserialize_with = "deserialize_non_empty_ref_tips",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub ref_tips: Option<Vec<String>>,
-}
-
-fn deserialize_non_empty_ref_tips<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<Vec<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let ref_tips = Option::<Vec<String>>::deserialize(deserializer)?;
-    Ok(ref_tips.filter(|ref_tips| !ref_tips.is_empty()))
+    /// Ref tips reachable from this pack. Empty means no filtering proof.
+    pub ref_tips: Vec<String>,
 }
 
 impl PackEntry {
-    /// Create a legacy pack entry without ref-tip metadata.
-    pub fn legacy(pack_id: impl Into<String>, size: u64) -> Self {
+    /// Create one canonical pack entry.
+    pub fn new(pack_id: impl Into<String>, size: u64, ref_tips: Vec<String>) -> Self {
         Self {
             pack_id: pack_id.into(),
             size,
-            ref_tips: None,
-        }
-    }
-
-    /// Create a pack entry with ref-tip metadata.
-    ///
-    /// Empty metadata is represented as legacy because it cannot prove that a
-    /// pack is irrelevant to any requested ref.
-    pub fn with_ref_tips(pack_id: impl Into<String>, size: u64, ref_tips: Vec<String>) -> Self {
-        Self {
-            pack_id: pack_id.into(),
-            size,
-            ref_tips: (!ref_tips.is_empty()).then_some(ref_tips),
+            ref_tips,
         }
     }
 }
@@ -516,16 +493,16 @@ mod tests {
     }
 
     #[test]
-    fn pack_entry_legacy_constructor() {
-        let entry = PackEntry::legacy("abc123", 1024);
+    fn pack_entry_without_filter_tips() {
+        let entry = PackEntry::new("abc123", 1024, Vec::new());
         assert_eq!(entry.pack_id, "abc123");
         assert_eq!(entry.size, 1024);
-        assert!(entry.ref_tips.is_none());
+        assert!(entry.ref_tips.is_empty());
     }
 
     #[test]
     fn pack_entry_with_ref_tips_constructor() {
-        let entry = PackEntry::with_ref_tips(
+        let entry = PackEntry::new(
             "def456",
             2048,
             vec!["tip_a".to_string(), "tip_b".to_string()],
@@ -534,15 +511,8 @@ mod tests {
         assert_eq!(entry.size, 2048);
         assert_eq!(
             entry.ref_tips,
-            Some(vec!["tip_a".to_string(), "tip_b".to_string()])
+            vec!["tip_a".to_string(), "tip_b".to_string()]
         );
-    }
-
-    #[test]
-    fn pack_entry_with_empty_ref_tips_is_legacy() {
-        let entry = PackEntry::with_ref_tips("empty", 2048, Vec::new());
-
-        assert!(entry.ref_tips.is_none());
     }
 
     #[test]
@@ -550,8 +520,8 @@ mod tests {
         let m = PackList {
             generation: 5,
             entries: vec![
-                PackEntry::with_ref_tips("pack1", 100, vec!["sha_a".to_string()]),
-                PackEntry::legacy("pack2", 200),
+                PackEntry::new("pack1", 100, vec!["sha_a".to_string()]),
+                PackEntry::new("pack2", 200, Vec::new()),
             ],
         };
         let json = serde_json::to_string(&m).unwrap();
@@ -560,34 +530,23 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pack_entry_omits_ref_tips_in_json() {
-        let entry = PackEntry::legacy("abc", 512);
+    fn canonical_pack_entry_serializes_empty_ref_tips() {
+        let entry = PackEntry::new("abc", 512, Vec::new());
         let json = serde_json::to_string(&entry).unwrap();
-        assert!(!json.contains("ref_tips"));
+        assert!(json.contains("\"ref_tips\":[]"));
     }
 
     #[test]
-    fn deserialize_pack_entry_without_ref_tips_field() {
+    fn pack_entry_without_ref_tips_is_rejected() {
         let json = r#"{"pack_id":"old_pack","size":4096}"#;
-        let entry: PackEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.pack_id, "old_pack");
-        assert_eq!(entry.size, 4096);
-        assert!(entry.ref_tips.is_none());
-    }
-
-    #[test]
-    fn deserialize_pack_entry_with_empty_ref_tips_is_legacy() {
-        let json = r#"{"pack_id":"old_pack","size":4096,"ref_tips":[]}"#;
-        let entry: PackEntry = serde_json::from_str(json).unwrap();
-
-        assert!(entry.ref_tips.is_none());
+        assert!(serde_json::from_str::<PackEntry>(json).is_err());
     }
 
     #[test]
     fn default_manifest_is_generation_zero() {
         let manifest = Manifest::default_for_repo("refs/heads/main");
 
-        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.version, MANIFEST_VERSION);
         assert_eq!(manifest.generation, 0);
         assert_eq!(manifest.head, "refs/heads/main");
         assert!(manifest.refs.is_empty());
@@ -614,17 +573,6 @@ mod tests {
         let json = serde_json::to_value(manifest).unwrap();
 
         assert_eq!(json["peeled_refs"], serde_json::json!({}));
-    }
-
-    #[test]
-    fn manifest_decode_accepts_missing_peeled_refs() {
-        let manifest = Manifest::default_for_repo("refs/heads/main");
-        let mut json = serde_json::to_value(manifest).unwrap();
-        json.as_object_mut().unwrap().remove("peeled_refs");
-
-        let decoded: Manifest = serde_json::from_value(json).unwrap();
-
-        assert!(decoded.peeled_refs.is_empty());
     }
 
     #[test]
@@ -695,7 +643,7 @@ mod tests {
         manifest.pack_index_hash = "c".repeat(64);
 
         let mut bad_version = manifest.clone();
-        bad_version.version = 1;
+        bad_version.version = MANIFEST_VERSION + 1;
         assert!(validate_manifest_payload(&bad_version).is_err());
 
         let mut bad_ref = manifest.clone();

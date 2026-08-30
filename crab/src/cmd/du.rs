@@ -303,7 +303,8 @@ async fn fetch_remote_size(root: &Path) -> (Option<u64>, Option<String>) {
 
     let config = crate::core::config::Config::resolve_for_repo(root).unwrap_or_default();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let Ok(store) = crate::auth::build_store(&config, &parsed, "du", &cancel).await else {
+    let Ok(store) = crate::auth::build_repository_url_store(&config, &parsed, "du", &cancel).await
+    else {
         return (None, Some(url));
     };
 

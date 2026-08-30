@@ -529,11 +529,9 @@ async fn filter_packs_by_local_object_closure(
     let tip_sets = remote_packs
         .iter()
         .map(|pack| {
-            metadata.get(pack.pack_id.as_str()).and_then(|entry| {
-                (entry.size == pack.size)
-                    .then(|| entry.ref_tips.clone())
-                    .flatten()
-            })
+            metadata
+                .get(pack.pack_id.as_str())
+                .and_then(|entry| (entry.size == pack.size).then(|| entry.ref_tips.clone()))
         })
         .collect::<Vec<_>>();
 
@@ -1549,7 +1547,7 @@ mod tests {
             }),
             pack_list: PackList {
                 generation: 1,
-                entries: vec![PackEntry::legacy(&pack_id, pack_data.len() as u64)],
+                entries: vec![PackEntry::new(&pack_id, pack_data.len() as u64, Vec::new())],
             },
         };
         let entries = [FetchEntry {
@@ -2065,7 +2063,11 @@ mod tests {
             summary: Some(summary),
             pack_list: PackList {
                 generation: 1,
-                entries: vec![PackEntry::legacy("shallow-pack", pack_data.len() as u64)],
+                entries: vec![PackEntry::new(
+                    "shallow-pack",
+                    pack_data.len() as u64,
+                    Vec::new(),
+                )],
             },
         };
 
@@ -2115,7 +2117,11 @@ mod tests {
             summary: Some(summary),
             pack_list: PackList {
                 generation: 1,
-                entries: vec![PackEntry::legacy("relative-pack", pack_data.len() as u64)],
+                entries: vec![PackEntry::new(
+                    "relative-pack",
+                    pack_data.len() as u64,
+                    Vec::new(),
+                )],
             },
         };
         let entries = vec![FetchEntry {
@@ -2370,12 +2376,12 @@ mod tests {
             pack_list: PackList {
                 generation: 1,
                 entries: vec![
-                    PackEntry::with_ref_tips(
+                    PackEntry::new(
                         "relevant-pack",
                         relevant_data.len() as u64,
                         vec!["sha_main".to_string()],
                     ),
-                    PackEntry::with_ref_tips(
+                    PackEntry::new(
                         "irrelevant-pack",
                         irrelevant_data.len() as u64,
                         vec!["sha_other_branch".to_string()],
@@ -2442,12 +2448,12 @@ mod tests {
             pack_list: PackList {
                 generation: 1,
                 entries: vec![
-                    PackEntry::with_ref_tips(
+                    PackEntry::new(
                         "base-pack",
                         base_data.len() as u64,
                         vec!["sha_base".to_owned()],
                     ),
-                    PackEntry::with_ref_tips(
+                    PackEntry::new(
                         "child-pack",
                         child_data.len() as u64,
                         vec!["sha_child".to_owned()],
@@ -2478,7 +2484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ref_filtering_keeps_legacy_and_locally_unproven_packs() {
+    async fn ref_filtering_keeps_packs_without_filtering_proof() {
         let tmp = temp_git_dir();
         let git_dir = tmp.path();
         let mut config = config_for(git_dir);
@@ -2511,10 +2517,10 @@ mod tests {
             pack_list: PackList {
                 generation: 1,
                 entries: vec![
-                    // Legacy pack: no ref_tips metadata.
-                    PackEntry::legacy("legacy-pack", legacy_data.len() as u64),
+                    // Empty tips carry no filtering proof.
+                    PackEntry::new("legacy-pack", legacy_data.len() as u64, Vec::new()),
                     // Tagged pack with non-matching ref tips.
-                    PackEntry::with_ref_tips(
+                    PackEntry::new(
                         "tagged-pack",
                         tagged_data.len() as u64,
                         vec!["sha_other".to_string()],
@@ -2542,7 +2548,7 @@ mod tests {
         let pack_dir = git_dir.join("objects/pack");
         assert!(
             pack_dir.join("pack-legacy-pack.pack").exists(),
-            "legacy pack should always be downloaded"
+            "pack without a filtering proof should always be downloaded"
         );
         assert!(
             pack_dir.join("pack-tagged-pack.pack").exists(),
@@ -2571,16 +2577,8 @@ mod tests {
             pack_list: PackList {
                 generation: 1,
                 entries: vec![
-                    PackEntry::with_ref_tips(
-                        "pack-a",
-                        pack_a.len() as u64,
-                        vec!["sha_main".to_string()],
-                    ),
-                    PackEntry::with_ref_tips(
-                        "pack-b",
-                        pack_b.len() as u64,
-                        vec!["sha_other".to_string()],
-                    ),
+                    PackEntry::new("pack-a", pack_a.len() as u64, vec!["sha_main".to_string()]),
+                    PackEntry::new("pack-b", pack_b.len() as u64, vec!["sha_other".to_string()]),
                 ],
             },
         };
@@ -2652,8 +2650,8 @@ mod tests {
         let pack_list = PackList {
             generation: 1,
             entries: vec![
-                PackEntry::with_ref_tips("complete", 100, vec![tip]),
-                PackEntry::legacy("legacy", 200),
+                PackEntry::new("complete", 100, vec![tip]),
+                PackEntry::new("legacy", 200, Vec::new()),
             ],
         };
 
@@ -2680,7 +2678,7 @@ mod tests {
         }];
         let pack_list = PackList {
             generation: 1,
-            entries: vec![PackEntry::with_ref_tips("incomplete", 100, vec![tip])],
+            entries: vec![PackEntry::new("incomplete", 100, vec![tip])],
         };
 
         let selected =

@@ -127,21 +127,11 @@ pub fn exp_stage_refs_object_path(id: &ExperimentId) -> String {
 
 /// Current schema version for the experiment metadata blob on disk.
 ///
-/// Readers refuse any blob stamped with a higher version
-/// ([`CrabError::WorkflowExperimentMetadataSchemaNewer`]); lower
-/// versions will be migrated up once an older schema ships. The
-/// starting value is `1` — there is no v0.
-pub const EXPERIMENT_METADATA_SCHEMA_VERSION: u16 = 3;
+/// Readers refuse any blob outside the canonical v1 contract.
+pub const EXPERIMENT_METADATA_SCHEMA_VERSION: u16 = 1;
 
-/// Highest schema version this binary knows how to read. Tracks
-/// [`EXPERIMENT_METADATA_SCHEMA_VERSION`] until a migration ladder
-/// lands (task 4.5+), at which point this value bumps to the latest
-/// version the ladder can produce.
+/// Highest schema version this binary knows how to read.
 pub const EXPERIMENT_METADATA_MAX_SUPPORTED_SCHEMA: u16 = EXPERIMENT_METADATA_SCHEMA_VERSION;
-
-fn default_experiment_metadata_status() -> String {
-    "unknown".to_owned()
-}
 
 /// Full experiment state, persisted as a single canonical-JSON blob
 /// under [`exp_meta_object_path`].
@@ -153,6 +143,7 @@ fn default_experiment_metadata_status() -> String {
 /// walker, `exp diff`) rely on that property to cache meta-blob
 /// content hashes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExperimentMetadata {
     /// Forward-compat schema stamp. Bumped whenever the on-disk
     /// shape gains or renames a field.
@@ -184,9 +175,7 @@ pub struct ExperimentMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 
-    /// Terminal state for list filters and audits. Older metadata
-    /// predates this field and reads back as `unknown`.
-    #[serde(default = "default_experiment_metadata_status")]
+    /// Terminal state for list filters and audits.
     pub status: String,
 
     /// Parameter overrides applied to the tmpdir worktree before
@@ -470,14 +459,12 @@ where
         return Ok(None);
     };
 
-    // Parse just the schema_version first so we can reject
-    // newer-than-supported blobs before interpreting any other
-    // fields (whose shape may have drifted).
+    // Parse the version first so non-v1 bytes are never interpreted as current.
     let probe: SchemaProbe = serde_json::from_slice(&bytes).map_err(|e| {
         CrabError::Internal(format!("experiment metadata malformed JSON for {id}: {e}"))
     })?;
 
-    if probe.schema_version > EXPERIMENT_METADATA_MAX_SUPPORTED_SCHEMA {
+    if probe.schema_version != EXPERIMENT_METADATA_SCHEMA_VERSION {
         return Err(CrabError::WorkflowExperimentMetadataSchemaNewer {
             id: id.to_string(),
             found: probe.schema_version,
@@ -804,15 +791,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata_v2_without_status_reads_as_unknown() {
+    fn retired_metadata_shape_is_rejected() {
         let mut value = serde_json::to_value(sample_metadata(pinned_id())).expect("serialize ok");
         let object = value.as_object_mut().expect("metadata object");
         object.insert("schema_version".to_owned(), serde_json::json!(2));
         object.remove("status");
 
-        let back: ExperimentMetadata = serde_json::from_value(value).expect("deserialize ok");
-        assert_eq!(back.schema_version, 2);
-        assert_eq!(back.status, "unknown");
+        assert!(serde_json::from_value::<ExperimentMetadata>(value).is_err());
     }
 
     #[test]

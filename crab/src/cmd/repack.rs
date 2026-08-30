@@ -822,17 +822,7 @@ async fn read_current_visibility(
     )
     .await
     {
-        Ok(Some(read)) => {
-            if read.format == crab_metadata::git_visibility::GitVisibilityFormat::V1 {
-                crab_metadata::git_visibility::upload_if_absent(
-                    store.as_storage(),
-                    &storage_router,
-                    &read.index,
-                )
-                .await?;
-            }
-            Ok(Some(read.index))
-        }
+        Ok(Some(read)) => Ok(Some(read.index)),
         Ok(None) => Ok(None),
         Err(error) => Err(error.into()),
     }

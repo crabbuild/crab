@@ -50,7 +50,7 @@ const FIRST_DYNAMIC_INO: u64 = 3;
 const ENTRY_TTL: Duration = Duration::ZERO;
 
 /// Longer TTL for the synthetic `.git` file (it never changes).
-const GITFILE_TTL: Duration = Duration::from_secs(60);
+const GITFILE_TTL: Duration = Duration::from_mins(1);
 
 /// Target FUSE readahead window for large sequential reads.
 const FUSE_TARGET_MAX_READAHEAD: u32 = 1024 * 1024;

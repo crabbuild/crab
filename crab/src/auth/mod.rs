@@ -108,17 +108,17 @@ fn credential_provider_config(auth: &AuthConfig) -> Result<CredentialProviderCon
         AuthProvider::CrabAuth => Ok(CredentialProviderConfig::CrabAuth(crab_auth_client_config(
             auth,
         )?)),
-        AuthProvider::Static => Ok(CredentialProviderConfig::Static(static_auth_config(auth))),
-        AuthProvider::None => Ok(CredentialProviderConfig::None(static_auth_config(auth))),
+        AuthProvider::Static => Ok(CredentialProviderConfig::Static(static_auth_config(auth)?)),
+        AuthProvider::None => Ok(CredentialProviderConfig::None(static_auth_config(auth)?)),
     }
 }
 
-fn static_auth_config(auth: &AuthConfig) -> StaticAuthConfig {
+fn static_auth_config(auth: &AuthConfig) -> Result<StaticAuthConfig> {
     let storage_provider = auth
         .storage_provider
         .storage_provider_kind()
-        .unwrap_or_else(crab_storage::resolve_static_env_provider);
-    StaticAuthConfig { storage_provider }
+        .map_or_else(crab_storage::resolve_static_env_provider, Ok)?;
+    Ok(StaticAuthConfig { storage_provider })
 }
 
 fn aws_oidc_config(auth: &AuthConfig) -> Result<AwsOidcConfig> {
@@ -337,6 +337,33 @@ pub async fn build_store(
     Ok(store)
 }
 
+/// Build and validate the store for one direct canonical-v1 repository URL.
+///
+/// Bucket-level and arbitrary object-source callers must continue to use
+/// [`build_store`]; this boundary rejects missing or non-v1 repository state
+/// before a repository command can read or mutate metadata.
+pub async fn build_repository_url_store(
+    config: &Config,
+    url: impl Into<crab_git::url::CrabUrl>,
+    operation: &str,
+    cancel: &CancellationToken,
+) -> Result<Store> {
+    let url = url.into();
+    let repository_prefix = url.repo_path.clone();
+    let store = build_store(config, url, operation, cancel).await?;
+    validate_repository_store(&store, &repository_prefix).await?;
+    Ok(store)
+}
+
+pub(crate) async fn validate_repository_store(
+    store: &Store,
+    repository_prefix: &str,
+) -> Result<()> {
+    let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
+    crate::core::remote_layout::open(store, &router).await?;
+    Ok(())
+}
+
 pub fn build_store_from_credentials(bucket: &str, creds: CloudCredentials) -> Result<Store> {
     crab_auth_store::build_store_from_credentials(bucket, creds)
         .map(Store::from_storage)
@@ -390,10 +417,39 @@ impl From<ManagedRepositoryError> for CrabError {
 mod tests {
     use super::*;
     use crate::core::config::{AuthConfig, AuthProvider, Config, StorageProvider};
+    use crate::storage::StoreLayout;
     use crab_types::storage::StorageProviderKind;
+    use object_store::memory::InMemory;
     use std::sync::{LazyLock, Mutex, MutexGuard};
 
     static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[tokio::test]
+    async fn repository_validation_requires_descriptor_without_creating_state() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+
+        let error = validate_repository_store(&store, "org/repo")
+            .await
+            .expect_err("descriptor-less repository must fail closed");
+
+        assert!(error.to_string().contains("layout descriptor is missing"));
+        assert!(store.head(&router.manifest_path()).await.is_err());
+        assert!(store.head(&router.layout_descriptor_path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn repository_validation_accepts_only_initialized_canonical_v1() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .expect("initialize canonical descriptor");
+
+        validate_repository_store(&store, "org/repo")
+            .await
+            .expect("canonical descriptor should open");
+    }
 
     /// Helper: build a `Config` with the given auth provider and storage provider.
     fn config_with(provider: AuthProvider, storage: StorageProvider) -> Config {
@@ -717,6 +773,14 @@ mod tests {
             }
             _ => panic!("expected StaticEnv Gcs, got {creds:?}"),
         }
+
+        // Sub-test 3: explicit invalid env values fail closed.
+        _guard.update(Some("auto"));
+        let cfg = config_with(AuthProvider::Static, StorageProvider::Auto);
+        assert!(matches!(
+            create_provider(&cfg),
+            Err(CrabError::Configuration { .. })
+        ));
     }
 
     // --- Env var guard for test isolation ---

@@ -174,6 +174,7 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     };
 
     let router = StoreLayout::new(target.store.clone(), repo_prefix.clone());
+    crate::cmd::init::initialize_remote_repository_store(&target.store, &router, &ref_name).await?;
 
     // Capture a metrics baseline so `bytes_uploaded` reflects this
     // publish, not a lifetime total. Default push config mirrors what
@@ -251,17 +252,9 @@ fn summarize_outcomes(result: &crate::git::push::PushResult) -> (u64, u64, Strin
     let mut ok: u64 = 0;
     let mut failed: u64 = 0;
     let mut failures: Vec<String> = Vec::new();
-    #[allow(
-        deprecated,
-        reason = "pattern-matches the deprecated Error variant for backward compat"
-    )]
     for (ref_name, outcome) in &result.outcomes {
         match outcome {
             RefPushOutcome::Ok => ok += 1,
-            RefPushOutcome::Error(msg) => {
-                failed += 1;
-                failures.push(format!("{ref_name}: {msg}"));
-            }
             RefPushOutcome::Rejected(reason) => {
                 failed += 1;
                 failures.push(format!("{ref_name}: {reason}"));
@@ -275,13 +268,7 @@ fn summarize_outcomes(result: &crate::git::push::PushResult) -> (u64, u64, Strin
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    deprecated,
-    reason = "test assertions; exercises the deprecated RefPushOutcome::Error path"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -686,7 +673,9 @@ mod tests {
         outcomes.insert("refs/heads/main".to_owned(), RefPushOutcome::Ok);
         outcomes.insert(
             "refs/heads/dev".to_owned(),
-            RefPushOutcome::Error("conflict".to_owned()),
+            RefPushOutcome::Rejected(crate::git::push::PushRejectReason::Internal(
+                "conflict".to_owned(),
+            )),
         );
         let result = PushResult::new(outcomes);
         let (ok, failed, msg) = summarize_outcomes(&result);

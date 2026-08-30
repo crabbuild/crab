@@ -7,9 +7,7 @@
 //!
 //! # Key and value encoding
 //!
-//! Committed rows are keyed by file hash and manifest generation. Legacy
-//! unversioned rows are read only by tests and removed after a complete
-//! manifest-scoped rebuild.
+//! Committed rows are keyed by file hash and manifest generation.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,9 +17,11 @@ use bytes::Bytes;
 use crate::core::error::{CrabError, Result};
 use crate::metadata::metadb::db::Db;
 use crate::metadata::metadb::transaction::{DbTarget, Transaction};
+#[cfg(test)]
+use crab_metadata::key_codec::encode_content_key;
 use crab_metadata::key_codec::{
-    PREFIX_COMMITTED, PREFIX_CONTENT, decode_committed_file_key, decode_content_key,
-    encode_committed_content_prefix, encode_committed_file_key, encode_content_key,
+    PREFIX_COMMITTED, decode_committed_file_key, encode_committed_content_prefix,
+    encode_committed_file_key,
 };
 use crab_metadata::value_codec::{
     CommittedFileRecord, decode_committed_file_record, encode_committed_file_record,
@@ -190,41 +190,10 @@ impl FileIndexStore {
     }
 
     /// Record a delete into the transaction.
+    #[cfg(test)]
     pub(crate) fn delete_legacy(&self, txn: &mut Transaction, file_hash: &MerkleHash) {
         let key = Bytes::copy_from_slice(&encode_content_key(file_hash));
         txn.delete(DbTarget::FileIndex, key);
-    }
-
-    /// Return one bounded batch of legacy unversioned keys.
-    pub(crate) async fn legacy_keys_batch(&self, limit: usize) -> Result<Vec<Bytes>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut rows = self.db.scan_prefix(&[PREFIX_CONTENT]).await?;
-        let mut keys = Vec::with_capacity(limit);
-        while keys.len() < limit {
-            let Some(row) = rows.next().await.map_err(|source| {
-                CrabError::from(crate::core::error::MetaDbError::Read {
-                    db: DB_LABEL.to_owned(),
-                    prefix: String::from("<legacy-content>"),
-                    source,
-                })
-            })?
-            else {
-                break;
-            };
-            decode_content_key(&row.key)
-                .map_err(|error| super::map_value_codec_error(error, DB_LABEL, &row.key))?;
-            keys.push(row.key);
-        }
-        Ok(keys)
-    }
-
-    /// Tombstone a bounded legacy-key batch after a complete rebuild.
-    pub(crate) fn delete_legacy_keys(&self, txn: &mut Transaction, keys: &[Bytes]) {
-        for key in keys {
-            txn.delete(DbTarget::FileIndex, key.clone());
-        }
     }
 
     /// Remove unreferenced rows from one first-byte hash partition.

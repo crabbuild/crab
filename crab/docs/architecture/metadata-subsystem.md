@@ -42,7 +42,7 @@ has two `Db` handles per session.
 
 ## Storage Layout
 
-See [Object Storage Layout V2](object-storage-layout.md) for the normative
+See [Canonical Object Storage Layout V1](object-storage-layout.md) for the normative
 scope, key grammar, ownership, and cross-language interpretation. The tree
 below focuses on the two metadata databases.
 

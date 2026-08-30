@@ -3,6 +3,7 @@
 pub mod manifest;
 pub mod metadb;
 pub mod refs;
+#[cfg(test)]
 pub mod segmented;
 pub mod shard_sync;
 

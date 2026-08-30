@@ -715,8 +715,8 @@ jobs:
       - name: Run workflow contract tests
         run: cargo test -p crab-workflow --locked
 
-      - name: Run CLI migration contract tests
-        run: cargo test -p crab --test workflow_migration --no-default-features --features simd-accel,tier,watch --locked
+      - name: Run CLI v1 contract tests
+        run: cargo test -p crab --test workflow_v1_contracts --no-default-features --features simd-accel,tier,watch --locked
 
       - name: Build and execute the Windows release candidate
         if: runner.os == 'Windows'

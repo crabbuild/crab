@@ -4,10 +4,11 @@
 //! This module adds only Crab's per-worktree `.crab/` paths while preserving
 //! the existing CLI-facing `WorktreeContext` shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::core::error::Result;
+use crate::core::error::{CrabError, Result};
+use crab_types::pointer::Pointer;
 
 pub use crab_git::worktree::{
     GIT_2_39_WORKTREE_SURFACE, GitVersion, GitWorktreeRecord, LATEST_TRACKED_VERSION_GATED_OPTIONS,
@@ -32,6 +33,110 @@ pub fn linked_identity_map_from_current_repo() -> Result<HashMap<String, String>
 
 pub fn worktree_identity_for_path(path: &Path) -> Result<Option<String>> {
     crab_git::worktree::worktree_identity_for_path(path).map_err(Into::into)
+}
+
+/// Read Crab pointers for selected paths from `HEAD` and every local ref tip.
+///
+/// Returns an empty map outside an initialized worktree. Fails if a reachable
+/// reference, commit, tree, or blob cannot be read exactly.
+pub fn committed_pointers_for_paths(
+    repo_root: &Path,
+    paths: &[PathBuf],
+) -> Result<HashMap<PathBuf, Vec<Pointer>>> {
+    let dot_git = repo_root.join(".git");
+    let dot_git_metadata = match std::fs::symlink_metadata(&dot_git) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new());
+        }
+        Err(error) => return Err(CrabError::Io(error)),
+    };
+    if dot_git_metadata.is_dir() && !dot_git.join("HEAD").try_exists().map_err(CrabError::Io)? {
+        return Ok(HashMap::new());
+    }
+    let repo = gix::open(repo_root)
+        .map_err(|error| CrabError::Internal(format!("failed to open Git repository: {error}")))?;
+    let mut tree_ids = HashSet::new();
+    tree_ids.insert(
+        repo.head_tree_id_or_empty()
+            .map_err(|error| CrabError::Internal(format!("failed to resolve HEAD tree: {error}")))?
+            .detach(),
+    );
+    let references = repo
+        .references()
+        .map_err(|error| CrabError::Internal(format!("failed to open Git references: {error}")))?;
+    let references = references
+        .all()
+        .map_err(|error| CrabError::Internal(format!("failed to list Git references: {error}")))?
+        .peeled()
+        .map_err(|error| CrabError::Internal(format!("failed to peel Git references: {error}")))?;
+    for reference in references {
+        let reference = reference.map_err(|error| {
+            CrabError::Internal(format!("failed to read Git reference: {error}"))
+        })?;
+        let object = reference.id().object().map_err(|error| {
+            CrabError::Internal(format!(
+                "failed to read Git reference {}: {error}",
+                reference.name()
+            ))
+        })?;
+        match object.kind {
+            gix_object::Kind::Commit => {
+                tree_ids.insert(
+                    object
+                        .into_commit()
+                        .tree_id()
+                        .map_err(|error| {
+                            CrabError::Internal(format!(
+                                "failed to read commit tree for {}: {error}",
+                                reference.name()
+                            ))
+                        })?
+                        .detach(),
+                );
+            }
+            gix_object::Kind::Tree => {
+                tree_ids.insert(object.id);
+            }
+            _ => {}
+        }
+    }
+    let mut pointers = HashMap::with_capacity(paths.len());
+
+    for tree_id in tree_ids {
+        let tree = repo.find_tree(tree_id).map_err(|error| {
+            CrabError::Internal(format!("failed to read committed Git tree: {error}"))
+        })?;
+        for path in paths {
+            let Some(entry) = tree.lookup_entry_by_path(path).map_err(|error| {
+                CrabError::Internal(format!(
+                    "failed to read committed Git path {}: {error}",
+                    path.display()
+                ))
+            })?
+            else {
+                continue;
+            };
+            if !entry.mode().is_blob() {
+                continue;
+            }
+            let blob = repo.find_blob(entry.object_id()).map_err(|error| {
+                CrabError::Internal(format!(
+                    "failed to read committed Git blob for {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if let Ok(pointer) = Pointer::parse(&blob.data) {
+                let path_pointers = pointers.entry(path.clone()).or_insert_with(Vec::new);
+                if !path_pointers.iter().any(|existing: &Pointer| {
+                    existing.file_hash == pointer.file_hash && existing.size == pointer.size
+                }) {
+                    path_pointers.push(pointer);
+                }
+            }
+        }
+    }
+    Ok(pointers)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

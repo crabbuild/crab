@@ -1,9 +1,9 @@
-//! Compatibility Adapter for repository manifest helpers.
+//! Repository manifest composition helpers.
 
 pub use crab_metadata::manifest_store::{
     ManifestHistoryEntry, RefJournalCompaction, RepositorySnapshot,
 };
-pub use crab_metadata::manifests::{BulkData, Manifest, PackManifestEntry};
+pub use crab_metadata::manifests::{BulkData, MANIFEST_VERSION, Manifest, PackManifestEntry};
 pub use crab_metadata::ref_journal::{
     RefJournalCommitResult, RefJournalEdit, RefJournalHeadSnapshot, RefJournalTransaction,
 };

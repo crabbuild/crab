@@ -22,6 +22,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
+use bstr::ByteSlice;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use tokio::task::JoinHandle;
@@ -35,8 +36,7 @@ use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::core::pattern::{PatternFilter, build_filter};
 use crate::git::progress::{format_bytes, format_rate, is_tty, render_bar};
 use crate::git::push::PushConfig;
-use crab_staging::push_plan::{FilePushPlan, PlannedPlacement, PlannedXorb, move_prepared_xorb};
-use crab_staging::{StagingArea, StagingAreaReadOnly};
+use crab_staging::{PublicationIntentEntry, PublicationIntentId, StagingArea, StagingAreaReadOnly};
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::XorbBuilder;
@@ -48,8 +48,6 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 const ADD_INCOMPLETE_PCT_FRACTION: f64 = 0.999;
 const ADD_DUPLICATE_FINGERPRINT_BYTES: usize = 1024 * 1024;
 const ADD_DUPLICATE_REUSE_MIN_BYTES: u64 = 32 * 1024 * 1024;
-
-type ChunkPairs = Arc<[(MerkleHash, u64)]>;
 
 /// Arguments for the `crab add` command.
 pub struct AddArgs {
@@ -94,9 +92,8 @@ struct FileResult {
     /// skipping the clean-filter round-trip that `git add` would
     /// otherwise trigger.
     file_hash: [u8; 32],
-    /// CDC chunk hash/size sequence produced during the verified
-    /// chunking pass.
-    chunk_pairs: ChunkPairs,
+    /// Canonical indexed recipe root produced by the verified chunking pass.
+    recipe: crab_staging::recipe::FileRecipe,
     /// Prepared xorbs produced during the verified streaming pass.
     prepared_xorbs: Vec<crate::cmd::stream_stage::StreamStagePreparedXorb>,
     /// Stat snapshot captured while the staged bytes were verified.
@@ -110,7 +107,7 @@ struct StagedEntry {
     abs_path: PathBuf,
     file_hash: [u8; 32],
     size: u64,
-    chunk_pairs: ChunkPairs,
+    recipe: crab_staging::recipe::FileRecipe,
     prepared_xorbs: Vec<crate::cmd::stream_stage::StreamStagePreparedXorb>,
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
 }
@@ -118,7 +115,7 @@ struct StagedEntry {
 struct AddExecutionPlans {
     duplicate_plan: DuplicateReusePlan,
     stream_xorb_plan: Option<StreamPreparedXorbPlan>,
-    fallback_push_plan_min_size: Option<u64>,
+    remote_classifier: Option<Arc<crate::git::push::AddRemoteChunkClassifier>>,
 }
 
 struct StreamPreparedXorbPlan {
@@ -172,7 +169,7 @@ struct StreamPreparedPlanGroup {
 struct ReusableStagedFile {
     file_hash: [u8; 32],
     size: u64,
-    chunk_pairs: ChunkPairs,
+    recipe: crab_staging::recipe::FileRecipe,
 }
 
 #[derive(Default)]
@@ -348,7 +345,7 @@ impl AddProgress {
         self.phase.store(phase as u8, Relaxed);
     }
 
-    fn update_plan_summary(&self, summary: &crate::cmd::add_push_plan::AddPushPlanSummary) {
+    fn update_plan_summary(&self, summary: &crab_staging::push_plan::AddPushPlanSummary) {
         self.plan_files_done.store(summary.files, Relaxed);
         self.plan_chunks.store(summary.chunks, Relaxed);
         self.plan_existing_candidates
@@ -1004,6 +1001,11 @@ async fn execute_add(
 
     // Open the staging area.
     let staging_root = worktree_ctx.shared_staging_dir();
+    if staging_root.join("index.db").exists() {
+        let recovery = StagingAreaReadOnly::open(staging_root.clone()).await?;
+        reconcile_publication_intents(&recovery, &repo_root).await?;
+        drop(recovery);
+    }
     let staging = Arc::new(StagingArea::open(staging_root.clone()).await?);
 
     if jobs != args.jobs {
@@ -1022,7 +1024,8 @@ async fn execute_add(
 
     let total_files = candidates.len() as u64;
     let total_bytes: u64 = candidates.iter().map(|(_, s)| *s).sum();
-    let execution_plans = add_execution_plans(&candidates, total_bytes);
+    let mut execution_plans = add_execution_plans(&candidates, total_bytes);
+    execution_plans.remote_classifier = open_add_remote_classifier(cancel).await;
 
     // Build the optional JSONL stream for streaming mode.
     let jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>> = match args.mode {
@@ -1077,6 +1080,12 @@ async fn execute_add(
             .stream_xorb_plan
             .as_ref()
             .and_then(|plan| plan.builder_for(&abs_path));
+        let existing_lookup = execution_plans
+            .remote_classifier
+            .as_ref()
+            .map(|classifier| {
+                Arc::clone(classifier) as Arc<dyn crab_staging::push_plan::ExistingChunkLookup>
+            });
         let file_progress = progress.file_progress(index).ok_or_else(|| {
             CrabError::Internal(format!("missing add progress slot for file #{index}"))
         })?;
@@ -1089,6 +1098,7 @@ async fn execute_add(
             Arc::clone(&file_progress),
             abs_path,
             stream_xorb_builder,
+            existing_lookup,
         );
         pending_tasks.push(join_add_task(file_progress, handle));
     }
@@ -1137,6 +1147,14 @@ async fn execute_add(
                         .stream_xorb_plan
                         .as_ref()
                         .and_then(|plan| plan.builder_for(&abs_path));
+                    let existing_lookup =
+                        execution_plans
+                            .remote_classifier
+                            .as_ref()
+                            .map(|classifier| {
+                                Arc::clone(classifier)
+                                    as Arc<dyn crab_staging::push_plan::ExistingChunkLookup>
+                            });
                     let file_progress = progress.file_progress(index).ok_or_else(|| {
                         CrabError::Internal(format!("missing add progress slot for file #{index}"))
                     })?;
@@ -1150,6 +1168,7 @@ async fn execute_add(
                         abs_path,
                         Some(reusable.clone()),
                         stream_xorb_builder,
+                        existing_lookup,
                     );
                     pending_tasks.push(join_add_task(file_progress, handle));
                 }
@@ -1163,6 +1182,12 @@ async fn execute_add(
                 .stream_xorb_plan
                 .as_ref()
                 .and_then(|plan| plan.builder_for(&abs_path));
+            let existing_lookup = execution_plans
+                .remote_classifier
+                .as_ref()
+                .map(|classifier| {
+                    Arc::clone(classifier) as Arc<dyn crab_staging::push_plan::ExistingChunkLookup>
+                });
             let file_progress = progress.file_progress(index).ok_or_else(|| {
                 CrabError::Internal(format!("missing add progress slot for file #{index}"))
             })?;
@@ -1176,6 +1201,7 @@ async fn execute_add(
                 abs_path,
                 None,
                 stream_xorb_builder,
+                existing_lookup,
             );
             pending_tasks.push(join_add_task(file_progress, handle));
         }
@@ -1192,6 +1218,9 @@ async fn execute_add(
             &mut staged_entries,
             &duplicate_representatives,
         );
+    }
+    if let Some(classifier) = execution_plans.remote_classifier.take() {
+        classifier.close().await;
     }
     summary.staging_duration_ms = staging_phase_start.elapsed().as_millis() as u64;
 
@@ -1219,62 +1248,37 @@ async fn execute_add(
         let plan_progress = Arc::clone(&progress);
         let plan_jsonl_stream = jsonl_stream.clone();
         let plan_start = Instant::now();
-        let mut on_plan_progress =
-            |plan_summary: &crate::cmd::add_push_plan::AddPushPlanSummary| {
-                plan_progress.update_plan_summary(plan_summary);
-                if let Some(ref stream) = plan_jsonl_stream
-                    && let Ok(mut s) = stream.lock()
-                {
-                    let elapsed = plan_start.elapsed();
-                    let rate = if elapsed.as_secs_f64() > 0.0 {
-                        plan_summary.prepared_bytes as f64 / elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    s.emit_progress(ProgressPayload {
-                        operation: "push-plan".to_owned(),
-                        current: plan_summary.files,
-                        total: total_files,
-                        bytes: plan_summary.prepared_bytes,
-                        total_bytes,
-                        rate_bytes_per_sec: rate,
-                        xorbs_produced: Some(plan_summary.prepared_xorbs),
-                    });
-                }
-            };
+        let mut on_plan_progress = |plan_summary: &crab_staging::push_plan::AddPushPlanSummary| {
+            plan_progress.update_plan_summary(plan_summary);
+            if let Some(ref stream) = plan_jsonl_stream
+                && let Ok(mut s) = stream.lock()
+            {
+                let elapsed = plan_start.elapsed();
+                let rate = if elapsed.as_secs_f64() > 0.0 {
+                    plan_summary.prepared_bytes as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+                s.emit_progress(ProgressPayload {
+                    operation: "push-plan".to_owned(),
+                    current: plan_summary.files,
+                    total: total_files,
+                    bytes: plan_summary.prepared_bytes,
+                    total_bytes,
+                    rate_bytes_per_sec: rate,
+                    xorbs_produced: Some(plan_summary.prepared_xorbs),
+                });
+            }
+        };
         let plan_result = if can_use_stream_prepared_plans(&staged_entries) {
             Some(
                 write_stream_prepared_push_plans(&staging, &staged_entries, &mut on_plan_progress)
                     .await,
             )
-        } else if fallback_push_plans_are_worth_preparing(
-            &staged_entries,
-            execution_plans.fallback_push_plan_min_size,
-        ) {
-            let plan_files: Vec<crate::cmd::add_push_plan::AddPlanFile> = staged_entries
-                .iter()
-                .map(|entry| crate::cmd::add_push_plan::AddPlanFile {
-                    file_hash: entry.file_hash,
-                    size: entry.size,
-                    chunks: entry.chunk_pairs.as_ref(),
-                })
-                .collect();
-            Some(
-                Box::pin(
-                    crate::cmd::add_push_plan::prepare_file_push_plans_with_progress(
-                        &staging,
-                        &repo_root,
-                        &plan_files,
-                        cancel,
-                        Some(&mut on_plan_progress),
-                    ),
-                )
-                .await,
-            )
         } else {
             debug!(
                 files = staged_entries.len(),
-                "add push-plan: skipping fallback planning for small add without stream coverage"
+                "add push-plan: deferring non-prepared files to bounded push planning"
             );
             None
         };
@@ -1297,6 +1301,24 @@ async fn execute_add(
         for entry in &mut staged_entries {
             entry.prepared_xorbs = Vec::new();
         }
+    }
+
+    let publish_git_index = should_publish_git_index(args, &summary, staged_entries.len());
+    if publish_git_index
+        && let Err(error) =
+            pin_committed_recipes_before_path_replacement(&staging, &repo_root, &staged_entries)
+    {
+        if let Err(cleanup_error) = rollback_unpublished_open_entries(
+            &staging,
+            &mut summary,
+            &mut staged_entries,
+            "failed to preserve committed recipes before Git index publication",
+        ) {
+            stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+            return Err(cleanup_error);
+        }
+        stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+        return Err(error);
     }
 
     // Close the staging area before publishing pointers into Git's index.
@@ -1323,7 +1345,7 @@ async fn execute_add(
     // `git add` and its clean-filter round-trip. For large batches this
     // is the dominant post-chunk cost, and doing it ourselves lets the
     // live bar tick per file instead of waiting on an opaque subprocess.
-    if should_publish_git_index(args, &summary, staged_entries.len()) {
+    if publish_git_index {
         let indexing_start = Instant::now();
         progress.set_phase(AddPhase::Indexing);
         // Re-purpose `files_done` for the indexing bar: starts at 0,
@@ -1341,28 +1363,63 @@ async fn execute_add(
             crate::cache::ShardHintCache::new()
         });
 
+        let publication_staging = StagingAreaReadOnly::open(staging_root.clone()).await?;
+        let mut publication_intent = None;
         let progress_cb = Arc::clone(&progress);
         if let Err(e) = write_pointers_and_tracking_to_git_index(
             &staged_entries,
             &repo_root,
             &shard_hints,
             &generated_tracking_patterns,
+            |index_entries, current_index| {
+                let entries = staged_entries
+                    .iter()
+                    .zip(index_entries)
+                    .map(|(staged, indexed)| {
+                        let batch_id = staged.batch_id.clone().ok_or_else(|| {
+                            CrabError::StagingCorrupt(format!(
+                                "staged path {} has no publication batch",
+                                staged.abs_path.display()
+                            ))
+                        })?;
+                        let path = staged
+                            .abs_path
+                            .strip_prefix(&repo_root)
+                            .unwrap_or(&staged.abs_path)
+                            .to_path_buf();
+                        let index_path = git_index_path_bstring(&path);
+                        Ok(PublicationIntentEntry {
+                            batch_id,
+                            path,
+                            expected_pointer_oid: indexed.sha.clone(),
+                            previous_index_state: git_index_path_state(
+                                current_index,
+                                index_path.as_bstr(),
+                            ),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                publication_intent = Some(publication_staging.create_publication_intent(&entries)?);
+                Ok(())
+            },
             || {
                 progress_cb.files_done.fetch_add(1, Relaxed);
             },
         ) {
-            let error = handle_git_index_write_error(&staging_root, &staged_entries, e).await;
+            let error = handle_git_index_write_error(
+                &staging_root,
+                &staged_entries,
+                publication_intent.as_ref(),
+                e,
+            )
+            .await;
             stop_progress_ticker(ticker.take(), &ticker_cancel).await;
             return Err(error);
         }
-        if let Err(error) =
-            mark_closed_staging_batches_published(&staging_root, &staged_entries).await
-        {
-            warn!(
-                error = %error,
-                "Git index committed but staging batch publication markers need repair"
-            );
-        }
+        let publication_intent = publication_intent.ok_or_else(|| {
+            CrabError::Internal("Git index publication intent was not recorded".to_owned())
+        })?;
+        publication_staging.publish_publication_intent(&publication_intent)?;
         summary.indexing_duration_ms = indexing_start.elapsed().as_millis() as u64;
     }
 
@@ -1480,7 +1537,7 @@ fn record_successful_file_result(
         abs_path: result.abs_path,
         file_hash: result.file_hash,
         size: result.size,
-        chunk_pairs: result.chunk_pairs,
+        recipe: result.recipe,
         prepared_xorbs: result.prepared_xorbs,
         index_stat: result.index_stat,
     });
@@ -1495,6 +1552,7 @@ fn spawn_primary_add_task(
     file_progress: Arc<AddFileProgress>,
     abs_path: PathBuf,
     stream_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
 ) -> JoinHandle<Result<FileResult>> {
     tokio::spawn(async move {
         let _permit = sem
@@ -1511,6 +1569,7 @@ fn spawn_primary_add_task(
             &progress,
             &file_progress,
             stream_xorb_builder,
+            existing_lookup,
             &cancel,
         )
         .await
@@ -1527,6 +1586,7 @@ fn spawn_duplicate_add_task(
     abs_path: PathBuf,
     reusable: Option<ReusableStagedFile>,
     stream_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
 ) -> JoinHandle<Result<FileResult>> {
     tokio::spawn(async move {
         let _permit = sem
@@ -1544,6 +1604,7 @@ fn spawn_duplicate_add_task(
             &file_progress,
             reusable,
             stream_xorb_builder,
+            existing_lookup,
             &cancel,
         )
         .await
@@ -1580,7 +1641,7 @@ fn record_add_task_join(
                         ReusableStagedFile {
                             file_hash: result.file_hash,
                             size: result.size,
-                            chunk_pairs: result.chunk_pairs.clone(),
+                            recipe: result.recipe.clone(),
                         },
                     )
                 });
@@ -1618,6 +1679,7 @@ async fn process_file(
     progress: &Arc<AddProgress>,
     file_progress: &Arc<AddFileProgress>,
     xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
     cancel: &CancellationToken,
 ) -> Result<FileResult> {
     file_progress.set_state(AddFileState::Running);
@@ -1631,6 +1693,7 @@ async fn process_file(
             chunk_bytes_done: Some(Arc::clone(&file_progress.chunk_bytes_done)),
             chunks_done: Some(Arc::clone(&file_progress.chunks_done)),
             xorb_builder,
+            existing_lookup,
         },
         cancel,
     )
@@ -1666,7 +1729,7 @@ async fn process_file(
         chunks: result.chunks,
         size: result.size,
         file_hash: result.file_hash,
-        chunk_pairs: result.chunk_pairs.into(),
+        recipe: result.recipe,
         prepared_xorbs: result.prepared_xorbs,
         index_stat: result.index_stat,
         duration_ms: result.duration_ms,
@@ -1681,6 +1744,7 @@ async fn process_duplicate_candidate(
     file_progress: &Arc<AddFileProgress>,
     reusable: Option<ReusableStagedFile>,
     fallback_xorb_builder: Option<crate::cmd::stream_stage::StreamStageXorbBuilder>,
+    existing_lookup: Option<Arc<dyn crab_staging::push_plan::ExistingChunkLookup>>,
     cancel: &CancellationToken,
 ) -> Result<FileResult> {
     let Some(reusable) = reusable else {
@@ -1691,6 +1755,7 @@ async fn process_duplicate_candidate(
             progress,
             file_progress,
             fallback_xorb_builder,
+            existing_lookup,
             cancel,
         )
         .await;
@@ -1744,6 +1809,7 @@ async fn process_duplicate_candidate(
             progress,
             file_progress,
             fallback_xorb_builder,
+            existing_lookup,
             cancel,
         )
         .await;
@@ -1752,12 +1818,7 @@ async fn process_duplicate_candidate(
     let file_merkle = MerkleHash::from(file_hash);
     let rel_path = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
     let batch_id = staging.create_batch()?;
-    let recipe = crab_staging::recipe::FileRecipe::from_staged_chunks(
-        crab_staging::recipe::ChunkingPolicyId::XetGearV1_64KiB,
-        file_merkle,
-        size,
-        reusable.chunk_pairs.as_ref(),
-    )?;
+    let recipe = reusable.recipe.clone();
     if let Err(error) = staging.record_verified_recipe_lease(&batch_id, rel_path, &recipe) {
         let _ = staging.rollback_batch(&batch_id);
         return Err(error.into());
@@ -1772,24 +1833,26 @@ async fn process_duplicate_candidate(
     file_progress.chunk_bytes_done.store(size, Relaxed);
     file_progress
         .chunks_done
-        .store(reusable.chunk_pairs.len() as u64, Relaxed);
+        .store(recipe.chunk_count(), Relaxed);
     file_progress.set_state(AddFileState::Done);
     progress.files_done.fetch_add(1, Relaxed);
 
     debug!(
         path = %rel_path.display(),
         size,
-        chunks = reusable.chunk_pairs.len(),
+        chunks = recipe.chunk_count(),
         "reused staged chunks from verified duplicate payload"
     );
 
     Ok(FileResult {
         batch_id,
         abs_path: abs_path.to_path_buf(),
-        chunks: reusable.chunk_pairs.len(),
+        chunks: usize::try_from(recipe.chunk_count()).map_err(|_| {
+            CrabError::StagingCorrupt("recipe chunk count cannot fit usize".to_owned())
+        })?,
         size,
         file_hash,
-        chunk_pairs: reusable.chunk_pairs,
+        recipe,
         prepared_xorbs: Vec::new(),
         index_stat: after_hash_stat.filter(|stat| stat.len == size),
         duration_ms: start.elapsed().as_millis() as u64,
@@ -1798,9 +1861,6 @@ async fn process_duplicate_candidate(
 
 fn add_execution_plans(candidates: &[(PathBuf, u64)], total_bytes: u64) -> AddExecutionPlans {
     let push_config = add_push_config(total_bytes);
-    let fallback_push_plan_min_size = push_config
-        .as_ref()
-        .map(|push_config| push_config.min_xorb_size);
     let fingerprint_min_size = push_config
         .as_ref()
         .map_or(ADD_DUPLICATE_REUSE_MIN_BYTES, |push_config| {
@@ -1840,8 +1900,57 @@ fn add_execution_plans(candidates: &[(PathBuf, u64)], total_bytes: u64) -> AddEx
     AddExecutionPlans {
         duplicate_plan,
         stream_xorb_plan,
-        fallback_push_plan_min_size,
+        remote_classifier: None,
     }
+}
+
+async fn open_add_remote_classifier(
+    cancel: &CancellationToken,
+) -> Option<Arc<crate::git::push::AddRemoteChunkClassifier>> {
+    let config = match crate::core::config::Config::resolve_local() {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "add remote classifier: config unavailable; packing locally");
+            return None;
+        }
+    };
+    if matches!(
+        config.auth.provider,
+        crate::core::config::AuthProvider::CrabAuth
+    ) {
+        debug!("add remote classifier: protected push requires a push session; packing locally");
+        return None;
+    }
+    let target = match crate::cmd::push::resolve_push_target(None) {
+        Ok(target) => target,
+        Err(error) => {
+            debug!(error = %error, "add remote classifier: no unambiguous Crab remote");
+            return None;
+        }
+    };
+    let selection =
+        match crate::replication::StoreResolver::new(&config, &target.parsed_url, cancel)
+            .write_store("add remote classification")
+            .await
+        {
+            Ok(selection) => selection,
+            Err(error) => {
+                warn!(error = %error, "add remote classifier: origin unavailable; packing locally");
+                return None;
+            }
+        };
+    let caching_store = crab_cache_store::CachingStore::try_build_healthy(
+        selection.store.as_storage().clone(),
+        &config.cache,
+    )
+    .await;
+    Some(Arc::new(crate::git::push::AddRemoteChunkClassifier::new(
+        PushConfig::from_config(&config),
+        selection.store,
+        caching_store,
+        selection.router,
+        cancel.clone(),
+    )))
 }
 
 fn add_push_config(total_bytes: u64) -> Option<Arc<PushConfig>> {
@@ -1993,31 +2102,15 @@ fn can_use_stream_prepared_plans(entries: &[StagedEntry]) -> bool {
     stream_prepared_plan_groups(entries).is_some()
 }
 
-fn fallback_push_plans_are_worth_preparing(
-    entries: &[StagedEntry],
-    min_plan_bytes: Option<u64>,
-) -> bool {
-    let Some(min_plan_bytes) = min_plan_bytes else {
-        return false;
-    };
-    entries
-        .iter()
-        .map(|entry| entry.size)
-        .try_fold(0u64, |total, size| total.checked_add(size))
-        .is_none_or(|total| total >= min_plan_bytes)
-}
-
 fn stream_prepared_plan_groups(entries: &[StagedEntry]) -> Option<Vec<StreamPreparedPlanGroup>> {
     let mut groups = Vec::<StreamPreparedPlanGroup>::new();
     let mut group_by_file = HashMap::<[u8; 32], usize>::new();
-    let mut chunk_owner = HashMap::<MerkleHash, [u8; 32]>::new();
 
     for (entry_idx, entry) in entries.iter().enumerate() {
         if let Some(&group_idx) = group_by_file.get(&entry.file_hash) {
             let group = &mut groups[group_idx];
             let representative = &entries[group.representative_idx];
-            if representative.size != entry.size || representative.chunk_pairs != entry.chunk_pairs
-            {
+            if representative.size != entry.size || representative.recipe != entry.recipe {
                 return None;
             }
             group.files += 1;
@@ -2032,21 +2125,11 @@ fn stream_prepared_plan_groups(entries: &[StagedEntry]) -> Option<Vec<StreamPrep
             representative_idx: entry_idx,
             files: 1,
         });
-
-        for (chunk_hash, _) in entry.chunk_pairs.iter() {
-            if let Some(owner) = chunk_owner.insert(*chunk_hash, entry.file_hash)
-                && owner != entry.file_hash
-            {
-                return None;
-            }
-        }
     }
 
     for group in &groups {
         let entry = &entries[group.representative_idx];
-        if !entry.chunk_pairs.is_empty()
-            && (entry.prepared_xorbs.is_empty() || !stream_prepared_xorbs_cover_entry(entry))
-        {
+        if entry.recipe.chunk_count() > 0 && entry.prepared_xorbs.is_empty() {
             return None;
         }
     }
@@ -2054,105 +2137,19 @@ fn stream_prepared_plan_groups(entries: &[StagedEntry]) -> Option<Vec<StreamPrep
     Some(groups)
 }
 
-fn stream_prepared_xorbs_cover_entry(entry: &StagedEntry) -> bool {
-    let mut expected = HashMap::new();
-    for (chunk_hash, size) in entry.chunk_pairs.iter() {
-        if let Some(existing_size) = expected.insert(*chunk_hash, *size)
-            && existing_size != *size
-        {
-            return false;
-        }
-    }
-
-    let mut covered = HashSet::with_capacity(expected.len());
-    for prepared in &entry.prepared_xorbs {
-        for placement in &prepared.placements {
-            if placement.xorb_hash != prepared.hash {
-                return false;
-            }
-            let Some(expected_size) = expected.get(&placement.chunk_hash) else {
-                return false;
-            };
-            if u64::from(placement.uncompressed_size) != *expected_size {
-                return false;
-            }
-            covered.insert(placement.chunk_hash);
-        }
-    }
-
-    expected
-        .keys()
-        .all(|chunk_hash| covered.contains(chunk_hash))
-}
-
 async fn write_stream_prepared_push_plans(
-    staging: &StagingArea,
+    _staging: &StagingArea,
     entries: &[StagedEntry],
-    on_progress: &mut (dyn FnMut(&crate::cmd::add_push_plan::AddPushPlanSummary) + Send),
-) -> Result<crate::cmd::add_push_plan::AddPushPlanSummary> {
+    on_progress: &mut (dyn FnMut(&crab_staging::push_plan::AddPushPlanSummary) + Send),
+) -> Result<crab_staging::push_plan::AddPushPlanSummary> {
     let groups = stream_prepared_plan_groups(entries).ok_or_else(|| {
         CrabError::Internal("stream-prepared push plans lost verified coverage".to_owned())
     })?;
-    let mut summary = crate::cmd::add_push_plan::AddPushPlanSummary::default();
+    let mut summary = crab_staging::push_plan::AddPushPlanSummary::default();
     for group in groups {
         let entry = &entries[group.representative_idx];
-        let file_hash = MerkleHash::from(entry.file_hash);
-        if let Some(plan) = staging
-            .load_file_push_plan(&file_hash)
-            .await
-            .map_err(CrabError::from)?
-            && plan.file_size == entry.size
-            && plan.chunk_pairs().map_err(CrabError::from)? == entry.chunk_pairs.as_ref()
-            && plan.prepared_xorbs.len() == entry.prepared_xorbs.len()
-        {
-            summary.files += group.files;
-            summary.chunks += entry.chunk_pairs.len() as u64;
-            summary.prepared_xorbs += plan.prepared_xorbs.len() as u64;
-            summary.prepared_bytes += plan
-                .prepared_xorbs
-                .iter()
-                .map(|prepared| prepared.bytes)
-                .sum::<u64>();
-            on_progress(&summary);
-            continue;
-        }
-        let mut plan =
-            FilePushPlan::new_verified_staging(file_hash, entry.size, entry.chunk_pairs.as_ref());
-        for prepared in &entry.prepared_xorbs {
-            let written = move_prepared_xorb(
-                staging.root(),
-                &file_hash,
-                &prepared.hash,
-                &prepared.payload_path,
-            )
-            .await
-            .map_err(CrabError::from)?;
-            if written != prepared.bytes {
-                return Err(CrabError::StagingCorrupt(format!(
-                    "stream-prepared xorb {} changed size while writing push plan: expected {} bytes, found {written}",
-                    prepared.hash.hex(),
-                    prepared.bytes
-                )));
-            }
-            plan.prepared_xorbs.push(PlannedXorb {
-                hash: prepared.hash.hex(),
-                payload_hash: prepared.payload_hash.clone(),
-                bytes: prepared.bytes,
-                upload: true,
-                placements: prepared
-                    .placements
-                    .iter()
-                    .map(PlannedPlacement::from_placement)
-                    .collect(),
-            });
-        }
-        staging
-            .write_file_push_plan(&plan)
-            .await
-            .map_err(CrabError::from)?;
-
         summary.files += group.files;
-        summary.chunks += entry.chunk_pairs.len() as u64;
+        summary.chunks += entry.recipe.chunk_count();
         summary.prepared_xorbs += entry.prepared_xorbs.len() as u64;
         summary.prepared_bytes += entry
             .prepared_xorbs
@@ -2307,17 +2304,6 @@ async fn rollback_closed_staging_entries(
     Ok(rows_deleted)
 }
 
-async fn mark_closed_staging_batches_published(
-    staging_root: &Path,
-    entries: &[StagedEntry],
-) -> Result<()> {
-    let staging = StagingAreaReadOnly::open(staging_root.to_path_buf()).await?;
-    for batch_id in entries.iter().filter_map(|entry| entry.batch_id.as_ref()) {
-        staging.mark_batch_published(batch_id)?;
-    }
-    Ok(())
-}
-
 async fn rollback_unpublished_closed_entries(
     staging_root: &Path,
     summary: &mut AddSummary,
@@ -2356,17 +2342,30 @@ async fn abort_if_cancelled_after_staging_close(
 async fn handle_git_index_write_error(
     staging_root: &Path,
     staged_entries: &[StagedEntry],
+    publication_intent: Option<&PublicationIntentId>,
     error: GitIndexWriteError,
 ) -> CrabError {
     match error {
         GitIndexWriteError::BeforeIndexMutation(error) => {
-            if let Err(cleanup_err) = rollback_closed_staging_entries(
-                staging_root,
-                staged_entries,
-                "Git index preparation failed before publication",
-            )
-            .await
-            {
+            let cleanup = async {
+                if let Some(publication_intent) = publication_intent {
+                    let staging = StagingAreaReadOnly::open(staging_root.to_path_buf()).await?;
+                    staging
+                        .rollback_publication_intent(publication_intent)
+                        .await?;
+                    Ok(())
+                } else {
+                    rollback_closed_staging_entries(
+                        staging_root,
+                        staged_entries,
+                        "Git index preparation failed before publication",
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            }
+            .await;
+            if let Err(cleanup_err) = cleanup {
                 warn!(
                     error = %cleanup_err,
                     "failed to roll back staged rows after Git index preparation failed"
@@ -2416,6 +2415,39 @@ fn should_publish_git_index(
     // commit boundary. Keep a failed add from publishing only the
     // successfully processed siblings.
     !args.skip_git_add && staged_entry_count > 0 && summary.files_failed == 0
+}
+
+fn pin_committed_recipes_before_path_replacement(
+    staging: &StagingArea,
+    repo_root: &Path,
+    entries: &[StagedEntry],
+) -> Result<()> {
+    let paths = entries
+        .iter()
+        .map(|staged| {
+            staged
+                .abs_path
+                .strip_prefix(repo_root)
+                .unwrap_or(&staged.abs_path)
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+    let committed_pointers = crate::git::worktree::committed_pointers_for_paths(repo_root, &paths)?;
+    let mut pinned_hashes = HashSet::new();
+
+    for (staged, relative_path) in entries.iter().zip(paths) {
+        let Some(pointers) = committed_pointers.get(&relative_path) else {
+            continue;
+        };
+        for pointer in pointers {
+            if pointer.file_hash == staged.file_hash || !pinned_hashes.insert(pointer.file_hash) {
+                continue;
+            }
+            let file_hash = MerkleHash::from(pointer.file_hash);
+            staging.preserve_published_history_recipe(&file_hash, pointer.size)?;
+        }
+    }
+    Ok(())
 }
 
 /// Collect candidate files: walk the working tree, filter by tracked
@@ -3020,6 +3052,7 @@ fn write_pointers_to_git_index(
         repo_root,
         shard_hints,
         &[],
+        |_, _| Ok(()),
         &mut on_file_done,
     )
 }
@@ -3029,6 +3062,7 @@ fn write_pointers_and_tracking_to_git_index(
     repo_root: &Path,
     shard_hints: &crate::cache::ShardHintCache,
     tracking_patterns: &[String],
+    before_index_mutation: impl FnOnce(&[GitIndexEntry], &gix_index::File) -> Result<()>,
     mut on_file_done: impl FnMut(),
 ) -> std::result::Result<(), GitIndexWriteError> {
     let honor_filemode = git_honors_filemode(repo_root);
@@ -3064,7 +3098,12 @@ fn write_pointers_and_tracking_to_git_index(
         on_file_done();
     }
 
-    publish_git_index_entries_with_tracking(&index_entries, repo_root, tracking_patterns)?;
+    publish_git_index_entries_with_tracking(
+        &index_entries,
+        repo_root,
+        tracking_patterns,
+        before_index_mutation,
+    )?;
 
     Ok(())
 }
@@ -3086,25 +3125,105 @@ fn write_pointer_blob(repo_root: &Path, payload: &[u8]) -> Result<String> {
     Ok(oid.to_string())
 }
 
+fn git_index_path_state(index: &gix_index::File, path: &bstr::BStr) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab git index path state v1\0");
+    if let Some(range) = index.entry_range(path) {
+        for entry in &index.entries()[range] {
+            hasher.update(&entry.flags.bits().to_le_bytes());
+            hasher.update(&entry.mode.bits().to_le_bytes());
+            hasher.update(entry.id.as_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+pub(crate) async fn reconcile_publication_intents(
+    staging: &StagingAreaReadOnly,
+    repo_root: &Path,
+) -> Result<()> {
+    use bstr::ByteSlice;
+    use gix_index::{File, decode, entry};
+
+    let intents = staging.unresolved_publication_intents()?;
+    if intents.is_empty() {
+        return Ok(());
+    }
+    let index_path =
+        crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?.index_path();
+    let index = File::at_or_default(
+        &index_path,
+        gix_hash::Kind::Sha1,
+        false,
+        decode::Options::default(),
+    )
+    .map_err(|error| {
+        CrabError::Internal(format!(
+            "failed to read Git index for add publication recovery: {error}"
+        ))
+    })?;
+
+    for intent in intents {
+        let new_matches = intent
+            .entries
+            .iter()
+            .filter(|expected| {
+                index
+                    .entry_by_path_and_stage(
+                        expected.path_bytes.as_bstr(),
+                        entry::Stage::Unconflicted,
+                    )
+                    .is_some_and(|actual| actual.id.to_string() == expected.expected_pointer_oid)
+            })
+            .count();
+        let old_matches = intent
+            .entries
+            .iter()
+            .filter(|expected| {
+                git_index_path_state(&index, expected.path_bytes.as_bstr())
+                    == expected.previous_index_state
+            })
+            .count();
+        if new_matches == intent.entries.len() {
+            staging.publish_publication_intent(&intent.intent_id)?;
+        } else if old_matches == intent.entries.len() {
+            staging
+                .rollback_publication_intent(&intent.intent_id)
+                .await?;
+        } else {
+            return Err(CrabError::StagingCorrupt(format!(
+                "add publication {} has an ambiguous Git index state ({new_matches}/{} new paths, {old_matches}/{} prior paths); restore one complete index state, then retry",
+                intent.intent_id.as_str(),
+                intent.entries.len(),
+                intent.entries.len(),
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn publish_git_index_entries(
     entries: &[GitIndexEntry],
     repo_root: &Path,
 ) -> std::result::Result<(), GitIndexWriteError> {
-    publish_git_index_entries_with_tracking(entries, repo_root, &[])
+    publish_git_index_entries_with_tracking(entries, repo_root, &[], |_, _| Ok(()))
 }
 
 fn publish_generated_tracking_rules(repo_root: &Path, patterns: &[String]) -> Result<()> {
-    publish_git_index_entries_with_tracking(&[], repo_root, patterns).map_err(|error| match error {
-        GitIndexWriteError::BeforeIndexMutation(error)
-        | GitIndexWriteError::IndexMutationUncertain(error) => error,
-    })
+    publish_git_index_entries_with_tracking(&[], repo_root, patterns, |_, _| Ok(())).map_err(
+        |error| match error {
+            GitIndexWriteError::BeforeIndexMutation(error)
+            | GitIndexWriteError::IndexMutationUncertain(error) => error,
+        },
+    )
 }
 
 fn publish_git_index_entries_with_tracking(
     entries: &[GitIndexEntry],
     repo_root: &Path,
     tracking_patterns: &[String],
+    before_index_mutation: impl FnOnce(&[GitIndexEntry], &gix_index::File) -> Result<()>,
 ) -> std::result::Result<(), GitIndexWriteError> {
     use bstr::ByteSlice;
     use gix_index::{File, decode, entry};
@@ -3272,6 +3391,8 @@ fn publish_git_index_entries_with_tracking(
         }
     }
 
+    before_index_mutation(entries, &index).map_err(GitIndexWriteError::BeforeIndexMutation)?;
+
     // Path lookups require sorted entries. Remove every old entry before
     // dangerously_push_entry invalidates that ordering for subsequent lookups.
     for selected in &prepared {
@@ -3426,12 +3547,24 @@ mod tests {
     fn staged_entry(abs_path: PathBuf, file_hash: [u8; 32], size: u64) -> StagedEntry {
         let index_stat =
             crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&abs_path);
+        let recipe_chunks = if size == 0 {
+            Vec::new()
+        } else {
+            vec![(MerkleHash::from(file_hash), size)]
+        };
+        let recipe = crab_staging::recipe::FileRecipe::from_staged_chunks(
+            crab_staging::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            MerkleHash::from(file_hash),
+            size,
+            &recipe_chunks,
+        )
+        .unwrap();
         StagedEntry {
             batch_id: None,
             abs_path,
             file_hash,
             size,
-            chunk_pairs: Vec::new().into(),
+            recipe,
             prepared_xorbs: Vec::new(),
             index_stat,
         }
@@ -3449,6 +3582,63 @@ mod tests {
     fn make_file_mtime_old(path: &Path) {
         let old = filetime::FileTime::from_unix_time(1_700_000_000, 0);
         filetime::set_file_mtime(path, old).unwrap();
+    }
+
+    async fn stage_publication_recipe(
+        staging: &StagingArea,
+        rel_path: &Path,
+        data: &[u8],
+    ) -> (crab_staging::StagingBatchId, MerkleHash) {
+        let file_hash = MerkleHash::from(*blake3::hash(data).as_bytes());
+        let chunk_hash = compute_data_hash(data);
+        staging
+            .pre_register_file(&file_hash, data.len() as u64)
+            .unwrap();
+        staging
+            .stage_chunks_batch(&[(&chunk_hash, data)], &file_hash, 0)
+            .await
+            .unwrap();
+        staging.flush_pending().await.unwrap();
+        let recipe = crab_staging::recipe::FileRecipe::from_staged_chunks(
+            crab_staging::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            data.len() as u64,
+            &[(chunk_hash, data.len() as u64)],
+        )
+        .unwrap();
+        let batch_id = staging.create_batch().unwrap();
+        staging
+            .record_verified_recipe_lease(&batch_id, rel_path, &recipe)
+            .unwrap();
+        (batch_id, file_hash)
+    }
+
+    fn publication_index_entry(repo: &Path, rel_path: &Path, payload: &[u8]) -> GitIndexEntry {
+        let abs_path = repo.join(rel_path);
+        std::fs::write(&abs_path, payload).unwrap();
+        make_file_mtime_old(&abs_path);
+        GitIndexEntry {
+            abs_path: abs_path.clone(),
+            mode: gix_index::entry::Mode::FILE,
+            sha: write_pointer_blob(repo, payload).unwrap(),
+            index_stat: crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&abs_path)
+                .unwrap(),
+        }
+    }
+
+    fn read_test_index(repo: &Path) -> gix_index::File {
+        use gix_index::{File, decode};
+
+        let index_path = crate::git::worktree::WorktreeContext::resolve_from_path(repo)
+            .unwrap()
+            .index_path();
+        File::at_or_default(
+            &index_path,
+            gix_hash::Kind::Sha1,
+            false,
+            decode::Options::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -3687,7 +3877,7 @@ mod tests {
                 .collect(),
         );
         progress.set_phase(AddPhase::Planning);
-        progress.update_plan_summary(&crate::cmd::add_push_plan::AddPushPlanSummary {
+        progress.update_plan_summary(&crab_staging::push_plan::AddPushPlanSummary {
             files: 2,
             chunks: 128,
             remote_lookup: true,
@@ -3783,12 +3973,13 @@ mod tests {
         )
         .await
         .unwrap();
+        let batch_id = result.batch_id.clone();
         let entries = vec![StagedEntry {
-            batch_id: None,
+            batch_id: Some(batch_id.clone()),
             abs_path: result.abs_path,
             file_hash: result.file_hash,
             size: result.size,
-            chunk_pairs: result.chunk_pairs.into(),
+            recipe: result.recipe,
             prepared_xorbs: result.prepared_xorbs,
             index_stat: result.index_stat,
         }];
@@ -3799,6 +3990,7 @@ mod tests {
             write_stream_prepared_push_plans(&staging, &entries, &mut |_| progress_calls += 1)
                 .await
                 .unwrap();
+        staging.mark_batch_published(&batch_id).unwrap();
         let file_hash = MerkleHash::from(entries[0].file_hash);
         let plan = staging
             .load_file_push_plan(&file_hash)
@@ -3807,7 +3999,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(summary.files, 1);
-        assert_eq!(summary.chunks, entries[0].chunk_pairs.len() as u64);
+        assert_eq!(summary.chunks, entries[0].recipe.chunk_count());
         assert_eq!(
             summary.prepared_xorbs,
             entries[0].prepared_xorbs.len() as u64
@@ -3826,9 +4018,17 @@ mod tests {
                 )
             })
             .collect();
-        let staged_chunks: std::collections::HashSet<_> =
-            entries[0].chunk_pairs.iter().copied().collect();
-        assert_eq!(planned_chunks, staged_chunks);
+        let recipe_chunks = staging
+            .chunks_for_file_with_sizes(&file_hash)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(planned_chunks, recipe_chunks);
+        assert_eq!(plan.chunk_count, entries[0].recipe.chunk_count());
+        assert_eq!(
+            plan.sequence_hash().unwrap(),
+            entries[0].recipe.sequence_hash()
+        );
         for prepared in &entries[0].prepared_xorbs {
             assert!(prepared_xorb_path(staging.root(), &file_hash, &prepared.hash).exists());
             assert!(
@@ -3891,39 +4091,6 @@ mod tests {
     }
 
     #[test]
-    fn fallback_push_plans_skip_without_push_config() {
-        let entries = vec![staged_entry(PathBuf::from("model.bin"), [3; 32], 64)];
-
-        assert!(!fallback_push_plans_are_worth_preparing(&entries, None));
-    }
-
-    #[test]
-    fn fallback_push_plans_skip_small_batches() {
-        let entries = vec![
-            staged_entry(PathBuf::from("first.bin"), [4; 32], 512),
-            staged_entry(PathBuf::from("second.bin"), [5; 32], 512),
-        ];
-
-        assert!(!fallback_push_plans_are_worth_preparing(
-            &entries,
-            Some(2048)
-        ));
-    }
-
-    #[test]
-    fn fallback_push_plans_prepare_large_batches() {
-        let entries = vec![
-            staged_entry(PathBuf::from("first.bin"), [6; 32], 1024),
-            staged_entry(PathBuf::from("second.bin"), [7; 32], 1024),
-        ];
-
-        assert!(fallback_push_plans_are_worth_preparing(
-            &entries,
-            Some(2048)
-        ));
-    }
-
-    #[test]
     fn add_execution_plans_use_direct_xorb_authority_for_crab_remote() {
         let _cwd_guard = CWD_LOCK.lock().unwrap();
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
@@ -3944,11 +4111,10 @@ mod tests {
         let plans = add_execution_plans(&candidates, 64 * 1024 * 1024);
 
         assert!(plans.stream_xorb_plan.is_some());
-        assert!(plans.fallback_push_plan_min_size.is_some());
     }
 
     #[test]
-    fn add_execution_plans_skip_tiny_fallback_plans_for_crab_remote() {
+    fn add_execution_plans_defer_tiny_files_to_push() {
         let _cwd_guard = CWD_LOCK.lock().unwrap();
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
@@ -3969,17 +4135,8 @@ mod tests {
             (PathBuf::from("second.bin"), 512),
         ];
         let plans = add_execution_plans(&candidates, 1024);
-        let entries = vec![
-            staged_entry(PathBuf::from("first.bin"), [8; 32], 512),
-            staged_entry(PathBuf::from("second.bin"), [9; 32], 512),
-        ];
 
         assert!(plans.stream_xorb_plan.is_none());
-        assert!(plans.fallback_push_plan_min_size.is_some());
-        assert!(!fallback_push_plans_are_worth_preparing(
-            &entries,
-            plans.fallback_push_plan_min_size
-        ));
     }
 
     #[test]
@@ -4061,7 +4218,7 @@ mod tests {
             abs_path: path.with_file_name("duplicate.bin"),
             file_hash: result.file_hash,
             size: result.size,
-            chunk_pairs: result.chunk_pairs.clone().into(),
+            recipe: result.recipe.clone(),
             prepared_xorbs: Vec::new(),
             index_stat: result.index_stat,
         };
@@ -4071,7 +4228,7 @@ mod tests {
                 abs_path: result.abs_path,
                 file_hash: result.file_hash,
                 size: result.size,
-                chunk_pairs: result.chunk_pairs.into(),
+                recipe: result.recipe,
                 prepared_xorbs: result.prepared_xorbs,
                 index_stat: result.index_stat,
             },
@@ -4293,6 +4450,7 @@ mod tests {
             dir.path(),
             &crate::cache::ShardHintCache::new(),
             &["*.bin".to_owned()],
+            |_, _| Ok(()),
             || {},
         )
         .unwrap();
@@ -4781,6 +4939,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_recipe_survives_same_path_restage_until_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        if !init_git_repo(&repo) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+        let staging = StagingArea::open(repo.join(".crab/staging")).await.unwrap();
+        let relative_path = PathBuf::from("model.bin");
+        let first_data = b"committed staged version";
+        let (first_batch, first_hash) =
+            stage_publication_recipe(&staging, &relative_path, first_data).await;
+        staging.mark_batch_published(&first_batch).unwrap();
+
+        let pointer = Pointer {
+            file_hash: first_hash.into(),
+            size: first_data.len() as u64,
+            shard_hint: None,
+        };
+        std::fs::write(repo.join(&relative_path), pointer.serialize()).unwrap();
+        let add = std::process::Command::new("git")
+            .args(["add", "model.bin"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(add.success());
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Crab Test",
+                "-c",
+                "user.email=crab@example.invalid",
+                "commit",
+                "-qm",
+                "first pointer",
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(commit.success());
+
+        let second_data = b"replacement staged version";
+        let (second_batch, second_hash) =
+            stage_publication_recipe(&staging, &relative_path, second_data).await;
+        let mut second_entry = staged_entry(
+            repo.join(&relative_path),
+            second_hash.into(),
+            second_data.len() as u64,
+        );
+        second_entry.batch_id = Some(second_batch.clone());
+
+        pin_committed_recipes_before_path_replacement(
+            &staging,
+            &repo,
+            std::slice::from_ref(&second_entry),
+        )
+        .unwrap();
+        staging.mark_batch_published(&second_batch).unwrap();
+
+        assert!(
+            staging
+                .published_recipe_for_file(&first_hash)
+                .unwrap()
+                .is_some(),
+            "the committed first version must remain push-visible"
+        );
+        assert!(
+            staging
+                .published_recipe_for_file(&second_hash)
+                .unwrap()
+                .is_some(),
+            "the replacement must become the current path head"
+        );
+        staging.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn rollback_open_staging_entries_removes_unpublished_rows() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join(".crab/staging");
@@ -4929,6 +5165,7 @@ mod tests {
                 file_hash_raw,
                 data.len() as u64,
             )],
+            None,
             GitIndexWriteError::IndexMutationUncertain(CrabError::Internal(
                 "git update-index failed".to_owned(),
             )),
@@ -4944,6 +5181,166 @@ mod tests {
             reopened.chunks_for_file(&file_hash).unwrap(),
             vec![chunk_hash]
         );
+    }
+
+    #[tokio::test]
+    async fn publication_recovery_publishes_when_every_pointer_is_in_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        if !init_git_repo(&repo) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+        let staging_root = repo.join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let rel_path = PathBuf::from("model.bin");
+        let data = b"publication recovery new index state";
+        let (batch_id, file_hash) = stage_publication_recipe(&staging, &rel_path, data).await;
+        let entry = publication_index_entry(&repo, &rel_path, b"crab pointer v1\n");
+        let mut intent = None;
+
+        publish_git_index_entries_with_tracking(
+            std::slice::from_ref(&entry),
+            &repo,
+            &[],
+            |entries, index| {
+                intent = Some(staging.create_publication_intent(&[PublicationIntentEntry {
+                    batch_id,
+                    path: rel_path.clone(),
+                    expected_pointer_oid: entries[0].sha.clone(),
+                    previous_index_state: git_index_path_state(
+                        index,
+                        git_index_path_bstring(&rel_path).as_bstr(),
+                    ),
+                }])?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(intent.is_some());
+        staging.close().await.unwrap();
+
+        let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
+        reconcile_publication_intents(&recovered, &repo)
+            .await
+            .unwrap();
+
+        assert!(
+            recovered
+                .unresolved_publication_intents()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            recovered
+                .published_recipe_for_file(&file_hash)
+                .unwrap()
+                .is_some(),
+            "exact new index state must publish the staged recipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_recovery_rolls_back_when_every_path_has_prior_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        if !init_git_repo(&repo) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+        let staging_root = repo.join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let rel_path = PathBuf::from("model.bin");
+        let data = b"publication recovery prior index state";
+        let (batch_id, file_hash) = stage_publication_recipe(&staging, &rel_path, data).await;
+        let index = read_test_index(&repo);
+        staging
+            .create_publication_intent(&[PublicationIntentEntry {
+                batch_id,
+                path: rel_path.clone(),
+                expected_pointer_oid: "1111111111111111111111111111111111111111".to_owned(),
+                previous_index_state: git_index_path_state(
+                    &index,
+                    git_index_path_bstring(&rel_path).as_bstr(),
+                ),
+            }])
+            .unwrap();
+        staging.close().await.unwrap();
+
+        let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
+        reconcile_publication_intents(&recovered, &repo)
+            .await
+            .unwrap();
+
+        assert!(
+            recovered
+                .unresolved_publication_intents()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            recovered
+                .published_recipe_for_file(&file_hash)
+                .unwrap()
+                .is_none(),
+            "exact prior index state must roll back the unpublished recipe"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_recovery_rejects_mixed_index_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        if !init_git_repo(&repo) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+        let staging_root = repo.join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let first_path = PathBuf::from("first.bin");
+        let second_path = PathBuf::from("second.bin");
+        let (first_batch, _) =
+            stage_publication_recipe(&staging, &first_path, b"first staged file").await;
+        let (second_batch, _) =
+            stage_publication_recipe(&staging, &second_path, b"second staged file").await;
+        let first_entry = publication_index_entry(&repo, &first_path, b"first pointer\n");
+        let second_entry = publication_index_entry(&repo, &second_path, b"second pointer\n");
+        let index = read_test_index(&repo);
+        staging
+            .create_publication_intent(&[
+                PublicationIntentEntry {
+                    batch_id: first_batch,
+                    path: first_path.clone(),
+                    expected_pointer_oid: first_entry.sha.clone(),
+                    previous_index_state: git_index_path_state(
+                        &index,
+                        git_index_path_bstring(&first_path).as_bstr(),
+                    ),
+                },
+                PublicationIntentEntry {
+                    batch_id: second_batch,
+                    path: second_path.clone(),
+                    expected_pointer_oid: second_entry.sha.clone(),
+                    previous_index_state: git_index_path_state(
+                        &index,
+                        git_index_path_bstring(&second_path).as_bstr(),
+                    ),
+                },
+            ])
+            .unwrap();
+        publish_git_index_entries(std::slice::from_ref(&first_entry), &repo).unwrap();
+        staging.close().await.unwrap();
+
+        let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
+        let error = reconcile_publication_intents(&recovered, &repo)
+            .await
+            .expect_err("mixed publication state must fail closed");
+
+        assert!(error.to_string().contains("ambiguous Git index state"));
+        assert_eq!(recovered.unresolved_publication_intents().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -5025,6 +5422,7 @@ mod tests {
             &progress,
             &file_progress,
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -5044,10 +5442,11 @@ mod tests {
             .chunks_for_file(&MerkleHash::from(result.file_hash))
             .unwrap();
         assert_eq!(staged.len(), result.chunks);
-        assert_eq!(result.chunk_pairs.len(), result.chunks);
-        let result_chunk_hashes: Vec<_> =
-            result.chunk_pairs.iter().map(|(hash, _)| *hash).collect();
-        assert_eq!(staged, result_chunk_hashes);
+        assert_eq!(result.recipe.chunk_count(), result.chunks as u64);
+        assert_eq!(
+            result.recipe.file_hash(),
+            MerkleHash::from(result.file_hash)
+        );
         assert!(!staged.is_empty());
     }
 
@@ -5084,6 +5483,7 @@ mod tests {
             &progress,
             &representative_progress,
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -5095,7 +5495,7 @@ mod tests {
         let reusable = ReusableStagedFile {
             file_hash: representative.file_hash,
             size: representative.size,
-            chunk_pairs: representative.chunk_pairs.clone(),
+            recipe: representative.recipe.clone(),
         };
 
         let duplicate = process_duplicate_candidate(
@@ -5105,6 +5505,7 @@ mod tests {
             &progress,
             &duplicate_progress,
             Some(reusable),
+            None,
             None,
             &CancellationToken::new(),
         )
@@ -5116,7 +5517,7 @@ mod tests {
                 .unwrap()
                 .len();
         assert_eq!(duplicate.file_hash, representative.file_hash);
-        assert_eq!(duplicate.chunk_pairs, representative.chunk_pairs);
+        assert_eq!(duplicate.recipe, representative.recipe);
         assert_eq!(
             segment_len_after_duplicate, segment_len_after_representative,
             "verified duplicate reuse must not append another staged copy"
@@ -5135,15 +5536,18 @@ mod tests {
         );
         assert_eq!(progress.files_done.load(Relaxed), 2);
 
-        let staged = staging
-            .chunks_for_file(&MerkleHash::from(representative.file_hash))
-            .unwrap();
-        let staged_hashes: Vec<_> = representative
-            .chunk_pairs
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect();
-        assert_eq!(staged, staged_hashes);
+        assert!(
+            staging
+                .has_verified_local_recipe(&representative.recipe)
+                .unwrap()
+        );
+        assert!(
+            staging
+                .published_recipe_for_file(&MerkleHash::from(representative.file_hash))
+                .unwrap()
+                .is_none(),
+            "duplicate staging must remain push-invisible until Git index publication"
+        );
     }
 
     #[tokio::test]
@@ -5182,6 +5586,7 @@ mod tests {
             &progress,
             &representative_progress,
             None,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -5193,7 +5598,7 @@ mod tests {
         let reusable = ReusableStagedFile {
             file_hash: representative.file_hash,
             size: representative.size,
-            chunk_pairs: representative.chunk_pairs.clone(),
+            recipe: representative.recipe.clone(),
         };
 
         let candidate = process_duplicate_candidate(
@@ -5203,6 +5608,7 @@ mod tests {
             &progress,
             &candidate_progress,
             Some(reusable),
+            None,
             None,
             &CancellationToken::new(),
         )

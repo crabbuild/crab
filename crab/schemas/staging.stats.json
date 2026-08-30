@@ -1,93 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "StagingStatsPayload",
-  "description": "Payload emitted by `crab staging stats --json`.",
-  "type": "object",
-  "required": [
-    "chunk_count",
-    "current_segment_bytes",
-    "dead_bytes",
-    "dead_ratio",
-    "file_count",
-    "files",
-    "live_bytes",
-    "segments_sealed",
-    "total_staged_bytes"
-  ],
-  "properties": {
-    "chunk_count": {
-      "description": "Total number of staged chunks.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "current_segment_bytes": {
-      "description": "Bytes written to the current (unsealed) segment.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "dead_bytes": {
-      "description": "Bytes occupied by dead (unreferenced) chunks.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "dead_ratio": {
-      "description": "Ratio of dead bytes to total staged bytes.",
-      "type": "number",
-      "format": "double"
-    },
-    "file_count": {
-      "description": "Total number of registered files.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "files": {
-      "description": "Per-file breakdown of staged chunks.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/StagedFileEntry"
-      }
-    },
-    "live_bytes": {
-      "description": "Bytes occupied by live (referenced) chunks.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "segments_sealed": {
-      "description": "Number of sealed segments.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "total_staged_bytes": {
-      "description": "Total bytes across all segments (sealed + current).",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    }
-  },
   "definitions": {
     "StagedFileEntry": {
       "description": "Per-file entry in the staging stats JSON output.",
-      "type": "object",
-      "required": [
-        "committed_chunks",
-        "file_hash",
-        "pending_chunks",
-        "segments",
-        "total_bytes",
-        "total_chunks"
-      ],
       "properties": {
         "committed_chunks": {
           "description": "Number of committed chunks (flushed to segment).",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "file_hash": {
           "description": "Hex-encoded Blake3 file hash.",
@@ -102,29 +23,225 @@
         },
         "pending_chunks": {
           "description": "Number of pending chunks (not yet flushed).",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "segments": {
           "description": "Number of distinct segments holding this file's data.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "total_bytes": {
           "description": "Original file size in bytes.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         },
         "total_chunks": {
           "description": "Total chunk count (committed + pending).",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0.0,
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "committed_chunks",
+        "file_hash",
+        "pending_chunks",
+        "segments",
+        "total_bytes",
+        "total_chunks"
+      ],
+      "type": "object"
+    },
+    "StagingLifecycleHealth": {
+      "description": "Recipe/lease publication and push-snapshot health for diagnostics.",
+      "properties": {
+        "committed_push_snapshots": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "current_head_prepared_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "current_head_segment_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "layout_version": {
+          "type": "string"
+        },
+        "open_batches_without_publication": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "open_push_snapshots": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "path_heads": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "path_leases": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "payloads": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "quarantined_entries": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "recipes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reclaimable_files": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reclaimable_superseded_leases": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "snapshot_pinned_prepared_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "snapshot_pinned_segment_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "snapshot_pinned_superseded_leases": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unresolved_publications": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "committed_push_snapshots",
+        "current_head_prepared_bytes",
+        "current_head_segment_bytes",
+        "layout_version",
+        "open_batches_without_publication",
+        "open_push_snapshots",
+        "path_heads",
+        "path_leases",
+        "payloads",
+        "quarantined_entries",
+        "recipes",
+        "reclaimable_files",
+        "reclaimable_superseded_leases",
+        "snapshot_pinned_prepared_bytes",
+        "snapshot_pinned_segment_bytes",
+        "snapshot_pinned_superseded_leases",
+        "unresolved_publications"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "Payload emitted by `crab staging stats --json`.",
+  "properties": {
+    "chunk_count": {
+      "description": "Total number of staged chunks.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "current_segment_bytes": {
+      "description": "Bytes written to the current (unsealed) segment.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "dead_bytes": {
+      "description": "Bytes occupied by dead (unreferenced) chunks.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "dead_ratio": {
+      "description": "Ratio of dead bytes to total staged bytes.",
+      "format": "double",
+      "type": "number"
+    },
+    "file_count": {
+      "description": "Total number of registered files.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "files": {
+      "description": "Per-file breakdown of staged chunks.",
+      "items": {
+        "$ref": "#/definitions/StagedFileEntry"
+      },
+      "type": "array"
+    },
+    "lifecycle": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StagingLifecycleHealth"
+        }
+      ],
+      "description": "Canonical path ownership and immutable push-pin health."
+    },
+    "live_bytes": {
+      "description": "Bytes occupied by live (referenced) chunks.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "segments_sealed": {
+      "description": "Number of sealed segments.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "total_staged_bytes": {
+      "description": "Total bytes across all segments (sealed + current).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "chunk_count",
+    "current_segment_bytes",
+    "dead_bytes",
+    "dead_ratio",
+    "file_count",
+    "files",
+    "lifecycle",
+    "live_bytes",
+    "segments_sealed",
+    "total_staged_bytes"
+  ],
+  "title": "StagingStatsPayload",
+  "type": "object"
 }

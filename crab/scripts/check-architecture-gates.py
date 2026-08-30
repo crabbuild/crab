@@ -917,7 +917,7 @@ AUTH_SERVER_MANIFEST_PAYLOAD_SCAN_PATHS = (
     "crates/crab-auth-server/src/receive/git_workspace.rs",
 )
 AUTH_SERVER_MANIFEST_PAYLOAD_FORBIDDEN_PATTERNS = (
-    "candidate manifest must use version 2",
+    "candidate manifest must use version 1",
     "candidate manifest HEAD does not resolve to a ref",
     "candidate manifest index hash",
 )
@@ -1113,7 +1113,7 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
 )
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
-    "crab/src/git/remote_helper.rs": ("pack_path(", "pack_metadata_path("),
+    "crab/src/git/remote_helper.rs": ("pack_path(", "pack_index_path("),
     "crab/src/read/mod.rs": ("pack_path(",),
     "crab/src/cmd/gc/mod.rs": ("pack_path(", "pack_metadata_path("),
     "crab/src/cmd/fsck_store.rs": (

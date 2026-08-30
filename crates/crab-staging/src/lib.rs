@@ -1,6 +1,6 @@
 //! Segment-based staging area for chunks awaiting upload.
 //!
-//! Layout (v2):
+//! Canonical layout (v1):
 //! ```text
 //! {root}/
 //! ├── segments/
@@ -11,8 +11,8 @@
 //! └── push-{uuid}.inflight
 //! ```
 //!
-//! Chunks are appended to segment files and indexed in `SQLite`. The v1
-//! per-chunk file layout is deleted — see design doc for rationale.
+//! Chunks are appended to segment files and indexed in `SQLite`. Pre-release
+//! layouts are rejected and must be restaged.
 //!
 //! # Concurrency
 //!
@@ -79,11 +79,12 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tracing::{debug, warn};
 
 use crab_xet::hash::{MerkleHash, compute_data_hash};
+use crab_xet::xorb::format::MAX_XORB_SIZE;
 use crab_xet::xorb::parser::XorbParser;
 
 use self::index::{
-    FileChunkLocator, Index, PendingRow, PreparedChunkLocator, PreparedXorbPlacementWrite,
-    PreparedXorbWrite, RecipeVerification,
+    ExistingChunkWrite, FileChunkLocator, Index, IndexedCoalescedReadGroup, PendingRow,
+    PreparedChunkLocator, PreparedXorbPlacementWrite, PreparedXorbWrite, RecipeVerification,
 };
 use self::segment::{ChunkLocator, PreparedRecord, ReaderPool, SegmentWriter};
 
@@ -127,6 +128,43 @@ impl StagingBatchId {
     }
 }
 
+/// Durable identity for one all-or-nothing Git-index publication attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PublicationIntentId(String);
+
+impl PublicationIntentId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One staged path expected to become visible in a Git index publication.
+#[derive(Debug, Clone)]
+pub struct PublicationIntentEntry {
+    pub batch_id: StagingBatchId,
+    pub path: PathBuf,
+    pub expected_pointer_oid: String,
+    pub previous_index_state: String,
+}
+
+/// Durable unresolved publication state returned for product-layer recovery.
+#[derive(Debug, Clone)]
+pub struct UnresolvedPublicationIntent {
+    pub intent_id: PublicationIntentId,
+    pub entries: Vec<UnresolvedPublicationIntentEntry>,
+}
+
+/// Exact path/OID evidence required to reconcile one publication entry.
+#[derive(Debug, Clone)]
+pub struct UnresolvedPublicationIntentEntry {
+    pub batch_id: StagingBatchId,
+    pub path_bytes: Vec<u8>,
+    pub recipe_hash: MerkleHash,
+    pub expected_pointer_oid: String,
+    pub previous_index_state: String,
+}
+
 fn new_staging_batch_id() -> StagingBatchId {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -142,6 +180,49 @@ fn new_staging_batch_id() -> StagingBatchId {
     hasher.update(&nanos.to_le_bytes());
     hasher.update(&sequence.to_le_bytes());
     StagingBatchId(hasher.finalize().to_hex().to_string())
+}
+
+fn new_publication_intent_id() -> PublicationIntentId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_INTENT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_INTENT.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab publication intent v1\0");
+    hasher.update(&std::process::id().to_le_bytes());
+    hasher.update(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+            .to_le_bytes(),
+    );
+    hasher.update(&sequence.to_le_bytes());
+    PublicationIntentId(hasher.finalize().to_hex().to_string())
+}
+
+fn unresolved_publication_intents(
+    index: &Mutex<Index>,
+) -> Result<Vec<UnresolvedPublicationIntent>> {
+    lock_index(index)?
+        .unresolved_publication_intents()?
+        .into_iter()
+        .map(|intent| {
+            Ok(UnresolvedPublicationIntent {
+                intent_id: PublicationIntentId(intent.intent_id),
+                entries: intent
+                    .entries
+                    .into_iter()
+                    .map(|entry| UnresolvedPublicationIntentEntry {
+                        batch_id: StagingBatchId(entry.batch_id),
+                        path_bytes: entry.path_bytes,
+                        recipe_hash: MerkleHash::from(entry.recipe_hash),
+                        expected_pointer_oid: entry.expected_pointer_oid,
+                        previous_index_state: entry.previous_index_state,
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -826,8 +907,54 @@ fn lock_index(index: &Mutex<Index>) -> Result<std::sync::MutexGuard<'_, Index>> 
         .map_err(|e| StagingError::Internal(format!("index lock poisoned: {e}")))
 }
 
+fn collect_recipe_chunks(
+    index: &Mutex<Index>,
+    recipe: &crate::recipe::FileRecipe,
+) -> Result<Vec<(MerkleHash, u64)>> {
+    let capacity = usize::try_from(recipe.chunk_count()).map_err(|_| {
+        StagingError::StagingCorrupt("recipe chunk count cannot fit in memory".to_owned())
+    })?;
+    let mut chunks = Vec::with_capacity(capacity);
+    let mut next = 0u64;
+    while next < recipe.chunk_count() {
+        let page = lock_index(index)?.recipe_page(recipe, next)?;
+        chunks.extend(
+            page.chunks
+                .iter()
+                .map(|chunk| (chunk.chunk_hash, chunk.len)),
+        );
+        next = page.next_occurrence();
+    }
+    Ok(chunks)
+}
+
+fn indexed_recipe_remote_chunk_page(
+    index: &Mutex<Index>,
+    recipe: &crate::recipe::FileRecipe,
+    start_occurrence: u64,
+) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+    lock_index(index)?
+        .recipe_remote_chunk_page(&recipe.hash(), start_occurrence)?
+        .into_iter()
+        .map(|existing| {
+            Ok((
+                MerkleHash::from(existing.chunk_hash),
+                push_plan::ExistingChunkCandidate {
+                    xorb_ref: crab_xet::xorb::format::XorbRef {
+                        xorb_hash: MerkleHash::from(existing.xorb_hash),
+                        chunk_index: existing.chunk_index,
+                        uncompressed_size: existing.uncompressed_size,
+                    },
+                    placement_id: existing.placement_id,
+                    origin_proof_id: existing.origin_proof_id,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn authoritative_file_push_plan(
-    root: &Path,
+    _root: &Path,
     index: &Mutex<Index>,
     file_hash: &MerkleHash,
 ) -> Result<Option<push_plan::FilePushPlan>> {
@@ -861,39 +988,43 @@ fn authoritative_file_push_plan(
             plan_hash.hex()
         )));
     }
-    let chunks = plan.chunk_pairs()?;
-    let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
-        StagingError::StagingCorrupt(format!(
-            "push plan for file {} has too many chunks",
-            file_hash.hex()
-        ))
-    })?;
-    if stored.chunk_count != chunk_count {
+    if stored.chunk_count != plan.chunk_count {
         return Err(StagingError::StagingCorrupt(format!(
             "stored push plan chunk count {} disagrees with plan body count {} for file {}",
             stored.chunk_count,
-            chunk_count,
+            plan.chunk_count,
             file_hash.hex()
         )));
     }
-    let sequence_hash = push_plan::chunk_sequence_hash(&chunks);
-    if stored.chunk_sequence_hash != sequence_hash {
+    if stored.chunk_sequence_hash != plan.sequence_hash()? {
         return Err(StagingError::StagingCorrupt(format!(
             "stored push plan chunk sequence hash disagrees with plan body for file {}",
             file_hash.hex()
         )));
     }
-    validate_file_push_plan_matches_staging(root, index, &plan)?;
-    prepared_xorb_index_records(&plan, &chunks)?;
+    let recipe = lock_index(index)?
+        .published_recipe_for_file(&fh)?
+        .ok_or_else(|| {
+            StagingError::StagingCorrupt(format!(
+                "push plan for file {} has no published recipe root",
+                file_hash.hex()
+            ))
+        })?;
+    validate_file_push_plan_matches_recipe(&plan, &recipe)?;
+    let prepared_xorbs = prepared_xorb_index_records(&plan)?;
+    lock_index(index)?.validate_prepared_xorb_recipe_coverage(
+        &recipe.hash(),
+        &fh,
+        &prepared_xorbs,
+    )?;
 
     Ok(Some(plan))
 }
 
-fn validate_file_push_plan_matches_staging(
-    root: &Path,
-    index: &Mutex<Index>,
+fn validate_file_push_plan_matches_recipe(
     plan: &push_plan::FilePushPlan,
-) -> Result<(MerkleHash, Vec<(MerkleHash, u64)>)> {
+    recipe: &crate::recipe::FileRecipe,
+) -> Result<MerkleHash> {
     if !plan.staged_chunk_sequence_verified {
         return Err(StagingError::StagingCorrupt(format!(
             "add-time push plan for file {} was not verified against staging",
@@ -901,91 +1032,20 @@ fn validate_file_push_plan_matches_staging(
         )));
     }
     let file_hash = plan.file_hash()?;
-    let chunks = plan.chunk_pairs()?;
-    let staged_chunks = {
-        let fh: [u8; 32] = file_hash.into();
-        lock_index(index)?.chunks_for_file_with_sizes(&fh)?
-    };
-    let segment_sequence_matches = staged_chunks.len() == chunks.len()
-        && staged_chunks.iter().zip(chunks.iter()).all(
-            |((hash, size), (expected_hash, expected_size))| {
-                MerkleHash::from(*hash) == *expected_hash && *size == *expected_size
-            },
-        );
-    if !staged_chunks.is_empty() && !segment_sequence_matches {
-        return Err(StagingError::StagingCorrupt(format!(
-            "add-time push plan for file {} no longer matches staged chunk rows",
-            file_hash.hex()
-        )));
-    }
-    if staged_chunks.is_empty()
-        && !prepared_xorbs_cover_chunk_sequence(root, &file_hash, &chunks, &plan.prepared_xorbs)
+    if file_hash != recipe.file_hash()
+        || plan.file_size != recipe.file_size()
+        || plan.chunk_count != recipe.chunk_count()
+        || plan.sequence_hash()? != recipe.sequence_hash()
     {
         return Err(StagingError::StagingCorrupt(format!(
-            "add-time push plan for file {} has neither matching segment rows nor complete prepared-xorb coverage",
+            "add-time push plan for file {} does not match its canonical recipe root",
             file_hash.hex()
         )));
     }
-    let staged_size = chunks.iter().try_fold(0u64, |acc, (_, size)| {
-        acc.checked_add(*size).ok_or_else(|| {
-            StagingError::StagingCorrupt(format!(
-                "add-time push plan size overflow for file {}",
-                file_hash.hex()
-            ))
-        })
-    })?;
-    if staged_size != plan.file_size {
-        return Err(StagingError::StagingCorrupt(format!(
-            "add-time push plan for file {} totals {staged_size} bytes, expected {}",
-            file_hash.hex(),
-            plan.file_size
-        )));
-    }
-
-    Ok((file_hash, chunks))
+    Ok(file_hash)
 }
 
-fn prepared_xorbs_cover_chunk_sequence(
-    root: &Path,
-    file_hash: &MerkleHash,
-    chunks: &[(MerkleHash, u64)],
-    prepared_xorbs: &[push_plan::PlannedXorb],
-) -> bool {
-    if chunks.is_empty() {
-        return prepared_xorbs.is_empty();
-    }
-    let expected = chunks.iter().copied().collect::<HashMap<_, _>>();
-    let mut covered = HashSet::with_capacity(expected.len());
-    for planned in prepared_xorbs {
-        let Ok(xorb_hash) = planned.hash() else {
-            return false;
-        };
-        let path = push_plan::prepared_xorb_path(root, file_hash, &xorb_hash);
-        if !push_plan::prepared_xorb_file_matches_cached_plan(&path, file_hash, &xorb_hash, planned)
-        {
-            return false;
-        }
-        for placement in &planned.placements {
-            let Ok(placement) = placement.to_placement() else {
-                return false;
-            };
-            if placement.xorb_hash != xorb_hash
-                || expected.get(&placement.chunk_hash).copied()
-                    != Some(u64::from(placement.uncompressed_size))
-            {
-                return false;
-            }
-            covered.insert(placement.chunk_hash);
-        }
-    }
-    expected.keys().all(|hash| covered.contains(hash))
-}
-
-fn prepared_xorb_index_records(
-    plan: &push_plan::FilePushPlan,
-    chunks: &[(MerkleHash, u64)],
-) -> Result<Vec<PreparedXorbWrite>> {
-    let chunk_sizes = chunks.iter().copied().collect::<HashMap<MerkleHash, u64>>();
+fn prepared_xorb_index_records(plan: &push_plan::FilePushPlan) -> Result<Vec<PreparedXorbWrite>> {
     let mut records = Vec::with_capacity(plan.prepared_xorbs.len());
     for planned in &plan.prepared_xorbs {
         let xorb_hash = planned.hash()?;
@@ -1003,18 +1063,7 @@ fn prepared_xorb_index_records(
                         placement.xorb_hash.hex()
                     )));
                 }
-                if let Some(expected_size) = chunk_sizes.get(&placement.chunk_hash) {
-                    covers_file = true;
-                    if *expected_size != u64::from(placement.uncompressed_size) {
-                        return Err(StagingError::StagingCorrupt(format!(
-                            "prepared xorb {} placement for chunk {} has size {}, expected {}",
-                            xorb_hash.hex(),
-                            placement.chunk_hash.hex(),
-                            placement.uncompressed_size,
-                            expected_size
-                        )));
-                    }
-                }
+                covers_file = true;
                 Ok(PreparedXorbPlacementWrite {
                     chunk_hash: placement.chunk_hash.into(),
                     chunk_index: placement.chunk_index,
@@ -1038,6 +1087,29 @@ fn prepared_xorb_index_records(
         });
     }
     Ok(records)
+}
+
+fn existing_chunk_index_records(plan: &push_plan::FilePushPlan) -> Result<Vec<ExistingChunkWrite>> {
+    plan.existing
+        .iter()
+        .map(|existing| {
+            let chunk_hash = MerkleHash::from_hex(&existing.chunk_hash).map_err(|error| {
+                StagingError::StagingCorrupt(format!(
+                    "invalid planned existing chunk hash {}: {error}",
+                    existing.chunk_hash
+                ))
+            })?;
+            let candidate = existing.candidate()?;
+            Ok(ExistingChunkWrite {
+                chunk_hash: chunk_hash.into(),
+                xorb_hash: candidate.xorb_ref.xorb_hash.into(),
+                chunk_index: candidate.xorb_ref.chunk_index,
+                uncompressed_size: candidate.xorb_ref.uncompressed_size,
+                placement_id: candidate.placement_id,
+                origin_proof_id: candidate.origin_proof_id,
+            })
+        })
+        .collect()
 }
 
 fn indexed_prepared_xorb_cache_for_chunks(
@@ -1131,6 +1203,88 @@ pub(crate) struct StagedChunkLocator {
     pub hash: MerkleHash,
     pub size: u64,
     pub locator: ChunkLocator,
+}
+
+enum CoalescedChunkAuthority {
+    Segments(Vec<(u64, StagedChunkLocator)>),
+    Prepared(Vec<(u64, MerkleHash, PreparedChunkLocator)>),
+}
+
+/// One bounded residual-read unit. Prepared units contain exactly one source xorb.
+struct CoalescedChunkReadGroup {
+    authority: CoalescedChunkAuthority,
+}
+
+/// Connection-local residual planner backed by SQLite temporary storage.
+///
+/// Appends are bounded by the caller's recipe page. Reads remove one bounded
+/// segment batch or one complete prepared source xorb at a time.
+pub struct CoalescedChunkReadPlan<'a> {
+    staging: &'a StagingAreaReadOnly,
+    next_sequence: u64,
+}
+
+impl CoalescedChunkReadPlan<'_> {
+    /// Append a bounded request page with an opaque caller context per chunk.
+    pub fn append(&mut self, requests: &[(MerkleHash, u64, u64)]) -> Result<()> {
+        let mut indexed = Vec::with_capacity(requests.len());
+        for (hash, size, context) in requests {
+            indexed.push((self.next_sequence, <[u8; 32]>::from(*hash), *size, *context));
+            self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
+                StagingError::StagingCorrupt("residual request sequence overflow".to_owned())
+            })?;
+        }
+        lock_index(&self.staging.index)?.append_coalesced_read_requests(&indexed)
+    }
+
+    /// Read and remove the next bounded residual group.
+    pub async fn read_next(
+        &self,
+        max_segment_chunks: usize,
+        max_segment_bytes: u64,
+    ) -> Result<Option<Vec<(u64, MerkleHash, Bytes)>>> {
+        let group = lock_index(&self.staging.index)?
+            .take_coalesced_read_group(max_segment_chunks, max_segment_bytes)?
+            .map(|group| match group {
+                IndexedCoalescedReadGroup::Segments(chunks) => CoalescedChunkReadGroup {
+                    authority: CoalescedChunkAuthority::Segments(
+                        chunks
+                            .into_iter()
+                            .map(|(context, chunk)| (context, StagedChunkLocator::from(chunk)))
+                            .collect(),
+                    ),
+                },
+                IndexedCoalescedReadGroup::Prepared(chunks) => CoalescedChunkReadGroup {
+                    authority: CoalescedChunkAuthority::Prepared(
+                        chunks
+                            .into_iter()
+                            .map(|(context, hash, locator)| {
+                                (context, MerkleHash::from(hash), locator)
+                            })
+                            .collect(),
+                    ),
+                },
+            });
+        match group {
+            Some(group) => read_coalesced_chunk_group(
+                &self.staging.root,
+                &self.staging.readers,
+                self.staging.metrics.as_deref(),
+                group,
+            )
+            .await
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Drop for CoalescedChunkReadPlan<'_> {
+    fn drop(&mut self) {
+        if let Ok(index) = lock_index(&self.staging.index) {
+            let _ = index.clear_coalesced_read_plan();
+        }
+    }
 }
 
 struct IndexedPreparedXorbStatsRef {
@@ -1227,35 +1381,61 @@ async fn read_staged_chunks_batch(
         .collect()
 }
 
-type PreparedXorbIdentity = ([u8; 32], [u8; 32], [u8; 32], u64);
+type PreparedXorbIdentity = ([u8; 32], [u8; 32], u64);
 
 async fn read_prepared_staged_chunks_batch(
     root: &Path,
     metrics: Option<&dyn StagingMetrics>,
     chunks: &[(usize, MerkleHash, PreparedChunkLocator)],
 ) -> Result<Vec<(usize, Bytes)>> {
-    let mut by_xorb = HashMap::<PreparedXorbIdentity, Vec<(usize, MerkleHash, u32, u32)>>::new();
+    let mut by_xorb =
+        HashMap::<PreparedXorbIdentity, ([u8; 32], Vec<(usize, MerkleHash, u32, u32)>)>::new();
     for (position, hash, locator) in chunks {
         by_xorb
-            .entry((
-                locator.file_hash,
-                locator.xorb_hash,
-                locator.payload_hash,
-                locator.xorb_bytes,
-            ))
-            .or_default()
+            .entry((locator.xorb_hash, locator.payload_hash, locator.xorb_bytes))
+            .or_insert_with(|| (locator.file_hash, Vec::new()))
+            .1
             .push((*position, *hash, locator.chunk_index, locator.size));
     }
 
-    let mut tasks = Vec::with_capacity(by_xorb.len());
-    for ((file_hash, xorb_hash, payload_hash, expected_bytes), wanted) in by_xorb {
+    let mut sources = by_xorb.into_iter().collect::<Vec<_>>();
+    sources.sort_by_key(|(identity, _)| *identity);
+    let mut out = Vec::with_capacity(chunks.len());
+    for ((xorb_hash, payload_hash, expected_bytes), (file_hash, wanted)) in sources {
         let path = push_plan::prepared_xorb_path(
             root,
             &MerkleHash::from(file_hash),
             &MerkleHash::from(xorb_hash),
         );
-        tasks.push(tokio::task::spawn_blocking(move || {
-            let payload = Bytes::from(std::fs::read(&path)?);
+        if let Some(metrics) = metrics {
+            metrics.inc_prepared_source_xorb_open();
+            metrics.prepared_source_reader_started();
+        }
+        let task = tokio::task::spawn_blocking(move || {
+            if expected_bytes > MAX_XORB_SIZE as u64 {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "prepared xorb {} declares {expected_bytes} bytes above the {MAX_XORB_SIZE}-byte format bound",
+                    MerkleHash::from(xorb_hash).hex()
+                )));
+            }
+            let file = File::open(&path)?;
+            let file_bytes = file.metadata()?.len();
+            if file_bytes != expected_bytes {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "prepared xorb {} payload changed: expected {expected_bytes} bytes, found {file_bytes} bytes",
+                    MerkleHash::from(xorb_hash).hex()
+                )));
+            }
+            let capacity = usize::try_from(expected_bytes).map_err(|_| {
+                StagingError::StagingCorrupt(format!(
+                    "prepared xorb {} size does not fit memory",
+                    MerkleHash::from(xorb_hash).hex()
+                ))
+            })?;
+            let mut payload = Vec::with_capacity(capacity);
+            file.take(expected_bytes.saturating_add(1))
+                .read_to_end(&mut payload)?;
+            let payload = Bytes::from(payload);
             let actual_payload_hash = blake3::hash(&payload);
             let size_matches = u64::try_from(payload.len()) == Ok(expected_bytes);
             let hash_matches = *actual_payload_hash.as_bytes() == payload_hash;
@@ -1290,25 +1470,75 @@ async fn read_prepared_staged_chunks_batch(
                 decoded.push((position, chunk.data));
             }
             Ok::<_, StagingError>((expected_bytes, decoded))
-        }));
-    }
-
-    let mut out = Vec::with_capacity(chunks.len());
-    let mut bytes_read = 0u64;
-    for task in tasks {
-        let (read, mut decoded) = task.await.map_err(|error| {
-            StagingError::Internal(format!("prepared xorb read join: {error}"))
-        })??;
-        bytes_read = bytes_read.saturating_add(read);
+        });
+        let result = task
+            .await
+            .map_err(|error| StagingError::Internal(format!("prepared xorb read join: {error}")));
+        if let Some(metrics) = metrics {
+            metrics.prepared_source_reader_finished();
+        }
+        let (read, mut decoded) = result??;
+        if let Some(metrics) = metrics {
+            metrics.add_staging_bytes_read(read);
+            metrics.add_prepared_source_xorb_bytes_read(read);
+        }
         out.append(&mut decoded);
-    }
-    if let Some(metrics) = metrics {
-        metrics.add_staging_bytes_read(bytes_read);
     }
     Ok(out)
 }
 
-async fn verify_unverified_recipe_payload(
+async fn read_coalesced_chunk_group(
+    root: &Path,
+    readers: &ReaderPool,
+    metrics: Option<&dyn StagingMetrics>,
+    group: CoalescedChunkReadGroup,
+) -> Result<Vec<(u64, MerkleHash, Bytes)>> {
+    match group.authority {
+        CoalescedChunkAuthority::Segments(chunks) => {
+            let locators = chunks
+                .iter()
+                .map(|(_, locator)| *locator)
+                .collect::<Vec<_>>();
+            let payloads = read_located_staged_chunks_batch(readers, metrics, &locators).await?;
+            Ok(chunks
+                .into_iter()
+                .zip(payloads)
+                .map(|((position, locator), (_, payload))| (position, locator.hash, payload))
+                .collect())
+        }
+        CoalescedChunkAuthority::Prepared(chunks) => {
+            let contexts = chunks
+                .iter()
+                .map(|(context, _, _)| *context)
+                .collect::<Vec<_>>();
+            let indexed = chunks
+                .into_iter()
+                .enumerate()
+                .map(|(position, (_, hash, locator))| (position, hash, locator))
+                .collect::<Vec<_>>();
+            Ok(read_prepared_staged_chunks_batch(root, metrics, &indexed)
+                .await?
+                .into_iter()
+                .map(|(position, payload)| {
+                    indexed
+                        .get(position)
+                        .and_then(|(_, hash, _)| {
+                            contexts
+                                .get(position)
+                                .map(|context| (*context, *hash, payload))
+                        })
+                        .ok_or_else(|| {
+                            StagingError::Internal(
+                                "prepared read returned an unknown position".to_owned(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?)
+        }
+    }
+}
+
+async fn verify_pending_recipe_payload(
     root: &Path,
     index: &Mutex<Index>,
     readers: &ReaderPool,
@@ -1316,42 +1546,49 @@ async fn verify_unverified_recipe_payload(
 ) -> Result<()> {
     let mut hasher = blake3::Hasher::new();
     let mut bytes_checked = 0u64;
-    for batch in recipe.sequence().spans.chunks(VERIFY_BATCH_CHUNKS) {
-        let hashes = batch.iter().map(|span| span.chunk_hash).collect::<Vec<_>>();
-        let payloads = read_staged_chunks_batch(root, index, readers, None, &hashes).await?;
-        for (span, (actual_hash, data)) in batch.iter().zip(payloads) {
-            if actual_hash != span.chunk_hash {
-                return Err(StagingError::StagingCorrupt(
-                    "unverified recipe returned a different chunk hash".to_owned(),
-                ));
+    let mut next_occurrence = 0u64;
+    while next_occurrence < recipe.chunk_count() {
+        let page = lock_index(index)?.recipe_page(recipe, next_occurrence)?;
+        for batch in page.chunks.chunks(VERIFY_BATCH_CHUNKS) {
+            let hashes = batch.iter().map(|span| span.chunk_hash).collect::<Vec<_>>();
+            let payloads = read_staged_chunks_batch(root, index, readers, None, &hashes).await?;
+            for (span, (actual_hash, data)) in batch.iter().zip(payloads) {
+                if actual_hash != span.chunk_hash {
+                    return Err(StagingError::StagingCorrupt(
+                        "unverified recipe returned a different chunk hash".to_owned(),
+                    ));
+                }
+                let size = u64::try_from(data.len()).map_err(|_| {
+                    StagingError::StagingCorrupt(
+                        "staged chunk size cannot be represented".to_owned(),
+                    )
+                })?;
+                if size != span.len {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "unverified chunk {} has {size} bytes, recipe requires {}",
+                        span.chunk_hash.hex(),
+                        span.len
+                    )));
+                }
+                bytes_checked = bytes_checked.checked_add(size).ok_or_else(|| {
+                    StagingError::StagingCorrupt("staged recipe size overflow".to_owned())
+                })?;
+                hasher.update(&data);
             }
-            let size = u64::try_from(data.len()).map_err(|_| {
-                StagingError::StagingCorrupt("migrated chunk size cannot be represented".to_owned())
-            })?;
-            if size != span.len {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "unverified chunk {} has {size} bytes, recipe requires {}",
-                    span.chunk_hash.hex(),
-                    span.len
-                )));
-            }
-            bytes_checked = bytes_checked.checked_add(size).ok_or_else(|| {
-                StagingError::StagingCorrupt("migrated recipe size overflow".to_owned())
-            })?;
-            hasher.update(&data);
         }
+        next_occurrence = page.next_occurrence();
     }
-    if bytes_checked != recipe.sequence().file_size {
+    if bytes_checked != recipe.file_size() {
         return Err(StagingError::StagingCorrupt(format!(
             "unverified recipe covers {bytes_checked} bytes, expected {}",
-            recipe.sequence().file_size
+            recipe.file_size()
         )));
     }
     let actual = MerkleHash::from(*hasher.finalize().as_bytes());
-    if actual != recipe.sequence().file_hash {
+    if actual != recipe.file_hash() {
         return Err(StagingError::StagingCorrupt(format!(
             "unverified recipe {} reconstructs to {}",
-            recipe.sequence().file_hash.hex(),
+            recipe.file_hash().hex(),
             actual.hex()
         )));
     }
@@ -1380,17 +1617,16 @@ async fn complete_recipe_payload_validation(
     index: &Mutex<Index>,
     readers: &ReaderPool,
 ) -> Result<()> {
-    let pending = lock_index(index)?.migration_validation_pending()?;
+    let pending = lock_index(index)?.recipe_payload_validation_pending()?;
     if !pending {
         return Ok(());
     }
-    let recipe_hashes = lock_index(index)?.unverified_recipe_hashes()?;
+    let recipe_hashes = lock_index(index)?.pending_recipe_hashes()?;
     for recipe_hash in recipe_hashes {
-        let recipe = match lock_index(index)?.unverified_recipe(&recipe_hash) {
+        let recipe = match lock_index(index)?.pending_recipe(&recipe_hash) {
             Ok(recipe) => recipe,
             Err(error) if recipe_payload_error_is_corruption(&error) => {
-                lock_index(index)?
-                    .quarantine_unverified_recipe(&recipe_hash, &error.to_string())?;
+                lock_index(index)?.quarantine_pending_recipe(&recipe_hash, &error.to_string())?;
                 warn!(
                     recipe_hash = %MerkleHash::from(recipe_hash).hex(),
                     error = %error,
@@ -1400,14 +1636,14 @@ async fn complete_recipe_payload_validation(
             }
             Err(error) => return Err(error),
         };
-        if let Err(error) = verify_unverified_recipe_payload(root, index, readers, &recipe).await {
+        if let Err(error) = verify_pending_recipe_payload(root, index, readers, &recipe).await {
             if !recipe_payload_error_is_corruption(&error) {
                 return Err(error);
             }
-            lock_index(index)?.quarantine_unverified_recipe(&recipe_hash, &error.to_string())?;
+            lock_index(index)?.quarantine_pending_recipe(&recipe_hash, &error.to_string())?;
             warn!(
                 recipe_hash = %MerkleHash::from(recipe_hash).hex(),
-                file_hash = %recipe.sequence().file_hash.hex(),
+                file_hash = %recipe.file_hash().hex(),
                 error = %error,
                 "quarantined corrupt unverified recipe without deleting payload bytes"
             );
@@ -1415,7 +1651,7 @@ async fn complete_recipe_payload_validation(
         }
         lock_index(index)?.mark_recipe_verified(&recipe_hash)?;
     }
-    lock_index(index)?.finish_migration_validation()
+    lock_index(index)?.finish_recipe_payload_validation()
 }
 
 async fn read_located_staged_chunks_batch(
@@ -1710,7 +1946,7 @@ fn seal_current_segment_blocking(
 impl StagingArea {
     /// Open or create a staging area at the given root path.
     ///
-    /// Acquires an advisory flock, runs schema migrations, performs
+    /// Acquires an advisory flock, validates the canonical schema, performs
     /// crash recovery, and opens the current segment for writing.
     ///
     /// # Errors
@@ -1757,8 +1993,8 @@ impl StagingArea {
         Ok(staging)
     }
 
-    /// Shared implementation for `open` and `open_blocking`. Runs the
-    /// v1-layout check, acquires the lock per `acq`, and performs the
+    /// Shared implementation for `open` and `open_blocking`. Rejects the
+    /// retired per-chunk layout, acquires the lock per `acq`, and performs the
     /// standard post-lock initialization (index, recovery, segment).
     fn open_with_lock(root: PathBuf, acq: LockAcquisition) -> Result<Self> {
         let cfg = StagingConfig::default();
@@ -1766,10 +2002,10 @@ impl StagingArea {
 
         std::fs::create_dir_all(&root)?;
 
-        // Reject v1 layout: a `chunks/` directory means old per-chunk layout.
+        // A `chunks/` directory belongs to a retired pre-release layout.
         if root.join("chunks").exists() {
             return Err(StagingError::StagingCorrupt(
-                "v1 per-chunk layout detected (chunks/ directory exists); \
+                "retired per-chunk layout detected (chunks/ directory exists); \
                  delete the staging root and retry"
                     .into(),
             ));
@@ -2152,6 +2388,41 @@ impl StagingArea {
         Ok(batch_id)
     }
 
+    /// Durably append one bounded ordered term batch to an open recipe recording.
+    pub fn append_recipe_recording_terms(
+        &self,
+        batch_id: &StagingBatchId,
+        start_occurrence: u64,
+        start_offset: u64,
+        chunks: &[(MerkleHash, u64)],
+    ) -> Result<()> {
+        lock_index(&self.index)?.append_recipe_recording_terms(
+            batch_id.as_str(),
+            start_occurrence,
+            start_offset,
+            chunks,
+        )
+    }
+
+    pub(crate) fn append_recording_remote_chunks(
+        &self,
+        batch_id: &StagingBatchId,
+        chunks: &[(MerkleHash, push_plan::ExistingChunkCandidate)],
+    ) -> Result<()> {
+        let writes = chunks
+            .iter()
+            .map(|(chunk_hash, candidate)| ExistingChunkWrite {
+                chunk_hash: (*chunk_hash).into(),
+                xorb_hash: candidate.xorb_ref.xorb_hash.into(),
+                chunk_index: candidate.xorb_ref.chunk_index,
+                uncompressed_size: candidate.xorb_ref.uncompressed_size,
+                placement_id: candidate.placement_id,
+                origin_proof_id: candidate.origin_proof_id,
+            })
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.append_recording_remote_chunks(batch_id.as_str(), &writes)
+    }
+
     /// Persist an unverified immutable recipe and lease it to one native-byte path.
     ///
     /// The recipe remains invisible to push until the next staging open
@@ -2198,7 +2469,65 @@ impl StagingArea {
 
     /// Mark a batch as published after its Git index replacement commits.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
-        lock_index(&self.index)?.mark_batch_published(batch_id.as_str())
+        let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file(&file_hash)?;
+            self.unregister_file(&file_hash)?;
+        }
+        Ok(())
+    }
+
+    /// Persist the complete add publication intent before mutating Git's index.
+    pub fn create_publication_intent(
+        &self,
+        entries: &[PublicationIntentEntry],
+    ) -> Result<PublicationIntentId> {
+        let intent_id = new_publication_intent_id();
+        let stored = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.batch_id.as_str().to_owned(),
+                    staging_path_bytes(&entry.path),
+                    entry.expected_pointer_oid.clone(),
+                    entry.previous_index_state.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.create_publication_intent(intent_id.as_str(), &stored)?;
+        Ok(intent_id)
+    }
+
+    /// Atomically publish every batch recorded by an add publication intent.
+    pub fn publish_publication_intent(&self, intent_id: &PublicationIntentId) -> Result<()> {
+        let unleased = lock_index(&self.index)?.publish_publication_intent(intent_id.as_str())?;
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file(&file_hash)?;
+            self.unregister_file(&file_hash)?;
+        }
+        Ok(())
+    }
+
+    /// Return every unresolved add publication intent for Git-aware recovery.
+    pub fn unresolved_publication_intents(&self) -> Result<Vec<UnresolvedPublicationIntent>> {
+        unresolved_publication_intents(&self.index)
+    }
+
+    /// Atomically remove an unresolved intent and every open batch it owns.
+    pub fn rollback_publication_intent(
+        &self,
+        intent_id: &PublicationIntentId,
+    ) -> Result<Vec<RetireStats>> {
+        let unleased = lock_index(&self.index)?.rollback_publication_intent(intent_id.as_str())?;
+        let mut retired = Vec::with_capacity(unleased.len());
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            retired.push(self.retire_file(&file_hash)?);
+            self.unregister_file(&file_hash)?;
+        }
+        Ok(retired)
     }
 
     /// Publish one complete recipe outside the multi-path `crab add` index transaction.
@@ -2211,12 +2540,23 @@ impl StagingArea {
         path: &Path,
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<StagingBatchId> {
+        self.publish_verified_recipe_owner(path, recipe, Some(&path.to_string_lossy()))
+    }
+
+    fn publish_verified_recipe_owner(
+        &self,
+        owner: &Path,
+        recipe: &crate::recipe::FileRecipe,
+        display_path: Option<&str>,
+    ) -> Result<StagingBatchId> {
         let batch_id = self.create_batch()?;
-        let file_hash = recipe.sequence().file_hash;
+        let file_hash = recipe.file_hash();
         let publish = (|| -> Result<()> {
-            self.pre_register_file(&file_hash, recipe.sequence().file_size)?;
-            self.record_verified_recipe_lease(&batch_id, path, recipe)?;
-            self.record_file_path(&file_hash, &path.to_string_lossy())?;
+            self.pre_register_file(&file_hash, recipe.file_size())?;
+            self.record_verified_recipe_lease(&batch_id, owner, recipe)?;
+            if let Some(display_path) = display_path {
+                self.record_file_path(&file_hash, display_path)?;
+            }
             self.mark_batch_published(&batch_id)
         })();
         if let Err(error) = publish {
@@ -2225,6 +2565,40 @@ impl StagingArea {
             return Err(error);
         }
         Ok(batch_id)
+    }
+
+    /// Publish one immutable recipe needed by not-yet-pushed Git history.
+    ///
+    /// History builders can emit several versions of one worktree path before
+    /// their first push. A content-addressed internal owner keeps every version
+    /// push-visible without weakening one-head-per-worktree-path ownership.
+    pub fn publish_verified_history_recipe(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Result<StagingBatchId> {
+        let owner = PathBuf::from(".crab/history").join(recipe.file_hash().hex());
+        self.publish_verified_recipe_owner(&owner, recipe, None)
+    }
+
+    /// Preserve a locally published recipe referenced by not-yet-pushed Git history.
+    pub fn preserve_published_history_recipe(
+        &self,
+        file_hash: &MerkleHash,
+        file_size: u64,
+    ) -> Result<bool> {
+        let Some(recipe) = self.published_recipe_for_file(file_hash)? else {
+            // Successful prior pushes retire local ownership, so absence is normal.
+            return Ok(false);
+        };
+        if recipe.file_size() != file_size {
+            return Err(StagingError::StagingCorrupt(format!(
+                "Git history pointer for {} records {file_size} bytes but its staged recipe records {} bytes",
+                file_hash.hex(),
+                recipe.file_size()
+            )));
+        }
+        self.publish_verified_history_recipe(&recipe)?;
+        Ok(true)
     }
 
     /// Remove one batch's leases and reclaim only recipes with no other owner.
@@ -2238,10 +2612,10 @@ impl StagingArea {
         Ok(retired)
     }
 
-    /// Reclaim a recipe only when no path lease in any batch still owns it.
+    /// Reclaim a recipe only when no path head/lease or push snapshot owns it.
     pub fn retire_file_if_unleased(&self, file_hash: &MerkleHash) -> Result<Option<RetireStats>> {
         let file_hash_bytes: [u8; 32] = (*file_hash).into();
-        if lock_index(&self.index)?.has_file_lease(&file_hash_bytes)? {
+        if lock_index(&self.index)?.has_file_owner(&file_hash_bytes)? {
             return Ok(None);
         }
         let retired = self.retire_file(file_hash)?;
@@ -2296,12 +2670,8 @@ impl StagingArea {
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
         if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
-            return Ok(recipe
-                .sequence()
-                .spans
-                .iter()
-                .map(|span| span.chunk_hash)
-                .collect());
+            return collect_recipe_chunks(&self.index, &recipe)
+                .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
         let fh: [u8; 32] = (*file_hash).into();
         let raw_hashes = lock_index(&self.index)?.chunks_for_file(&fh)?;
@@ -2314,12 +2684,7 @@ impl StagingArea {
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
         if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
-            return Ok(recipe
-                .sequence()
-                .spans
-                .iter()
-                .map(|span| (span.chunk_hash, span.len))
-                .collect());
+            return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();
         let chunks = lock_index(&self.index)?.chunks_for_file_with_sizes(&fh)?;
@@ -2327,6 +2692,34 @@ impl StagingArea {
             .into_iter()
             .map(|(hash, size)| (MerkleHash::from(hash), size))
             .collect())
+    }
+
+    /// Whether every canonical recipe occurrence remains segment-backed.
+    pub fn has_complete_segment_authority_for_recipe(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Result<bool> {
+        let index = lock_index(&self.index)?;
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            if !index.recipe_page_has_segment_authority(recipe, next)? {
+                return Ok(false);
+            }
+            next = next
+                .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+                .ok_or_else(|| {
+                    StagingError::StagingCorrupt(
+                        "segment-authority recipe page overflow".to_owned(),
+                    )
+                })?;
+        }
+        Ok(true)
+    }
+
+    /// Return whether an exact raw segment payload remains locally readable.
+    pub fn has_segment_payload(&self, chunk_hash: &MerkleHash, size: u64) -> Result<bool> {
+        let chunk_hash: [u8; 32] = (*chunk_hash).into();
+        lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
     }
 
     /// Return the immutable recipe owned by a published staging batch.
@@ -2338,37 +2731,96 @@ impl StagingArea {
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
     }
 
+    /// Read one bounded page from an indexed immutable recipe.
+    pub fn recipe_page(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<crate::recipe::RecipePage> {
+        lock_index(&self.index)?.recipe_page(recipe, start_occurrence)
+    }
+
+    /// Load proof-bearing remote authority for one bounded recipe page.
+    pub fn recipe_remote_chunk_page(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+        indexed_recipe_remote_chunk_page(&self.index, recipe, start_occurrence)
+    }
+
+    /// Return whether the exact caller-verified recipe has local authority.
+    pub fn has_verified_local_recipe(&self, recipe: &crate::recipe::FileRecipe) -> Result<bool> {
+        Ok(lock_index(&self.index)?
+            .verified_local_recipe(&recipe.hash())?
+            .is_some_and(|stored| stored == *recipe))
+    }
+
     /// Promote a verified add-time push plan into the staging index.
-    #[expect(
-        clippy::unused_async,
-        reason = "async signature matches add-time planning callers"
-    )]
     pub async fn write_file_push_plan(&self, plan: &push_plan::FilePushPlan) -> Result<()> {
-        let (file_hash, chunks) =
-            validate_file_push_plan_matches_staging(&self.root, &self.index, plan)?;
-        let plan_json = push_plan::serialize_file_push_plan(plan)?;
-        let sequence_hash = push_plan::chunk_sequence_hash(&chunks);
-        let prepared_xorbs = prepared_xorb_index_records(plan, &chunks)?;
+        let file_hash = plan.file_hash()?;
+        let fh: [u8; 32] = file_hash.into();
+        let recipe = lock_index(&self.index)?
+            .published_recipe_for_file(&fh)?
+            .ok_or_else(|| {
+                StagingError::StagingCorrupt(format!(
+                    "cannot publish add-time push plan before recipe {} is indexed",
+                    file_hash.hex()
+                ))
+            })?;
+        self.write_file_push_plan_for_recipe(plan, &recipe).await
+    }
+
+    /// Persist a push plan bound to the exact recipe sealed by the same stream.
+    pub async fn write_file_push_plan_for_recipe(
+        &self,
+        plan: &push_plan::FilePushPlan,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Result<()> {
+        self.write_file_push_plan_bound_to_recipe(plan, recipe, None)
+            .await
+    }
+
+    pub(crate) async fn write_file_push_plan_for_open_recipe(
+        &self,
+        plan: &push_plan::FilePushPlan,
+        recipe: &crate::recipe::FileRecipe,
+        batch_id: &StagingBatchId,
+    ) -> Result<()> {
+        self.write_file_push_plan_bound_to_recipe(plan, recipe, Some(batch_id))
+            .await
+    }
+
+    async fn write_file_push_plan_bound_to_recipe(
+        &self,
+        plan: &push_plan::FilePushPlan,
+        recipe: &crate::recipe::FileRecipe,
+        recording_batch_id: Option<&StagingBatchId>,
+    ) -> Result<()> {
+        let file_hash = validate_file_push_plan_matches_recipe(plan, recipe)?;
+        let existing_chunks = existing_chunk_index_records(plan)?;
+        let mut indexed_plan = plan.clone();
+        indexed_plan.existing.clear();
+        let plan_json = push_plan::serialize_file_push_plan(&indexed_plan)?;
+        let sequence_hash = plan.sequence_hash()?;
+        let prepared_xorbs = prepared_xorb_index_records(plan)?;
         let retained_prepared_xorbs = prepared_xorbs
             .iter()
             .map(|record| MerkleHash::from(record.xorb_hash))
             .collect::<HashSet<_>>();
         let fh: [u8; 32] = file_hash.into();
-        let chunk_count = u64::try_from(chunks.len()).map_err(|_| {
-            StagingError::StagingCorrupt(format!(
-                "add-time push plan for file {} has too many chunks",
-                file_hash.hex()
-            ))
+        lock_index(&self.index)?.insert_file_push_plan(index::FilePushPlanWrite {
+            file_hash: &fh,
+            recipe_hash: &recipe.hash(),
+            recording_batch_id: recording_batch_id.map(StagingBatchId::as_str),
+            version: plan.version,
+            file_size: plan.file_size,
+            chunk_count: plan.chunk_count,
+            chunk_sequence_hash: &sequence_hash,
+            plan_json: &plan_json,
+            existing_chunks: &existing_chunks,
+            prepared_xorbs: &prepared_xorbs,
         })?;
-        lock_index(&self.index)?.insert_file_push_plan(
-            &fh,
-            plan.version,
-            plan.file_size,
-            chunk_count,
-            &sequence_hash,
-            &plan_json,
-            &prepared_xorbs,
-        )?;
         if let Err(error) =
             push_plan::retain_file_prepared_xorbs(&self.root, &file_hash, &retained_prepared_xorbs)
         {
@@ -2499,9 +2951,19 @@ impl StagingArea {
     /// Returns [`StagingError::Io`] on filesystem failure.
     pub fn mark_push_inflight(&self, push_id: &str) -> Result<()> {
         let stale = mark_push_inflight_marker(&self.root, push_id)?;
-        let index = lock_index(&self.index)?;
         for stale_id in stale {
-            index.remove_open_push_snapshot(&stale_id)?;
+            self.discard_open_push_snapshot(&stale_id)?;
+        }
+        Ok(())
+    }
+
+    fn discard_open_push_snapshot(&self, push_id: &str) -> Result<()> {
+        let unleased = lock_index(&self.index)?.discard_open_push_snapshot(push_id)?;
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file(&file_hash)?;
+            let bytes: [u8; 32] = file_hash.into();
+            lock_index(&self.index)?.remove_file(&bytes)?;
         }
         Ok(())
     }
@@ -2586,9 +3048,9 @@ impl StagingArea {
     /// [`StagingError::Io`] on filesystem failure.
     pub fn clean(&self) -> Result<StagingCleanStats> {
         // 1. The exclusive staging lock proves no push reader is alive. Clear
-        // stale markers, complete any post-CAS snapshot retirement, and only
-        // then remove snapshot journals. Open snapshots never crossed the
-        // recorded manifest-commit transition and keep their path leases.
+        // stale markers, discard failed snapshots, complete any post-CAS
+        // retirement, and only then remove snapshot journals. Immutable
+        // snapshot recipe pins preserve superseded payloads until this point.
         let inflight = self.list_inflight()?;
         let mut stale_markers_removed: u64 = 0;
         for id in &inflight {
@@ -2598,7 +3060,7 @@ impl StagingArea {
         let snapshots = lock_index(&self.index)?.push_snapshot_states()?;
         for (snapshot_id, state) in snapshots {
             if state == "open" {
-                lock_index(&self.index)?.remove_open_push_snapshot(&snapshot_id)?;
+                self.discard_open_push_snapshot(&snapshot_id)?;
                 continue;
             }
             let unleased = lock_index(&self.index)?.retire_push_snapshot(&snapshot_id)?;
@@ -2608,6 +3070,12 @@ impl StagingArea {
                 self.unregister_file(&file_hash)?;
             }
             lock_index(&self.index)?.remove_push_snapshot(&snapshot_id)?;
+        }
+        let unowned = lock_index(&self.index)?.reclaim_superseded_ownership()?;
+        for file_hash in unowned {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file(&file_hash)?;
+            self.unregister_file(&file_hash)?;
         }
 
         // 2. Sweep orphan segments.
@@ -3197,6 +3665,15 @@ impl StagingAreaReadOnly {
         .await
     }
 
+    /// Begin one disk-backed residual plan for bounded recipe-page appends.
+    pub fn begin_coalesced_chunk_read_plan(&self) -> Result<CoalescedChunkReadPlan<'_>> {
+        lock_index(&self.index)?.begin_coalesced_read_plan()?;
+        Ok(CoalescedChunkReadPlan {
+            staging: self,
+            next_sequence: 0,
+        })
+    }
+
     /// Check if a chunk exists in staging.
     #[expect(
         clippy::unused_async,
@@ -3215,12 +3692,8 @@ impl StagingAreaReadOnly {
     /// Return the ordered list of chunk hashes staged for a given file.
     pub fn chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Vec<MerkleHash>> {
         if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
-            return Ok(recipe
-                .sequence()
-                .spans
-                .iter()
-                .map(|span| span.chunk_hash)
-                .collect());
+            return collect_recipe_chunks(&self.index, &recipe)
+                .map(|chunks| chunks.into_iter().map(|(hash, _)| hash).collect());
         }
         let fh: [u8; 32] = (*file_hash).into();
         let raw_hashes = lock_index(&self.index)?.chunks_for_file(&fh)?;
@@ -3233,12 +3706,7 @@ impl StagingAreaReadOnly {
         file_hash: &MerkleHash,
     ) -> Result<Vec<(MerkleHash, u64)>> {
         if let Some(recipe) = self.published_recipe_for_file(file_hash)? {
-            return Ok(recipe
-                .sequence()
-                .spans
-                .iter()
-                .map(|span| (span.chunk_hash, span.len))
-                .collect());
+            return collect_recipe_chunks(&self.index, &recipe);
         }
         let fh: [u8; 32] = (*file_hash).into();
         let chunks = lock_index(&self.index)?.chunks_for_file_with_sizes(&fh)?;
@@ -3248,6 +3716,34 @@ impl StagingAreaReadOnly {
             .collect())
     }
 
+    /// Whether every canonical recipe occurrence remains segment-backed.
+    pub fn has_complete_segment_authority_for_recipe(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Result<bool> {
+        let index = lock_index(&self.index)?;
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            if !index.recipe_page_has_segment_authority(recipe, next)? {
+                return Ok(false);
+            }
+            next = next
+                .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+                .ok_or_else(|| {
+                    StagingError::StagingCorrupt(
+                        "segment-authority recipe page overflow".to_owned(),
+                    )
+                })?;
+        }
+        Ok(true)
+    }
+
+    /// Return whether an exact raw segment payload remains locally readable.
+    pub fn has_segment_payload(&self, chunk_hash: &MerkleHash, size: u64) -> Result<bool> {
+        let chunk_hash: [u8; 32] = (*chunk_hash).into();
+        lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
+    }
+
     /// Return the immutable recipe owned by a published staging batch.
     pub fn published_recipe_for_file(
         &self,
@@ -3255,6 +3751,24 @@ impl StagingAreaReadOnly {
     ) -> Result<Option<crate::recipe::FileRecipe>> {
         let file_hash: [u8; 32] = (*file_hash).into();
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
+    }
+
+    /// Read one bounded page from an indexed immutable recipe.
+    pub fn recipe_page(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<crate::recipe::RecipePage> {
+        lock_index(&self.index)?.recipe_page(recipe, start_occurrence)
+    }
+
+    /// Load proof-bearing remote authority for one bounded recipe page.
+    pub fn recipe_remote_chunk_page(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+        indexed_recipe_remote_chunk_page(&self.index, recipe, start_occurrence)
     }
 
     /// Load the indexed add-time push plan for a file.
@@ -3291,6 +3805,10 @@ impl StagingAreaReadOnly {
         reason = "async signature matches the rest of the staging API; callers already await"
     )]
     pub async fn retire_file(&self, file_hash: &MerkleHash) -> Result<RetireStats> {
+        self.retire_file_now(file_hash)
+    }
+
+    fn retire_file_now(&self, file_hash: &MerkleHash) -> Result<RetireStats> {
         let fh: [u8; 32] = (*file_hash).into();
         let (rows_deleted, segments_touched) =
             lock_index(&self.index)?.delete_chunks_for_file(&fh)?;
@@ -3303,7 +3821,68 @@ impl StagingAreaReadOnly {
 
     /// Mark a staged batch published after the Git index commit.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
-        lock_index(&self.index)?.mark_batch_published(batch_id.as_str())
+        let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file_now(&file_hash)?;
+            let file_hash_bytes: [u8; 32] = file_hash.into();
+            lock_index(&self.index)?.remove_file(&file_hash_bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Persist the complete add publication intent before mutating Git's index.
+    pub fn create_publication_intent(
+        &self,
+        entries: &[PublicationIntentEntry],
+    ) -> Result<PublicationIntentId> {
+        let intent_id = new_publication_intent_id();
+        let stored = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.batch_id.as_str().to_owned(),
+                    staging_path_bytes(&entry.path),
+                    entry.expected_pointer_oid.clone(),
+                    entry.previous_index_state.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.create_publication_intent(intent_id.as_str(), &stored)?;
+        Ok(intent_id)
+    }
+
+    /// Return every unresolved add publication intent for Git-aware recovery.
+    pub fn unresolved_publication_intents(&self) -> Result<Vec<UnresolvedPublicationIntent>> {
+        unresolved_publication_intents(&self.index)
+    }
+
+    /// Atomically publish every batch recorded by an add publication intent.
+    pub fn publish_publication_intent(&self, intent_id: &PublicationIntentId) -> Result<()> {
+        let unleased = lock_index(&self.index)?.publish_publication_intent(intent_id.as_str())?;
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            self.retire_file_now(&file_hash)?;
+            let file_hash_bytes: [u8; 32] = file_hash.into();
+            lock_index(&self.index)?.remove_file(&file_hash_bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Atomically remove an unresolved intent and every open batch it owns.
+    pub async fn rollback_publication_intent(
+        &self,
+        intent_id: &PublicationIntentId,
+    ) -> Result<Vec<RetireStats>> {
+        let unleased = lock_index(&self.index)?.rollback_publication_intent(intent_id.as_str())?;
+        let mut retired = Vec::with_capacity(unleased.len());
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            retired.push(self.retire_file(&file_hash).await?);
+            let file_hash_bytes: [u8; 32] = file_hash.into();
+            lock_index(&self.index)?.remove_file(&file_hash_bytes)?;
+        }
+        Ok(retired)
     }
 
     /// Roll back one batch while preserving recipes leased by another path.
@@ -3334,7 +3913,7 @@ impl StagingAreaReadOnly {
         lock_index(&self.index)?.commit_push_snapshot(push_id)
     }
 
-    /// Retire the exact leases pinned by one committed push snapshot.
+    /// Retire the exact recipe ownership pinned by one committed push snapshot.
     pub async fn retire_push_snapshot(&self, push_id: &str) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.retire_push_snapshot(push_id)?;
         let mut retired = Vec::with_capacity(unleased.len());
@@ -3353,6 +3932,28 @@ impl StagingAreaReadOnly {
         lock_index(&self.index)?.remove_push_snapshot(push_id)
     }
 
+    /// Discard one failed push snapshot and reclaim ownership it alone pinned.
+    #[expect(
+        clippy::unused_async,
+        reason = "async signature matches the push snapshot retirement API"
+    )]
+    pub async fn discard_open_push_snapshot(&self, push_id: &str) -> Result<Vec<RetireStats>> {
+        self.discard_open_push_snapshot_now(push_id)
+    }
+
+    fn discard_open_push_snapshot_now(&self, push_id: &str) -> Result<Vec<RetireStats>> {
+        let unleased = lock_index(&self.index)?.discard_open_push_snapshot(push_id)?;
+        let mut retired = Vec::with_capacity(unleased.len());
+        for file_hash in unleased {
+            let file_hash = MerkleHash::from(file_hash);
+            let stats = self.retire_file_now(&file_hash)?;
+            let bytes: [u8; 32] = file_hash.into();
+            lock_index(&self.index)?.remove_file(&bytes)?;
+            retired.push(stats);
+        }
+        Ok(retired)
+    }
+
     /// Create a push-inflight marker file from a shared push handle.
     ///
     /// Push uses shared staging locks so multiple local pushes can read
@@ -3360,11 +3961,10 @@ impl StagingAreaReadOnly {
     /// from retiring segment rows while another push is still packing
     /// from them.
     pub fn mark_push_inflight(&self, push_id: &str) -> Result<()> {
-        let stale = mark_push_inflight_marker(&self.root, push_id)?;
-        let index = lock_index(&self.index)?;
-        for stale_id in stale {
-            index.remove_open_push_snapshot(&stale_id)?;
-        }
+        // Shared push readers cannot reclaim snapshot-owned bytes while a
+        // sibling may still be between marker creation and snapshot capture.
+        // Exclusive retirement/clean consumes journals for stale markers.
+        let _stale = mark_push_inflight_marker(&self.root, push_id)?;
         Ok(())
     }
 
@@ -3381,9 +3981,10 @@ impl StagingAreaReadOnly {
     /// that cleanup is about to retire.
     pub fn begin_retirement(&self, push_id: &str) -> Result<Option<StagingRetirementGuard>> {
         let (guard, stale) = begin_retirement_marker(&self.root, push_id)?;
-        let index = lock_index(&self.index)?;
-        for stale_id in stale {
-            index.remove_open_push_snapshot(&stale_id)?;
+        if guard.is_some() {
+            for stale_id in stale {
+                self.discard_open_push_snapshot_now(&stale_id)?;
+            }
         }
         Ok(guard)
     }
@@ -3519,6 +4120,25 @@ impl StagingAreaReadOnly {
                 &mut referenced_xorbs,
             )? {
                 stats.invalid_plan_files += 1;
+            } else {
+                let recipe = lock_index(&self.index)?
+                    .published_recipe_for_file(&file.file_hash)?
+                    .ok_or_else(|| {
+                        StagingError::StagingCorrupt(format!(
+                            "push plan for file {} has no published recipe",
+                            file_hash.hex()
+                        ))
+                    })?;
+                stats.existing_chunks = stats
+                    .existing_chunks
+                    .checked_add(
+                        lock_index(&self.index)?.recipe_remote_chunk_count(&recipe.hash())?,
+                    )
+                    .ok_or_else(|| {
+                        StagingError::Internal(
+                            "push-plan existing chunk count overflowed".to_owned(),
+                        )
+                    })?;
             }
             for planned_xorb in &plan.prepared_xorbs {
                 let xorb_hash = planned_xorb.hash()?;
@@ -3806,17 +4426,48 @@ mod tests {
     #[derive(Default)]
     struct CountingMetrics {
         fsyncs: AtomicU64,
+        prepared_source_opens: AtomicU64,
+        prepared_source_bytes: AtomicU64,
+        prepared_readers: AtomicU64,
+        max_prepared_readers: AtomicU64,
     }
 
     impl StagingMetrics for CountingMetrics {
         fn inc_staging_fsyncs(&self) {
             self.fsyncs.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn inc_prepared_source_xorb_open(&self) {
+            self.prepared_source_opens.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn add_prepared_source_xorb_bytes_read(&self, value: u64) {
+            self.prepared_source_bytes
+                .fetch_add(value, Ordering::Relaxed);
+        }
+
+        fn prepared_source_reader_started(&self) {
+            let current = self.prepared_readers.fetch_add(1, Ordering::Relaxed) + 1;
+            self.max_prepared_readers
+                .fetch_max(current, Ordering::Relaxed);
+        }
+
+        fn prepared_source_reader_finished(&self) {
+            self.prepared_readers.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     impl CountingMetrics {
         fn fsyncs(&self) -> u64 {
             self.fsyncs.load(Ordering::Relaxed)
+        }
+
+        fn prepared_source_counts(&self) -> (u64, u64, u64) {
+            (
+                self.prepared_source_opens.load(Ordering::Relaxed),
+                self.prepared_source_bytes.load(Ordering::Relaxed),
+                self.max_prepared_readers.load(Ordering::Relaxed),
+            )
         }
     }
 
@@ -3927,6 +4578,32 @@ mod tests {
         file_hash
     }
 
+    async fn stage_chunks_as_published_file(
+        staging: &StagingArea,
+        chunks: &[(MerkleHash, Vec<u8>)],
+    ) -> MerkleHash {
+        let file_hash = stage_chunks_as_synthetic_file(staging, chunks).await;
+        let chunk_pairs = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64))
+            .collect::<Vec<_>>();
+        let file_size = chunk_pairs.iter().map(|(_, size)| *size).sum();
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            file_size,
+            &chunk_pairs,
+        )
+        .expect("published test recipe");
+        staging
+            .publish_verified_recipe_lease(
+                &PathBuf::from(format!("published-{}.bin", file_hash.hex())),
+                &recipe,
+            )
+            .expect("publish test recipe");
+        file_hash
+    }
+
     fn corrupt_first_chunk_size(root: &std::path::Path, file_hash: &MerkleHash) {
         let conn = rusqlite::Connection::open(root.join("index.db")).expect("open raw index db");
         let fh: [u8; 32] = (*file_hash).into();
@@ -3947,17 +4624,6 @@ mod tests {
             )
             .expect("corrupt pending first chunk size");
         assert_eq!(committed + pending, 1);
-    }
-
-    fn assert_stale_plan_error(error: StagingError) {
-        assert!(
-            matches!(
-                error,
-                StagingError::StagingCorrupt(ref message)
-                    if message.contains("no longer matches staged chunk rows")
-            ),
-            "unexpected error: {error}"
-        );
     }
 
     fn assert_prepared_xorb_without_file_coverage_error(error: StagingError) {
@@ -4060,6 +4726,182 @@ mod tests {
                 .collect(),
         });
         plan
+    }
+
+    #[tokio::test]
+    async fn segment_authority_proof_pages_the_canonical_recipe() {
+        let chunks = (0..=crate::recipe::RECIPE_PAGE_ENTRIES as u32)
+            .map(|index| make_chunk(10_000 + index, 64))
+            .collect::<Vec<_>>();
+        let chunk_pairs = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64))
+            .collect::<Vec<_>>();
+        let mut file_hasher = blake3::Hasher::new();
+        for (_, data) in &chunks {
+            file_hasher.update(data);
+        }
+        let file_hash = MerkleHash::from(*file_hasher.finalize().as_bytes());
+        let file_size = chunk_pairs.iter().map(|(_, size)| *size).sum();
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            file_size,
+            &chunk_pairs,
+        )
+        .expect("valid multi-page recipe");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staging = StagingArea::open(tmp.path().to_path_buf())
+            .await
+            .expect("open staging");
+        staging
+            .pre_register_file(&file_hash, file_size)
+            .expect("pre-register");
+        let refs = chunks
+            .iter()
+            .map(|(hash, data)| (hash, data.as_slice()))
+            .collect::<Vec<_>>();
+        staging
+            .stage_chunks_batch(&refs, &file_hash, 0)
+            .await
+            .expect("stage recipe chunks");
+        staging.flush_pending().await.expect("flush");
+        staging
+            .publish_verified_recipe_lease(Path::new("paged-authority.bin"), &recipe)
+            .expect("publish recipe");
+        assert!(
+            staging
+                .has_complete_segment_authority_for_recipe(&recipe)
+                .expect("complete segment authority")
+        );
+
+        let connection =
+            rusqlite::Connection::open(tmp.path().join("index.db")).expect("open raw index");
+        let file_hash_bytes: [u8; 32] = file_hash.into();
+        let removed = connection
+            .execute(
+                "DELETE FROM pending_chunks WHERE file_hash = ?1 AND chunk_index = ?2",
+                rusqlite::params![
+                    file_hash_bytes.as_slice(),
+                    crate::recipe::RECIPE_PAGE_ENTRIES as i64
+                ],
+            )
+            .expect("remove second-page segment row");
+        assert_eq!(removed, 1);
+        assert!(
+            !staging
+                .has_complete_segment_authority_for_recipe(&recipe)
+                .expect("incomplete segment authority")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prepared_residual_plan_reads_each_unique_source_once() {
+        let chunks = (0..8)
+            .map(|index| make_chunk(100 + index, 4096))
+            .collect::<Vec<_>>();
+        let chunk_pairs = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64))
+            .collect::<Vec<_>>();
+        let total_bytes = chunk_pairs.iter().map(|(_, size)| *size).sum();
+        let mut file_hasher = blake3::Hasher::new();
+        for (_, data) in &chunks {
+            file_hasher.update(data);
+        }
+        let file_hash = MerkleHash::from(*file_hasher.finalize().as_bytes());
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            total_bytes,
+            &chunk_pairs,
+        )
+        .expect("valid residual recipe");
+        let (xorb_bytes, xorb_hash, placements) = build_xorb_for_chunks(&chunks);
+        let plan =
+            prepared_plan_for_xorb(file_hash, &chunk_pairs, &xorb_bytes, xorb_hash, &placements);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        {
+            let staging = StagingArea::open(tmp.path().to_path_buf())
+                .await
+                .expect("open staging");
+            staging
+                .pre_register_file(&file_hash, total_bytes)
+                .expect("pre-register");
+            let refs = chunks
+                .iter()
+                .map(|(hash, data)| (hash, data.as_slice()))
+                .collect::<Vec<_>>();
+            staging
+                .stage_chunks_batch(&refs, &file_hash, 0)
+                .await
+                .expect("stage chunks");
+            staging.flush_pending().await.expect("flush");
+            staging
+                .publish_verified_recipe_lease(Path::new("prepared-residual.bin"), &recipe)
+                .expect("publish residual recipe");
+            push_plan::write_prepared_xorb(
+                staging.root(),
+                &file_hash,
+                &xorb_hash,
+                xorb_bytes.clone(),
+            )
+            .await
+            .expect("write prepared xorb");
+            staging
+                .write_file_push_plan(&plan)
+                .await
+                .expect("write prepared plan");
+            staging.close().await.expect("close staging");
+        }
+        {
+            let connection =
+                rusqlite::Connection::open(tmp.path().join("index.db")).expect("open raw index");
+            let file_hash_bytes: [u8; 32] = file_hash.into();
+            connection
+                .execute(
+                    "DELETE FROM chunks WHERE file_hash = ?1",
+                    rusqlite::params![file_hash_bytes.as_slice()],
+                )
+                .expect("remove segment authority");
+            connection
+                .execute(
+                    "DELETE FROM pending_chunks WHERE file_hash = ?1",
+                    rusqlite::params![file_hash_bytes.as_slice()],
+                )
+                .expect("remove pending segment authority");
+        }
+
+        let metrics = Arc::new(CountingMetrics::default());
+        let mut staging = StagingAreaReadOnly::open(tmp.path().to_path_buf())
+            .await
+            .expect("open staging readonly");
+        staging.set_metrics(Arc::clone(&metrics));
+        let mut plan = staging
+            .begin_coalesced_chunk_read_plan()
+            .expect("begin coalesced reads");
+        for (hash, size) in &chunk_pairs {
+            plan.append(&[(*hash, *size, 7u64)])
+                .expect("append one residual page");
+        }
+        let decoded = plan
+            .read_next(1, 1)
+            .await
+            .expect("read prepared source")
+            .expect("one source group");
+        assert_eq!(decoded.len(), chunks.len());
+        assert!(
+            plan.read_next(1, 1)
+                .await
+                .expect("finish residual plan")
+                .is_none(),
+            "one source xorb must produce one read unit"
+        );
+        assert_eq!(
+            metrics.prepared_source_counts(),
+            (1, xorb_bytes.len() as u64, 1),
+            "the complete prepared source is opened once under a one-reader bound"
+        );
     }
 
     fn insert_extra_prepared_xorb_row(
@@ -4184,7 +5026,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4211,7 +5053,11 @@ mod tests {
         assert!(loaded.staged_chunk_sequence_verified);
         assert_eq!(loaded.file_hash().expect("file hash"), file_hash);
         assert_eq!(loaded.file_size, total_bytes);
-        assert_eq!(loaded.chunk_pairs().expect("chunks"), chunk_pairs);
+        assert_eq!(loaded.chunk_count, chunk_pairs.len() as u64);
+        assert_eq!(
+            loaded.sequence_hash().expect("sequence hash"),
+            push_plan::chunk_sequence_hash(&chunk_pairs)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4229,7 +5075,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4269,7 +5115,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let (xorb_bytes, xorb_hash, placements) = build_xorb_for_chunks(&chunks);
             xorb_len = xorb_bytes.len() as u64;
@@ -4332,7 +5178,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let (xorb_bytes, xorb_hash, placements) = build_xorb_for_chunks(&chunks);
             push_plan::write_prepared_xorb(
@@ -4401,7 +5247,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4444,7 +5290,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let (xorb_bytes, built_xorb_hash, placements) = build_xorb_for_chunks(&chunks);
             xorb_hash = built_xorb_hash;
@@ -4488,7 +5334,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn indexed_file_push_plan_rejects_stale_staged_rows() {
+    async fn indexed_file_push_plan_remains_bound_to_recipe_when_segment_rows_stale() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let chunks = [make_chunk(98, 4096), make_chunk(99, 4096)];
         let total_bytes: u64 = chunks.iter().map(|(_, data)| data.len() as u64).sum();
@@ -4502,7 +5348,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4518,11 +5364,23 @@ mod tests {
         let ro = StagingAreaReadOnly::open(tmp.path().to_path_buf())
             .await
             .expect("open readonly");
-        let error = ro
+        let plan = ro
             .load_file_push_plan(&file_hash)
             .await
-            .expect_err("stale indexed plan should be rejected");
-        assert_stale_plan_error(error);
+            .expect("load recipe-bound plan")
+            .expect("recipe-bound plan exists");
+        assert_eq!(
+            plan.sequence_hash().expect("plan sequence"),
+            push_plan::chunk_sequence_hash(&chunk_pairs)
+        );
+        let recipe = ro
+            .published_recipe_for_file(&file_hash)
+            .expect("load recipe")
+            .expect("published recipe");
+        assert!(
+            !ro.has_complete_segment_authority_for_recipe(&recipe)
+                .expect("check segment authority")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4538,7 +5396,7 @@ mod tests {
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
             .expect("open staging");
-        let file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+        let file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
         staging.flush_pending().await.expect("flush");
         let xorb_hash = MerkleHash::from([0xB1; 32]);
         let foreign_chunk = compute_data_hash(b"not part of this file");
@@ -4580,7 +5438,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4619,7 +5477,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn prepared_cache_ignores_candidates_from_stale_source_plan() {
+    async fn prepared_cache_survives_stale_segment_rows_for_recipe_bound_source() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let chunks = [make_chunk(108, 4096), make_chunk(109, 4096)];
         let chunk_pairs: Vec<(MerkleHash, u64)> = chunks
@@ -4636,7 +5494,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let (xorb_bytes, xorb_hash, placements) = build_xorb_for_chunks(&chunks);
             push_plan::write_prepared_xorb(
@@ -4673,11 +5531,11 @@ mod tests {
             .await
             .expect("reopen staging");
         assert!(
-            staging
+            !staging
                 .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
-                .expect("load stale-source prepared cache")
+                .expect("load recipe-bound prepared cache")
                 .is_empty(),
-            "prepared xorb candidates from stale source plans should not be reused"
+            "prepared xorb authority is independent of mutable segment rows"
         );
     }
 
@@ -4701,7 +5559,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let (xorb_bytes, xorb_hash, placements) = build_xorb_for_chunks(&chunks);
             push_plan::write_prepared_xorb(
@@ -4761,7 +5619,7 @@ mod tests {
             let staging = StagingArea::open(tmp.path().to_path_buf())
                 .await
                 .expect("open staging");
-            file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+            file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
             staging.flush_pending().await.expect("flush");
             let plan =
                 push_plan::FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
@@ -4796,7 +5654,7 @@ mod tests {
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
             .expect("open staging");
-        let file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+        let file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
         staging.flush_pending().await.expect("flush");
 
         let first_xorb = MerkleHash::from([0xA1; 32]);
@@ -4861,7 +5719,7 @@ mod tests {
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
             .expect("open staging");
-        let file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+        let file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
         staging.flush_pending().await.expect("flush");
         std::fs::write(staging.root().join("push-plans"), b"not a directory")
             .expect("create stale push-plan path");
@@ -4878,7 +5736,11 @@ mod tests {
             .await
             .expect("load indexed plan")
             .expect("indexed plan exists");
-        assert_eq!(loaded.chunk_pairs().expect("chunks"), chunk_pairs);
+        assert_eq!(loaded.chunk_count, chunk_pairs.len() as u64);
+        assert_eq!(
+            loaded.sequence_hash().expect("sequence hash"),
+            push_plan::chunk_sequence_hash(&chunk_pairs)
+        );
 
         let wanted_chunks = chunk_pairs
             .iter()
@@ -4914,7 +5776,7 @@ mod tests {
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
             .expect("open staging");
-        let file_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+        let file_hash = stage_chunks_as_published_file(&staging, &chunks).await;
         staging.flush_pending().await.expect("flush");
         let prepared_xorb = MerkleHash::from([0xA3; 32]);
         let prepared_payload = Bytes::from_static(b"unregister prepared payload");
@@ -4965,7 +5827,7 @@ mod tests {
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
             .expect("open staging");
-        let source_hash = stage_chunks_as_synthetic_file(&staging, &chunks).await;
+        let source_hash = stage_chunks_as_published_file(&staging, &chunks).await;
         staging.flush_pending().await.expect("flush");
         let source_xorb = MerkleHash::from([0xA4; 32]);
         let source_payload = Bytes::from_static(b"adopt source prepared payload");
@@ -5334,6 +6196,78 @@ mod tests {
         let health = staging.lifecycle_health().expect("health");
         assert_eq!(health.committed_push_snapshots, 0);
         assert_eq!(health.path_leases, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clean_reclaims_file_left_after_path_head_publication_crash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first_path = tmp.path().join("first.bin");
+        let second_path = tmp.path().join("second.bin");
+        std::fs::write(&first_path, vec![0x31; 2 * 1024 * 1024]).expect("write first");
+        std::fs::write(&second_path, vec![0x42; 2 * 1024 * 1024]).expect("write second");
+        let staging = StagingArea::open(tmp.path().join("staging"))
+            .await
+            .expect("open staging");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let logical_path = std::path::Path::new("model.bin");
+        let first = crate::stream::stage_file_streaming_as(
+            &first_path,
+            tmp.path(),
+            logical_path,
+            &staging,
+            crate::stream::StreamStageProgress::default(),
+            &cancel,
+        )
+        .await
+        .expect("stage first");
+        staging
+            .mark_batch_published(&first.batch_id)
+            .expect("publish first");
+        let second = crate::stream::stage_file_streaming_as(
+            &second_path,
+            tmp.path(),
+            logical_path,
+            &staging,
+            crate::stream::StreamStageProgress::default(),
+            &cancel,
+        )
+        .await
+        .expect("stage second");
+
+        let unowned = lock_index(&staging.index)
+            .expect("lock index")
+            .mark_batch_published(second.batch_id.as_str())
+            .expect("commit path-head replacement");
+        assert_eq!(unowned, vec![first.file_hash]);
+        let before = staging.lifecycle_health().expect("health before clean");
+        assert_eq!(before.path_heads, 1);
+        assert_eq!(before.path_leases, 1);
+        assert_eq!(before.reclaimable_files, 1);
+        assert!(
+            !staging
+                .chunks_for_file(&MerkleHash::from(first.file_hash))
+                .expect("first chunks before clean")
+                .is_empty()
+        );
+
+        staging.clean().expect("clean staging");
+
+        assert!(
+            staging
+                .chunks_for_file(&MerkleHash::from(first.file_hash))
+                .expect("first chunks after clean")
+                .is_empty()
+        );
+        assert!(
+            !staging
+                .chunks_for_file(&MerkleHash::from(second.file_hash))
+                .expect("second chunks after clean")
+                .is_empty()
+        );
+        let after = staging.lifecycle_health().expect("health after clean");
+        assert_eq!(after.path_heads, 1);
+        assert_eq!(after.path_leases, 1);
+        assert_eq!(after.reclaimable_files, 0);
     }
 
     #[cfg(unix)]
@@ -6616,126 +7550,5 @@ mod batch_diagnostic_tests {
         );
 
         staging.close().await.expect("close");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn legacy_migration_quarantines_wrong_file_hash_without_deleting_payload() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        let content = b"legacy payload remains recoverable".to_vec();
-        let chunk_hash = compute_data_hash(&content);
-        let original_file_hash = chunk_hash;
-        let wrong_file_hash = MerkleHash::from([0xA5; 32]);
-        {
-            let staging = StagingArea::open(root.clone()).await.expect("open staging");
-            staging
-                .pre_register_file(&original_file_hash, content.len() as u64)
-                .expect("pre-register");
-            staging
-                .stage_chunks_batch(&[(&chunk_hash, content.as_slice())], &original_file_hash, 0)
-                .await
-                .expect("stage payload");
-            staging.flush_pending().await.expect("flush");
-            staging.close().await.expect("close staging");
-        }
-
-        let connection = rusqlite::Connection::open(root.join("index.db")).expect("open index");
-        connection
-            .execute(
-                "UPDATE chunks SET file_hash = ?1 WHERE file_hash = ?2",
-                rusqlite::params![
-                    <[u8; 32]>::from(wrong_file_hash).as_slice(),
-                    <[u8; 32]>::from(original_file_hash).as_slice()
-                ],
-            )
-            .expect("rewrite chunk owner");
-        connection
-            .execute(
-                "UPDATE files SET file_hash = ?1 WHERE file_hash = ?2",
-                rusqlite::params![
-                    <[u8; 32]>::from(wrong_file_hash).as_slice(),
-                    <[u8; 32]>::from(original_file_hash).as_slice()
-                ],
-            )
-            .expect("rewrite file hash");
-        connection
-            .execute(
-                "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
-                [],
-            )
-            .expect("mark legacy layout");
-        drop(connection);
-
-        let staging = StagingArea::open(root).await.expect("migrate staging");
-        assert!(
-            staging
-                .published_recipe_for_file(&wrong_file_hash)
-                .expect("published recipe lookup")
-                .is_none()
-        );
-        assert_eq!(
-            staging
-                .lifecycle_health()
-                .expect("lifecycle health")
-                .quarantined_entries,
-            1
-        );
-        assert_eq!(
-            staging
-                .get_chunk(&chunk_hash)
-                .await
-                .expect("read preserved payload")
-                .expect("payload exists"),
-            Bytes::from(content)
-        );
-        staging.close().await.expect("close migrated staging");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn legacy_migration_physically_verifies_recipe_before_publication() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        let content = b"legacy recipe physical verification".to_vec();
-        let chunk_hash = compute_data_hash(&content);
-        let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
-        {
-            let staging = StagingArea::open(root.clone()).await.expect("open staging");
-            staging
-                .pre_register_file(&file_hash, content.len() as u64)
-                .expect("pre-register");
-            staging
-                .stage_chunks_batch(&[(&chunk_hash, content.as_slice())], &file_hash, 0)
-                .await
-                .expect("stage payload");
-            staging.flush_pending().await.expect("flush");
-            staging.close().await.expect("close staging");
-        }
-
-        let connection = rusqlite::Connection::open(root.join("index.db")).expect("open index");
-        connection
-            .execute(
-                "UPDATE staging_meta SET value = '1' WHERE key = 'layout_version'",
-                [],
-            )
-            .expect("mark legacy layout");
-        drop(connection);
-
-        let staging = StagingArea::open(root).await.expect("migrate staging");
-        let recipe = staging
-            .published_recipe_for_file(&file_hash)
-            .expect("published recipe lookup")
-            .expect("physically verified recipe becomes publishable");
-        assert_eq!(recipe.sequence().file_hash, file_hash);
-        assert_eq!(recipe.sequence().file_size, content.len() as u64);
-        assert_eq!(recipe.sequence().spans.len(), 1);
-        assert_eq!(recipe.sequence().spans[0].chunk_hash, chunk_hash);
-        assert_eq!(
-            staging
-                .lifecycle_health()
-                .expect("lifecycle health")
-                .quarantined_entries,
-            0
-        );
-        staging.close().await.expect("close migrated staging");
     }
 }

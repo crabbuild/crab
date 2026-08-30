@@ -7,10 +7,7 @@
 //! serialized as canonical JSON and stored locally under the
 //! `stages/` subtree of the chunk cache.
 //!
-//! Entry schemas are versioned (`schema_version`). Newer schemas are
-//! refused with `CacheEntrySchemaNewer`; older schemas are migrated
-//! up to the current version before use and re-serialized on next
-//! write. A v1→v1 identity migration scaffolds the ladder.
+//! Entries use one strict Crab-owned v1 schema. Other versions are refused.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -139,10 +136,7 @@ pub fn available_disk_space(_path: &Path) -> Option<u64> {
 /// Load an entry from the local cache root for the given stage hash.
 ///
 /// Returns `Ok(None)` when the entry is missing or when the cache has
-/// been disabled (read-only filesystem). Returns
-/// `CacheEntrySchemaNewer` when an on-disk entry is stamped with a
-/// higher schema version than this binary supports. Older schemas
-/// are migrated up to the current version.
+/// been disabled (read-only filesystem). Non-v1 entries are rejected.
 pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCacheEntry>> {
     if is_cache_disabled() {
         return Ok(None);
@@ -171,7 +165,7 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
             detail: "stage cache entry missing schema_version".to_owned(),
         })?;
 
-    if found > ENTRY_SCHEMA_MAX_SUPPORTED {
+    if found != ENTRY_SCHEMA_VERSION {
         return Err(CrabError::CacheEntrySchemaNewer {
             stage_hash: hash.as_hex(),
             found,
@@ -179,9 +173,8 @@ pub fn read_local(cache_root: &Path, hash: &StageHash) -> Result<Option<StageCac
         });
     }
 
-    let migrated = migrate(found, raw)?;
     let entry: StageCacheEntry =
-        serde_json::from_value(migrated).map_err(|e| CrabError::WorkflowJournalCorrupt {
+        serde_json::from_value(raw).map_err(|e| CrabError::WorkflowJournalCorrupt {
             run_id: hash.as_hex(),
             detail: format!("stage cache entry shape mismatch: {e}"),
         })?;
@@ -472,77 +465,6 @@ fn canonicalize(value: serde_json::Value) -> serde_json::Value {
         Value::Array(items) => Value::Array(items.into_iter().map(canonicalize).collect()),
         other => other,
     }
-}
-
-/// Migration ladder. Each step reads the previous shape and produces
-/// the next. Migrations are chained: a v1 entry passes through
-/// `migrate_v1_to_v2` to reach the current schema.
-fn migrate(from: u16, value: serde_json::Value) -> Result<serde_json::Value> {
-    match from {
-        1 => {
-            let v2 = migrate_v1_to_v2(value)?;
-            Ok(migrate_v2_to_v3(v2)?)
-        }
-        2 => migrate_v2_to_v3(value),
-        3 => Ok(value),
-        other => Err(CrabError::Internal(format!(
-            "no migration path for stage cache entry schema v{other}"
-        ))),
-    }
-}
-
-fn migrate_v2_to_v3(mut value: serde_json::Value) -> Result<serde_json::Value> {
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| CrabError::Internal("stage cache entry is not a JSON object".to_owned()))?;
-    obj.insert(
-        "schema_version".to_owned(),
-        serde_json::Value::Number(3.into()),
-    );
-    Ok(value)
-}
-
-/// Migrate a v1 cache entry to v2.
-///
-/// v1 (Phase 1) entries have file outs only, no remote refs, no tree
-/// manifests. v2 adds:
-/// - `tree_manifest: null` on each out (file outs don't have one).
-/// - `source: "Local"` (Phase 1 entries are always local).
-/// - `attempts: 1` (Phase 1 never retried — field may already exist
-///   but we ensure it's present).
-///
-/// The migration is lossless: all v1 fields are preserved verbatim.
-fn migrate_v1_to_v2(mut value: serde_json::Value) -> Result<serde_json::Value> {
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| CrabError::Internal("stage cache entry is not a JSON object".to_owned()))?;
-
-    // Bump schema_version to 2.
-    obj.insert(
-        "schema_version".to_owned(),
-        serde_json::Value::Number(2.into()),
-    );
-
-    // Ensure `attempts` is present (Phase 1 entries always ran once).
-    obj.entry("attempts")
-        .or_insert(serde_json::Value::Number(1.into()));
-
-    // Ensure each out has `tree_manifest: null` (file outs don't have one).
-    for outs_key in &["outs", "metrics", "plots"] {
-        if let Some(outs_val) = obj.get_mut(*outs_key)
-            && let Some(outs_arr) = outs_val.as_array_mut()
-        {
-            for out in outs_arr.iter_mut() {
-                if let Some(out_obj) = out.as_object_mut() {
-                    out_obj
-                        .entry("tree_manifest".to_owned())
-                        .or_insert(serde_json::Value::Null);
-                }
-            }
-        }
-    }
-
-    Ok(value)
 }
 
 /// Atomic write: tempfile + rename. Same-filesystem by construction
@@ -854,7 +776,7 @@ async fn push_remote_inner(
     entry: &StageCacheEntry,
     cache_root: &Path,
 ) -> Result<bool> {
-    validate_stage_cache_entry_at(entry, cache_validation_root(cache_root))?;
+    validate_stage_cache_entry(entry)?;
     if !entry.remote_push_enabled() {
         debug!(
             stage = %entry.stage_name,
@@ -1219,7 +1141,7 @@ pub async fn pull_remote_with_artifact_stores(
     }
 
     // Verify schema version is supported.
-    if entry.schema_version > ENTRY_SCHEMA_MAX_SUPPORTED {
+    if entry.schema_version != ENTRY_SCHEMA_VERSION {
         debug!(
             stage_hash = %stage_hash,
             found = entry.schema_version,
@@ -1284,22 +1206,14 @@ pub async fn pull_remote_with_artifact_stores(
                 }
                 write_local_xorb(cache_root, &out.file_hash, &xorb_bytes)?;
 
-                let target = if out.path.is_absolute() {
-                    out.path.clone()
-                } else {
-                    base_dir.join(&out.path)
-                };
+                let target = base_dir.join(&out.path);
                 crate::materialize::write_atomic(&target, &xorb_bytes, run_id, out.mode)?;
                 materialized_paths.push(target);
             }
             OutKind::Directory => {
                 if let Some(ref manifest) = out.tree_manifest {
                     // Download each file entry from the remote and materialize.
-                    let local_target = if out.path.is_absolute() {
-                        out.path.clone()
-                    } else {
-                        base_dir.join(&out.path)
-                    };
+                    let local_target = base_dir.join(&out.path);
 
                     for tree_entry in manifest {
                         if tree_entry.kind == "dir" {

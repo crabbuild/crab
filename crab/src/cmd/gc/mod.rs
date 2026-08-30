@@ -1729,11 +1729,9 @@ async fn extend_reachable_bulk_objects(
                 .as_ref()
                 .to_string(),
         );
-        // Crab 1.0.15 readers still use the v1 key. Retain it while the
-        // explicit read/backfill migration remains supported.
         reachable.insert(
             router
-                .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash)
+                .git_visibility_catalog_path(&manifest.git_validation_digest)
                 .as_ref()
                 .to_string(),
         );
@@ -2262,7 +2260,7 @@ async fn stream_reachable_bulk_objects(
         .await?;
         sink.add(
             router
-                .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash)
+                .git_visibility_catalog_path(&manifest.git_validation_digest)
                 .as_ref()
                 .to_owned(),
         )
@@ -3778,12 +3776,12 @@ mod tests {
         assert!(reachable.contains(&format!("org/repo/metadata/pack/indexes/{pack_hash}.json")));
         assert!(reachable.contains(&format!("org/repo/{pack_segment_path}")));
         assert!(reachable.contains(&format!(
-            "org/repo/metadata/git-visibility/v2/{}.json",
+            "org/repo/metadata/git-visibility/v1/digest/{}.json",
             manifest.git_validation_digest
         )));
         assert!(reachable.contains(&format!(
-            "org/repo/metadata/git-visibility/{:020}-{pack_hash}.json",
-            manifest.generation,
+            "org/repo/metadata/git-visibility/v1/catalog/{}.json",
+            manifest.git_validation_digest
         )));
         assert!(reachable.contains(&format!(
             "org/repo/metadata/git-visibility-pending/v1/{}.json",
@@ -3866,7 +3864,7 @@ mod tests {
         let content_hash = "a".repeat(64);
         let request_hash = "b".repeat(64);
         let descriptor = serde_json::json!({
-            "version": 2,
+            "version": crab_remote_git::GENERATED_PACK_CACHE_VERSION,
             "request_hash": request_hash,
             "content_hash": content_hash,
             "checksum": "c".repeat(40),

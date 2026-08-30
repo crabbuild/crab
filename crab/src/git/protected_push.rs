@@ -271,7 +271,8 @@ async fn protected_push_ref_updates(
     specs: &[PushSpec],
     cancel: &CancellationToken,
 ) -> Result<Vec<PushRefUpdate>> {
-    let read_store = crate::auth::build_store(config, parsed_url, "fetch", cancel).await?;
+    let read_store =
+        crate::auth::build_repository_url_store(config, parsed_url, "fetch", cancel).await?;
     protected_push_ref_updates_from_store(&read_store, &parsed_url.repo_path, specs, cancel).await
 }
 

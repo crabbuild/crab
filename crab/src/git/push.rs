@@ -1522,6 +1522,35 @@ fn build_xorb_info_from_placements(
     })
 }
 
+fn build_complete_xorb_info_map(
+    placements: &ChunkPlacementMap,
+) -> Result<HashMap<MerkleHash, MDBXorbInfo>> {
+    let mut grouped: HashMap<MerkleHash, Vec<(&MerkleHash, &ChunkPlacement)>> = HashMap::new();
+    for (chunk_hash, placement) in placements {
+        grouped
+            .entry(placement.xorb_hash)
+            .or_default()
+            .push((chunk_hash, placement));
+    }
+
+    grouped
+        .into_iter()
+        .map(|(xorb_hash, mut chunks)| {
+            build_xorb_info_from_placements(xorb_hash, &mut chunks).map(|info| (xorb_hash, info))
+        })
+        .collect()
+}
+
+fn same_xorb_info(left: &MDBXorbInfo, right: &MDBXorbInfo) -> bool {
+    left.metadata.xorb_hash == right.metadata.xorb_hash
+        && left.chunks.len() == right.chunks.len()
+        && left.chunks.iter().zip(&right.chunks).all(|(left, right)| {
+            left.chunk_hash == right.chunk_hash
+                && left.unpacked_segment_bytes == right.unpacked_segment_bytes
+                && left.chunk_byte_range_start == right.chunk_byte_range_start
+        })
+}
+
 fn build_xorb_info_from_remote_index(index: &RemoteXorbIndex) -> Result<MDBXorbInfo> {
     let xorb_entry_count = usize_to_shard_u32("remote xorb chunk count", index.chunks.len())?;
     let total_uncompressed = index.chunks.iter().try_fold(0u32, |acc, meta| {
@@ -1586,7 +1615,7 @@ fn add_push_plan_matches_staging(
     plan: &FilePushPlan,
     file_hash: &MerkleHash,
     expected_size: u64,
-    staged_chunks: &[(MerkleHash, u64)],
+    recipe: &FileRecipe,
 ) -> bool {
     if plan.version != push_plan::FILE_PUSH_PLAN_VERSION
         || !plan.staged_chunk_sequence_verified
@@ -1600,10 +1629,13 @@ fn add_push_plan_matches_staging(
     if &plan_hash != file_hash {
         return false;
     }
-    let Ok(plan_chunks) = plan.chunk_pairs() else {
+    let Ok(sequence_hash) = plan.sequence_hash() else {
         return false;
     };
-    plan_chunks == staged_chunks
+    recipe.file_hash() == *file_hash
+        && recipe.file_size() == expected_size
+        && plan.chunk_count == recipe.chunk_count()
+        && sequence_hash == recipe.sequence_hash()
 }
 
 fn planned_xorb_placements(planned: &PlannedXorb) -> Result<Vec<ChunkPlacement>> {
@@ -3745,18 +3777,7 @@ impl fmt::Display for PushRejectReason {
 pub enum RefPushOutcome {
     /// The ref was updated successfully.
     Ok,
-    /// The ref push failed with a structured reason. The opaque
-    /// `String` variant is retained for backward compatibility with
-    /// callers that format errors as strings; prefer [`Self::Rejected`]
-    /// for new code so consumers get the structured reason.
-    #[deprecated(
-        since = "0.2.0",
-        note = "use Rejected(PushRejectReason) for structured rejects; \
-                Error(String) will be removed in the next major version"
-    )]
-    Error(String),
-    /// The ref push failed with a structured reject reason. Always
-    /// prefer this over `Error(String)` when a reason variant is known.
+    /// The ref push failed with a structured reject reason.
     Rejected(PushRejectReason),
 }
 
@@ -3765,28 +3786,18 @@ impl RefPushOutcome {
     /// or the reject reason's tag on failure. Used by the remote
     /// helper to emit stable `ok {ref}` / `error {ref} {tag}` lines.
     #[must_use]
-    #[allow(
-        deprecated,
-        reason = "pattern-matches the deprecated Error variant for backward compat"
-    )]
     pub fn protocol_tag(&self) -> &'static str {
         match self {
             Self::Ok => "ok",
-            Self::Error(_) => "internal",
             Self::Rejected(reason) => reason.protocol_tag(),
         }
     }
 }
 
 impl fmt::Display for RefPushOutcome {
-    #[allow(
-        deprecated,
-        reason = "pattern-matches the deprecated Error variant for backward compat"
-    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok => write!(f, "ok"),
-            Self::Error(reason) => write!(f, "error: {reason}"),
             Self::Rejected(reason) => write!(f, "error: {reason}"),
         }
     }
@@ -4105,6 +4116,10 @@ pub struct PushPipeline {
     /// xorbs may be referenced sparsely, so shard xorb-info must come from
     /// the verified remote xorb index.
     verified_existing_xorb_info: tokio::sync::Mutex<HashMap<MerkleHash, MDBXorbInfo>>,
+    /// Complete immutable metadata captured when each new xorb is packed.
+    /// Ref-scoped replanning filters chunk placements, so shard construction
+    /// must never reconstruct xorb metadata from that filtered subset.
+    packed_xorb_info: tokio::sync::Mutex<HashMap<MerkleHash, Arc<MDBXorbInfo>>>,
     /// Positive origin proofs reused across step-4 dedup tiers. These
     /// caches are scoped to one push pipeline and never store negative
     /// results, so a later repair/retry path is not masked by stale failure
@@ -4123,7 +4138,6 @@ pub struct PushPipeline {
     verified_committed_chunk_receipts: tokio::sync::Mutex<HashMap<MerkleHash, [u8; 32]>>,
     /// Candidate deletions discovered during read-only planning and applied
     /// by the short post-CAS metadata writer.
-    pending_legacy_chunk_tombstones: tokio::sync::Mutex<HashSet<MerkleHash>>,
     pending_committed_receipt_tombstones: tokio::sync::Mutex<HashSet<(MerkleHash, [u8; 32])>>,
     /// Pointer blobs discovered in step 1.
     pointers: tokio::sync::Mutex<Vec<super::walk::PointerBlob>>,
@@ -4164,15 +4178,15 @@ pub struct PushPipeline {
     /// with large-file xorb packing.
     prepared_git_pack: tokio::sync::Mutex<Option<PreparedGitPack>>,
     /// Remote ref-tip frontier proven usable by step 10. Step 10b uses
-    /// it to verify only newly reachable objects; legacy exact-object
-    /// pack exclusions are intentionally not reused because connectivity
+    /// it to verify only newly reachable objects; exact-object pack
+    /// exclusions are intentionally not reused because connectivity
     /// needs a commit frontier, not an arbitrary object set.
     connectivity_frontier_tips: tokio::sync::Mutex<Vec<String>>,
     /// Shard hashes uploaded in step 9, consumed by step 11 for shard-list CAS.
     uploaded_shard_hashes: tokio::sync::Mutex<Vec<MerkleHash>>,
     /// Set of chunk hashes classified as "new" (class C) by step 4.
-    /// Step 5 only packs chunks in this set. Empty means "pack all"
-    /// (fallback when classification didn't run).
+    /// Step 5 only packs chunks in this set. `None` means classification did
+    /// not run and every pinned recipe chunk must be packed.
     new_chunk_hashes: tokio::sync::Mutex<Option<std::collections::HashSet<MerkleHash>>>,
     /// Estimated bytes that can enter the xorb pack/upload memory window.
     /// Classification owns this value; repository admission reads it once.
@@ -4185,26 +4199,15 @@ pub struct PushPipeline {
     /// here so a successful upload does not pin all pushed bytes until
     /// the final cleanup step.
     uploaded_xorbs: tokio::sync::Mutex<Vec<UploadedXorb>>,
-    /// Per-file verified recipe cache: `file_hash → hashes and sized occurrences`.
-    ///
-    /// Populated once during step 2 (`lookup_staging`) and reused by
-    /// steps 4, 5, and 8. Eliminates repeated SQLite `chunks_for_file`
-    /// queries — a 2.9 GiB push previously issued ~190K queries across
-    /// the pipeline; with this cache each file's chunk list is fetched
-    /// exactly once.
-    ///
-    /// Uses `Arc<Vec<…>>` so multiple steps can share the same allocation
-    /// without cloning the chunk hash vectors.
-    chunk_cache: tokio::sync::Mutex<HashMap<MerkleHash, CachedFileChunks>>,
-    /// Add-time push plans that matched staged chunk rows during step 2.
+    /// Per-file immutable recipe-root cache populated by step 2.
+    /// Ordered terms remain indexed in staging and are consumed in fixed pages.
+    chunk_cache: tokio::sync::Mutex<HashMap<MerkleHash, CachedFileRecipe>>,
+    /// Add-time push plans that matched an exact published recipe during step 2.
     ///
     /// These are advisory until step 4 re-proves every remote placement
     /// against origin. Prepared local xorbs are only adopted after that
-    /// proof succeeds for the whole pushed file set.
+    /// proof succeeds for that file; invalid siblings fall back independently.
     add_push_plans: tokio::sync::Mutex<HashMap<MerkleHash, FilePushPlan>>,
-    /// Set after step 4 adopts add-time prepared xorbs so step 5 does
-    /// not rebuild the same payloads from staging.
-    add_push_plan_applied: tokio::sync::Mutex<bool>,
     /// Local staging marker held while this push may still read staged
     /// chunks. This keeps post-success cleanup in a concurrent local push
     /// from retiring rows out from under our pack step.
@@ -4228,8 +4231,8 @@ pub struct PushPipeline {
     metadb: tokio::sync::Mutex<Option<crate::metadata::MetaDbGuard>>,
     /// Base manifest read at the start of the push (before step 1).
     /// Used by `build_manifest` to compute the new manifest from the
-    /// current state. `None` when the store is unavailable (tests) or
-    /// the manifest does not exist yet (first push after init).
+    /// current state. `None` only when the store is unavailable in a test or
+    /// protected push delegates source-manifest ownership to the service.
     base_manifest: tokio::sync::Mutex<Option<Manifest>>,
     /// Base split commit graph loaded on demand as the fast-forward
     /// fallback when `git merge-base --is-ancestor` can't answer
@@ -4244,7 +4247,7 @@ pub struct PushPipeline {
     /// shallow update refs and the summary is absent or unreadable.
     base_commit_graph_loaded: tokio::sync::Mutex<bool>,
     /// ETag of the base manifest, used for CAS writes in step 12.
-    /// `None` when the manifest was not read (no store, or first push).
+    /// `None` when the manifest is service-owned or no store exists in a test.
     manifest_etag: tokio::sync::Mutex<Option<String>>,
     /// Generation and shard-index hash returned by a successful manifest CAS.
     committed_manifest_anchor: tokio::sync::Mutex<Option<CommittedManifestAnchor>>,
@@ -4269,7 +4272,121 @@ pub struct PushPipeline {
     /// before any S3 write happens.
     receive_config: ReceiveConfig,
     #[cfg(test)]
+    test_metrics: Arc<PushTestMetrics>,
+    #[cfg(test)]
     cas_dependency_replans: std::sync::atomic::AtomicU64,
+}
+
+/// Shared add-time classifier backed by the push pipeline's full proof path.
+pub(crate) struct AddRemoteChunkClassifier {
+    pipeline: PushPipeline,
+}
+
+impl AddRemoteChunkClassifier {
+    #[must_use]
+    pub(crate) fn new(
+        config: PushConfig,
+        store: Store,
+        caching_store: Option<crab_cache_store::CachingStore>,
+        router: StoreLayout,
+        cancel: CancellationToken,
+    ) -> Self {
+        let prefix = router.repo_prefix().to_owned();
+        let pipeline = PushPipeline::new(
+            config,
+            Vec::new(),
+            Some(store.clone()),
+            caching_store.clone(),
+            None,
+            prefix,
+            router.clone(),
+            None,
+            cancel,
+            None,
+        );
+        let metadb_store = caching_store
+            .as_ref()
+            .map(crab_cache_store::CachingStore::object_store);
+        let guard = build_push_metadb_guard_with_object_store(
+            &store,
+            metadb_store,
+            &router,
+            None,
+            &pipeline.config.metadb,
+            true,
+        );
+        pipeline.install_metadb(guard);
+        Self { pipeline }
+    }
+
+    pub(crate) async fn close(&self) {
+        self.pipeline.close_metadb().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
+    async fn lookup_existing_candidates(
+        &self,
+        chunks: &[(MerkleHash, u64)],
+    ) -> crab_staging::Result<Vec<Option<crab_staging::push_plan::ExistingChunkCandidate>>> {
+        let hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+        let candidates = self
+            .pipeline
+            .lookup_proven_remote_chunks_for_add(&hashes)
+            .await
+            .map_err(|error| match error {
+                CrabError::Cancelled => crab_staging::StagingError::Cancelled,
+                error => crab_staging::StagingError::Internal(format!(
+                    "remote add classifier failed: {error}"
+                )),
+            })?;
+        Ok(chunks
+            .iter()
+            .map(|(chunk_hash, size)| {
+                candidates
+                    .get(chunk_hash)
+                    .copied()
+                    .filter(|candidate| u64::from(candidate.xorb_ref.uncompressed_size) == *size)
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PushTestMetrics {
+    add_plan_adopted_files: std::sync::atomic::AtomicU64,
+    add_plan_fallback_files: std::sync::atomic::AtomicU64,
+    file_backed_upload_bytes: std::sync::atomic::AtomicU64,
+    materialized_upload_bytes: std::sync::atomic::AtomicU64,
+    xorb_upload_attempts: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+impl PushTestMetrics {
+    fn add_plan_outcomes(&self) -> (u64, u64) {
+        (
+            self.add_plan_adopted_files
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.add_plan_fallback_files
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn upload_bytes(&self) -> (u64, u64) {
+        (
+            self.file_backed_upload_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.materialized_upload_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn xorb_upload_attempts(&self) -> u64 {
+        self.xorb_upload_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4475,53 +4592,24 @@ impl PushDependencyPlan {
 }
 
 #[derive(Debug, Clone)]
-struct CachedFileChunks {
-    hashes: Arc<Vec<MerkleHash>>,
-    occurrences: Arc<Vec<(MerkleHash, u64)>>,
+struct CachedFileRecipe {
+    recipe: Option<FileRecipe>,
 }
 
-impl CachedFileChunks {
-    fn new(occurrences: Vec<(MerkleHash, u64)>) -> Self {
-        let hashes = occurrences.iter().map(|(hash, _)| *hash).collect();
-        Self {
-            hashes: Arc::new(hashes),
-            occurrences: Arc::new(occurrences),
-        }
+impl CachedFileRecipe {
+    fn new(recipe: Option<FileRecipe>) -> Self {
+        Self { recipe }
     }
 }
 
-async fn pack_staging_chunk_batch(
-    staging: &StagingAreaReadOnly,
-    requested: &mut Vec<(MerkleHash, u64)>,
-    run_id: RunId,
+async fn pack_decoded_chunk_group(
+    ordered: Vec<(Chunk, RunId)>,
     mut builder: XorbBuilder,
     spill_dir: &Path,
     packed_payload_budget: Option<&Arc<tokio::sync::Semaphore>>,
 ) -> Result<(XorbBuilder, usize, Vec<PackedXorb>)> {
-    if requested.is_empty() {
+    if ordered.is_empty() {
         return Ok((builder, 0, Vec::new()));
-    }
-    let hashes = requested.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-    let batch = staging.get_chunks_batch(&hashes).await?;
-    if batch.len() != requested.len() {
-        return Err(CrabError::StagingCorrupt(format!(
-            "staging returned {} chunks for a {}-chunk pack batch",
-            batch.len(),
-            requested.len()
-        )));
-    }
-    let mut ordered = Vec::with_capacity(batch.len());
-    for ((expected_hash, expected_size), (hash, data)) in requested.drain(..).zip(batch) {
-        if hash != expected_hash || data.len() as u64 != expected_size {
-            return Err(CrabError::StagingCorrupt(format!(
-                "staged chunk {} changed recipe identity: expected {} bytes, read {} bytes as {}",
-                expected_hash.hex(),
-                expected_size,
-                data.len(),
-                hash.hex()
-            )));
-        }
-        ordered.push((Chunk { hash, data }, run_id));
     }
     let count = ordered.len();
     let (builder, completed) = tokio::task::spawn_blocking(move || {
@@ -4765,6 +4853,11 @@ impl UploadedXorb {
     #[cfg(test)]
     fn has_payload(&self) -> bool {
         self.payload.is_some()
+    }
+
+    #[cfg(test)]
+    fn has_file_backed_payload(&self) -> bool {
+        self.payload.as_ref().is_some_and(XorbPayload::is_spilled)
     }
 }
 
@@ -5970,46 +6063,13 @@ async fn download_locator_pack_evidence(
         )
         .await?;
     check_cancelled(cancel)?;
-    match store
+    store
         .download_to_path_bounded(
             &router.pack_reverse_index_path(&pack.pack_id),
             &rev_path,
             reverse_maximum,
         )
-        .await
-    {
-        Ok(_) => {}
-        // v1.0.14 and earlier direct pushes published `.idx` without `.rev`.
-        // Rebuilding that deterministic evidence is the tagged-data migration.
-        Err(CrabError::NotFound { .. }) => {
-            let index = idx_path.clone();
-            let reverse = rev_path.clone();
-            let (reverse_hash, reverse_size) = tokio::task::spawn_blocking(move || {
-                crab_git::pack_locator::write_pack_reverse_index(&index, &reverse)
-                    .map_err(crab_git::pack::PackError::from)
-                    .map_err(CrabError::from)?;
-                hash_file_blake3(&reverse)
-            })
-            .await
-            .map_err(|error| {
-                CrabError::Internal(format!(
-                    "legacy reverse-index generation worker failed: {error}"
-                ))
-            })??;
-            store
-                .put_multipart_file_retry(
-                    &router.pack_reverse_index_path(&pack.pack_id),
-                    &rev_path,
-                    reverse_size,
-                    reverse_hash,
-                    8 * 1024 * 1024,
-                    cancel,
-                    None,
-                )
-                .await?;
-        }
-        Err(error) => return Err(error),
-    }
+        .await?;
     check_cancelled(cancel)?;
     validate_locator_pack_evidence(
         pack,
@@ -7318,6 +7378,7 @@ impl PushPipeline {
             merged_placement: tokio::sync::Mutex::new(HashMap::new()),
             verified_existing_placement: tokio::sync::Mutex::new(HashMap::new()),
             verified_existing_xorb_info: tokio::sync::Mutex::new(HashMap::new()),
+            packed_xorb_info: tokio::sync::Mutex::new(HashMap::new()),
             remote_xorb_index_cache: tokio::sync::Mutex::new(HashMap::new()),
             remote_full_xorb_ref_cache: tokio::sync::Mutex::new(HashSet::new()),
             remote_chunk_ref_cache: tokio::sync::Mutex::new(HashSet::new()),
@@ -7326,7 +7387,6 @@ impl PushPipeline {
                 CommittedChunkCandidates::default(),
             ),
             verified_committed_chunk_receipts: tokio::sync::Mutex::new(HashMap::new()),
-            pending_legacy_chunk_tombstones: tokio::sync::Mutex::new(HashSet::new()),
             pending_committed_receipt_tombstones: tokio::sync::Mutex::new(HashSet::new()),
             pointers: tokio::sync::Mutex::new(Vec::new()),
             commit_entries: tokio::sync::Mutex::new(Vec::new()),
@@ -7350,7 +7410,6 @@ impl PushPipeline {
             uploaded_xorbs: tokio::sync::Mutex::new(Vec::new()),
             chunk_cache: tokio::sync::Mutex::new(HashMap::new()),
             add_push_plans: tokio::sync::Mutex::new(HashMap::new()),
-            add_push_plan_applied: tokio::sync::Mutex::new(false),
             staging_push_id: uuid::Uuid::now_v7().to_string(),
             staging_push_marked: tokio::sync::Mutex::new(false),
             prepopulated: tokio::sync::Mutex::new(None),
@@ -7366,6 +7425,8 @@ impl PushPipeline {
             planned_ref_decisions: tokio::sync::Mutex::new(None),
             dependency_plan: tokio::sync::Mutex::new(None),
             receive_config,
+            #[cfg(test)]
+            test_metrics: Arc::new(PushTestMetrics::default()),
             #[cfg(test)]
             cas_dependency_replans: std::sync::atomic::AtomicU64::new(0),
         }
@@ -7391,44 +7452,62 @@ impl PushPipeline {
         Ok(self.common_git_dir()?.join("objects"))
     }
 
-    /// Look up the verified chunk list for a file.
-    ///
-    /// Steps 4, 5, 8, and 9b call this after step 2 (`lookup_staging`)
-    /// populates the cache. The later phases intentionally have no
-    /// staging fallback, so they cannot bypass reconstruction validation
-    /// with a second SQLite query.
-    ///
-    /// Returns an empty `Arc<Vec>` when the file has no staged chunks
-    /// (same semantics as `StagingAreaReadOnly::chunks_for_file`).
-    async fn cached_chunks_for_file(&self, file_hash: &MerkleHash) -> Result<Arc<Vec<MerkleHash>>> {
+    async fn cached_recipe_for_file(&self, file_hash: &MerkleHash) -> Result<Option<FileRecipe>> {
         self.chunk_cache
             .lock()
             .await
             .get(file_hash)
-            .map(|cached| Arc::clone(&cached.hashes))
+            .map(|cached| cached.recipe.clone())
             .ok_or_else(|| {
                 CrabError::Internal(format!(
-                    "push pipeline invariant violated: verified chunk cache missing for file {}; lookup_staging must run before chunk classification, packing, shard build, and local cache warming",
+                    "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
                     file_hash.hex()
                 ))
             })
     }
 
-    async fn cached_chunk_occurrences_for_file(
+    fn recipe_page(
         &self,
-        file_hash: &MerkleHash,
-    ) -> Result<Arc<Vec<(MerkleHash, u64)>>> {
-        self.chunk_cache
-            .lock()
-            .await
-            .get(file_hash)
-            .map(|cached| Arc::clone(&cached.occurrences))
+        recipe: &FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<crab_staging::recipe::RecipePage> {
+        self.staging
+            .as_ref()
             .ok_or_else(|| {
-                CrabError::Internal(format!(
-                    "push pipeline invariant violated: verified recipe cache missing for file {}",
-                    file_hash.hex()
-                ))
-            })
+                CrabError::Internal("staging disappeared during recipe read".to_owned())
+            })?
+            .recipe_page(recipe, start_occurrence)
+            .map_err(CrabError::from)
+    }
+
+    fn visit_recipe_chunks(
+        &self,
+        recipe: &FileRecipe,
+        mut visit: impl FnMut(MerkleHash, u64) -> Result<()>,
+    ) -> Result<()> {
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = self.recipe_page(recipe, next)?;
+            for chunk in &page.chunks {
+                visit(chunk.chunk_hash, chunk.len)?;
+            }
+            next = page.next_occurrence();
+        }
+        Ok(())
+    }
+
+    fn build_file_terms_for_recipe(
+        &self,
+        recipe: &FileRecipe,
+        placement: &ChunkPlacementMap,
+    ) -> Result<Vec<FileTerm>> {
+        let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
+        self.visit_recipe_chunks(recipe, |chunk_hash, _| {
+            builder.push(chunk_hash, placement).map_err(CrabError::from)
+        })?;
+        builder
+            .finish(&recipe.file_hash(), recipe.chunk_count())
+            .map_err(CrabError::from)
     }
 
     async fn mark_staging_push_reader_if_needed(&self) -> Result<()> {
@@ -7471,18 +7550,25 @@ impl PushPipeline {
                 if remote_only.contains(&file_hash) || !seen.insert(file_hash) {
                     continue;
                 }
-                let chunks = chunk_cache.get(&file_hash).ok_or_else(|| {
+                let cached = chunk_cache.get(&file_hash).ok_or_else(|| {
                     CrabError::Internal(format!(
                         "verified recipe cache missing before push snapshot for file {}",
                         file_hash.hex()
                     ))
                 })?;
-                recipes.push(FileRecipe::from_staged_chunks(
-                    ChunkingPolicyId::XetGearV1_64KiB,
-                    file_hash,
-                    file_size,
-                    chunks.occurrences.as_ref(),
-                )?);
+                let recipe = cached.recipe.clone().ok_or_else(|| {
+                    CrabError::Internal(format!(
+                        "verified recipe root absent before push snapshot for file {}",
+                        file_hash.hex()
+                    ))
+                })?;
+                if recipe.file_size() != file_size {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "cached recipe size for {} changed before push snapshot",
+                        file_hash.hex()
+                    )));
+                }
+                recipes.push(recipe);
             }
             drop(chunk_cache);
             staging.create_push_snapshot(&self.staging_push_id, &recipes)?;
@@ -7533,8 +7619,53 @@ impl PushPipeline {
         }
     }
 
+    async fn discard_open_staging_push_snapshot(&self) {
+        if let Some(staging) = &self.staging {
+            let _retirement_guard = match staging.begin_retirement(&self.staging_push_id) {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    debug!(
+                        push_id = %self.staging_push_id,
+                        "retaining failed push snapshot while another local push reads staging"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        push_id = %self.staging_push_id,
+                        error = %e,
+                        "failed to serialize failed push snapshot cleanup"
+                    );
+                    return;
+                }
+            };
+            match staging
+                .discard_open_push_snapshot(&self.staging_push_id)
+                .await
+            {
+                Ok(retired) => {
+                    let rows = retired.iter().map(|stats| stats.rows_deleted).sum::<u64>();
+                    if rows > 0 {
+                        debug!(
+                            push_id = %self.staging_push_id,
+                            chunks_retired = rows,
+                            "reclaimed staging data unpinned by failed push snapshot"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        push_id = %self.staging_push_id,
+                        error = %e,
+                        "failed to discard open staging push snapshot"
+                    );
+                }
+            }
+        }
+    }
+
     async fn clear_staging_push_inflight(&self) {
-        self.remove_staging_push_snapshot().await;
+        self.discard_open_staging_push_snapshot().await;
         self.clear_staging_push_marker().await;
     }
 
@@ -7559,8 +7690,9 @@ impl PushPipeline {
     /// compute the new manifest from the current state. The optional
     /// commit-graph summary is loaded later only if a fast-forward
     /// probe needs the shallow-client fallback. When the store is
-    /// unavailable (tests) or the manifest does not exist yet (first
-    /// push after init), the fields remain `None`.
+    /// unavailable in tests, the fields remain `None`. A direct canonical-v1
+    /// repository must already contain the generation-0 manifest created by
+    /// `crab init`.
     #[tracing::instrument(level = "info", name = "push.read_base_manifest", skip_all)]
     async fn read_base_manifest(&self) -> Result<()> {
         if self.config.protected_push.is_some() {
@@ -7584,8 +7716,11 @@ impl PushPipeline {
                 *self.base_manifest.lock().await = Some(manifest);
                 *self.manifest_etag.lock().await = Some(snapshot.manifest_etag);
             }
-            Err(CrabError::NotFound { .. }) => {
-                debug!("read_base_manifest: no manifest found, first push");
+            Err(CrabError::NotFound { path }) if path == self.router.manifest_path().as_ref() => {
+                return Err(CrabError::CorruptObject {
+                    path,
+                    reason: "canonical v1 manifest is missing; retry `crab init` for this isolated development repository".to_owned(),
+                });
             }
             Err(e) => return Err(e),
         }
@@ -7659,8 +7794,8 @@ impl PushPipeline {
     }
 
     /// Return the HEAD symref target recorded in the base manifest, or
-    /// `None` when no base manifest exists (freshly-initialised repo)
-    /// or the recorded head is empty.
+    /// `None` when a protected/service-owned manifest is not loaded or the
+    /// recorded head is empty.
     ///
     /// Reads from the already-loaded `base_manifest` — callers must
     /// have awaited [`Self::read_base_manifest`] first. No additional
@@ -7916,16 +8051,22 @@ impl PushPipeline {
             None => crab_git::ref_resolve::resolve_head_symref().ok().flatten(),
         };
 
-        // Start from the base manifest or a fresh generation-0
-        // manifest when nothing has been pushed yet.
+        // Direct repositories always start from init's generation-0 manifest.
+        // Protected push builds a delta candidate whose source state is owned
+        // and validated by the service.
         let base = self.base_manifest.lock().await;
         let mut new_manifest = if let Some(manifest) = base.as_ref() {
             manifest.clone()
-        } else {
+        } else if self.config.protected_push.is_some() {
             let seed = local_head
                 .clone()
                 .unwrap_or_else(|| "refs/heads/main".to_owned());
             Manifest::default_for_repo(&seed)
+        } else {
+            return Err(CrabError::CorruptObject {
+                path: self.router.manifest_path().to_string(),
+                reason: "canonical v1 push has no base manifest; retry `crab init` for this isolated development repository".to_owned(),
+            });
         };
         drop(base);
 
@@ -8296,13 +8437,20 @@ impl PushPipeline {
                     .as_bytes(),
             );
         }
-        let staged_hashes = self
+        let staged_recipes = self
             .chunk_cache
             .lock()
             .await
             .values()
-            .flat_map(|cached| cached.occurrences.iter().map(|(hash, _)| *hash))
-            .collect::<HashSet<_>>();
+            .filter_map(|cached| cached.recipe.clone())
+            .collect::<Vec<_>>();
+        let mut staged_hashes = HashSet::new();
+        for recipe in &staged_recipes {
+            self.visit_recipe_chunks(recipe, |chunk_hash, _| {
+                staged_hashes.insert(chunk_hash);
+                Ok(())
+            })?;
+        }
         let prepared_xorbs = self
             .uploaded_xorbs
             .lock()
@@ -8600,19 +8748,13 @@ impl PushPipeline {
 
     /// Step 11 (new): Build the unified manifest pointer and bulk data.
     ///
-    /// Thin wrapper around [`Self::evaluate_decisions`] +
-    /// [`Self::apply_decisions`] preserved for backward compatibility
-    /// with call sites that just want the final manifest. Reads
+    /// Test helper around [`Self::evaluate_decisions`] +
+    /// [`Self::apply_decisions`]. Reads
     /// `self.config.atomic` for the atomic flag so the pass-2 behavior
     /// matches `option atomic true` when set.
     //
-    // Production callers now go through `evaluate_decisions` +
-    // `apply_decisions` directly so `execute_inner` can thread the
-    // decision map into outcome reporting. Kept as a convenience
-    // wrapper because the existing unit-test suite at the bottom of
-    // this file calls `pipeline.build_manifest()` and the behavior
-    // is identical.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Production callers thread the decision map into outcome reporting.
+    #[cfg(test)]
     #[tracing::instrument(level = "info", name = "push.build_manifest", skip_all)]
     async fn build_manifest(&self) -> Result<(Manifest, BulkData)> {
         let sha_map = self.resolve_src_ref_map()?;
@@ -8960,20 +9102,19 @@ impl PushPipeline {
         self.validate_push_commit_receipt(&manifest).await?;
         let base = self.base_manifest.lock().await.clone();
         let current_snapshot =
-            match crate::metadata::manifest::read_repository_snapshot(store, &self.router).await {
-                Ok(snapshot) => snapshot,
-                Err(CrabError::NotFound { path })
-                    if path == self.router.manifest_path().as_ref() =>
-                {
-                    let initial = Manifest::default_for_repo(&manifest.head);
-                    match create_manifest_with_etag(store, &self.router, &initial).await {
-                        Ok(_) | Err(CrabError::CasConflict { .. }) => {}
-                        Err(error) => return Err(error),
+            crate::metadata::manifest::read_repository_snapshot(store, &self.router)
+                .await
+                .map_err(|error| match error {
+                    CrabError::NotFound { path }
+                        if path == self.router.manifest_path().as_ref() =>
+                    {
+                        CrabError::CorruptObject {
+                            path,
+                            reason: "canonical v1 manifest disappeared during push; retry `crab init` only after confirming this isolated development repository has no data to preserve".to_owned(),
+                        }
                     }
-                    crate::metadata::manifest::read_repository_snapshot(store, &self.router).await?
-                }
-                Err(error) => return Err(error),
-            };
+                    other => other,
+                })?;
         let current = current_snapshot.materialized_manifest();
         let reusable_visibility_base_oids = current.refs.values().cloned().collect::<HashSet<_>>();
         let conflicts = ref_base_conflicts(&self.specs, &decisions, base.as_ref(), &current);
@@ -9787,13 +9928,23 @@ impl PushPipeline {
             return Err(CrabError::StagingLocked { holder_pid });
         };
 
-        let pointer_specs: Vec<(MerkleHash, u64)> = {
+        if !staging.unresolved_publication_intents()?.is_empty() {
+            let worktree = crate::git::worktree::WorktreeContext::resolve()?;
+            crate::cmd::add::reconcile_publication_intents(
+                staging,
+                &worktree.current_worktree_root,
+            )
+            .await?;
+        }
+
+        let mut pointer_specs: Vec<(MerkleHash, u64)> = {
             let pointers = self.pointers.lock().await;
             pointers
                 .iter()
                 .map(|ptr| (MerkleHash::from(ptr.file_hash), ptr.size))
                 .collect()
         };
+        pointer_specs.sort_unstable();
         let total = pointer_specs.len();
         let mut unique_specs = Vec::with_capacity(total);
         let mut seen_sizes = HashMap::new();
@@ -9828,32 +9979,13 @@ impl PushPipeline {
                         );
                         return Ok((
                             file_hash,
-                            CachedFileChunks::new(Vec::new()),
+                            CachedFileRecipe::new(None),
                             false,
                             Some((file_hash, pointer_size)),
                             None,
                         ));
                     };
-                    let staged_chunks = recipe
-                        .sequence()
-                        .spans
-                        .iter()
-                        .map(|span| (span.chunk_hash, span.len))
-                        .collect::<Vec<_>>();
-                    let staged_size =
-                        staged_chunks
-                            .iter()
-                            .try_fold(0u64, |acc, (_, size)| match acc.checked_add(*size) {
-                                Some(total) => Ok(total),
-                                None => Err(CrabError::StagingCorrupt(format!(
-                                    "staged chunk sizes overflow for file {}",
-                                    file_hash.hex()
-                                ))),
-                            })?;
-                    let chunk_hashes: Vec<MerkleHash> =
-                        staged_chunks.iter().map(|(hash, _)| *hash).collect();
-
-                    if chunk_hashes.is_empty() {
+                    if recipe.chunk_count() == 0 {
                         if pointer_size == 0 {
                             debug!(
                                 file_hash = %file_hash.hex(),
@@ -9861,7 +9993,7 @@ impl PushPipeline {
                             );
                             return Ok((
                                 file_hash,
-                                CachedFileChunks::new(staged_chunks),
+                                CachedFileRecipe::new(Some(recipe)),
                                 true,
                                 None,
                                 None,
@@ -9870,17 +10002,18 @@ impl PushPipeline {
                         debug!(file_hash = %file_hash.hex(), "step 2: no staged chunks for pointer");
                         return Ok((
                             file_hash,
-                            CachedFileChunks::new(staged_chunks),
+                            CachedFileRecipe::new(Some(recipe)),
                             false,
                             Some((file_hash, pointer_size)),
                             None,
                         ));
                     }
 
-                    if staged_size != pointer_size {
+                    if recipe.file_size() != pointer_size {
                         return Err(CrabError::StagingCorrupt(format!(
-                            "staged chunk bytes for file {} total {staged_size}, pointer size {}",
+                            "staged recipe for file {} has {} bytes, pointer size {}",
                             file_hash.hex(),
+                            recipe.file_size(),
                             pointer_size
                         )));
                     }
@@ -9892,7 +10025,7 @@ impl PushPipeline {
                                 &plan,
                                 &file_hash,
                                 pointer_size,
-                                &staged_chunks,
+                                &recipe,
                             ) =>
                         {
                             Some(plan)
@@ -9917,7 +10050,7 @@ impl PushPipeline {
 
                     Ok((
                         file_hash,
-                        CachedFileChunks::new(staged_chunks),
+                        CachedFileRecipe::new(Some(recipe)),
                         true,
                         None,
                         add_push_plan,
@@ -9928,7 +10061,7 @@ impl PushPipeline {
         .buffer_unordered(STAGING_VERIFY_CONCURRENCY)
         .collect::<Vec<Result<(
             MerkleHash,
-            CachedFileChunks,
+            CachedFileRecipe,
             bool,
             Option<(MerkleHash, u64)>,
             Option<FilePushPlan>,
@@ -10403,6 +10536,102 @@ impl PushPipeline {
         self.verify_xorb_refs(refs).await
     }
 
+    async fn revalidate_add_plan_existing_candidates(
+        &self,
+        planned: &HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>,
+    ) -> Result<HashMap<MerkleHash, XorbRef>> {
+        if planned.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let chunk_store = {
+            let guard = self.metadb.lock().await;
+            let Some(guard) = guard.as_ref() else {
+                return Ok(HashMap::new());
+            };
+            match guard.chunk_index().await {
+                Ok(store) => store,
+                Err(error) if error.is_metadb_read_only_uninitialized() => {
+                    return Ok(HashMap::new());
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let exact_candidates = planned
+            .iter()
+            .map(|(chunk_hash, candidate)| (*chunk_hash, candidate.placement_id))
+            .collect::<Vec<_>>();
+        let remote_candidates = tokio::time::timeout(
+            GLOBAL_CHUNK_LOOKUP_BUDGET,
+            chunk_store.get_committed_candidates_by_id_batch(&exact_candidates),
+        )
+        .await
+        .map_err(|_| {
+            CrabError::NetworkTransient(object_store::Error::Generic {
+                store: "chunk_index_db",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "staged remote-proof revalidation budget exhausted",
+                )),
+            })
+        })??;
+
+        let indexed_candidates = remote_candidates.placements.len();
+        let mut refs = HashMap::with_capacity(indexed_candidates);
+        let mut placement_ids = HashMap::with_capacity(remote_candidates.placements.len());
+        let mut placement_mismatches = 0usize;
+        let mut origin_proof_mismatches = 0usize;
+        for (chunk_hash, placement) in &remote_candidates.placements {
+            let Some(candidate) = planned.get(chunk_hash) else {
+                continue;
+            };
+            let xorb_ref = XorbRef {
+                xorb_hash: MerkleHash::from(placement.xorb_hash),
+                chunk_index: placement.chunk_index,
+                uncompressed_size: placement.uncompressed_size,
+            };
+            if candidate.xorb_ref != xorb_ref {
+                placement_mismatches += 1;
+                continue;
+            }
+            if candidate.placement_id != placement.placement_id()
+                || candidate.origin_proof_id != placement.origin_proof_id
+            {
+                origin_proof_mismatches += 1;
+                continue;
+            }
+            refs.insert(*chunk_hash, xorb_ref);
+            placement_ids.insert(*chunk_hash, placement.placement_id());
+        }
+        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates {
+            placements: remote_candidates.placements,
+            origin_proofs: remote_candidates.origin_proofs,
+            source_anchors: remote_candidates.source_anchors,
+        };
+        let committed_receipts = self.validate_committed_chunk_receipts(&refs).await;
+        let validated = self.verified_committed_chunk_receipts.lock().await.clone();
+        let verified = self
+            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts)
+            .await?;
+        debug!(
+            planned = planned.len(),
+            indexed = indexed_candidates,
+            matched = refs.len(),
+            generation_verified = validated.len(),
+            payload_verified = verified.len(),
+            placement_mismatches,
+            origin_proof_mismatches,
+            "revalidated staged remote placement proofs"
+        );
+        Ok(verified
+            .into_iter()
+            .filter(|(chunk_hash, _)| {
+                placement_ids
+                    .get(chunk_hash)
+                    .is_some_and(|placement_id| validated.get(chunk_hash) == Some(placement_id))
+            })
+            .collect())
+    }
+
     async fn prove_all_origin_xorbs_for_publish(&self) -> Result<()> {
         let placements = self.merged_placement.lock().await.clone();
         if placements.is_empty() {
@@ -10655,7 +10884,58 @@ impl PushPipeline {
     async fn clear_add_push_plan_adoption_state(&self) {
         self.verified_existing_placement.lock().await.clear();
         self.verified_existing_xorb_info.lock().await.clear();
-        *self.add_push_plan_applied.lock().await = false;
+    }
+
+    fn record_add_plan_adopted(&self) {
+        #[cfg(test)]
+        self.test_metrics
+            .add_plan_adopted_files
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn record_add_plan_fallback(&self) {
+        #[cfg(test)]
+        self.test_metrics
+            .add_plan_fallback_files
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn require_segment_fallback_authority(
+        staging: &StagingAreaReadOnly,
+        file_hash: &MerkleHash,
+        recipe: &FileRecipe,
+        reason: &str,
+    ) -> Result<()> {
+        if staging.has_complete_segment_authority_for_recipe(recipe)? {
+            return Ok(());
+        }
+        Err(CrabError::StagingCorrupt(format!(
+            "add-time push plan for file {} {reason} and no complete segment authority remains; run crab add again",
+            file_hash.hex()
+        )))
+    }
+
+    async fn retain_packed_xorb_info(
+        &self,
+        incoming: HashMap<MerkleHash, MDBXorbInfo>,
+    ) -> Result<()> {
+        let mut retained = self.packed_xorb_info.lock().await;
+        for (xorb_hash, info) in incoming {
+            match retained.entry(xorb_hash) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Arc::new(info));
+                }
+                std::collections::hash_map::Entry::Occupied(entry)
+                    if same_xorb_info(entry.get().as_ref(), &info) => {}
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "conflicting complete metadata for packed xorb {}",
+                        xorb_hash.hex()
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn try_apply_add_push_plans(&self) -> Result<bool> {
@@ -10687,122 +10967,160 @@ impl PushPipeline {
         }
 
         let mut needed_plans = Vec::new();
+        let mut expected_sizes = HashMap::new();
+        let mut candidate_refs = HashMap::new();
+        let mut residual_chunks = HashSet::new();
+        let mut total_occurrence_bytes = 0u64;
+        let mut total_occurrence_chunks = 0u64;
         for (file_hash, pointer_size) in pointer_specs {
-            let chunk_hashes = self.cached_chunks_for_file(&file_hash).await?;
-            if chunk_hashes.is_empty() {
+            let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
+                continue;
+            };
+            if recipe.chunk_count() == 0 {
+                continue;
+            }
+            let mut file_sizes = HashMap::new();
+            self.visit_recipe_chunks(&recipe, |chunk_hash, size| {
+                total_occurrence_bytes = total_occurrence_bytes.saturating_add(size);
+                total_occurrence_chunks = total_occurrence_chunks.saturating_add(1);
+                match expected_sizes.insert(chunk_hash, size) {
+                    Some(existing) if existing != size => {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "chunk {} has conflicting staged sizes {existing} and {size}",
+                            chunk_hash.hex()
+                        )));
+                    }
+                    _ => {}
+                }
+                match file_sizes.insert(chunk_hash, size) {
+                    Some(existing) if existing != size => Err(CrabError::StagingCorrupt(format!(
+                        "chunk {} has conflicting sizes within one recipe",
+                        chunk_hash.hex()
+                    ))),
+                    _ => Ok(()),
+                }
+            })?;
+
+            let Some(plan) = plans.remove(&file_hash) else {
+                self.record_add_plan_fallback();
+                debug!(
+                    file_hash = %file_hash.hex(),
+                    "step 4: no add-time push plan for staged pointer; classifying only this file normally"
+                );
+                residual_chunks.extend(file_sizes.keys().copied());
+                continue;
+            };
+            if !add_push_plan_matches_staging(&plan, &file_hash, pointer_size, &recipe) {
+                self.record_add_plan_fallback();
+                Self::require_segment_fallback_authority(
+                    staging,
+                    &file_hash,
+                    &recipe,
+                    "does not match its published recipe",
+                )?;
+                debug!(
+                    file_hash = %file_hash.hex(),
+                    "step 4: add-time push plan no longer matches staging; classifying only this file normally"
+                );
+                residual_chunks.extend(file_sizes.keys().copied());
                 continue;
             }
 
-            let Some(plan) = plans.remove(&file_hash) else {
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 4: no add-time push plan for staged pointer; using normal classification"
-                );
-                return Ok(false);
-            };
-            if plan.version != push_plan::FILE_PUSH_PLAN_VERSION || plan.file_size != pointer_size {
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 4: add-time push plan no longer matches pointer; using normal classification"
-                );
-                return Ok(false);
-            }
-            let Ok(plan_hash) = plan.file_hash() else {
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 4: add-time push plan has invalid file hash; using normal classification"
-                );
-                return Ok(false);
-            };
-            if plan_hash != file_hash {
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    plan_hash = %plan_hash.hex(),
-                    "step 4: add-time push plan belongs to another file; using normal classification"
-                );
-                return Ok(false);
-            }
-            let plan_chunks = match plan.chunk_pairs() {
-                Ok(chunks) => chunks,
-                Err(e) => {
-                    debug!(
-                        file_hash = %file_hash.hex(),
-                        error = %e,
-                        "step 4: add-time push plan has invalid chunks; using normal classification"
-                    );
-                    return Ok(false);
+            let mut prepared = Vec::new();
+            let mut structurally_valid = true;
+            for planned_xorb in plan.prepared_xorbs.iter().filter(|xorb| xorb.upload) {
+                let parsed = planned_xorb
+                    .hash()
+                    .map_err(CrabError::from)
+                    .and_then(|hash| {
+                        planned_xorb_placements(planned_xorb).map(|placements| (hash, placements))
+                    });
+                match parsed {
+                    Ok((hash, placements))
+                        if placements
+                            .iter()
+                            .all(|placement| placement.xorb_hash == hash) =>
+                    {
+                        prepared.push((hash, placements));
+                    }
+                    Ok(_) => {
+                        structurally_valid = false;
+                        break;
+                    }
+                    Err(error) => {
+                        debug!(
+                            file_hash = %file_hash.hex(),
+                            error = %error,
+                            "step 4: add-time prepared xorb is malformed; classifying only this file normally"
+                        );
+                        structurally_valid = false;
+                        break;
+                    }
                 }
-            };
-            if plan_chunks.len() != chunk_hashes.len()
-                || plan_chunks
-                    .iter()
-                    .zip(chunk_hashes.iter())
-                    .any(|((hash, _), cached)| hash != cached)
-            {
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 4: add-time push plan chunk order changed; using normal classification"
-                );
-                return Ok(false);
             }
-            needed_plans.push((file_hash, plan, plan_chunks));
+            if !structurally_valid {
+                self.record_add_plan_fallback();
+                Self::require_segment_fallback_authority(
+                    staging,
+                    &file_hash,
+                    &recipe,
+                    "contains malformed prepared-xorb metadata",
+                )?;
+                residual_chunks.extend(file_sizes.keys().copied());
+                continue;
+            }
+
+            let mut next_occurrence = 0u64;
+            while next_occurrence < recipe.chunk_count() {
+                for (chunk_hash, candidate) in
+                    staging.recipe_remote_chunk_page(&recipe, next_occurrence)?
+                {
+                    let size = file_sizes.get(&chunk_hash).ok_or_else(|| {
+                        CrabError::StagingCorrupt(format!(
+                            "remote authority for chunk {} escaped file {} recipe coverage",
+                            chunk_hash.hex(),
+                            file_hash.hex()
+                        ))
+                    })?;
+                    if u64::from(candidate.xorb_ref.uncompressed_size) != *size {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "remote authority for chunk {} in file {} has size {}, expected {size}",
+                            chunk_hash.hex(),
+                            file_hash.hex(),
+                            candidate.xorb_ref.uncompressed_size
+                        )));
+                    }
+                    if let Some(existing) = candidate_refs.insert(chunk_hash, candidate)
+                        && existing != candidate
+                    {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "add-time push plans disagree on remote placement proof for chunk {}",
+                            chunk_hash.hex()
+                        )));
+                    }
+                }
+                next_occurrence = next_occurrence
+                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
+                    .ok_or_else(|| {
+                        CrabError::StagingCorrupt(
+                            "remote authority recipe page overflow".to_owned(),
+                        )
+                    })?;
+            }
+            self.record_add_plan_adopted();
+            needed_plans.push((file_hash, recipe, plan, file_sizes, prepared));
         }
         if needed_plans.is_empty() {
             return Ok(false);
         }
-        let mut expected_sizes = HashMap::new();
-        let mut candidate_refs = HashMap::new();
-        for (_, plan, chunks) in &needed_plans {
-            for (chunk_hash, size) in chunks {
-                expected_sizes.entry(*chunk_hash).or_insert(*size);
-            }
-            for (chunk_hash, xorb_ref) in match plan.existing_refs() {
-                Ok(refs) => refs,
-                Err(e) => {
-                    debug!(
-                        plan_file_hash = %plan.file_hash.as_str(),
-                        error = %e,
-                        "step 4: add-time push plan has invalid remote refs; using normal classification"
-                    );
-                    return Ok(false);
-                }
-            } {
-                let Some(size) = expected_sizes.get(&chunk_hash) else {
-                    debug!(
-                        chunk_hash = %chunk_hash.hex(),
-                        "step 4: add-time push plan remote ref is not part of the file; using normal classification"
-                    );
-                    return Ok(false);
-                };
-                if u64::from(xorb_ref.uncompressed_size) != *size {
-                    debug!(
-                        chunk_hash = %chunk_hash.hex(),
-                        "step 4: add-time push plan remote ref size changed; using normal classification"
-                    );
-                    return Ok(false);
-                }
-                if let Some(existing) = candidate_refs.insert(chunk_hash, xorb_ref)
-                    && existing != xorb_ref
-                {
-                    debug!(
-                        chunk_hash = %chunk_hash.hex(),
-                        "step 4: add-time push plan has conflicting remote refs; using normal classification"
-                    );
-                    return Ok(false);
-                }
-            }
-        }
 
-        let mut verified_refs = match self.verify_remote_xorb_refs(&candidate_refs).await {
+        let mut verified_refs = match self
+            .revalidate_add_plan_existing_candidates(&candidate_refs)
+            .await
+        {
             Ok(refs) => refs,
             Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "step 4: add-time push plan remote proof failed; using normal classification"
-                );
-                return Ok(false);
-            }
+            Err(error) => return Err(error),
         };
         let stale_existing = candidate_refs.len().saturating_sub(verified_refs.len());
         if stale_existing > 0 {
@@ -10865,52 +11183,25 @@ impl PushPipeline {
         let mut xorb_results = Vec::new();
         let mut loaded_prepared_xorbs = HashSet::new();
         let mut placement_map = HashMap::new();
-        let mut residual_chunks = HashSet::new();
         let mut unusable_prepared_xorbs = 0usize;
         let mut skipped_existing_prepared_xorbs = 0usize;
-        for (file_hash, plan, chunks) in &needed_plans {
-            let file_chunks: HashSet<MerkleHash> = chunks
+        for (file_hash, recipe, plan, chunks, prepared) in &needed_plans {
+            for (planned_xorb, (prepared_hash, planned_placements)) in plan
+                .prepared_xorbs
                 .iter()
-                .map(|(chunk_hash, _)| chunk_hash)
-                .copied()
-                .collect();
-            for planned_xorb in &plan.prepared_xorbs {
-                if !planned_xorb.upload {
-                    continue;
-                }
-                let planned_placements = match planned_xorb_placements(planned_xorb) {
-                    Ok(placements) => placements,
-                    Err(e) => {
-                        debug!(
-                            file_hash = %file_hash.hex(),
-                            error = %e,
-                            "step 4: add-time prepared xorb has invalid placements; using normal classification"
-                        );
-                        return Ok(false);
-                    }
-                };
-                let prepared_hash = match planned_xorb.hash() {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        debug!(
-                            file_hash = %file_hash.hex(),
-                            error = %e,
-                            "step 4: add-time prepared xorb has invalid hash; using normal classification"
-                        );
-                        return Ok(false);
-                    }
-                };
-                if loaded_prepared_xorbs.contains(&prepared_hash) {
+                .filter(|xorb| xorb.upload)
+                .zip(prepared)
+            {
+                if loaded_prepared_xorbs.contains(prepared_hash) {
                     for placement in planned_placements {
                         match placement_map.get(&placement.chunk_hash) {
                             Some(existing) if same_chunk_placement(existing, &placement) => {}
                             _ => {
-                                debug!(
-                                    xorb_hash = %prepared_hash.hex(),
-                                    chunk_hash = %placement.chunk_hash.hex(),
-                                    "step 4: duplicate add-time prepared xorb disagrees with verified placements; using normal classification"
-                                );
-                                return Ok(false);
+                                return Err(CrabError::StagingCorrupt(format!(
+                                    "prepared xorb {} has conflicting placement for chunk {}",
+                                    prepared_hash.hex(),
+                                    placement.chunk_hash.hex()
+                                )));
                             }
                         }
                     }
@@ -10936,6 +11227,12 @@ impl PushPipeline {
                     Ok(packed) => packed,
                     Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
                     Err(e) => {
+                        Self::require_segment_fallback_authority(
+                            staging,
+                            file_hash,
+                            recipe,
+                            "references an unusable prepared xorb",
+                        )?;
                         warn!(
                             file_hash = %file_hash.hex(),
                             error = %e,
@@ -10943,7 +11240,7 @@ impl PushPipeline {
                         );
                         unusable_prepared_xorbs += 1;
                         for placement in planned_placements {
-                            if !file_chunks.contains(&placement.chunk_hash) {
+                            if !chunks.contains_key(&placement.chunk_hash) {
                                 continue;
                             }
                             residual_chunks.insert(placement.chunk_hash);
@@ -10954,17 +11251,16 @@ impl PushPipeline {
                 for placement in &packed.placements {
                     if let Some(existing) = placement_map.get(&placement.chunk_hash) {
                         if !same_chunk_placement(existing, placement) {
-                            debug!(
-                                chunk_hash = %placement.chunk_hash.hex(),
-                                "step 4: add-time prepared xorbs disagree for one chunk; using normal classification"
-                            );
-                            return Ok(false);
+                            return Err(CrabError::StagingCorrupt(format!(
+                                "prepared xorbs disagree on placement for chunk {}",
+                                placement.chunk_hash.hex()
+                            )));
                         }
                     } else {
                         placement_map.insert(placement.chunk_hash, placement.clone());
                     }
                 }
-                loaded_prepared_xorbs.insert(prepared_hash);
+                loaded_prepared_xorbs.insert(*prepared_hash);
                 xorb_results.push(packed);
             }
         }
@@ -10978,8 +11274,39 @@ impl PushPipeline {
                 )
             })
             .collect();
-        for (_, _, chunks) in &needed_plans {
-            for (chunk_hash, _) in chunks {
+        for (file_hash, recipe, _, chunks, _) in &needed_plans {
+            let mut next_occurrence = 0u64;
+            while next_occurrence < recipe.chunk_count() {
+                for (chunk_hash, _) in staging.recipe_remote_chunk_page(recipe, next_occurrence)? {
+                    if verified_placement.contains_key(&chunk_hash)
+                        || placement_map.contains_key(&chunk_hash)
+                    {
+                        continue;
+                    }
+                    let size = chunks.get(&chunk_hash).copied().ok_or_else(|| {
+                        CrabError::StagingCorrupt(format!(
+                            "remote authority for chunk {} escaped file {} recipe coverage",
+                            chunk_hash.hex(),
+                            file_hash.hex()
+                        ))
+                    })?;
+                    if !staging.has_segment_payload(&chunk_hash, size)? {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
+                            chunk_hash.hex(),
+                            file_hash.hex()
+                        )));
+                    }
+                }
+                next_occurrence = next_occurrence
+                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
+                    .ok_or_else(|| {
+                        CrabError::StagingCorrupt(
+                            "remote authority recipe page overflow".to_owned(),
+                        )
+                    })?;
+            }
+            for chunk_hash in chunks.keys() {
                 if placement_map.contains_key(chunk_hash)
                     || verified_placement.contains_key(chunk_hash)
                 {
@@ -11001,15 +11328,9 @@ impl PushPipeline {
         let prepared_chunks = placement_map.len();
         let existing_chunks = verified_placement.len();
         let residual_chunk_count = residual_chunks.len();
-        let residual_bytes = needed_plans
+        let residual_bytes = residual_chunks
             .iter()
-            .flat_map(|(_, _, chunks)| chunks)
-            .filter(|(hash, _)| residual_chunks.contains(hash))
-            .fold(HashMap::new(), |mut sizes, (hash, size)| {
-                sizes.entry(*hash).or_insert(*size);
-                sizes
-            })
-            .into_values()
+            .map(|hash| expected_sizes.get(hash).copied().unwrap_or(0))
             .fold(0u64, u64::saturating_add);
         self.planned_xorb_bytes.store(
             u64::try_from(prepared_bytes)
@@ -11018,37 +11339,28 @@ impl PushPipeline {
             std::sync::atomic::Ordering::Relaxed,
         );
 
+        self.retain_packed_xorb_info(build_complete_xorb_info_map(&placement_map)?)
+            .await?;
         *self.chunk_placement.lock().await = placement_map;
         *self.xorbs.lock().await = xorb_results;
         *self.verified_existing_placement.lock().await = verified_placement;
         *self.new_chunk_hashes.lock().await = Some(residual_chunks);
-        *self.add_push_plan_applied.lock().await = true;
 
         if let Some(metrics) = &self.metrics {
-            let mut occurrence_bytes = 0u64;
-            let mut sizes = HashMap::new();
-            let mut occurrence_chunks = 0u64;
-            for (_, _, chunks) in &needed_plans {
-                for (hash, size) in chunks.iter() {
-                    occurrence_bytes = occurrence_bytes.saturating_add(*size);
-                    occurrence_chunks = occurrence_chunks.saturating_add(1);
-                    sizes.entry(*hash).or_insert(*size);
-                }
-            }
             let residual = self.new_chunk_hashes.lock().await;
             let new_bytes = residual
                 .as_ref()
                 .into_iter()
                 .flatten()
-                .map(|hash| sizes.get(hash).copied().unwrap_or(0))
+                .map(|hash| expected_sizes.get(hash).copied().unwrap_or(0))
                 .sum::<u64>();
             let new_count = residual.as_ref().map_or(0, HashSet::len) as u64;
             metrics.set_dedup_metrics(&xet_data::deduplication::DeduplicationMetrics {
-                total_bytes: occurrence_bytes,
-                deduped_bytes: occurrence_bytes.saturating_sub(new_bytes),
+                total_bytes: total_occurrence_bytes,
+                deduped_bytes: total_occurrence_bytes.saturating_sub(new_bytes),
                 new_bytes,
-                total_chunks: occurrence_chunks,
-                deduped_chunks: occurrence_chunks.saturating_sub(new_count),
+                total_chunks: total_occurrence_chunks,
+                deduped_chunks: total_occurrence_chunks.saturating_sub(new_count),
                 new_chunks: new_count,
                 ..xet_data::deduplication::DeduplicationMetrics::default()
             });
@@ -11095,40 +11407,21 @@ impl PushPipeline {
         }
         self.clear_add_push_plan_adoption_state().await;
 
-        let file_chunks: Vec<Arc<Vec<MerkleHash>>> = {
-            let pointers = self.pointers.lock().await;
-            let mut file_chunks = Vec::with_capacity(pointers.len());
-            for ptr in pointers.iter() {
-                let file_hash = MerkleHash::from(ptr.file_hash);
-                let chunk_hashes = self.cached_chunks_for_file(&file_hash).await?;
-                file_chunks.push(chunk_hashes);
+        let file_hashes = self
+            .pointers
+            .lock()
+            .await
+            .iter()
+            .map(|pointer| MerkleHash::from(pointer.file_hash))
+            .collect::<Vec<_>>();
+        let mut file_recipes = Vec::with_capacity(file_hashes.len());
+        for file_hash in file_hashes {
+            if let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? {
+                file_recipes.push(recipe);
             }
-            file_chunks
-        };
-        let (occurrence_bytes, chunk_sizes) = {
-            let cache = self.chunk_cache.lock().await;
-            let mut occurrence_bytes = 0u64;
-            let mut sizes = HashMap::new();
-            for cached in cache.values() {
-                for (hash, size) in cached.occurrences.iter() {
-                    occurrence_bytes = occurrence_bytes.checked_add(*size).ok_or_else(|| {
-                        CrabError::StagingCorrupt(
-                            "chunk occurrence byte count overflow during classification".to_owned(),
-                        )
-                    })?;
-                    match sizes.insert(*hash, *size) {
-                        Some(existing) if existing != *size => {
-                            return Err(CrabError::StagingCorrupt(format!(
-                                "chunk {} has conflicting staged sizes {existing} and {size}",
-                                hash.hex()
-                            )));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            (occurrence_bytes, sizes)
-        };
+        }
+        let mut occurrence_bytes = 0u64;
+        let mut chunk_sizes = HashMap::new();
 
         let mut total_chunks = 0u64;
         let mut existing = 0u64;
@@ -11149,26 +11442,43 @@ impl PushPipeline {
                 shard_files: &shard_files,
             };
 
-            for chunk_hashes in &file_chunks {
-                for chunk_hash in chunk_hashes.iter() {
+            for recipe in &file_recipes {
+                self.visit_recipe_chunks(recipe, |chunk_hash, chunk_size| {
+                    occurrence_bytes =
+                        occurrence_bytes.checked_add(chunk_size).ok_or_else(|| {
+                            CrabError::StagingCorrupt(
+                                "chunk occurrence byte count overflow during classification"
+                                    .to_owned(),
+                            )
+                        })?;
+                    match chunk_sizes.insert(chunk_hash, chunk_size) {
+                        Some(existing) if existing != chunk_size => {
+                            return Err(CrabError::StagingCorrupt(format!(
+                                "chunk {} has conflicting staged sizes {existing} and {chunk_size}",
+                                chunk_hash.hex()
+                            )));
+                        }
+                        _ => {}
+                    }
                     total_chunks += 1;
-                    let class = classifier.classify_with_context(chunk_hash, &dedup_ctx);
+                    let class = classifier.classify_with_context(&chunk_hash, &dedup_ctx);
                     match class {
                         ChunkClass::Existing(xorb_ref) => {
                             existing_candidates
-                                .entry(*chunk_hash)
+                                .entry(chunk_hash)
                                 .and_modify(|(_, count)| *count += 1)
                                 .or_insert((xorb_ref, 1));
                         }
                         ChunkClass::Staged => staged += 1,
                         ChunkClass::New => {
                             new_chunks += 1;
-                            new_set.insert(*chunk_hash);
-                            *new_counts.entry(*chunk_hash).or_insert(0) += 1;
+                            new_set.insert(chunk_hash);
+                            *new_counts.entry(chunk_hash).or_insert(0) += 1;
                         }
                     }
-                    classifier.mark_seen(*chunk_hash);
-                }
+                    classifier.mark_seen(chunk_hash);
+                    Ok(())
+                })?;
             }
         };
 
@@ -11376,18 +11686,13 @@ impl PushPipeline {
             return Ok(XorbPackSummary::default());
         }
 
-        let add_push_plan_applied = *self.add_push_plan_applied.lock().await;
         let residual_add_plan_chunks = self
             .new_chunk_hashes
             .lock()
             .await
             .as_ref()
             .map_or(0usize, HashSet::len);
-        let prepared_xorbs = if add_push_plan_applied {
-            std::mem::take(&mut *self.xorbs.lock().await)
-        } else {
-            Vec::new()
-        };
+        let prepared_xorbs = std::mem::take(&mut *self.xorbs.lock().await);
         let prepared_xorb_count = prepared_xorbs.len();
 
         // Set packing phase for progress reporting.
@@ -11398,7 +11703,10 @@ impl PushPipeline {
             p.set_pack_totals(pointers.len() as u64, total_bytes);
         }
 
-        let mut new_chunk_filter = self.new_chunk_hashes.lock().await.clone();
+        // Packing owns the residual set after classification. Moving it out
+        // avoids a second repository-sized hash set while the disk-backed
+        // read schedule is populated.
+        let mut new_chunk_filter = self.new_chunk_hashes.lock().await.take();
         let filtering = new_chunk_filter.is_some();
 
         let mut builder = XorbBuilder::with_policy(self.config.compression_policy());
@@ -11424,112 +11732,106 @@ impl PushPipeline {
         let spill_dir = staging.root().join("push-spill");
 
         let batch_size = self.config.batch_read_size.max(1);
-        let mut buffer: Vec<(MerkleHash, u64)> = Vec::with_capacity(batch_size);
-        let mut buffer_bytes = 0u64;
 
-        if !add_push_plan_applied || residual_add_plan_chunks != 0 {
+        if new_chunk_filter
+            .as_ref()
+            .is_none_or(|chunks| !chunks.is_empty())
+        {
+            let mut read_plan = staging.begin_coalesced_chunk_read_plan()?;
+            let mut request_batch = Vec::<(MerkleHash, u64, u64)>::with_capacity(batch_size);
             for (file_idx, ptr) in pointers.iter().enumerate() {
                 check_cancelled(&self.cancel)?;
                 let file_hash = MerkleHash::from(ptr.file_hash);
-                let chunk_occurrences = self.cached_chunk_occurrences_for_file(&file_hash).await?;
-
-                if chunk_occurrences.is_empty() {
+                let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
                     debug!(file_hash = %file_hash.hex(), "no staged chunks for pointer, skipping");
                     if let Some(ref p) = self.progress {
                         p.inc_pack_file();
                         p.add_pack_bytes(ptr.size);
                     }
                     continue;
+                };
+                if recipe.chunk_count() == 0 {
+                    if let Some(ref p) = self.progress {
+                        p.inc_pack_file();
+                    }
+                    continue;
                 }
 
-                let run_id = RunId(file_idx as u64);
+                let run_context = u64::try_from(file_idx).map_err(|_| {
+                    CrabError::StagingCorrupt("too many files in one push".to_owned())
+                })?;
 
-                for (chunk_hash, chunk_size) in chunk_occurrences.iter() {
+                self.visit_recipe_chunks(&recipe, |chunk_hash, chunk_size| {
                     // Skip chunks already on the remote (class A/B) when
                     // the ChunkIndex was populated.
                     if let Some(ref mut new_set) = new_chunk_filter
-                        && !new_set.remove(chunk_hash)
+                        && !new_set.remove(&chunk_hash)
                     {
                         summary.skipped_chunks = summary.skipped_chunks.saturating_add(1);
                         if let Some(ref p) = self.progress {
-                            p.add_pack_bytes(*chunk_size);
+                            p.add_pack_bytes(chunk_size);
                         }
-                        continue;
+                        return Ok(());
                     }
+                    request_batch.push((chunk_hash, chunk_size, run_context));
+                    if request_batch.len() == batch_size {
+                        read_plan.append(&request_batch)?;
+                        request_batch.clear();
+                    }
+                    Ok(())
+                })?;
 
-                    let would_exceed_bytes = !buffer.is_empty()
-                        && buffer_bytes.saturating_add(*chunk_size) > XORB_PACK_READ_PAYLOAD_LIMIT;
-                    if buffer.len() >= batch_size || would_exceed_bytes {
-                        let packed_input_bytes = buffer_bytes;
-                        let (next_builder, packed_chunks, packed) = pack_staging_chunk_batch(
-                            staging,
-                            &mut buffer,
-                            run_id,
-                            builder,
-                            &spill_dir,
-                            packed_payload_budget.as_ref(),
-                        )
-                        .await?;
-                        builder = next_builder;
-                        summary.packed_chunks =
-                            summary.packed_chunks.saturating_add(packed_chunks as u64);
-                        route_packed_xorb_batch(
-                            packed,
-                            output.as_ref(),
-                            self.metrics.as_ref(),
-                            &mut collected,
-                            &mut placement_map,
-                            &mut summary,
-                        )
-                        .await?;
-                        if let Some(ref p) = self.progress {
-                            p.add_pack_bytes(packed_input_bytes);
-                            p.set_pack_xorbs_produced(summary.xorb_count);
-                        }
-                        buffer_bytes = 0;
-                    }
-                    buffer.push((*chunk_hash, *chunk_size));
-                    buffer_bytes = buffer_bytes.checked_add(*chunk_size).ok_or_else(|| {
-                        CrabError::StagingCorrupt("packer batch byte length overflow".to_owned())
-                    })?;
-                }
-
-                // End of file: flush any tail before the next run_id so
-                // chunks land in-order inside each run.
-                if !buffer.is_empty() {
-                    let packed_input_bytes = buffer_bytes;
-                    let (next_builder, packed_chunks, packed) = pack_staging_chunk_batch(
-                        staging,
-                        &mut buffer,
-                        run_id,
-                        builder,
-                        &spill_dir,
-                        packed_payload_budget.as_ref(),
-                    )
-                    .await?;
-                    builder = next_builder;
-                    summary.packed_chunks =
-                        summary.packed_chunks.saturating_add(packed_chunks as u64);
-                    route_packed_xorb_batch(
-                        packed,
-                        output.as_ref(),
-                        self.metrics.as_ref(),
-                        &mut collected,
-                        &mut placement_map,
-                        &mut summary,
-                    )
-                    .await?;
-                    if let Some(ref p) = self.progress {
-                        p.add_pack_bytes(packed_input_bytes);
-                        p.set_pack_xorbs_produced(summary.xorb_count);
-                    }
-                    buffer_bytes = 0;
-                }
                 if let Some(ref p) = self.progress {
                     p.inc_pack_file();
                     p.set_pack_xorbs_produced(summary.xorb_count);
                 }
             }
+            read_plan.append(&request_batch)?;
+            request_batch.clear();
+            if let Some(unseen) = new_chunk_filter.as_ref()
+                && !unseen.is_empty()
+            {
+                return Err(CrabError::StagingCorrupt(format!(
+                    "push classification retained {} new chunks absent from every pinned recipe",
+                    unseen.len()
+                )));
+            }
+
+            while let Some(payloads) = read_plan
+                .read_next(batch_size, XORB_PACK_READ_PAYLOAD_LIMIT)
+                .await?
+            {
+                check_cancelled(&self.cancel)?;
+                let mut ordered = Vec::with_capacity(payloads.len());
+                let mut group_bytes = 0u64;
+                for (run_context, hash, data) in payloads {
+                    group_bytes = group_bytes.saturating_add(data.len() as u64);
+                    ordered.push((Chunk { hash, data }, RunId(run_context)));
+                }
+                let (next_builder, packed_chunks, packed) = pack_decoded_chunk_group(
+                    ordered,
+                    builder,
+                    &spill_dir,
+                    packed_payload_budget.as_ref(),
+                )
+                .await?;
+                builder = next_builder;
+                summary.packed_chunks = summary.packed_chunks.saturating_add(packed_chunks as u64);
+                route_packed_xorb_batch(
+                    packed,
+                    output.as_ref(),
+                    self.metrics.as_ref(),
+                    &mut collected,
+                    &mut placement_map,
+                    &mut summary,
+                )
+                .await?;
+                if let Some(ref p) = self.progress {
+                    p.add_pack_bytes(group_bytes);
+                    p.set_pack_xorbs_produced(summary.xorb_count);
+                }
+            }
+            drop(read_plan);
 
             let completed = tokio::task::spawn_blocking(move || builder.finalize())
                 .await
@@ -11597,6 +11899,8 @@ impl PushPipeline {
             "step 5: packed xorbs"
         );
 
+        self.retain_packed_xorb_info(build_complete_xorb_info_map(&placement_map)?)
+            .await?;
         *self.chunk_placement.lock().await = placement_map;
         if output.is_none() {
             *self.xorbs.lock().await = collected;
@@ -11823,6 +12127,10 @@ impl PushPipeline {
         let mut handles = Vec::with_capacity(xorbs.len());
 
         for xorb in xorbs {
+            #[cfg(test)]
+            self.test_metrics
+                .xorb_upload_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let PackedXorb {
                 hash,
                 payload,
@@ -11840,6 +12148,8 @@ impl PushPipeline {
             // Clone the shared progress handle (if any) into the task
             // so the per-part callback can credit bytes in real time.
             let progress_for_task = self.progress.clone();
+            #[cfg(test)]
+            let test_metrics = Arc::clone(&self.test_metrics);
             // Hand the push cancellation token into the task so the
             // retried multipart upload can observe cancellation between
             // parts and abort cleanly.
@@ -11850,15 +12160,11 @@ impl PushPipeline {
 
                 permit.transfer_starting().await;
 
-                let payload_budget_len = payload
-                    .file_source()
-                    .filter(|_| {
-                        store_for_task.staging_write_prefix().is_none()
-                            && payload_len > XORB_MULTIPART_THRESHOLD
-                    })
-                    .map_or(payload_len, |_| {
-                        payload_len.min(XORB_MULTIPART_PART_SIZE * 4)
-                    });
+                let file_backed = payload.file_source().is_some();
+                let multipart_progress = file_backed || payload_len > XORB_MULTIPART_THRESHOLD;
+                let payload_budget_len = payload.file_source().map_or(payload_len, |_| {
+                    payload_len.min(XORB_MULTIPART_PART_SIZE * 4)
+                });
                 let payload_units = xorb_upload_payload_permit_units(payload_budget_len);
                 let payload_permit = match payload_read_budget
                     .acquire_many_owned(payload_units)
@@ -11872,10 +12178,12 @@ impl PushPipeline {
                         ));
                     }
                 };
-                let result = if store_for_task.staging_write_prefix().is_none()
-                    && payload_len > XORB_MULTIPART_THRESHOLD
-                    && let Some((file_path, file_len, payload_hash)) = payload.file_source()
+                let result = if let Some((file_path, file_len, payload_hash)) = payload.file_source()
                 {
+                    #[cfg(test)]
+                    test_metrics
+                        .file_backed_upload_bytes
+                        .fetch_add(file_len as u64, std::sync::atomic::Ordering::Relaxed);
                     let done_bytes_cb = Arc::clone(&done_bytes);
                     let progress_cb = progress_for_task.clone();
                     let on_part: Box<dyn Fn(u64) + Send + Sync> = Box::new(move |bytes: u64| {
@@ -11903,6 +12211,10 @@ impl PushPipeline {
                             return Err(e);
                         }
                     };
+                    #[cfg(test)]
+                    test_metrics
+                        .materialized_upload_bytes
+                        .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     let result = if store_for_task.staging_write_prefix().is_some() {
                         store_for_task.put(&path, data.clone()).await
                     } else if data.len() > XORB_MULTIPART_THRESHOLD {
@@ -11966,7 +12278,7 @@ impl PushPipeline {
                     // Single-PUT path reports bytes here; the multipart
                     // path has already folded per-part bytes into
                     // `done_bytes` via the callback above.
-                    if data_len <= XORB_MULTIPART_THRESHOLD as u64 {
+                    if !multipart_progress {
                         done_bytes.fetch_add(data_len, std::sync::atomic::Ordering::Relaxed);
                     }
                     let uploaded_xorb = if retain_payload {
@@ -11979,7 +12291,7 @@ impl PushPipeline {
                         )
                     };
                     drop(packed_payload_permit);
-                    (uploaded_xorb, data_len)
+                    (uploaded_xorb, data_len, multipart_progress)
                 })
             }));
         }
@@ -11988,7 +12300,7 @@ impl PushPipeline {
         let mut first_error: Option<CrabError> = None;
         for handle in handles {
             match handle.await {
-                Ok(Ok((uploaded_xorb, bytes))) => {
+                Ok(Ok((uploaded_xorb, bytes, multipart_progress))) => {
                     uploaded += 1;
                     // Collected test paths retain the body for cache-warm
                     // coverage. The production stream keeps only remote
@@ -11999,7 +12311,7 @@ impl PushPipeline {
                     // the bytes into `upload_bytes_done`, so only bump
                     // the xorb counter here to avoid double-counting.
                     if let Some(p) = &self.progress {
-                        if bytes > XORB_MULTIPART_THRESHOLD as u64 {
+                        if multipart_progress {
                             p.inc_upload_xorb_bytes_already_reported();
                         } else {
                             p.inc_upload_xorb(bytes);
@@ -12235,21 +12547,53 @@ impl PushPipeline {
     /// the 100 MiB soft cap.
     #[tracing::instrument(level = "info", name = "push.build_shard", skip_all)]
     async fn build_shard(&self) -> Result<()> {
+        self.build_shard_with_session(PushShardSession::new()).await
+    }
+
+    async fn build_shard_with_session(&self, mut shard_session: PushShardSession) -> Result<()> {
         if self.staging.is_none() {
             debug!("step 8: no staging area, skipping shard build");
             return Ok(());
         }
 
-        let pointer_specs: Vec<(MerkleHash, u64)> = {
+        let mut pointer_specs: Vec<(MerkleHash, u64)> = {
             let pointers = self.pointers.lock().await;
             pointers
                 .iter()
                 .map(|ptr| (MerkleHash::from(ptr.file_hash), ptr.size))
                 .collect()
         };
+        pointer_specs.sort_unstable();
         let mut placement_map = self.chunk_placement.lock().await.clone();
         let mut verified_existing = self.verified_existing_placement.lock().await.clone();
         let verified_existing_xorb_info = self.verified_existing_xorb_info.lock().await.clone();
+        let mut packed_xorb_info = self.packed_xorb_info.lock().await.clone();
+        let mut uncaptured_placements = ChunkPlacementMap::new();
+        for (chunk_hash, placement) in &placement_map {
+            if let Some(info) = packed_xorb_info.get(&placement.xorb_hash) {
+                let entry = usize::try_from(placement.chunk_index)
+                    .ok()
+                    .and_then(|index| info.chunks.get(index));
+                if !entry.is_some_and(|entry| {
+                    entry.chunk_hash == *chunk_hash
+                        && entry.unpacked_segment_bytes == placement.uncompressed_size
+                }) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "packed xorb metadata {} does not cover current chunk {} at index {}",
+                        placement.xorb_hash.hex(),
+                        chunk_hash.hex(),
+                        placement.chunk_index
+                    )));
+                }
+            } else {
+                uncaptured_placements.insert(*chunk_hash, placement.clone());
+            }
+        }
+        packed_xorb_info.extend(
+            build_complete_xorb_info_map(&uncaptured_placements)?
+                .into_iter()
+                .map(|(xorb_hash, info)| (xorb_hash, Arc::new(info))),
+        );
         let remote_only = self.remote_only_pointers.lock().await.clone();
 
         if pointer_specs.is_empty() {
@@ -12267,12 +12611,12 @@ impl PushPipeline {
             if remote_only.contains(file_hash) {
                 continue;
             }
-            required_chunks.extend(
-                self.cached_chunks_for_file(file_hash)
-                    .await?
-                    .iter()
-                    .copied(),
-            );
+            if let Some(recipe) = self.cached_recipe_for_file(file_hash).await? {
+                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                    required_chunks.insert(chunk_hash);
+                    Ok(())
+                })?;
+            }
         }
         placement_map.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
         verified_existing.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
@@ -12288,12 +12632,15 @@ impl PushPipeline {
                 if remote_only.contains(file_hash) {
                     continue;
                 }
-                let chunk_hashes = self.cached_chunks_for_file(file_hash).await?;
-                for (idx, ch) in chunk_hashes.iter().enumerate() {
-                    if !merged_placement.contains_key(ch) {
-                        match verified_existing.get(ch) {
+                let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
+                    continue;
+                };
+                let mut idx = 0usize;
+                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                    if !merged_placement.contains_key(&chunk_hash) {
+                        match verified_existing.get(&chunk_hash) {
                             Some(placement) => {
-                                merged_placement.insert(*ch, placement.clone());
+                                merged_placement.insert(chunk_hash, placement.clone());
                                 merged_from_index += 1;
                             }
                             None => {
@@ -12306,7 +12653,7 @@ impl PushPipeline {
                                     file_hash: file_hash.hex(),
                                     path: None,
                                     uncovered_chunks: 1,
-                                    example_chunk_hash: ch.hex(),
+                                    example_chunk_hash: chunk_hash.hex(),
                                     example_chunk_index: usize_to_shard_u32(
                                         "file chunk index",
                                         idx,
@@ -12315,7 +12662,9 @@ impl PushPipeline {
                             }
                         }
                     }
-                }
+                    idx = idx.saturating_add(1);
+                    Ok(())
+                })?;
             }
         }
         info!(
@@ -12326,39 +12675,41 @@ impl PushPipeline {
             "step 8: merged placement map"
         );
 
-        let mut shard_session = PushShardSession::new();
         let mut file_shard_idx: HashMap<MerkleHash, usize> = HashMap::new();
 
-        // Add xorb CAS info: parse each xorb to extract chunk metadata.
-        // Collect unique xorb hashes from the placement map to avoid
-        // re-parsing xorbs that were already consumed by step 7.
-        let mut xorb_data_map: HashMap<MerkleHash, Vec<u8>> = HashMap::new();
-        for p in merged_placement.values() {
-            xorb_data_map.entry(p.xorb_hash).or_default();
-        }
-
-        // We need the raw xorb bytes to parse. The xorbs were moved out
-        // in step 7, but we can reconstruct the CAS info from the placement
-        // map alone — each placement entry has the chunk hash, xorb hash,
-        // index, and uncompressed size.
-        //
-        // Group placements by xorb_hash, sorted by chunk_index.
-        let mut xorb_chunks: HashMap<MerkleHash, Vec<(&MerkleHash, &ChunkPlacement)>> =
-            HashMap::new();
-        for (chunk_hash, placement) in &merged_placement {
-            xorb_chunks
-                .entry(placement.xorb_hash)
-                .or_default()
-                .push((chunk_hash, placement));
-        }
-
-        for (xorb_hash, mut chunks) in xorb_chunks {
-            let xorb_info = if let Some(info) = verified_existing_xorb_info.get(&xorb_hash) {
-                info.clone()
-            } else {
-                build_xorb_info_from_placements(xorb_hash, &mut chunks)?
+        // Build one complete xorb-info authority map before partitioning files.
+        // The shard session consumes only dependency-closed file bundles; it
+        // never rotates between an xorb block and the file that references it.
+        let mut referenced_xorbs = merged_placement
+            .values()
+            .map(|placement| placement.xorb_hash)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        referenced_xorbs.sort_unstable();
+        let mut xorb_info_by_hash = HashMap::with_capacity(referenced_xorbs.len());
+        for xorb_hash in referenced_xorbs {
+            let existing = verified_existing_xorb_info.get(&xorb_hash);
+            let packed = packed_xorb_info.get(&xorb_hash);
+            if let (Some(existing), Some(packed)) = (existing, packed)
+                && !same_xorb_info(existing, packed.as_ref())
+            {
+                return Err(CrabError::StagingCorrupt(format!(
+                    "remote and packed metadata disagree for xorb {}",
+                    xorb_hash.hex()
+                )));
+            }
+            let xorb_info = match (existing, packed) {
+                (Some(info), _) => Arc::new(info.clone()),
+                (None, Some(info)) => Arc::clone(info),
+                (None, None) => {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "complete immutable metadata is unavailable for referenced xorb {}",
+                        xorb_hash.hex()
+                    )));
+                }
             };
-            shard_session.add_xorb(Arc::new(xorb_info))?;
+            xorb_info_by_hash.insert(xorb_hash, xorb_info);
         }
 
         // Add file reconstruction info for each pointer.
@@ -12388,9 +12739,12 @@ impl PushPipeline {
                 );
                 continue;
             }
-            let chunk_hashes = self.cached_chunks_for_file(file_hash).await?;
+            let recipe = self.cached_recipe_for_file(file_hash).await?;
 
-            let entries: Vec<FileDataSequenceEntry> = if chunk_hashes.is_empty() {
+            let entries: Vec<FileDataSequenceEntry> = if recipe
+                .as_ref()
+                .is_none_or(|recipe| recipe.chunk_count() == 0)
+            {
                 if *size != 0 {
                     return Err(CrabError::PointerMissingStaging {
                         total: pointer_specs.len(),
@@ -12405,13 +12759,12 @@ impl PushPipeline {
                 );
                 Vec::new()
             } else {
-                let terms = build_file_terms(&file_hash, &chunk_hashes, &merged_placement)?;
-
-                // Defense-in-depth coverage guard. Primary enforcement lives
-                // in `build_file_terms`; `validate_term_coverage` catches any
-                // future regression in the term builder or merge loop and
-                // gives a consistent structured error.
-                validate_term_coverage(&file_hash, &chunk_hashes, &terms)?;
+                let recipe = recipe.as_ref().ok_or_else(|| {
+                    CrabError::Internal(
+                        "non-empty recipe disappeared during shard build".to_owned(),
+                    )
+                })?;
+                let terms = self.build_file_terms_for_recipe(recipe, &merged_placement)?;
 
                 terms
                     .iter()
@@ -12425,14 +12778,36 @@ impl PushPipeline {
                     })
                     .collect()
             };
+            let mut dependency_hashes = entries
+                .iter()
+                .map(|entry| entry.xorb_hash)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            dependency_hashes.sort_unstable();
+            let dependencies = dependency_hashes
+                .into_iter()
+                .map(|xorb_hash| {
+                    xorb_info_by_hash.get(&xorb_hash).cloned().ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "missing complete xorb metadata {} for file {}",
+                            xorb_hash.hex(),
+                            file_hash.hex()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
             let header = build_file_data_header(*file_hash, entries.len())?;
 
-            let shard_idx = shard_session.add_file(MDBFileInfo {
-                metadata: header,
-                segments: entries,
-                verification: vec![],
-                metadata_ext: None,
-            })?;
+            let shard_idx = shard_session.add_file_bundle(
+                MDBFileInfo {
+                    metadata: header,
+                    segments: entries,
+                    verification: vec![],
+                    metadata_ext: None,
+                },
+                &dependencies,
+            )?;
             // Record the precise shard index this file landed in so the
             // file→shard mapping is accurate for multi-shard pushes.
             file_shard_idx.insert(*file_hash, shard_idx);
@@ -12444,7 +12819,7 @@ impl PushPipeline {
         let shard_count = results.len();
         let total_shard_bytes: usize = results.iter().map(|(b, _)| b.len()).sum();
 
-        // file_shard_idx was populated precisely during `add_file` above
+        // file_shard_idx was populated precisely during `add_file_bundle` above
         // (see CR1-F12 fix). No post-hoc reconciliation needed.
         info!(
             shards = shard_count,
@@ -13581,9 +13956,9 @@ impl PushPipeline {
         // output and rebuild classification against the locked base.
         self.xorbs.lock().await.clear();
         self.chunk_placement.lock().await.clear();
+        self.packed_xorb_info.lock().await.clear();
         self.merged_placement.lock().await.clear();
         self.uploaded_xorbs.lock().await.clear();
-        *self.add_push_plan_applied.lock().await = false;
         *self.new_chunk_hashes.lock().await = None;
         self.enumerate_pointers().await?;
         self.lookup_staging().await?;
@@ -13792,10 +14167,6 @@ impl PushPipeline {
                 })
                 .collect::<Vec<_>>()
         };
-        self.pending_legacy_chunk_tombstones
-            .lock()
-            .await
-            .extend(chunk_hashes.iter().copied());
         {
             let mut receipt_tombstones = self.pending_committed_receipt_tombstones.lock().await;
             receipt_tombstones.extend(stale_receipts);
@@ -14743,6 +15114,84 @@ impl PushPipeline {
         Ok(Some((hits, 0)))
     }
 
+    async fn lookup_proven_remote_chunks_for_add(
+        &self,
+        chunk_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, crab_staging::push_plan::ExistingChunkCandidate>> {
+        if chunk_hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        check_cancelled(&self.cancel)?;
+        let chunk_store = {
+            let guard = self.metadb.lock().await;
+            let Some(guard) = guard.as_ref() else {
+                return Ok(HashMap::new());
+            };
+            match guard.chunk_index().await {
+                Ok(store) => store,
+                Err(error) if error.is_metadb_read_only_uninitialized() => {
+                    return Ok(HashMap::new());
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let remote_candidates = tokio::time::timeout(
+            GLOBAL_CHUNK_LOOKUP_BUDGET,
+            chunk_store.get_committed_candidates_batch(chunk_hashes),
+        )
+        .await
+        .map_err(|_| {
+            CrabError::NetworkTransient(object_store::Error::Generic {
+                store: "chunk_index_db",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "add remote classification proof budget exhausted",
+                )),
+            })
+        })??;
+
+        let mut refs = HashMap::with_capacity(remote_candidates.placements.len());
+        let mut proof_ids = HashMap::with_capacity(remote_candidates.placements.len());
+        for (chunk_hash, placement) in &remote_candidates.placements {
+            refs.insert(
+                *chunk_hash,
+                XorbRef {
+                    xorb_hash: MerkleHash::from(placement.xorb_hash),
+                    chunk_index: placement.chunk_index,
+                    uncompressed_size: placement.uncompressed_size,
+                },
+            );
+            proof_ids.insert(
+                *chunk_hash,
+                (placement.placement_id(), placement.origin_proof_id),
+            );
+        }
+        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates {
+            placements: remote_candidates.placements,
+            origin_proofs: remote_candidates.origin_proofs,
+            source_anchors: remote_candidates.source_anchors,
+        };
+        let committed_receipts = self.validate_committed_chunk_receipts(&refs).await;
+        let validated = self.verified_committed_chunk_receipts.lock().await.clone();
+        let verified = self
+            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts)
+            .await?;
+        Ok(verified
+            .into_iter()
+            .filter_map(|(chunk_hash, xorb_ref)| {
+                let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
+                (validated.get(&chunk_hash) == Some(&placement_id)).then_some((
+                    chunk_hash,
+                    crab_staging::push_plan::ExistingChunkCandidate {
+                        xorb_ref,
+                        placement_id,
+                        origin_proof_id,
+                    },
+                ))
+            })
+            .collect())
+    }
+
     async fn lookup_cache_service_chunk_refs(
         &self,
         chunk_hashes: &[MerkleHash],
@@ -14993,16 +15442,20 @@ impl PushPipeline {
                     example_chunk_index: u32::MAX,
                 }
             })?;
-            for chunk_hash in self.cached_chunks_for_file(file_hash).await?.iter() {
+            let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
+                continue;
+            };
+            self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
                 // The global index is rebuildable acceleration. Re-publishing an
                 // already generation-pinned receipt only grows immutable history;
                 // if that source root later disappears, validation repacks or repair
                 // publishes a replacement from the still-canonical shard graph.
-                if already_committed.contains_key(chunk_hash) {
-                    continue;
+                if already_committed.contains_key(&chunk_hash) {
+                    return Ok(());
                 }
-                chunk_sources.entry(*chunk_hash).or_insert(*shard_hash);
-            }
+                chunk_sources.entry(chunk_hash).or_insert(*shard_hash);
+                Ok(())
+            })?;
         }
         for chunk_hash in chunk_sources.keys() {
             let placement = placement_snapshot.get(chunk_hash).ok_or_else(|| {
@@ -15023,13 +15476,6 @@ impl PushPipeline {
         }
         let committed_chunk_count = chunk_sources.len();
 
-        let legacy_tombstones = self
-            .pending_legacy_chunk_tombstones
-            .lock()
-            .await
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
         let receipt_tombstones = self
             .pending_committed_receipt_tombstones
             .lock()
@@ -15039,24 +15485,10 @@ impl PushPipeline {
             .collect::<Vec<_>>();
 
         // These indexes are post-CAS, rebuildable acceleration data. Keep each
-        // SlateDB WriteBatch bounded: a single transaction with two receipt
-        // rows plus a legacy tombstone per chunk exceeded 4 GiB RSS for a
-        // 10 GiB file. Partial batch success remains safe and repairable.
+        // SlateDB WriteBatch bounded so metadata memory stays independent of
+        // total push size. Partial batch success remains safe and repairable.
         let mut aggregate = crate::metadata::metadb::PushWriteReceipt::default();
         let mut batch_count = 0usize;
-        for batch in legacy_tombstones.chunks(POST_COMMIT_METADATA_BATCH_SIZE) {
-            let mut txn = guard.new_transaction()?;
-            for chunk_hash in batch {
-                chunk_store.delete_legacy(&mut txn, chunk_hash);
-            }
-            Box::pin(Self::commit_post_commit_metadata_batch(
-                guard,
-                txn,
-                &mut aggregate,
-                &mut batch_count,
-            ))
-            .await?;
-        }
         for batch in receipt_tombstones.chunks(POST_COMMIT_METADATA_BATCH_SIZE) {
             let mut txn = guard.new_transaction()?;
             chunk_store.delete_committed_receipts(&mut txn, batch);
@@ -15070,9 +15502,6 @@ impl PushPipeline {
         }
         for batch in file_entries.chunks(POST_COMMIT_METADATA_BATCH_SIZE) {
             let mut txn = guard.new_transaction()?;
-            for (file_hash, _) in batch {
-                file_store.delete_legacy(&mut txn, file_hash);
-            }
             file_store.save_committed_batch(&mut txn, batch);
             Box::pin(Self::commit_post_commit_metadata_batch(
                 guard,
@@ -15129,9 +15558,6 @@ impl PushPipeline {
                 ));
             }
             let mut txn = guard.new_transaction()?;
-            for (chunk_hash, _) in &entries {
-                chunk_store.delete_legacy(&mut txn, chunk_hash);
-            }
             chunk_store.save_committed_receipts(&mut txn, &entries)?;
             Box::pin(Self::commit_post_commit_metadata_batch(
                 guard,
@@ -15144,7 +15570,6 @@ impl PushPipeline {
         guard.flush_memtables().await?;
         drop(placement_snapshot);
         drop(origin_receipts);
-        self.pending_legacy_chunk_tombstones.lock().await.clear();
         self.pending_committed_receipt_tombstones
             .lock()
             .await
@@ -15153,7 +15578,6 @@ impl PushPipeline {
             file_ops = aggregate.file_ops_written,
             chunk_ops = aggregate.chunk_ops_written,
             committed_chunk_receipts = committed_chunk_count,
-            legacy_chunk_tombstones = legacy_tombstones.len(),
             committed_receipt_tombstones = receipt_tombstones.len(),
             batches = batch_count,
             bytes = aggregate.bytes_written,
@@ -15172,19 +15596,15 @@ impl PushPipeline {
     }
 
     async fn staged_recipe_hash(&self, file_hash: &MerkleHash) -> Result<[u8; 32]> {
-        let chunks = self.cached_chunk_occurrences_for_file(file_hash).await?;
-        let file_size = chunks.iter().try_fold(0u64, |total, (_, size)| {
-            total
-                .checked_add(*size)
-                .ok_or_else(|| CrabError::StagingCorrupt("file recipe size overflow".to_owned()))
-        })?;
-        Ok(FileRecipe::from_staged_chunks(
-            ChunkingPolicyId::XetGearV1_64KiB,
-            *file_hash,
-            file_size,
-            chunks.as_slice(),
-        )?
-        .hash())
+        self.cached_recipe_for_file(file_hash)
+            .await?
+            .map(|recipe| recipe.hash())
+            .ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "staged recipe root missing for {}",
+                    file_hash.hex()
+                ))
+            })
     }
 
     /// Warm the local chunk-index cache tiers for every shard this
@@ -15213,8 +15633,9 @@ impl PushPipeline {
         let placement_snapshot = self.verified_placement_snapshot().await;
 
         for (file_hash, shard_idx) in file_index_plan {
-            let chunk_hashes = match self.cached_chunks_for_file(file_hash).await {
-                Ok(hs) => hs,
+            let recipe = match self.cached_recipe_for_file(file_hash).await {
+                Ok(Some(recipe)) => recipe,
+                Ok(None) => continue,
                 Err(e) => {
                     warn!(
                         file_hash = %file_hash.hex(),
@@ -15233,10 +15654,17 @@ impl PushPipeline {
                 );
                 continue;
             };
-            for ch in chunk_hashes.iter() {
-                if let Some(p) = placement_snapshot.get(ch) {
-                    bucket.push((*ch, Self::xorb_ref_from_placement(p)));
+            if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                if let Some(p) = placement_snapshot.get(&chunk_hash) {
+                    bucket.push((chunk_hash, Self::xorb_ref_from_placement(p)));
                 }
+                Ok(())
+            }) {
+                warn!(
+                    file_hash = %file_hash.hex(),
+                    error = %error,
+                    "step 9b: failed to page recipe for warm grouping; skipping file"
+                );
             }
         }
         // De-dup within each shard bucket so `install_shard` doesn't
@@ -15481,34 +15909,39 @@ impl PushPipeline {
                         continue;
                     }
 
-                    // Collect chunk hashes for this file from the
-                    // chunk cache (populated in step 2).
-                    let chunk_hashes = {
+                    let recipe = {
                         let cache = self.chunk_cache.lock().await;
                         cache
                             .get(&file_hash)
-                            .map(|cached| Arc::clone(&cached.hashes))
+                            .and_then(|cached| cached.recipe.clone())
                     };
-                    let Some(chunk_hashes) = chunk_hashes else {
+                    let Some(recipe) = recipe else {
                         continue;
                     };
 
-                    for chunk_hash in chunk_hashes.iter() {
-                        let Some(p) = placement_map.get(chunk_hash) else {
+                    if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                        let Some(p) = placement_map.get(&chunk_hash) else {
                             // Invariant: build_shard guarantees every
                             // chunk has a placement. Log and skip — the
                             // push already succeeded at this point so we
                             // are defensive about cleanup warnings.
-                            continue;
+                            return Ok(());
                         };
                         per_shard[shard_idx].push((
-                            *chunk_hash,
+                            chunk_hash,
                             crab_xet::xorb::format::XorbRef {
                                 xorb_hash: p.xorb_hash,
                                 chunk_index: p.chunk_index,
                                 uncompressed_size: p.uncompressed_size,
                             },
                         ));
+                        Ok(())
+                    }) {
+                        warn!(
+                            file_hash = %file_hash.hex(),
+                            error = %error,
+                            "step 13: failed to page recipe for local cache update"
+                        );
                     }
                 }
 
@@ -16373,7 +16806,6 @@ impl PushPipeline {
             let shard_hashes = self.uploaded_shard_hashes.lock().await.clone();
             let anchor = *self.committed_manifest_anchor.lock().await;
             let needs_metadb_write = !file_index_plan.is_empty()
-                || !self.pending_legacy_chunk_tombstones.lock().await.is_empty()
                 || !self
                     .pending_committed_receipt_tombstones
                     .lock()
@@ -18293,10 +18725,6 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 }
 
 #[cfg(test)]
-#[allow(
-    deprecated,
-    reason = "tests still construct RefPushOutcome::Error for backward-compat regression coverage"
-)]
 mod tests {
     use super::*;
     use crate::core::metrics::Metrics;
@@ -18327,6 +18755,39 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
         (store, router)
+    }
+
+    fn planned_existing(
+        chunk_hash: MerkleHash,
+        xorb_ref: XorbRef,
+    ) -> crab_staging::push_plan::PlannedExistingChunk {
+        crab_staging::push_plan::PlannedExistingChunk::from_candidate(
+            chunk_hash,
+            crab_staging::push_plan::ExistingChunkCandidate {
+                xorb_ref,
+                placement_id: *blake3::hash(&<[u8; 32]>::from(chunk_hash)).as_bytes(),
+                origin_proof_id: *blake3::hash(&<[u8; 32]>::from(chunk_hash)).as_bytes(),
+            },
+        )
+    }
+
+    async fn initialize_test_repository(store: &Store, router: &StoreLayout) {
+        crate::cmd::init::initialize_remote_repository_store(store, router, "refs/heads/main")
+            .await
+            .expect("initialize canonical test repository");
+    }
+
+    async fn ensure_test_layout(store: &Store, router: &StoreLayout) {
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        crab_metadata::layout_descriptor::ensure_canonical_layout(
+            store.as_storage(),
+            &storage_router,
+        )
+        .await
+        .expect("publish canonical test layout");
     }
 
     fn locator_pack_fixture_for(
@@ -19365,11 +19826,19 @@ mod tests {
         chunks: &[(MerkleHash, u64)],
         placements: &[ChunkPlacement],
     ) {
+        let file_size = chunks.iter().map(|(_, size)| *size).sum();
+        let recipe = FileRecipe::from_staged_chunks(
+            ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            file_size,
+            chunks,
+        )
+        .expect("valid test recipe");
         pipeline
             .chunk_cache
             .lock()
             .await
-            .insert(file_hash, CachedFileChunks::new(chunks.to_vec()));
+            .insert(file_hash, CachedFileRecipe::new(Some(recipe)));
         let mut origins = pipeline.origin_receipts.lock().await;
         for placement in placements {
             origins.entry(placement.xorb_hash).or_insert_with(|| {
@@ -19386,6 +19855,50 @@ mod tests {
         }
         drop(origins);
         *pipeline.push_commit_receipt.lock().await = Some(test_push_commit_receipt(1));
+    }
+
+    async fn test_recipe_staging(
+        file_hash: MerkleHash,
+        chunks: &[(MerkleHash, u64)],
+    ) -> (tempfile::TempDir, Arc<crab_staging::StagingAreaReadOnly>) {
+        let temp = tempfile::tempdir().expect("recipe staging tempdir");
+        let staging = crab_staging::StagingArea::open(temp.path().to_path_buf())
+            .await
+            .expect("open recipe staging");
+        let file_size = chunks.iter().map(|(_, size)| *size).sum();
+        staging
+            .pre_register_file(&file_hash, file_size)
+            .expect("pre-register recipe file");
+        let payloads = chunks
+            .iter()
+            .map(|(hash, size)| {
+                (
+                    *hash,
+                    vec![0_u8; usize::try_from(*size).expect("test chunk size")],
+                )
+            })
+            .collect::<Vec<_>>();
+        let refs = payloads
+            .iter()
+            .map(|(hash, bytes)| (hash, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        staging
+            .stage_chunks_batch(&refs, &file_hash, 0)
+            .await
+            .expect("stage recipe chunks");
+        staging.flush_pending().await.expect("flush recipe chunks");
+        publish_recipe_for_test(
+            &staging,
+            "metadb-commit.bin",
+            file_hash,
+            file_size,
+            &payloads,
+        );
+        staging.close().await.expect("close recipe staging");
+        let readonly = crab_staging::StagingAreaReadOnly::open(temp.path().to_path_buf())
+            .await
+            .expect("open recipe staging read-only");
+        (temp, Arc::new(readonly))
     }
 
     fn test_add_plan_builder() -> impl Fn() -> XorbBuilder {
@@ -19550,7 +20063,13 @@ mod tests {
             .await
             .expect("stage chunks");
         staging.flush_pending().await.expect("flush staging");
-        publish_recipe_for_test(&staging, "test-file", file_hash, total_bytes, chunks);
+        publish_recipe_for_test(
+            &staging,
+            &format!("test-file-{}", file_hash.hex()),
+            file_hash,
+            total_bytes,
+            chunks,
+        );
         staging.close().await.expect("close staging");
         (file_hash, total_bytes)
     }
@@ -19639,7 +20158,13 @@ mod tests {
             .await
             .expect("stage chunks");
         staging.flush_pending().await.expect("flush staging");
-        publish_recipe_for_test(&staging, "test-file", file_hash, total_bytes, chunks);
+        publish_recipe_for_test(
+            &staging,
+            &format!("test-file-{}", file_hash.hex()),
+            file_hash,
+            total_bytes,
+            chunks,
+        );
         let chunk_pairs: Vec<(MerkleHash, u64)> = chunks
             .iter()
             .map(|(hash, data)| (*hash, data.len() as u64))
@@ -19678,12 +20203,19 @@ mod tests {
         let chunks = vec![(chunk_hash, data.len() as u64)];
         let mut plan = FilePushPlan::new(file_hash, data.len() as u64, &chunks);
         plan.staged_chunk_sequence_verified = false;
+        let recipe = FileRecipe::from_staged_chunks(
+            ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            data.len() as u64,
+            &chunks,
+        )
+        .expect("valid test recipe");
 
         assert!(!add_push_plan_matches_staging(
             &plan,
             &file_hash,
             data.len() as u64,
-            &chunks
+            &recipe
         ));
     }
 
@@ -20983,95 +21515,6 @@ mod tests {
         assert!(replacement.added.contains(&new_oid));
     }
 
-    #[tokio::test]
-    async fn mismatched_v1_visibility_is_absent_for_v2_rebuild() {
-        let (store, router) = test_store_router("visibility-v1-mismatch");
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 3;
-        manifest.pack_index_hash = "a".repeat(64);
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "1".repeat(40));
-        manifest.seal_git_validation();
-        let storage = store.as_storage();
-        let storage_router =
-            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-        let legacy = serde_json::json!({
-            "version": 1,
-            "generation": manifest.generation,
-            "pack_index_hash": manifest.pack_index_hash.clone(),
-            "refs": {"refs/heads/main": ["2".repeat(40)]},
-        });
-        storage
-            .put(
-                &storage_router
-                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
-                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            !git_visibility_index_exists_for_manifest(&store, &router, &manifest)
-                .await
-                .unwrap()
-        );
-        assert!(matches!(
-            storage
-                .head(&storage_router.git_visibility_path(&manifest.git_validation_digest),)
-                .await,
-            Err(StorageError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn matching_v1_visibility_is_not_authoritative_without_catalog() {
-        let (store, router) = test_store_router("visibility-v1-backfill");
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 3;
-        manifest.pack_index_hash = "a".repeat(64);
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "1".repeat(40));
-        manifest.seal_git_validation();
-        let storage = store.as_storage();
-        let storage_router =
-            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
-        let legacy = serde_json::json!({
-            "version": 1,
-            "generation": manifest.generation,
-            "pack_index_hash": manifest.pack_index_hash.clone(),
-            "refs": {"refs/heads/main": ["1".repeat(40)]},
-        });
-        storage
-            .put(
-                &storage_router
-                    .git_visibility_v1_path(manifest.generation, &manifest.pack_index_hash),
-                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
-            )
-            .await
-            .unwrap();
-
-        assert!(
-            !git_visibility_index_exists_for_manifest(&store, &router, &manifest)
-                .await
-                .unwrap()
-        );
-        let current = crab_metadata::git_visibility::read_with_format(
-            &storage,
-            &storage_router,
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            current.format,
-            crab_metadata::git_visibility::GitVisibilityFormat::V1
-        );
-    }
-
     #[test]
     fn ref_tip_pack_basis_uses_locally_available_tips() {
         let _guard = GitDirGuard::new();
@@ -21844,7 +22287,7 @@ mod tests {
         outcomes.insert("refs/heads/main".to_owned(), RefPushOutcome::Ok);
         outcomes.insert(
             "refs/heads/dev".to_owned(),
-            RefPushOutcome::Error("rejected".to_owned()),
+            RefPushOutcome::Rejected(PushRejectReason::Internal("rejected".to_owned())),
         );
         let result = PushResult::new(outcomes);
         assert!(!result.all_ok());
@@ -21948,8 +22391,12 @@ mod tests {
 
     #[test]
     fn ref_push_outcome_display_error() {
-        let outcome = RefPushOutcome::Error("non-fast-forward".to_owned());
-        assert_eq!(outcome.to_string(), "error: non-fast-forward");
+        let outcome =
+            RefPushOutcome::Rejected(PushRejectReason::Internal("non-fast-forward".to_owned()));
+        assert_eq!(
+            outcome.to_string(),
+            "error: internal error: non-fast-forward"
+        );
     }
 
     // --- run_push_batch ---
@@ -22564,7 +23011,7 @@ mod tests {
         .expect("read published visibility proof");
         assert_eq!(
             visibility.format,
-            crab_metadata::git_visibility::GitVisibilityFormat::V4
+            crab_metadata::git_visibility::GitVisibilityFormat::DigestV1
         );
         assert!(
             visibility
@@ -22903,6 +23350,7 @@ mod tests {
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
+        ensure_test_layout(&store, &router).await;
         let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
@@ -23075,6 +23523,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let repo_prefix = "upload-pack-journal-admission";
         let (store, router) = test_store_router(repo_prefix);
+        ensure_test_layout(&store, &router).await;
         let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
@@ -23183,6 +23632,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let repo_prefix = "upload-pack-locator-repair";
         let (store, router) = test_store_router(repo_prefix);
+        ensure_test_layout(&store, &router).await;
         let initial = non_initial_empty_manifest();
         create_manifest_with_etag(&store, &router, &initial)
             .await
@@ -23421,21 +23871,21 @@ mod tests {
             .expect("owner should publish locator coverage before visibility repair")
         );
         let visibility_path = router.git_visibility_catalog_path(&manifest.git_validation_digest);
-        let legacy_visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
+        let digest_visibility_path = router.git_visibility_path(&manifest.git_validation_digest);
         store
             .delete(&visibility_path)
             .await
             .expect("remove derived visibility proof");
         store
-            .delete(&legacy_visibility_path)
+            .delete(&digest_visibility_path)
             .await
-            .expect("remove legacy visibility proof");
+            .expect("remove digest visibility proof");
         assert!(matches!(
             store.head(&visibility_path).await,
             Err(CrabError::NotFound { .. })
         ));
         assert!(matches!(
-            store.head(&legacy_visibility_path).await,
+            store.head(&digest_visibility_path).await,
             Err(CrabError::NotFound { .. })
         ));
 
@@ -23969,6 +24419,7 @@ mod tests {
     #[tokio::test]
     async fn pre_acquired_lock_is_released_when_every_ref_is_rejected() {
         let (store, router) = test_store_router("prelocked-all-rejected");
+        initialize_test_repository(&store, &router).await;
         let specs = vec![make_delete_spec("refs/heads/main")];
         let config = PushConfig {
             receive_deny_deletes: true,
@@ -24070,6 +24521,7 @@ mod tests {
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
         let (store, router) = test_store_router("single-ref");
+        initialize_test_repository(&store, &router).await;
         let result = run_push_batch(
             &specs,
             &config,
@@ -24124,6 +24576,7 @@ mod tests {
             make_spec("refs/tags/v1.0"),
         ];
         let (store, router) = test_store_router("multiple-refs");
+        initialize_test_repository(&store, &router).await;
         let result = run_push_batch(
             &specs,
             &config,
@@ -24149,6 +24602,7 @@ mod tests {
         };
         let specs = vec![make_spec("refs/heads/main")];
         let (store, router) = test_store_router("custom-concurrency");
+        initialize_test_repository(&store, &router).await;
         let result = run_push_batch(
             &specs,
             &config,
@@ -24228,6 +24682,7 @@ mod tests {
             make_spec("refs/heads/dev"),
         ];
         let (store, router) = test_store_router("preflight-atomic");
+        initialize_test_repository(&store, &router).await;
 
         let result = run_push_batch(
             &specs,
@@ -24252,10 +24707,11 @@ mod tests {
                 PushRejectReason::AtomicAbort { .. }
             ))
         ));
-        assert!(matches!(
-            read_manifest(&store, &router).await,
-            Err(CrabError::NotFound { .. })
-        ));
+        let (manifest, _) = read_manifest(&store, &router)
+            .await
+            .expect("canonical empty manifest remains");
+        assert!(manifest.refs.is_empty());
+        assert_eq!(manifest.generation, 0);
     }
 
     #[test]
@@ -24424,6 +24880,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let router = StoreLayout::new(store.clone(), "head-check-metrics".to_owned());
+        initialize_test_repository(&store, &router).await;
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
         let result = run_push_batch(
@@ -24453,6 +24910,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let router = StoreLayout::new(store.clone(), "head-check-no-metrics".to_owned());
+        initialize_test_repository(&store, &router).await;
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
         let result = run_push_batch(
@@ -24682,12 +25140,6 @@ mod tests {
 
         let outcome = result.outcomes.get("refs/heads/main").unwrap();
         match outcome {
-            RefPushOutcome::Error(msg) => {
-                assert!(
-                    msg.contains("CRAB-E0090"),
-                    "error should contain cancelled code: {msg}"
-                );
-            }
             RefPushOutcome::Rejected(reason) => {
                 // The structured-reject-reason path now preserves the
                 // underlying error text in `Internal(..)` for anything
@@ -24708,6 +25160,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let router = StoreLayout::new(store.clone(), "uncancelled-push".to_owned());
+        initialize_test_repository(&store, &router).await;
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
         let result = run_push_batch(
@@ -24785,13 +25238,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn step10_falls_back_when_pack_list_missing() {
+    async fn step10_uses_canonical_empty_manifest_when_pack_list_missing() {
         let _guard = GitDirGuard::new();
-        // Store exists but no manifest means no remote pack exclusions.
         use object_store::memory::InMemory;
 
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = crate::storage::store::Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        initialize_test_repository(&store, &router).await;
 
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
@@ -24801,7 +25255,7 @@ mod tests {
             Some(store.clone()),
             None,
             None,
-            StoreLayout::new(store, "repo".to_owned()),
+            router,
             None,
             CancellationToken::new(),
             None,
@@ -24809,7 +25263,7 @@ mod tests {
         .await;
         assert!(
             result.all_ok(),
-            "push should succeed when pack-list is missing"
+            "push should succeed from a canonical empty manifest"
         );
     }
 
@@ -24821,13 +25275,8 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = crate::storage::store::Store::new(inner.clone());
 
-        // Seed a manifest with empty bulk lists so there are no remote
-        // pack exclusions to apply.
         let router = StoreLayout::new(store.clone(), "repo".to_owned());
-        let init = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
-        crate::metadata::manifest::create_manifest(&store, &router, &init)
-            .await
-            .unwrap();
+        initialize_test_repository(&store, &router).await;
 
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
@@ -25846,6 +26295,8 @@ mod tests {
 
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = crate::storage::store::Store::new(inner.clone());
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        initialize_test_repository(&store, &router).await;
 
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main")];
@@ -25855,7 +26306,7 @@ mod tests {
             Some(store.clone()),
             None,
             None,
-            StoreLayout::new(store, "repo".to_owned()),
+            router,
             None,
             CancellationToken::new(),
             None,
@@ -25901,6 +26352,8 @@ mod tests {
 
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = crate::storage::store::Store::new(inner.clone());
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        initialize_test_repository(&store, &router).await;
 
         let config = PushConfig::default();
         let specs = vec![make_spec("refs/heads/main"), make_spec("refs/heads/dev")];
@@ -25910,7 +26363,7 @@ mod tests {
             Some(store.clone()),
             None,
             None,
-            StoreLayout::new(store, "repo".to_owned()),
+            router,
             None,
             CancellationToken::new(),
             None,
@@ -27154,14 +27607,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn verified_add_time_refs_avoid_redundant_cache_service_query() {
+    async fn fabricated_add_time_proof_falls_through_to_verified_cache_query() {
         use crate::core::config::{CacheConfig, ServiceAuth, ServiceMode};
         use crate::git::walk::PointerBlob;
         use crate::test::git_repo::CacheDirGuard;
         use axum::{Json, Router, routing::post};
         use crab_cache_store::CachingStore;
         use crab_staging::StagingAreaReadOnly;
-        use crab_staging::push_plan::{FilePushPlan, PlannedExistingChunk};
+        use crab_staging::push_plan::FilePushPlan;
         use crab_xet::hash::compute_data_hash;
         use serde_json::json;
 
@@ -27194,8 +27647,7 @@ mod tests {
 
         let mut plan = FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
         for ((chunk_hash, _), xorb_ref) in chunks.iter().zip(xorb_refs.iter()) {
-            plan.existing
-                .push(PlannedExistingChunk::from_ref(*chunk_hash, *xorb_ref));
+            plan.existing.push(planned_existing(*chunk_hash, *xorb_ref));
         }
         write_add_time_plan_for_test(tmp.path(), &plan).await;
 
@@ -27305,10 +27757,10 @@ mod tests {
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
 
-        assert_eq!(request_count.load(Ordering::Relaxed), 0);
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "fresh origin proof should reuse the add-time placement without another dedup query"
+        assert_eq!(
+            request_count.load(Ordering::Relaxed),
+            1,
+            "a staged placement without a current committed origin proof must not suppress the verified fallback lookup"
         );
         let new_chunks = pipeline
             .new_chunk_hashes
@@ -28872,10 +29324,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "valid add-time plan should be adopted"
-        );
         assert_eq!(
             metrics.snapshot().staging_bytes_read,
             0,
@@ -28900,6 +29348,94 @@ mod tests {
             metrics.snapshot().staging_bytes_read,
             0,
             "pack_xorbs should not rebuild from staged chunks after adopting the plan"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mixed_add_time_push_plan_keeps_valid_sibling_and_packs_only_missing_plan() {
+        use crate::git::walk::PointerBlob;
+        use crab_staging::StagingAreaReadOnly;
+        use crab_xet::hash::compute_data_hash;
+
+        let planned_chunks = (0..4u32)
+            .map(|index| {
+                let data = format!("mixed-planned-chunk-{index}").into_bytes();
+                (compute_data_hash(&data), data)
+            })
+            .collect::<Vec<_>>();
+        let fallback_chunks = (0..3u32)
+            .map(|index| {
+                let data = format!("mixed-fallback-chunk-{index}").into_bytes();
+                (compute_data_hash(&data), data)
+            })
+            .collect::<Vec<_>>();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (planned_hash, planned_bytes) =
+            stage_file_and_prepare_add_plan_for_test(tmp.path(), &planned_chunks).await;
+        let (fallback_hash, fallback_bytes) =
+            stage_file_for_test(tmp.path(), &fallback_chunks).await;
+
+        let metrics = Arc::new(Metrics::new());
+        let mut staging = StagingAreaReadOnly::open(tmp.path().to_path_buf())
+            .await
+            .expect("open staging ro");
+        staging.set_metrics(Arc::clone(&metrics));
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            None,
+            None,
+            Some(Arc::new(staging)),
+            "repo-mixed-add-plan".to_owned(),
+            test_router("repo-mixed-add-plan"),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.pointers.lock().await.extend([
+            PointerBlob {
+                oid: [0u8; 20],
+                file_hash: planned_hash.into(),
+                size: planned_bytes,
+            },
+            PointerBlob {
+                oid: [1u8; 20],
+                file_hash: fallback_hash.into(),
+                size: fallback_bytes,
+            },
+        ]);
+
+        pipeline.lookup_staging().await.expect("lookup staging");
+        pipeline.classify_chunks().await.expect("classify chunks");
+        assert_eq!(
+            pipeline.test_metrics.add_plan_outcomes(),
+            (1, 1),
+            "one valid plan must be adopted while only its missing sibling falls back"
+        );
+        assert!(
+            !pipeline.xorbs.lock().await.is_empty(),
+            "the valid sibling's prepared xorbs must survive"
+        );
+        let residual = pipeline
+            .new_chunk_hashes
+            .lock()
+            .await
+            .clone()
+            .expect("mixed adoption publishes residual coverage");
+        assert_eq!(
+            residual,
+            fallback_chunks
+                .iter()
+                .map(|(hash, _)| *hash)
+                .collect::<HashSet<_>>()
+        );
+        assert_eq!(metrics.snapshot().staging_bytes_read, 0);
+
+        pipeline.pack_xorbs().await.expect("pack mixed residuals");
+        assert_eq!(
+            metrics.snapshot().staging_bytes_read,
+            fallback_bytes,
+            "only the file without a plan should be read from segment staging"
         );
     }
 
@@ -29018,10 +29554,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "global hits should still allow add-time plan adoption"
-        );
         assert!(
             pipeline.xorbs.lock().await.is_empty(),
             "prepared xorb must not upload chunks already verified in the bucket-global index"
@@ -29214,10 +29746,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "combined add-time plans should be adopted"
-        );
         assert_eq!(
             pipeline.chunk_placement.lock().await.len(),
             3,
@@ -29405,10 +29933,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "push should adopt a plan that reuses a whole prepared xorb with extra chunks"
-        );
         assert_eq!(
             metrics.snapshot().staging_bytes_read,
             0,
@@ -29429,7 +29953,7 @@ mod tests {
     async fn add_time_push_plan_stale_remote_refs_fall_back_to_packing() {
         use crate::git::walk::PointerBlob;
         use crab_staging::StagingAreaReadOnly;
-        use crab_staging::push_plan::{FilePushPlan, PlannedExistingChunk};
+        use crab_staging::push_plan::FilePushPlan;
         use crab_xet::hash::compute_data_hash;
 
         let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..3u32)
@@ -29448,7 +29972,7 @@ mod tests {
         let mut plan = FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
         let stale_xorb = MerkleHash::from([0xA11CE, 0xB0B, 0xBAD, 0xFADE]);
         for (idx, (chunk_hash, data)) in chunks.iter().enumerate() {
-            plan.existing.push(PlannedExistingChunk::from_ref(
+            plan.existing.push(planned_existing(
                 *chunk_hash,
                 XorbRef {
                     xorb_hash: stale_xorb,
@@ -29486,10 +30010,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            !*pipeline.add_push_plan_applied.lock().await,
-            "stale remote proof should reject add-time plan adoption"
-        );
         pipeline.pack_xorbs().await.expect("pack xorbs");
         assert!(
             !pipeline.xorbs.lock().await.is_empty(),
@@ -29501,9 +30021,7 @@ mod tests {
     async fn add_time_push_plan_reuses_prepared_xorbs_when_existing_refs_are_stale() {
         use crate::git::walk::PointerBlob;
         use crab_staging::StagingAreaReadOnly;
-        use crab_staging::push_plan::{
-            FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb,
-        };
+        use crab_staging::push_plan::{FilePushPlan, PlannedPlacement, PlannedXorb};
         use crab_xet::hash::compute_data_hash;
 
         let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..4u32)
@@ -29543,7 +30061,7 @@ mod tests {
         push_plan::write_prepared_xorb(tmp.path(), &file_hash, &authority_hash, authority_bytes)
             .await
             .expect("write local authority xorb");
-        plan.existing.push(PlannedExistingChunk::from_ref(
+        plan.existing.push(planned_existing(
             chunks[0].0,
             XorbRef {
                 xorb_hash: MerkleHash::from([0xA11CE, 0xB0B, 0xBAD, 0xFADE]),
@@ -29605,10 +30123,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            *pipeline.add_push_plan_applied.lock().await,
-            "valid prepared xorb coverage should survive stale existing refs"
-        );
         assert_eq!(
             pipeline.xorbs.lock().await.len(),
             1,
@@ -29697,10 +30211,6 @@ mod tests {
 
         pipeline.lookup_staging().await.expect("lookup staging");
         pipeline.classify_chunks().await.expect("classify chunks");
-        assert!(
-            !*pipeline.add_push_plan_applied.lock().await,
-            "corrupt prepared xorb should reject add-time plan adoption"
-        );
         pipeline.pack_xorbs().await.expect("pack xorbs");
         assert!(
             !pipeline.xorbs.lock().await.is_empty(),
@@ -29930,6 +30440,407 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_shard_reuses_complete_shared_xorb_metadata_after_ref_subset_replan() {
+        use crate::git::walk::PointerBlob;
+        use crab_staging::StagingAreaReadOnly;
+        use crab_xet::hash::compute_data_hash;
+        use crab_xet::shard::ShardReader;
+
+        let removed_bytes = b"removed prefix in shared packed xorb".to_vec();
+        let kept_bytes = b"surviving suffix in shared packed xorb".to_vec();
+        let removed_chunk = (compute_data_hash(&removed_bytes), removed_bytes);
+        let kept_chunk = (compute_data_hash(&kept_bytes), kept_bytes);
+        let shared_chunks = vec![removed_chunk.clone(), kept_chunk.clone()];
+        let (_, shared_xorb, refs) = test_xorb_with_chunks(&shared_chunks);
+        assert_eq!(refs[1].chunk_index, 1, "survivor must use a sparse suffix");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (kept_file, kept_size) =
+            stage_file_for_test(tmp.path(), std::slice::from_ref(&kept_chunk)).await;
+        let staging = Arc::new(
+            StagingAreaReadOnly::open(tmp.path().to_path_buf())
+                .await
+                .expect("open staging ro"),
+        );
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            None,
+            None,
+            Some(staging),
+            "repo-shared-xorb-replan".to_owned(),
+            test_router("repo-shared-xorb-replan"),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.pointers.lock().await.push(PointerBlob {
+            oid: [1u8; 20],
+            file_hash: kept_file.into(),
+            size: kept_size,
+        });
+        pipeline.lookup_staging().await.expect("lookup kept recipe");
+
+        let complete_placements = shared_chunks
+            .iter()
+            .zip(&refs)
+            .map(|((chunk_hash, _), xorb_ref)| {
+                (
+                    *chunk_hash,
+                    PushPipeline::chunk_placement_from_ref(*chunk_hash, *xorb_ref),
+                )
+            })
+            .collect::<ChunkPlacementMap>();
+        pipeline
+            .retain_packed_xorb_info(
+                build_complete_xorb_info_map(&complete_placements)
+                    .expect("capture complete packed-xorb metadata"),
+            )
+            .await
+            .expect("retain packed-xorb metadata");
+
+        // A non-atomic CAS replan replaces ref-scoped placements with only
+        // the surviving file. The immutable xorb metadata must remain dense.
+        pipeline.chunk_placement.lock().await.insert(
+            kept_chunk.0,
+            PushPipeline::chunk_placement_from_ref(kept_chunk.0, refs[1]),
+        );
+        pipeline.build_shard().await.expect("build survivor shard");
+
+        let shards = pipeline.shard_results.lock().await;
+        let (bytes, hash) = shards.first().expect("one rebuilt shard");
+        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *hash);
+        let xorb_info = reader
+            .get_xorb_info(&shared_xorb)
+            .expect("read shared xorb")
+            .expect("shared xorb metadata");
+        assert_eq!(xorb_info.chunks.len(), 2);
+        assert_eq!(xorb_info.chunks[0].chunk_hash, removed_chunk.0);
+        assert_eq!(xorb_info.chunks[1].chunk_hash, kept_chunk.0);
+        assert!(
+            reader
+                .get_file_info(&kept_file)
+                .expect("read kept file")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn packed_xorb_info_rejects_conflicting_duplicate_metadata() {
+        use crab_xet::hash::compute_data_hash;
+
+        let chunks = vec![
+            (
+                compute_data_hash(b"first packed chunk"),
+                b"first packed chunk".to_vec(),
+            ),
+            (
+                compute_data_hash(b"second packed chunk"),
+                b"second packed chunk".to_vec(),
+            ),
+        ];
+        let (_, xorb_hash, refs) = test_xorb_with_chunks(&chunks);
+        let placements = chunks
+            .iter()
+            .zip(refs)
+            .map(|((chunk_hash, _), xorb_ref)| {
+                (
+                    *chunk_hash,
+                    PushPipeline::chunk_placement_from_ref(*chunk_hash, xorb_ref),
+                )
+            })
+            .collect::<ChunkPlacementMap>();
+        let complete = build_complete_xorb_info_map(&placements).expect("complete metadata");
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            "repo-packed-xorb-info".to_owned(),
+            test_router("repo-packed-xorb-info"),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+
+        pipeline
+            .retain_packed_xorb_info(complete.clone())
+            .await
+            .expect("retain first metadata");
+        pipeline
+            .retain_packed_xorb_info(complete.clone())
+            .await
+            .expect("identical metadata is idempotent");
+
+        let mut conflicting = complete[&xorb_hash].clone();
+        conflicting.chunks[0].unpacked_segment_bytes = conflicting.chunks[0]
+            .unpacked_segment_bytes
+            .saturating_add(1);
+        let error = pipeline
+            .retain_packed_xorb_info(HashMap::from([(xorb_hash, conflicting)]))
+            .await
+            .expect_err("conflicting metadata must fail closed");
+        assert!(matches!(error, CrabError::StagingCorrupt(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shared_xorb_non_atomic_replan_cas_dependency_replan_reuses_one_upload() {
+        use crab_staging::StagingAreaReadOnly;
+        use crab_types::pointer::Pointer;
+        use crab_xet::shard::ShardReader;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git output utf8")
+                .trim()
+                .to_owned()
+        }
+
+        let _git_env = CleanGitEnvGuard::new();
+        let repo = tempfile::tempdir().expect("git fixture");
+        git(repo.path(), &["init", "--initial-branch=main"]);
+        git(repo.path(), &["config", "user.email", "test@test.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("base.txt"), b"base\n").expect("write base");
+        git(repo.path(), &["add", "base.txt"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        let base = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let removed_bytes = b"removed prefix in one newly packed shared xorb".to_vec();
+        let kept_bytes = b"surviving suffix in one newly packed shared xorb".to_vec();
+        let removed_chunk = compute_data_hash(&removed_bytes);
+        let kept_chunk = compute_data_hash(&kept_bytes);
+        let removed_file = test_file_hash_from_chunks(&[(removed_chunk, removed_bytes.clone())]);
+        let kept_file = test_file_hash_from_chunks(&[(kept_chunk, kept_bytes.clone())]);
+
+        git(repo.path(), &["checkout", "-b", "removed", &base]);
+        std::fs::write(
+            repo.path().join("removed.bin"),
+            Pointer {
+                file_hash: removed_file.into(),
+                size: removed_bytes.len() as u64,
+                shard_hint: None,
+            }
+            .serialize(),
+        )
+        .expect("write removed pointer");
+        git(repo.path(), &["add", "removed.bin"]);
+        git(repo.path(), &["commit", "-m", "removed pointer"]);
+
+        git(repo.path(), &["checkout", "-b", "kept", &base]);
+        std::fs::write(
+            repo.path().join("kept.bin"),
+            Pointer {
+                file_hash: kept_file.into(),
+                size: kept_bytes.len() as u64,
+                shard_hint: None,
+            }
+            .serialize(),
+        )
+        .expect("write kept pointer");
+        git(repo.path(), &["add", "kept.bin"]);
+        git(repo.path(), &["commit", "-m", "kept pointer"]);
+
+        let staging_tmp = tempfile::tempdir().expect("staging fixture");
+        let (staged_removed, _) = stage_file_for_test(
+            staging_tmp.path(),
+            &[(removed_chunk, removed_bytes.clone())],
+        )
+        .await;
+        let (staged_kept, _) =
+            stage_file_for_test(staging_tmp.path(), &[(kept_chunk, kept_bytes.clone())]).await;
+        assert_eq!(staged_removed, removed_file);
+        assert_eq!(staged_kept, kept_file);
+        let staging = Arc::new(
+            StagingAreaReadOnly::open(staging_tmp.path().to_path_buf())
+                .await
+                .expect("open staging"),
+        );
+
+        let (store, router) = test_store_router("shared-xorb-real-replan");
+        ensure_test_layout(&store, &router).await;
+        let mut remote = Manifest::default_for_repo("refs/heads/main");
+        remote.generation = 1;
+        remote
+            .refs
+            .insert("refs/heads/main".to_owned(), base.clone());
+        remote
+            .refs
+            .insert("refs/heads/removed".to_owned(), base.clone());
+        remote.refs.insert("refs/heads/kept".to_owned(), base);
+        remote.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &remote)
+            .await
+            .expect("create remote manifest");
+
+        let mut config = PushConfig::default();
+        config.git_dir = Some(repo.path().join(".git"));
+        let specs = vec![
+            make_spec("refs/heads/removed"),
+            make_spec("refs/heads/kept"),
+        ];
+        let pipeline = PushPipeline::new(
+            config,
+            specs,
+            Some(store.clone()),
+            None,
+            Some(staging),
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline
+            .read_base_manifest()
+            .await
+            .expect("read base manifest");
+        let decisions = HashMap::from([
+            (
+                "refs/heads/removed".to_owned(),
+                RefUpdateDecision::Proceed { etag: None },
+            ),
+            (
+                "refs/heads/kept".to_owned(),
+                RefUpdateDecision::Proceed { etag: None },
+            ),
+        ]);
+        *pipeline.planned_ref_decisions.lock().await = Some(decisions.clone());
+        pipeline
+            .enumerate_pointers()
+            .await
+            .expect("enumerate both refs");
+        assert_eq!(pipeline.pointers.lock().await.len(), 2);
+        pipeline
+            .lookup_staging()
+            .await
+            .expect("lookup both recipes");
+        pipeline
+            .classify_chunks()
+            .await
+            .expect("classify both chunks");
+        pipeline.pack_xorbs().await.expect("pack shared xorb");
+
+        let packed = pipeline.packed_xorb_info.lock().await.clone();
+        assert_eq!(packed.len(), 1, "both small file runs must share one xorb");
+        let (shared_xorb, complete_info) = packed.into_iter().next().expect("shared xorb");
+        assert_eq!(complete_info.chunks.len(), 2);
+        pipeline.head_check_resume().await.expect("head check");
+        pipeline
+            .upload_xorbs()
+            .await
+            .expect("upload shared xorb once");
+        assert_eq!(pipeline.test_metrics.xorb_upload_attempts(), 1);
+        store
+            .head(&router.xorb_path(&shared_xorb))
+            .await
+            .expect("shared xorb durable");
+
+        let mut surviving = decisions;
+        surviving.insert(
+            "refs/heads/removed".to_owned(),
+            RefUpdateDecision::Reject(PushRejectReason::StaleInfo),
+        );
+        *pipeline.planned_ref_decisions.lock().await = Some(surviving);
+        pipeline
+            .replan_base_bound_dependencies_after_cas_conflict()
+            .await
+            .expect("replan surviving ref");
+
+        assert_eq!(pipeline.test_metrics.xorb_upload_attempts(), 1);
+        let pointers = pipeline.pointers.lock().await.clone();
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(MerkleHash::from(pointers[0].file_hash), kept_file);
+        let shards = pipeline.shard_results.lock().await;
+        assert_eq!(shards.len(), 1);
+        let reader = ShardReader::from_bytes(Bytes::from(shards[0].0.clone()), shards[0].1);
+        assert!(
+            reader
+                .get_file_info(&kept_file)
+                .expect("read kept file")
+                .is_some()
+        );
+        assert!(
+            reader
+                .get_file_info(&removed_file)
+                .expect("read removed file")
+                .is_none()
+        );
+        let xorb_info = reader
+            .get_xorb_info(&shared_xorb)
+            .expect("read shared xorb metadata")
+            .expect("shared xorb metadata retained");
+        assert_eq!(xorb_info.chunks.len(), 2);
+        assert!(
+            xorb_info
+                .chunks
+                .iter()
+                .any(|entry| entry.chunk_hash == removed_chunk)
+        );
+        assert!(
+            xorb_info
+                .chunks
+                .iter()
+                .any(|entry| entry.chunk_hash == kept_chunk)
+        );
+        assert_eq!(pipeline.merged_placement.lock().await.len(), 1);
+        drop(shards);
+
+        *pipeline.planned_ref_decisions.lock().await = Some(HashMap::from([
+            (
+                "refs/heads/removed".to_owned(),
+                RefUpdateDecision::Proceed { etag: None },
+            ),
+            (
+                "refs/heads/kept".to_owned(),
+                RefUpdateDecision::Reject(PushRejectReason::StaleInfo),
+            ),
+        ]));
+        pipeline
+            .replan_base_bound_dependencies_after_cas_conflict()
+            .await
+            .expect("replan opposite surviving ref");
+
+        assert_eq!(pipeline.test_metrics.xorb_upload_attempts(), 1);
+        let pointers = pipeline.pointers.lock().await.clone();
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(MerkleHash::from(pointers[0].file_hash), removed_file);
+        let shards = pipeline.shard_results.lock().await;
+        assert_eq!(shards.len(), 1);
+        let reader = ShardReader::from_bytes(Bytes::from(shards[0].0.clone()), shards[0].1);
+        assert!(
+            reader
+                .get_file_info(&removed_file)
+                .expect("read opposite kept file")
+                .is_some()
+        );
+        assert!(
+            reader
+                .get_file_info(&kept_file)
+                .expect("read opposite removed file")
+                .is_none()
+        );
+        let xorb_info = reader
+            .get_xorb_info(&shared_xorb)
+            .expect("read opposite shared xorb metadata")
+            .expect("opposite shared xorb metadata retained");
+        assert_eq!(xorb_info.chunks.len(), 2);
+        assert_eq!(pipeline.merged_placement.lock().await.len(), 1);
+    }
+
     // --- Step 5: pack_xorbs batched staging reads ---
 
     /// Exercises the batched staging-read path in `pack_xorbs` with a
@@ -30088,6 +30999,13 @@ mod tests {
                 .await
                 .expect("batch stage");
             staging.flush_pending().await.expect("flush");
+            publish_recipe_for_test(
+                &staging,
+                "duplicate-new-chunk.bin",
+                file_hash,
+                total_bytes,
+                &staged_chunks,
+            );
             staging.close().await.expect("close");
         }
 
@@ -30118,15 +31036,15 @@ mod tests {
             file_hash: file_hash.into(),
             size: total_bytes,
         });
-        pipeline.chunk_cache.lock().await.insert(
-            file_hash,
-            CachedFileChunks::new(
-                chunk_hashes
-                    .iter()
-                    .map(|hash| (*hash, data.len() as u64))
-                    .collect(),
-            ),
-        );
+        let recipe = ro
+            .published_recipe_for_file(&file_hash)
+            .expect("load recipe")
+            .expect("published recipe");
+        pipeline
+            .chunk_cache
+            .lock()
+            .await
+            .insert(file_hash, CachedFileRecipe::new(Some(recipe)));
         *pipeline.new_chunk_hashes.lock().await = Some([chunk_hash].into_iter().collect());
 
         pipeline.pack_xorbs().await.expect("pack_xorbs");
@@ -30707,7 +31625,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn upload_xorbs_streams_disk_backed_payloads() {
+    async fn protected_file_backed_xorb_streams_to_staging_store() {
         use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression};
 
         let mut data = vec![0u8; XORB_MULTIPART_THRESHOLD + 1024 * 1024];
@@ -30739,9 +31657,14 @@ mod tests {
         assert!(packed.is_spilled(), "test must use a disk-backed payload");
         let xorb_hash = packed.hash;
 
-        let inner: Arc<dyn object_store::ObjectStore> =
+        let read_inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
-        let store = Store::new(Arc::clone(&inner));
+        let write_inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(Arc::clone(&read_inner)).with_staging_write_store(
+            "repo-upload-file-backed/staging/push-1".to_owned(),
+            Arc::clone(&write_inner),
+        );
         let router = StoreLayout::new(store.clone(), "repo-upload-file-backed".to_owned());
         let path = router.xorb_path(&xorb_hash);
         let pipeline = PushPipeline::new(
@@ -30759,13 +31682,38 @@ mod tests {
         *pipeline.xorbs.lock().await = vec![packed];
 
         pipeline.upload_xorbs().await.expect("upload xorbs");
-
-        let uploaded = inner.get(&path).await.unwrap().bytes().await.unwrap();
-        assert_eq!(uploaded, expected);
         assert_eq!(
-            pipeline.uploaded_xorbs.lock().await.len(),
-            1,
-            "uploaded payload should be retained for cache warming"
+            pipeline.test_metrics.upload_bytes(),
+            (expected.len() as u64, 0),
+            "protected file-backed upload must not materialize the complete payload"
+        );
+
+        let canonical = read_inner
+            .get(&path)
+            .await
+            .expect_err("protected upload must not write canonical storage");
+        assert!(matches!(canonical, object_store::Error::NotFound { .. }));
+        let staged_writes = pipeline
+            .store
+            .as_ref()
+            .expect("pipeline store")
+            .staged_writes();
+        assert_eq!(staged_writes.len(), 1);
+        assert_eq!(staged_writes[0].canonical_key, path.to_string());
+        let staged_path = object_store::path::Path::from(staged_writes[0].staged_key.clone());
+        let uploaded = write_inner
+            .get(&staged_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(uploaded, expected);
+        let uploaded_xorbs = pipeline.uploaded_xorbs.lock().await;
+        assert_eq!(uploaded_xorbs.len(), 1);
+        assert!(
+            uploaded_xorbs[0].has_file_backed_payload(),
+            "protected multipart must retain file-backed authority without replacing it with a full-body allocation"
         );
     }
 
@@ -31074,7 +32022,7 @@ mod tests {
 
         let store = Store::new(Arc::clone(&inner));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        let pipeline = PushPipeline::new(
+        let mut pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![],
             Some(store),
@@ -31113,13 +32061,11 @@ mod tests {
 
         let file_hash = MerkleHash::from([30_u64, 0, 0, 0]);
         let shard_hash = MerkleHash::from([31_u64, 0, 0, 0]);
-        install_test_metadb_commit_dependencies(
-            &pipeline,
-            file_hash,
-            &[(chunk_hash, 1)],
-            &[placement],
-        )
-        .await;
+        let recipe_chunks = [(chunk_hash, 1)];
+        let (_staging_temp, staging) = test_recipe_staging(file_hash, &recipe_chunks).await;
+        pipeline.staging = Some(staging);
+        install_test_metadb_commit_dependencies(&pipeline, file_hash, &recipe_chunks, &[placement])
+            .await;
         let err = pipeline
             .commit_metadb_and_warm_cache(&[(file_hash, 0)], &[shard_hash], test_committed_anchor())
             .await
@@ -31149,7 +32095,7 @@ mod tests {
         let cache_path = cache_tmp.path().join("chunk-index.sqlite");
         let store = Store::new(Arc::clone(&inner));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        let pipeline = PushPipeline::new(
+        let mut pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![],
             Some(store),
@@ -31212,10 +32158,13 @@ mod tests {
                 uncompressed_size: 200,
             },
         ];
+        let recipe_chunks = [(new_chunk, 100), (existing_chunk, 200)];
+        let (_staging_temp, staging) = test_recipe_staging(file_hash, &recipe_chunks).await;
+        pipeline.staging = Some(staging);
         install_test_metadb_commit_dependencies(
             &pipeline,
             file_hash,
-            &[(new_chunk, 100), (existing_chunk, 200)],
+            &recipe_chunks,
             &commit_placements,
         )
         .await;
@@ -31246,6 +32195,15 @@ mod tests {
 
         {
             let chunk_store = guard.chunk_index().await.expect("chunk index store");
+            let committed = chunk_store
+                .get_committed_candidates_batch(&[new_chunk, existing_chunk])
+                .await
+                .expect("committed receipt candidates");
+            assert!(committed.placements.contains_key(&new_chunk));
+            assert!(
+                !committed.placements.contains_key(&existing_chunk),
+                "step 9b must not duplicate a generation-pinned committed receipt"
+            );
             assert_eq!(
                 chunk_store.get(&new_chunk).await.expect("new chunk"),
                 Some(XorbRef {
@@ -31259,8 +32217,12 @@ mod tests {
                     .get(&existing_chunk)
                     .await
                     .expect("existing chunk"),
-                None,
-                "step 9b must not duplicate a generation-pinned committed receipt"
+                Some(XorbRef {
+                    xorb_hash: existing_xorb,
+                    chunk_index: 9,
+                    uncompressed_size: 200,
+                }),
+                "post-commit local shard warming must still cover the complete recipe"
             );
         }
 
@@ -31278,7 +32240,7 @@ mod tests {
         let cache_path = cache_tmp.path().join("chunk-index.sqlite");
         let store = Store::new(Arc::clone(&inner));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-        let pipeline = PushPipeline::new(
+        let mut pipeline = PushPipeline::new(
             PushConfig::default(),
             vec![],
             Some(store),
@@ -31334,10 +32296,13 @@ mod tests {
             chunk_index: 0,
             uncompressed_size: 100,
         };
+        let recipe_chunks = [(new_chunk, 100)];
+        let (_staging_temp, staging) = test_recipe_staging(file_hash, &recipe_chunks).await;
+        pipeline.staging = Some(staging);
         install_test_metadb_commit_dependencies(
             &pipeline,
             file_hash,
-            &[(new_chunk, 100)],
+            &recipe_chunks,
             &[new_placement],
         )
         .await;
@@ -31484,6 +32449,16 @@ mod tests {
                 .await
                 .expect("stage chunks");
             staging.flush_pending().await.expect("flush");
+            publish_recipe_for_test(
+                &staging,
+                "mixed-warm.bin",
+                file_hash,
+                (new_bytes.len() + existing_bytes.len()) as u64,
+                &[
+                    (new_chunk, new_bytes.clone()),
+                    (existing_chunk, existing_bytes.clone()),
+                ],
+            );
             staging.close().await.expect("close");
         }
 
@@ -31539,13 +32514,18 @@ mod tests {
                 },
             );
         }
-        pipeline.chunk_cache.lock().await.insert(
-            file_hash,
-            CachedFileChunks::new(vec![
-                (new_chunk, new_bytes.len() as u64),
-                (existing_chunk, existing_bytes.len() as u64),
-            ]),
-        );
+        let recipe = pipeline
+            .staging
+            .as_ref()
+            .expect("staging")
+            .published_recipe_for_file(&file_hash)
+            .expect("load recipe")
+            .expect("published recipe");
+        pipeline
+            .chunk_cache
+            .lock()
+            .await
+            .insert(file_hash, CachedFileRecipe::new(Some(recipe)));
 
         let guard = MetaDbGuard::new(MetaDb::new(
             Arc::clone(&inner),
@@ -32417,7 +33397,7 @@ mod tests {
         match err {
             CrabError::StagingCorrupt(message) => {
                 assert!(message.contains(&file_hash.hex()));
-                assert!(message.contains("total 4"));
+                assert!(message.contains("has 4 bytes"));
                 assert!(message.contains("pointer size 15"));
             }
             other => panic!("expected StagingCorrupt, got {other:?}"),
@@ -33217,7 +34197,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn build_shard_errors_on_uncached_non_remote_pointer() {
+    async fn build_shard_requires_verified_recipe_root_for_non_remote_pointer() {
         use crate::git::walk::PointerBlob;
         use crab_staging::{StagingArea, StagingAreaReadOnly};
 
@@ -33260,8 +34240,102 @@ mod tests {
             .expect_err("build_shard must not bypass the verified chunk cache");
 
         assert!(
-            matches!(err, CrabError::Internal(ref msg) if msg.contains("verified chunk cache missing")),
+            matches!(err, CrabError::Internal(ref msg) if msg.contains("verified recipe root missing")),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_shard_forced_partitions_are_dependency_closed_and_deterministic() {
+        use crate::git::walk::PointerBlob;
+        use crate::test::git_repo::CacheDirGuard;
+        use crab_staging::StagingAreaReadOnly;
+        use crab_xet::hash::compute_data_hash;
+
+        let cache_tmp = tempfile::tempdir().expect("cache tempdir");
+        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let staging_tmp = tempfile::tempdir().expect("staging tempdir");
+        let first_chunks = vec![(
+            compute_data_hash(b"forced-partition-first"),
+            b"forced-partition-first".to_vec(),
+        )];
+        let second_chunks = vec![(
+            compute_data_hash(b"forced-partition-second"),
+            b"forced-partition-second".to_vec(),
+        )];
+        let (first_hash, first_size) = stage_file_for_test(staging_tmp.path(), &first_chunks).await;
+        let (second_hash, second_size) =
+            stage_file_for_test(staging_tmp.path(), &second_chunks).await;
+        let staging = Arc::new(
+            StagingAreaReadOnly::open(staging_tmp.path().to_path_buf())
+                .await
+                .expect("open staging readonly"),
+        );
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            None,
+            None,
+            Some(staging),
+            "forced-partitions".to_owned(),
+            test_router("forced-partitions"),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.pointers.lock().await.extend([
+            PointerBlob {
+                oid: [1u8; 20],
+                file_hash: first_hash.into(),
+                size: first_size,
+            },
+            PointerBlob {
+                oid: [2u8; 20],
+                file_hash: second_hash.into(),
+                size: second_size,
+            },
+        ]);
+
+        pipeline.lookup_staging().await.expect("lookup staging");
+        pipeline.classify_chunks().await.expect("classify chunks");
+        pipeline.pack_xorbs().await.expect("pack xorbs");
+        pipeline
+            .build_shard_with_session(PushShardSession::with_qualification_size_cap(1))
+            .await
+            .expect("build forced shard partitions");
+
+        let first_results = pipeline.shard_results.lock().await.clone();
+        assert_eq!(first_results.len(), 2);
+        let mut extracted_files = Vec::new();
+        for (bytes, _) in &first_results {
+            let recipes = crab_xet::shard_parse::extract_file_recipes(&Bytes::from(bytes.clone()))
+                .expect("each forced shard must be independently dependency closed");
+            assert_eq!(recipes.len(), 1);
+            extracted_files.push(recipes[0].file_hash);
+        }
+        extracted_files.sort_unstable();
+        let mut expected_files = vec![first_hash, second_hash];
+        expected_files.sort_unstable();
+        assert_eq!(extracted_files, expected_files);
+        assert_eq!(pipeline.file_shard_index.lock().await.len(), 2);
+
+        pipeline
+            .build_shard_with_session(PushShardSession::with_qualification_size_cap(1))
+            .await
+            .expect("repeat forced shard build");
+        let repeated_hashes = pipeline
+            .shard_results
+            .lock()
+            .await
+            .iter()
+            .map(|(_, hash)| *hash)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            repeated_hashes,
+            first_results
+                .iter()
+                .map(|(_, hash)| *hash)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -34286,9 +35360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_manifest_without_base_creates_generation_one() {
-        // No manifest exists in the store — build_manifest should start
-        // from a default generation-0 manifest and increment to 1.
+    async fn direct_push_rejects_missing_canonical_manifest() {
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let store = crate::storage::store::Store::new(inner);
@@ -34308,26 +35380,15 @@ mod tests {
             None,
         );
 
-        // read_base_manifest finds nothing — fields stay None.
-        pipeline.read_base_manifest().await.unwrap();
-        assert!(pipeline.base_manifest.lock().await.is_none());
+        let error = pipeline
+            .read_base_manifest()
+            .await
+            .expect_err("direct push must not synthesize generation zero");
 
-        let (manifest, bulk) = pipeline.build_manifest().await.unwrap();
-        assert_eq!(manifest.generation, 1);
-        // `resolve_local_head` reads the repo's actual HEAD via
-        // `gix-ref`. In this process that's the crab workspace's
-        // current branch (varies by developer), so we assert on the
-        // shape, not the exact value. When HEAD can't be resolved
-        // (detached HEAD, discovery fails) the manifest falls back
-        // to `refs/heads/main`, which is also valid.
         assert!(
-            manifest.head.starts_with("refs/heads/") || manifest.head == "refs/heads/main",
-            "seed HEAD should be a refs/heads/ ref, got {:?}",
-            manifest.head
+            matches!(error, CrabError::CorruptObject { ref reason, .. } if reason.contains("crab init"))
         );
-        assert!(manifest.refs.is_empty());
-
-        assert!(bulk.shard_index.segments.is_empty());
+        assert!(pipeline.base_manifest.lock().await.is_none());
     }
 
     #[tokio::test]

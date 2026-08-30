@@ -284,7 +284,7 @@ pub fn run_dehydrate_in(
 /// Priority: `--all` > positional globs > `None` (print help).
 fn resolve_patterns(args: &DehydrateArgs) -> Result<Option<PatternFilter>> {
     if args.all {
-        let filter = build_filter(&["**/*".to_owned()], &[])?;
+        let filter = build_all_filter()?;
         return Ok(Some(filter));
     }
 
@@ -294,6 +294,12 @@ fn resolve_patterns(args: &DehydrateArgs) -> Result<Option<PatternFilter>> {
     }
 
     Ok(None)
+}
+
+fn build_all_filter() -> Result<PatternFilter> {
+    // Git pathspec `**/*` excludes repository-root files; bare `*`
+    // matches both root and nested paths.
+    build_filter(&["*".to_owned()], &[])
 }
 
 /// Build a [`GlobSet`] from the `always` prefetch profile, if present.
@@ -1852,6 +1858,17 @@ mod tests {
     }
 
     // --- walk_hydrated_files tests ---
+
+    #[test]
+    fn resolve_all_matches_root_and_nested_files() {
+        let args = DehydrateArgs {
+            all: true,
+            ..default_args()
+        };
+        let filter = resolve_patterns(&args).unwrap().unwrap();
+        assert!(filter.matches("root.bin"));
+        assert!(filter.matches("nested/model.bin"));
+    }
 
     #[test]
     fn walk_collects_hydrated_files_only() {

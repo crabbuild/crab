@@ -25,7 +25,7 @@ pub const DEFAULT_GC_FENCE_TTL: Duration = Duration::from_secs(300);
 pub const GC_FENCE_MAX_WRITERS: usize = 64;
 /// Minimum quarantine retained after an ungraceful writer expiry.
 pub const DEFAULT_GC_FENCE_QUARANTINE: Duration = Duration::from_secs(24 * 60 * 60);
-const GC_FENCE_SCHEMA_VERSION: u32 = 2;
+pub const GC_FENCE_SCHEMA_VERSION: u32 = 1;
 const GC_FENCE_MAX_CAS_ATTEMPTS: usize = 32;
 const GC_FENCE_MAX_QUARANTINES: usize = 64;
 
@@ -67,7 +67,6 @@ enum GcFenceModeWire {
 struct GcFenceState {
     schema_version: u32,
     epoch: u64,
-    #[serde(default)]
     writer_epoch: u64,
     writers: Vec<GcFenceHolder>,
     sweep: Option<GcFenceHolder>,
@@ -78,7 +77,6 @@ struct GcFenceState {
     /// the state reached its quarantine bound, allowing a sweep to pass an
     /// uncertain writer. Keeping one deadline preserves safety without
     /// making the fence state grow with crashed writers.
-    #[serde(default)]
     quarantine_block_until_backend: Option<i64>,
 }
 

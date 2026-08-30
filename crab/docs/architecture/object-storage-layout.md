@@ -1,4 +1,4 @@
-# Object Storage Layout V2
+# Canonical Object Storage Layout V1
 
 This document is the normative, provider-neutral contract for Crab object
 keys. It covers the core bucket-global and repository-local namespaces used by
@@ -110,13 +110,13 @@ s3://{bucket}/
 └── {repo-b}/...
 ```
 
-### V2 hard cutover
+### Canonical v1 hard cutover
 
-V2 readers and writers accept only the fan-out xorb and shard keys above.
-Flat V1 keys such as `.crab/xorbs/{hash}` and `.crab/shards/{hash}` are not
-read, rewritten, or collected. Operators must stop V1 writers and re-upload
-repositories with a V2 client; there is no dual-read or in-place migration
-path.
+Canonical v1 readers and writers accept only the fan-out xorb and shard keys
+above. Retired pre-cutover keys such as `.crab/xorbs/{hash}` and
+`.crab/shards/{hash}` are not read, rewritten, or collected. Operators must
+stop pre-cutover writers and re-add repositories with a canonical v1 client;
+there is no dual-read or in-place migration path.
 
 The partitioned ref registry is also a hard cutover. Operators MUST stop
 writers that use the aggregate `.crab/ref-registry` object, upgrade every
@@ -143,7 +143,8 @@ Paths are relative to `repo_prefix`.
 | `packs/pack-{pack-id}.kinds` | compact object-kind proof ordered by pack offset and bound to the Git pack checksum and object count | Immutable, idempotent create |
 | `file_index_db/` | `crab-metadata`: file-to-shard SlateDB | Opaque; SlateDB owns children |
 | `git_object_catalog_db/` | `crab-metadata`: generation-bound Git object catalog | Opaque; SlateDB owns children and immutable digest-named checkpoints |
-| `metadata/git-visibility/v3/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
+| `metadata/git-visibility/v1/digest/{validation-digest}.json` | `crab-metadata`: visibility closures with an embedded object dictionary | Immutable, idempotent create |
+| `metadata/git-visibility/v1/catalog/{validation-digest}.json` | `crab-metadata`: visibility closures over catalog ordinals | Immutable, idempotent create |
 | `metadata/git-visibility-pending/v1/{validation-digest}.json` | `crab-metadata`: catalog-ordinal visibility delta awaiting owner catalog publication | Immutable, current-manifest recovery root |
 | `manifests/commit-graph-{blake3}` | complete split commit-graph descriptor pinned by `manifest` | Immutable |
 | `metadata/commit-graph/layers/{blake3}.bin` | positional commit records and parent ordinals | Immutable |
@@ -154,9 +155,9 @@ Paths are relative to `repo_prefix`.
 | `protected-push-sessions/{push-id}.{json,verified.json}` | protected-push prepare state and verified source materialization | Ephemeral, service-owned |
 
 The `manifest` is authoritative. Physical `refs/`, `HEAD`, `pack-list`, or
-`shard-list` objects are compatibility or feature-owned surfaces, not an
-alternate source of truth. Commit-graph layers are trusted only through the
-descriptor hash pinned by that manifest.
+`shard-list` objects are auxiliary feature-owned surfaces, not an alternate
+source of truth or a compatibility reader. Commit-graph layers are trusted
+only through the descriptor hash pinned by that manifest.
 
 The opaque `git_object_catalog_db/` also contains a derived pack-slot
 membership keyspace used only by the exclusive locator writer. It maps each

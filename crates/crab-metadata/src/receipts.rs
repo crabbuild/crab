@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MetadataError, Result};
 
-pub const RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const COMMITTED_CHUNK_PLACEMENT_ENCODED_LEN: usize = 140;
 
 fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -128,7 +128,7 @@ impl OriginReceipt {
     #[must_use]
     pub fn proof_id(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"crab origin proof v2\0");
+        hasher.update(b"crab origin proof v1\0");
         hasher.update(&self.schema_version.to_le_bytes());
         field(&mut hasher, self.namespace.as_bytes());
         field(&mut hasher, self.object_key.as_bytes());
@@ -183,7 +183,7 @@ impl SourceAnchor {
     #[must_use]
     pub fn anchor_id(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"crab source anchor v2\0");
+        hasher.update(b"crab source anchor v1\0");
         hasher.update(&self.schema_version.to_le_bytes());
         field(&mut hasher, self.source_repo_prefix.as_bytes());
         hasher.update(&self.source_shard_hash);
@@ -313,7 +313,7 @@ impl CommittedChunkPlacement {
     #[must_use]
     pub fn placement_id(&self) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"crab committed chunk placement v2\0");
+        hasher.update(b"crab committed chunk placement v1\0");
         hasher.update(&self.schema_version.to_le_bytes());
         hasher.update(&self.chunk_hash);
         hasher.update(&self.xorb_hash);

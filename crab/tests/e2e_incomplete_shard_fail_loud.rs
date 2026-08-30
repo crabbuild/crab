@@ -16,8 +16,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    deprecated,
-    reason = "test assertions; exercises the deprecated RefPushOutcome::Error path"
+    reason = "test assertions"
 )]
 
 use std::io::{self, Write};
@@ -76,6 +75,10 @@ impl RecordingStore {
     /// Snapshot the recorded PUT paths.
     fn puts(&self) -> Vec<String> {
         self.puts.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn clear_puts(&self) {
+        self.puts.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     fn record(&self, path: &ObjectPath) {
@@ -434,6 +437,13 @@ async fn push_single_file(
     let store = Store::new(inner);
 
     let router = StoreLayout::new(store.clone(), SINGLE_PREFIX.to_owned());
+    crab::core::remote_layout::initialize(&store, &router)
+        .await
+        .expect("initialize canonical layout");
+    crab::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+        .await
+        .expect("initialize canonical manifest");
+    recording.clear_puts();
 
     let specs = vec![PushSpec {
         force: false,
@@ -454,17 +464,15 @@ async fn push_single_file(
     )
     .await;
 
-    // `run_push_batch` always returns Ok at the Rust level; per-ref
-    // errors are surfaced via `RefPushOutcome::Error`. Extract the
-    // message for the only ref we pushed so the caller can branch on
-    // ok vs. loud-error.
+    // `run_push_batch` reports failures per ref. Extract the structured
+    // rejection for the only ref so the caller can branch on success
+    // versus a loud error.
     let push_error_message =
         result
             .outcomes
             .get("refs/heads/main")
             .and_then(|outcome| match outcome {
                 crab::git::push::RefPushOutcome::Ok => None,
-                crab::git::push::RefPushOutcome::Error(msg) => Some(msg.clone()),
                 crab::git::push::RefPushOutcome::Rejected(reason) => Some(reason.to_string()),
             });
 
@@ -833,6 +841,13 @@ async fn push_batch_of_five_files_is_reconstructible_or_fails_loud() {
     let inner: Arc<dyn ObjectStore> = Arc::new(recording.clone());
     let store = Store::new(inner);
     let router = StoreLayout::new(store.clone(), BATCH_PREFIX.to_owned());
+    crab::core::remote_layout::initialize(&store, &router)
+        .await
+        .expect("initialize canonical layout");
+    crab::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+        .await
+        .expect("initialize canonical manifest");
+    recording.clear_puts();
 
     let specs = vec![PushSpec {
         force: false,
@@ -858,7 +873,6 @@ async fn push_batch_of_five_files_is_reconstructible_or_fails_loud() {
         .get("refs/heads/main")
         .and_then(|o| match o {
             crab::git::push::RefPushOutcome::Ok => None,
-            crab::git::push::RefPushOutcome::Error(m) => Some(m.clone()),
             crab::git::push::RefPushOutcome::Rejected(reason) => Some(reason.to_string()),
         });
 

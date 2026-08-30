@@ -11,7 +11,7 @@ use crate::storage::store::Store;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::ShardReader;
 
-pub const CLOSURE_SCHEMA_VERSION: u32 = 2;
+pub const CLOSURE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_CLOSURE_BYTES: usize = 8 * 1024 * 1024;
 pub const CLOSURE_HASHES_PER_SEGMENT: usize = 4096;
 const MAX_CLOSURE_SEGMENT_BYTES: usize = 1024 * 1024;

@@ -103,15 +103,8 @@ pub fn build_ref_edits(
             // for `Delete` per gix-ref docs.
             let expected = match prior_tips.get(&spec.dst) {
                 Some(prev) if !spec.force && !prev.is_empty() => {
-                    // Malformed prior SHAs (non-hex, wrong length)
-                    // come from legacy manifests predating strict
-                    // validation. Downgrade to `Any` rather than
-                    // failing the push — the S3 CAS will still
-                    // catch real conflicts via its own ETag path.
-                    match parse_sha_opt(prev) {
-                        Some(oid) => PreviousValue::MustExistAndMatch(Target::Object(oid)),
-                        None => PreviousValue::Any,
-                    }
+                    let oid = parse_sha(prev, &spec.dst)?;
+                    PreviousValue::MustExistAndMatch(Target::Object(oid))
                 }
                 _ => PreviousValue::Any,
             };
@@ -138,13 +131,9 @@ pub fn build_ref_edits(
                 PreviousValue::Any
             } else {
                 match prior_tips.get(&spec.dst) {
-                    Some(prev) if !prev.is_empty() => match parse_sha_opt(prev) {
-                        Some(prev_oid) => {
-                            PreviousValue::MustExistAndMatch(Target::Object(prev_oid))
-                        }
-                        // Same legacy-SHA tolerance as for deletes.
-                        None => PreviousValue::Any,
-                    },
+                    Some(prev) if !prev.is_empty() => PreviousValue::MustExistAndMatch(
+                        Target::Object(parse_sha(prev, &spec.dst)?),
+                    ),
                     _ => PreviousValue::MustNotExist,
                 }
             };
@@ -231,15 +220,6 @@ pub fn dst_name(edit: &RefEdit) -> String {
 fn parse_sha(sha: &str, context: &str) -> Result<ObjectId> {
     ObjectId::from_hex(sha.as_bytes())
         .map_err(|e| CrabError::Internal(format!("invalid SHA '{sha}' for '{context}': {e}")))
-}
-
-/// Best-effort variant of [`parse_sha`] used for prior-tip values
-/// read from the manifest. Returns `None` on parse failure instead
-/// of producing an error — the caller handles the miss by falling
-/// back to `PreviousValue::Any`, which keeps a malformed legacy
-/// manifest entry from blocking a push.
-fn parse_sha_opt(sha: &str) -> Option<ObjectId> {
-    ObjectId::from_hex(sha.as_bytes()).ok()
 }
 
 #[cfg(test)]
@@ -329,6 +309,28 @@ mod tests {
             } => {}
             other => panic!("expected Update with MustExistAndMatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn malformed_prior_tip_is_rejected() {
+        let specs = vec![spec(false, "refs/heads/main", "refs/heads/main")];
+        let mut sha_map = HashMap::new();
+        sha_map.insert("refs/heads/main".to_owned(), sha(0x22));
+        let prior = HashMap::from([("refs/heads/main".to_owned(), "invalid".to_owned())]);
+
+        let error = build_ref_edits(&specs, &sha_map, &prior).unwrap_err();
+
+        assert!(error.to_string().contains("invalid SHA"));
+    }
+
+    #[test]
+    fn malformed_prior_tip_rejects_delete() {
+        let specs = vec![spec(false, "", "refs/heads/old")];
+        let prior = HashMap::from([("refs/heads/old".to_owned(), "invalid".to_owned())]);
+
+        let error = build_ref_edits(&specs, &HashMap::new(), &prior).unwrap_err();
+
+        assert!(error.to_string().contains("invalid SHA"));
     }
 
     #[test]

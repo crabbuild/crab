@@ -582,7 +582,7 @@ fn uninstall_completions() {
 /// append detection.
 const MIRROR_HOOK_MARKER: &str = "# Crab mirror:";
 
-pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh\n# Crab mirror: push xorbs before refs go to origin\ncrab add . --skip-git-add 2>/dev/null\ncrab push --remote crab --quiet 2>/dev/null\n";
+pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh\n# Crab mirror: push published pointer recipes before refs go to origin\ncrab push --remote crab --quiet 2>/dev/null\n";
 
 /// Hook definitions for mirror mode: (hook_name, content_lines).
 const MIRROR_HOOKS: &[(&str, &str)] = &[

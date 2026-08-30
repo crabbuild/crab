@@ -1,5 +1,9 @@
 # Plan 003: Persist and consume complete shard closures
 
+> **Hard-cutover rule**: consume only the canonical Crab-owned shard v1
+> contract established by Plan 013. Delete v2 fixtures/readers rather than
+> qualifying both formats.
+
 > **Executor instructions**: Follow every step and verification gate. Stop and
 > report if a closure cannot be proven complete; do not silently fall back to a
 > full shard scan for destructive GC. Update `plans/README.md` when complete.
@@ -14,16 +18,17 @@
 - **Effort**: L
 - **Risk**: HIGH
 - **Depends on**: `plans/001-close-writer-gc-fence.md`,
-  `plans/002-durable-bounded-gc-engine.md`
+  `plans/002-durable-bounded-gc-engine.md`, and
+  `plans/013-dependency-closed-shard-partitioning.md`
 - **Category**: perf
 - **Planned at**: commit `b738f3b2`, 2026-08-22
 
 ## Delivery status
 
 Partial implementation in this branch: immutable strict closure sidecars are
-published at current shard writers, consumed by destructive bucket GC, cleaned
-when their source shard is deleted, and backfilled by
-`crab gc --scope=bucket --repair-closures`. Sidecar decode and concurrent
+published at current shard writers, consumed by destructive bucket GC, and
+cleaned when their source shard is deleted. The repair/backfill path is obsolete
+under the no-user hard cutover and must be deleted. Sidecar decode and concurrent
 closure reads have explicit byte budgets. Coverage markers, segmented
 closures, and durable repair progress are still pending; oversized closures
 fail closed until segmentation is delivered.
@@ -35,7 +40,7 @@ parses it twice to discover live xorb and file hashes. That makes recurring GC
 read I/O proportional to all retained data, not to changed roots, and keeps
 large shard bodies in memory during the mark phase. The current shard writer and
 reader already know the complete relationships; persist that verified closure
-once, backfill existing repositories explicitly, and make closure coverage a
+once from repository genesis and make closure coverage a
 hard deletion precondition.
 
 ## Current state
@@ -45,10 +50,9 @@ hard deletion precondition.
   (`crab/src/cmd/gc/bucket.rs:203-327`, `:748-842`). The function downloads the
   entire body, verifies the Merkle hash, reads xorb blocks, then reads file-info
   sections from the same bytes.
-- `crates/crab-xet/src/shard.rs:168-390` supports lazy v1/v2 `ShardReader`,
-  and v2 bloom trailers are available to read paths, but no durable closure
-  object exists. A bloom is only a negative prefilter; it is not a complete
-  xorb/file relationship.
+- `crates/crab-xet/src/shard.rs:168-390` currently contains v1/v2 reader
+  branches. Plan 013 hard-cuts this to canonical v1 before closure work. A
+  bloom is only a negative prefilter; it is not a complete xorb/file relationship.
 - Current push sessions produce and upload shards in
   `crab/src/git/push.rs:1100-1188` and track uploaded hashes before manifest
   publication (`:7160-7260`). Protected receive and recovery/restripe have
@@ -62,7 +66,7 @@ hard deletion precondition.
 
 ## Closure contract
 
-Define a versioned immutable `ShardClosureManifest` keyed by the exact shard
+Define a canonical-v1 immutable `ShardClosureManifest` keyed by the exact shard
 content hash. It must contain:
 
 - schema/parser version, shard hash, byte length, and verified content digest;
@@ -88,7 +92,7 @@ corrupt, not “best effort.”
 
 | Purpose | Command | Expected on success |
 |---|---|---|
-| Shard tests | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab-xet --locked shard` | v1/v2 reader/writer tests pass |
+| Shard tests | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab-xet --locked shard` | canonical v1 reader/writer tests pass; non-v1 rejected |
 | Metadata tests | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab-metadata --locked ref_registry` | coverage/CAS tests pass |
 | GC closure tests | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab --lib --locked shard_closure` | closure and no-body-GET tests pass |
 | Bucket GC tests | `CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-main cargo test -p crab --lib --locked cmd::gc::bucket` | bucket suite passes |
@@ -105,13 +109,12 @@ corrupt, not “best effort.”
 - direct push, protected receive, recovery restore, restripe reconcile, and
   any other production shard writer from Plan 001's writer map
 - `crab/src/cmd/gc/bucket.rs`, `crab/src/cmd/gc/mod.rs`, CLI wiring, and tests
-- an explicit resumable `gc --repair-closures`/equivalent administrative path
-  that uses Plan 001's fence and Plan 002's run journal
+- canonical-v1 initialization/registry coverage that begins complete at genesis
 - current storage/recovery/web documentation
 
 **Out of scope**:
 
-- changing shard bytes or the current v1/v2 shard format
+- changing immutable xorb payload bytes or canonical shard-v1 semantics
 - replacing the manifest or ref-registry as the root of truth
 - using a bloom filter as a complete closure
 - PB shard/recipe/partition layouts
@@ -127,7 +130,7 @@ and matching source/segment digests. Provide streaming encode/decode APIs that
 never require all file entries in one `Vec`. Add canonical path builders and
 content-addressed create-if-absent writes through the current `Store`.
 
-Write v1 and v2 fixtures from `crab-xet` and assert that the closure contains
+Write canonical v1 fixtures from `crab-xet` and assert that the closure contains
 every xorb block and every file-info entry. Include empty and multi-segment
 shards, duplicate entries, malformed hashes, truncated segments, wrong source
 hash, count mismatch, and future schema cases.
@@ -161,26 +164,19 @@ visible without a valid closure; retrying the same shard is idempotent;
 closure-generation errors leave no new committed root. Run the coordination,
 receive, GC, and writer tests from Plan 001.
 
-### Step 3: Add explicit resumable backfill and coverage proof
+### Step 3: Make closure coverage complete from genesis
 
-Add a bucket administrative operation (for example
-`crab gc --repair-closures --bucket <bucket>`) that enumerates the current and
-historical shard roots from the complete ref-registry, reads each shard once,
-writes/validates its closure, and records progress in the Plan 002 run journal.
-Use bounded concurrency, Plan 001's global/repo fence ordering, cancellation,
-and process-death resume. Never mark coverage complete after a partial scan.
+Extend canonical `RefRegistry` v1 with a required closure coverage identity
+(digest, generation, and covered shard-root frontier). Repository initialization
+starts with complete empty coverage; every shard writer atomically advances it.
+Delete repair/backfill commands, serde defaults, and missing-field compatibility
+branches. A non-v1 or incomplete registry fails closed and the development
+repository must be reinitialized.
 
-Extend `RefRegistry` with a schema-versioned closure coverage identity (run
-ID/digest/generation and covered shard-root frontier). Preserve serde defaults
-for existing registries, but destructive bucket GC must require current schema,
-complete registry coverage, and matching closure coverage. Registry repair and
-closure repair must union roots rather than clear a concurrent writer's
-conservative entries.
-
-**Verify**: backfill tests cover empty registries, current/history roots,
-multi-repo shared shards, cancellation, process death, duplicate retry,
-missing/corrupt shard, registry CAS conflict, and a concurrent writer. An
-incomplete or stale coverage marker makes destructive GC fail closed.
+**Verify**: tests cover empty genesis, current/history roots, multi-repo shared
+shards, cancellation, process death, duplicate retry, missing/corrupt shard,
+registry CAS conflict, and a concurrent writer. Incomplete/stale coverage makes
+destructive GC fail before any deletion.
 
 ### Step 4: Replace bucket shard downloads with closure streaming
 
@@ -192,7 +188,7 @@ corrupt, schema-unknown, or coverage-mismatched closure returns a structured
 configuration/corrupt-object error before any delete batch. Do not silently
 download the shard as a fallback.
 
-Retain full shard verification for `fsck` and explicit closure repair. Keep
+Retain full shard verification for `fsck`. Keep
 closure objects live while their source shard or historical root is live; add
 closure candidates to bucket GC only when no corresponding shard root remains,
 using the same grace/fence/run journal as other global objects.
@@ -219,10 +215,10 @@ invariants.
 
 ## Test plan
 
-- Strict closure format/property tests for v1/v2 shards and segmented streams.
+- Strict closure format/property tests for canonical v1 shards and segmented streams.
 - Writer publication tests for direct, protected, recovery, restripe,
   replication, and any newly discovered shard writer.
-- Backfill resume/failure/CAS/coverage tests with multiple repositories.
+- Genesis coverage/failure/CAS tests with multiple repositories.
 - Instrumented stores measuring referenced-shard body GETs and closure GETs.
 - Differential GC tests comparing closure mark results with full `ShardReader`
   extraction on generated multi-shard repositories.
@@ -233,8 +229,8 @@ invariants.
 - [ ] Every canonical shard publication writes one verified immutable closure
       before root publication; no writer-map row is exempt without a documented
       read-only reason.
-- [ ] Existing repositories have an explicit resumable closure backfill and a
-      durable, scope-matched coverage proof.
+- [ ] Canonical v1 repositories have complete closure coverage from genesis;
+      non-v1 repositories are rejected and reinitialized.
 - [ ] Destructive bucket GC fails closed on missing/corrupt/stale coverage and
       performs zero referenced-shard body GETs when coverage is complete.
 - [ ] Closure/file-index streams obey explicit row/byte/memory budgets.
@@ -245,11 +241,11 @@ invariants.
 
 ## STOP conditions
 
-- The closure cannot represent every current v1/v2 xorb and file relationship
+- The closure cannot represent every canonical v1 xorb and file relationship
   without changing shard bytes or using an unbounded record.
 - A writer can publish a shard root before its closure or cannot acquire the
   Plan 001 global fence.
-- Backfill cannot distinguish complete from partial coverage after interruption.
+- Genesis/writer publication cannot distinguish complete from partial coverage after interruption.
 - A closure mismatch would be handled by a permissive full-shard fallback in a
   destructive run.
 - A file-index differential test disagrees with full-shard extraction.

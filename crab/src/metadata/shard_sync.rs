@@ -400,7 +400,7 @@ impl ShardSynchronizer {
             return Ok(stats);
         }
 
-        // Apply bloom-first filtering: for shards with a v2 bloom trailer,
+        // Apply bloom-first filtering: for shards with a v1 bloom trailer,
         // download only the bloom section and skip the full shard when the
         // bloom reports no matches against the query hashes.
         let to_download = self.bloom_filter_delta(to_download, &mut stats).await;
@@ -569,13 +569,13 @@ impl ShardSynchronizer {
     /// Apply bloom-first filtering to the delta set.
     ///
     /// For each shard in the download list, reads a small suffix via Range
-    /// GET to check for a v2 bloom trailer. If a bloom exists, downloads
+    /// GET to check for a v1 bloom trailer. If a bloom exists, downloads
     /// only the bloom section and queries it with the push's chunk hashes.
     /// Shards whose bloom reports no matches are skipped entirely.
     ///
     /// Falls back to full download when:
     /// - No query hashes were provided (bloom filtering disabled)
-    /// - The shard has no v2 bloom trailer
+    /// - The shard has no v1 bloom trailer
     /// - The bloom download or parse fails
     /// - The bloom reports possible matches
     async fn bloom_filter_delta(
@@ -870,7 +870,7 @@ impl ShardSynchronizer {
             )));
         }
 
-        let mut cursor = std::io::Cursor::new(strip_v2_trailer(data));
+        let mut cursor = std::io::Cursor::new(strip_bloom_trailer(data));
         let shard_file_cache = new_shard_file_cache();
         let shard_file = MDBShardFile::write_out_from_reader(dir, &mut cursor, &shard_file_cache)
             .map_err(|e| {
@@ -934,7 +934,7 @@ async fn download_one_shard(
 /// Returns `Ok(true)` when the bloom definitively reports no matches
 /// (the shard can be skipped). Returns `Ok(false)` when the bloom
 /// reports possible matches, the shard has no bloom, or the shard is too
-/// small for a v2 trailer. Returns `Err` on I/O or parse failures (the
+/// small for a v1 trailer. Returns `Err` on I/O or parse failures (the
 /// caller should fall back to a full download).
 ///
 /// Thin wrapper over the shared pre-filter in
@@ -985,7 +985,7 @@ fn extract_dedup_eligible_entries(
     data: &Bytes,
 ) -> Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)> {
     use std::collections::HashSet;
-    let v1_data = strip_v2_trailer(data);
+    let v1_data = strip_bloom_trailer(data);
     let mut cursor = std::io::Cursor::new(v1_data);
 
     let shard = match MDBMinimalShard::from_reader(&mut cursor, true, true) {
@@ -1028,11 +1028,9 @@ fn extract_dedup_eligible_entries(
     entries
 }
 
-/// Strip the v2 bloom trailer from shard bytes, returning the v1 portion.
-///
-/// For v1 shards (no bloom trailer), returns the full slice unchanged.
-fn strip_v2_trailer(data: &[u8]) -> &[u8] {
-    crab_xet::shard_parse::strip_v2_trailer(data)
+/// Return the xet shard body without Crab's optional canonical v1 bloom trailer.
+fn strip_bloom_trailer(data: &[u8]) -> &[u8] {
+    crab_xet::shard_parse::strip_bloom_trailer(data)
 }
 
 fn install_chunk_index_shard(
@@ -1065,11 +1063,11 @@ fn install_chunk_index_shard(
 /// function uses `repo_hash` for repo-scoped shard state and the store's
 /// bucket identity for the globally shared chunk-index cache.
 ///
-/// Failures are intentionally non-fatal: a missing manifest, a 404 on
-/// an individual shard, or a corrupt cache entry all produce a
-/// `warn!` and let the caller proceed. The local cache is an
-/// optimisation; correctness still comes from lazy-on-miss lookups
-/// against the remote `chunk_index_db` on the next push.
+/// Repository snapshot failures are returned to the caller. Clone/fetch may
+/// report them as a post-fetch cache-warming warning only after the canonical
+/// repository snapshot has already been admitted. Individual shard and local
+/// cache failures remain optimisation misses; correctness comes from
+/// lazy-on-miss lookups against the remote `chunk_index_db` on the next push.
 pub async fn run_post_fetch_shard_sync(
     router: StoreLayout,
     repo_hash: &str,
@@ -1607,17 +1605,17 @@ mod tests {
 
     // --- Bloom-first filtering tests ---
 
-    /// Build a v2 shard with a bloom filter from the given chunk hashes.
+    /// Build a canonical v1 shard with a bloom filter.
     /// Returns `(shard_bytes, shard_hash)`.
-    fn build_v2_shard(chunk_hashes: &[MerkleHash]) -> (Vec<u8>, MerkleHash) {
+    fn build_bloom_shard(chunk_hashes: &[MerkleHash]) -> (Vec<u8>, MerkleHash) {
         use crab_xet::shard::ShardWriter;
 
         let w = ShardWriter::new();
         w.finalize_with_bloom(&[], chunk_hashes).unwrap()
     }
 
-    /// Build a v1 shard (no bloom). Returns `(shard_bytes, shard_hash)`.
-    fn build_v1_shard() -> (Vec<u8>, MerkleHash) {
+    /// Build a canonical v1 shard without the optional bloom.
+    fn build_plain_shard() -> (Vec<u8>, MerkleHash) {
         use crab_xet::shard::ShardWriter;
 
         let w = ShardWriter::new();
@@ -1659,7 +1657,7 @@ mod tests {
     async fn bloom_filter_skips_shard_when_no_chunk_matches() {
         let (router, cache, _dir) = setup();
 
-        // Build a v2 shard with 500 chunk hashes to create a large bloom
+        // Build a bloom shard with 500 chunk hashes to create a large bloom
         // filter where false positives for unrelated hashes are negligible.
         let shard_chunks: Vec<MerkleHash> = (10_000..10_500)
             .map(|i: u64| {
@@ -1671,7 +1669,7 @@ mod tests {
                 ])
             })
             .collect();
-        let (shard_bytes, shard_hash) = build_v2_shard(&shard_chunks);
+        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
 
         let obj_path = router.shard_path(&shard_hash);
         router
@@ -1705,7 +1703,7 @@ mod tests {
     async fn bloom_filter_downloads_shard_when_chunk_may_match() {
         let (router, cache, _dir) = setup();
 
-        // Build a v2 shard whose bloom contains 100 chunk hashes.
+        // Build a shard whose bloom contains 100 chunk hashes.
         let shard_chunks: Vec<MerkleHash> = (1000..1100)
             .map(|i: u64| {
                 MerkleHash::from([
@@ -1716,7 +1714,7 @@ mod tests {
                 ])
             })
             .collect();
-        let (shard_bytes, shard_hash) = build_v2_shard(&shard_chunks);
+        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
 
         let obj_path = router.shard_path(&shard_hash);
         router
@@ -1750,8 +1748,8 @@ mod tests {
     async fn bloom_filter_falls_back_for_v1_shard() {
         let (router, cache, _dir) = setup();
 
-        // Build a v1 shard (no bloom).
-        let (shard_bytes, shard_hash) = build_v1_shard();
+        // Build a canonical v1 shard without a bloom.
+        let (shard_bytes, shard_hash) = build_plain_shard();
 
         let obj_path = router.shard_path(&shard_hash);
         router
@@ -1760,7 +1758,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Even with query hashes set, v1 shards should be downloaded normally.
+        // Even with query hashes set, no-bloom shards download normally.
         let query: HashSet<MerkleHash> =
             (200..210).map(|i| MerkleHash::from([i, i, i, i])).collect();
 
@@ -1789,7 +1787,7 @@ mod tests {
                 ])
             })
             .collect();
-        let (shard_bytes, shard_hash) = build_v2_shard(&shard_chunks);
+        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
 
         let obj_path = router.shard_path(&shard_hash);
         router
@@ -1877,7 +1875,7 @@ mod tests {
     async fn bloom_filter_disabled_without_query_hashes() {
         let (router, cache, _dir) = setup();
 
-        // Build a v2 shard with bloom.
+        // Build a canonical v1 shard with a bloom.
         let shard_chunks: Vec<MerkleHash> = (1000..1100)
             .map(|i: u64| {
                 MerkleHash::from([
@@ -1888,7 +1886,7 @@ mod tests {
                 ])
             })
             .collect();
-        let (shard_bytes, shard_hash) = build_v2_shard(&shard_chunks);
+        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
 
         let obj_path = router.shard_path(&shard_hash);
         router
@@ -1916,8 +1914,8 @@ mod tests {
         let (router, cache, dir) = setup();
         let shard_cache_dir = dir.path().join("repos").join("testhash").join("shards");
 
-        // Build a valid v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_v1_shard();
+        // Build a valid plain v1 shard and upload it.
+        let (shard_bytes, shard_hash) = build_plain_shard();
         let obj_path = router.shard_path(&shard_hash);
         router
             .store()
@@ -1958,8 +1956,8 @@ mod tests {
         let (router, cache, dir) = setup();
         let shard_cache_dir = dir.path().join("repos").join("testhash").join("shards");
 
-        // Build a valid v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_v1_shard();
+        // Build a valid plain v1 shard and upload it.
+        let (shard_bytes, shard_hash) = build_plain_shard();
         let obj_path = router.shard_path(&shard_hash);
         router
             .store()
@@ -1986,8 +1984,8 @@ mod tests {
     async fn shard_falls_back_to_memory_without_shard_cache_dir() {
         let (router, cache, _dir) = setup();
 
-        // Build a valid v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_v1_shard();
+        // Build a valid plain v1 shard and upload it.
+        let (shard_bytes, shard_hash) = build_plain_shard();
         let obj_path = router.shard_path(&shard_hash);
         router
             .store()

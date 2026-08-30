@@ -723,7 +723,7 @@ mod tests {
             ),
             segments: vec![FileDataSequenceEntry::new(
                 MerkleHash::from([1u64, 1, 1, 1]), // references xorb seed=1
-                4096u32,
+                1024u32,
                 0u32,
                 1u32,
             )],
@@ -810,7 +810,7 @@ mod tests {
             ),
             segments: vec![FileDataSequenceEntry::new(
                 MerkleHash::from([1u64, 1, 1, 1]),
-                4096u32,
+                1024u32,
                 0u32,
                 1u32,
             )],

@@ -264,7 +264,7 @@ pub fn compute_remote_object_set(
 /// Generate a push pack containing only objects not in the remote set.
 ///
 /// When `remote_objects` is `Some`, objects in that set are excluded from
-/// the generated pack. When `None`, a full pack is generated (fallback).
+/// the generated pack. When `None`, a complete pack is generated.
 ///
 /// When `config.thin_packs` is `true`, the pack is marked as thin and
 /// delta base references against remote objects are permitted. Before
@@ -284,9 +284,9 @@ pub async fn generate_push_pack(
 
 /// Generate a push pack using a remote reachability boundary.
 ///
-/// Ref-tip exclusions avoid materializing every remote object ID for
-/// modern pack manifests. Exact object exclusions remain available for
-/// legacy manifests and thin-pack base verification.
+/// Ref-tip exclusions avoid materializing every remote object ID when the
+/// committed frontier is locally available. Exact object exclusions remain
+/// available for locator probes and thin-pack base verification.
 pub async fn generate_push_pack_with_exclusions(
     local_refs: &[RefUpdate],
     remote_exclusions: Option<RemotePackExclusions<'_>>,
@@ -320,9 +320,8 @@ pub async fn generate_push_pack_with_exclusions(
 
     // Use `git pack-objects` to create a real pack file containing all
     // objects reachable from the push tips but not reachable from the
-    // remote boundary. The boundary is normally ref tips from the
-    // manifest; legacy manifests fall back to exact object IDs parsed
-    // from local pack indexes.
+    // remote boundary. The boundary is either manifest ref tips or exact
+    // object IDs proven by the canonical locator/local pack indexes.
     let exact_remote_objects = match remote_exclusions {
         Some(RemotePackExclusions::ExactObjects(objects)) => Some(objects),
         _ => None,

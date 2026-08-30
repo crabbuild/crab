@@ -55,14 +55,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
-use tracing::debug;
-
 use crate::core::error::{CrabError, Result};
+use rusqlite::{Connection, OptionalExtension, params};
 
-/// On-disk schema identifier. Increment when the SQL layout changes
-/// in a way that earlier readers cannot tolerate.
-const SCHEMA_VERSION: &str = "3";
+/// Canonical on-disk schema identifier.
+pub const IMPORT_JOURNAL_SCHEMA_VERSION: &str = "1";
+const SCHEMA_DESCRIPTOR: &str = "plan-v1;entries-v1;lfs-resolutions-v1;journal-meta-v1";
 
 /// Integer encoding of [`SourceModeTag`] for the `plan.source_mode`
 /// column. Kept stable across releases; new modes append.
@@ -297,8 +295,7 @@ impl Journal {
     /// Open (or create) the journal at `{into}/.crab/import-journal.db`.
     ///
     /// Creates the `.crab/` parent directory as needed, enables
-    /// WAL mode, applies the schema, and seeds the schema-version
-    /// marker on first open.
+    /// WAL mode, and initializes one canonical v1 schema on first open.
     pub fn open(into: &Path) -> Result<Self> {
         let dir = into.join(".crab");
         fs::create_dir_all(&dir).map_err(|e| {
@@ -308,6 +305,22 @@ impl Journal {
             ))
         })?;
         let path = dir.join("import-journal.db");
+        let existed = path.exists();
+
+        if existed {
+            let readonly = Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|e| {
+                CrabError::Internal(format!(
+                    "failed to inspect import journal at {}: {e}",
+                    path.display()
+                ))
+            })?;
+            validate_schema(&readonly, &path)?;
+        }
 
         let conn = Connection::open(&path).map_err(|e| {
             CrabError::Internal(format!(
@@ -329,14 +342,18 @@ impl Journal {
             .map_err(|e| CrabError::Internal(format!("enable foreign_keys: {e}")))?;
 
         let journal = Self { conn, path };
-        journal.run_migrations()?;
+        if existed {
+            validate_schema(&journal.conn, &journal.path)?;
+        } else {
+            journal.initialize_schema()?;
+        }
         Ok(journal)
     }
 
-    fn run_migrations(&self) -> Result<()> {
+    fn initialize_schema(&self) -> Result<()> {
         self.conn
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS plan (
+                "CREATE TABLE plan (
                     plan_id        INTEGER PRIMARY KEY CHECK (plan_id = 1),
                     source_url     TEXT NOT NULL,
                     target_url     TEXT NOT NULL,
@@ -358,7 +375,7 @@ impl Journal {
                     created_at     INTEGER NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS entries (
+                CREATE TABLE entries (
                     relative_path    TEXT NOT NULL,
                     version_id       TEXT NOT NULL DEFAULT '',
                     size             INTEGER NOT NULL,
@@ -373,13 +390,13 @@ impl Journal {
                     PRIMARY KEY (relative_path, version_id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_entries_state_size
+                CREATE INDEX idx_entries_state_size
                     ON entries(state, size DESC);
 
-                CREATE INDEX IF NOT EXISTS idx_entries_time
+                CREATE INDEX idx_entries_time
                     ON entries(last_modified, relative_path, version_id);
 
-                CREATE TABLE IF NOT EXISTS lfs_resolutions (
+                CREATE TABLE lfs_resolutions (
                     relative_path TEXT NOT NULL,
                     version_id    TEXT NOT NULL DEFAULT '',
                     oid           BLOB NOT NULL,
@@ -392,81 +409,61 @@ impl Journal {
                         ON DELETE CASCADE
                 );
 
-                CREATE TABLE IF NOT EXISTS journal_meta (
+                CREATE TABLE journal_meta (
                     key   TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );",
+                );
+                INSERT INTO journal_meta (key, value) VALUES
+                    ('schema_version', '1'),
+                    ('schema_descriptor', 'plan-v1;entries-v1;lfs-resolutions-v1;journal-meta-v1');",
             )
-            .map_err(|e| CrabError::Internal(format!("journal schema migration: {e}")))?;
-
-        // Seed schema_version on first open; verify on subsequent opens.
-        let existing: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM journal_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| CrabError::Internal(format!("read journal schema_version: {e}")))?;
-
-        match existing {
-            None => {
-                self.conn
-                    .execute(
-                        "INSERT INTO journal_meta (key, value) VALUES ('schema_version', ?1)",
-                        params![SCHEMA_VERSION],
-                    )
-                    .map_err(|e| {
-                        CrabError::Internal(format!("seed journal schema_version: {e}"))
-                    })?;
-                debug!(version = SCHEMA_VERSION, "seeded import journal schema");
-            }
-            Some(ref v) if v == SCHEMA_VERSION => {}
-            Some(ref v) if v == "1" => {
-                self.conn
-                    .execute_batch(
-                        "ALTER TABLE plan ADD COLUMN dest_prefix TEXT NOT NULL DEFAULT '';
-                         ALTER TABLE plan ADD COLUMN lfs_source TEXT NOT NULL DEFAULT 'fail';
-                         ALTER TABLE plan ADD COLUMN lfs_objects TEXT NOT NULL DEFAULT '';
-                         UPDATE journal_meta
-                            SET value = '3'
-                          WHERE key = 'schema_version';",
-                    )
-                    .map_err(|e| {
-                        CrabError::Internal(format!("migrate import journal v1 to v3: {e}"))
-                    })?;
-                if let Some(plan) = self.load_plan()? {
-                    self.record_plan(&plan.inputs, plan.created_at)?;
-                }
-                debug!(from = %v, to = SCHEMA_VERSION, "migrated import journal schema");
-            }
-            Some(ref v) if v == "2" => {
-                self.conn
-                    .execute_batch(
-                        "ALTER TABLE plan ADD COLUMN lfs_source TEXT NOT NULL DEFAULT 'fail';
-                         ALTER TABLE plan ADD COLUMN lfs_objects TEXT NOT NULL DEFAULT '';
-                         UPDATE journal_meta
-                            SET value = '3'
-                          WHERE key = 'schema_version';",
-                    )
-                    .map_err(|e| {
-                        CrabError::Internal(format!("migrate import journal v2 to v3: {e}"))
-                    })?;
-                if let Some(plan) = self.load_plan()? {
-                    self.record_plan(&plan.inputs, plan.created_at)?;
-                }
-                debug!(from = %v, to = SCHEMA_VERSION, "migrated import journal schema");
-            }
-            Some(v) => {
-                return Err(CrabError::Internal(format!(
-                    "unsupported import journal schema: expected {SCHEMA_VERSION}, found {v}"
-                )));
-            }
-        }
-
-        Ok(())
+            .map_err(|e| CrabError::Internal(format!("initialize import journal schema: {e}")))
     }
+}
+
+fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
+    let metadata = |key: &str| -> Result<Option<String>> {
+        conn.query_row(
+            "SELECT value FROM journal_meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| CrabError::Internal(format!("read import journal metadata: {e}")))
+    };
+    let version = metadata("schema_version")?;
+    let descriptor = metadata("schema_descriptor")?;
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .map_err(|e| CrabError::Internal(format!("inspect import journal schema: {e}")))?;
+    let objects = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| CrabError::Internal(format!("inspect import journal schema: {e}")))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| CrabError::Internal(format!("inspect import journal schema: {e}")))?;
+    let expected = vec![
+        ("index".to_owned(), "idx_entries_state_size".to_owned()),
+        ("index".to_owned(), "idx_entries_time".to_owned()),
+        ("table".to_owned(), "entries".to_owned()),
+        ("table".to_owned(), "journal_meta".to_owned()),
+        ("table".to_owned(), "lfs_resolutions".to_owned()),
+        ("table".to_owned(), "plan".to_owned()),
+    ];
+    if version.as_deref() != Some(IMPORT_JOURNAL_SCHEMA_VERSION)
+        || descriptor.as_deref() != Some(SCHEMA_DESCRIPTOR)
+        || objects != expected
+    {
+        return Err(CrabError::Internal(format!(
+            "import journal {} is not canonical v1; remove that journal and restart import",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 impl Journal {
@@ -1533,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn open_migrates_v1_plan_checksum_to_dest_prefix_schema() {
+    fn open_rejects_retired_v1_shape_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let crab_dir = tmp.path().join(".crab");
         std::fs::create_dir_all(&crab_dir).unwrap();
@@ -1599,11 +1596,16 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let journal = Journal::open(tmp.path()).unwrap();
-        journal.verify_plan(&inputs).unwrap();
-        let loaded = journal.load_plan().unwrap().unwrap();
-        assert_eq!(loaded.inputs.dest_prefix, "");
-        assert_eq!(loaded.plan_checksum, inputs.checksum());
+        assert!(Journal::open(tmp.path()).is_err());
+        let conn = Connection::open(&db_path).unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(plan)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "dest_prefix"));
     }
 
     #[test]

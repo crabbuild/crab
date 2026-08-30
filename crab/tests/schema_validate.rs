@@ -43,6 +43,7 @@ use crab::cmd::optimize::{
 use crab::cmd::prune::PruneSummary;
 use crab::cmd::push::{PushRefOutcome, PushSummaryPayload};
 use crab::cmd::repack::RepackSummary;
+use crab::cmd::staging::StagingStatsPayload;
 use crab::cmd::stat::{ClassEntry, StatClassesPayload};
 use crab::cmd::tier::{TierEventPayload, TierPlanPayload, TierRulePayload, TierTransitionPayload};
 use crab::cmd::track::{TrackPattern, TrackPayload};
@@ -51,6 +52,7 @@ use crab::cost::recommendations::{Recommendation, RiskLevel};
 use crab::cost::report::{ClassCost, ColdObjectSummary, CostReport, InventorySummary};
 use crab::optimize::xorbs::planner::OptimizeXorbsEstimate;
 use crab::tier::classes::StorageClass;
+use crab_staging::stats::{StagingLifecycleHealth, StagingStats};
 
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas")
@@ -1760,18 +1762,26 @@ fn validate_ls_files_entry() {
 
 #[test]
 fn validate_staging_stats() {
-    let instance = serde_json::json!({
-        "segments_sealed": 3,
-        "current_segment_bytes": 1024,
-        "total_staged_bytes": 4096,
-        "live_bytes": 3072,
-        "dead_bytes": 1024,
-        "dead_ratio": 0.25,
-        "chunk_count": 50,
-        "file_count": 10,
-        "files": []
-    });
-    assert_valid("staging.stats", &instance);
+    validate(
+        "staging.stats",
+        &StagingStatsPayload {
+            stats: StagingStats {
+                segments_sealed: 3,
+                current_segment_bytes: 1024,
+                total_staged_bytes: 4096,
+                live_bytes: 3072,
+                dead_bytes: 1024,
+                dead_ratio: 0.25,
+                chunk_count: 50,
+                file_count: 10,
+            },
+            lifecycle: StagingLifecycleHealth {
+                layout_version: "1".to_owned(),
+                ..StagingLifecycleHealth::default()
+            },
+            files: Vec::new(),
+        },
+    );
 }
 
 #[test]

@@ -206,11 +206,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("crab.lock");
         let conflicted = b"<<<<<<< HEAD\n\
-crab_hash_algo: \"crab.stage.v3\"\n\
+crab_hash_algo: \"crab.stage.v1\"\n\
 schema_version: 1\n\
 stages: {}\n\
 =======\n\
-crab_hash_algo: \"crab.stage.v3\"\n\
+crab_hash_algo: \"crab.stage.v1\"\n\
 schema_version: 1\n\
 stages: {}\n\
 >>>>>>> theirs\n";

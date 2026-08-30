@@ -9,13 +9,11 @@ use crate::hasher::{TreeEntry, TreeEntryKind, hash_tree_entries};
 use crate::{OutKind, Result, StageName, WorkflowError};
 use crab_types::workflow::StageHash;
 
-/// Current on-disk entry schema.
-///
-/// Newer readers migrate older entries up; older readers refuse newer entries.
-pub const ENTRY_SCHEMA_VERSION: u16 = 3;
+/// Canonical on-disk entry schema.
+pub const ENTRY_SCHEMA_VERSION: u16 = 1;
 
 /// Maximum schema version this crate can read.
-pub const ENTRY_SCHEMA_MAX_SUPPORTED: u16 = 3;
+pub const ENTRY_SCHEMA_MAX_SUPPORTED: u16 = ENTRY_SCHEMA_VERSION;
 
 /// Maximum serialized size accepted for one stage-cache manifest.
 pub const MAX_STAGE_CACHE_ENTRY_BYTES: usize = 64 * 1024 * 1024;
@@ -115,15 +113,13 @@ pub fn validate_stage_cache_entry(entry: &StageCacheEntry) -> Result<()> {
     validate_stage_cache_entry_at(entry, None)
 }
 
-/// Validate a cache entry while allowing legacy absolute paths under a
-/// caller-provided repository root. Remote manifests must use the strict
-/// [`validate_stage_cache_entry`] form because they have no trusted root.
+/// Validate a locally produced cache entry against its trusted repository root.
 pub(crate) fn validate_stage_cache_entry_at(
     entry: &StageCacheEntry,
     repository_root: Option<&Path>,
 ) -> Result<()> {
     let stage_hash = entry.stage_hash.as_hex();
-    if entry.schema_version == 0 || entry.schema_version > ENTRY_SCHEMA_MAX_SUPPORTED {
+    if entry.schema_version != ENTRY_SCHEMA_VERSION {
         return Err(cache_entry_invalid(
             &stage_hash,
             format!("unsupported schema version {}", entry.schema_version),

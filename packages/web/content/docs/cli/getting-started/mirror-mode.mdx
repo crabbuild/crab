@@ -73,8 +73,7 @@ needs the mirror remote and hooks installed locally.
 
 ```bash
 #!/bin/sh
-# Crab mirror: push xorbs before refs go to origin
-crab add . --skip-git-add 2>/dev/null
+# Crab mirror: push published pointer recipes before refs go to origin
 crab push --remote crab --quiet 2>/dev/null
 ```
 

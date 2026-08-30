@@ -8,13 +8,15 @@ use tracing::debug;
 use crate::StagingArea;
 use crate::error::{Result, StagingError};
 use crate::push_plan::{
-    FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb, PreparedXorbCache,
-    PreparedXorbCandidate, PreparedXorbSource, link_prepared_xorb, materialize_prepared_xorb,
-    write_prepared_xorb,
+    ExistingChunkCandidate, FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb,
+    PreparedXorbCache, PreparedXorbCandidate, PreparedXorbSource, link_prepared_xorb,
+    materialize_prepared_xorb, write_prepared_xorb,
 };
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder};
-use crab_xet::xorb::format::{Chunk, XorbRef};
+use crab_xet::xorb::format::Chunk;
+#[cfg(test)]
+use crab_xet::xorb::format::XorbRef;
 
 const ADD_PLAN_READ_BATCH_CHUNKS: usize = 128;
 
@@ -45,7 +47,7 @@ pub trait ExistingChunkLookup: Send + Sync {
     async fn lookup_existing_candidates(
         &self,
         chunks: &[(MerkleHash, u64)],
-    ) -> Result<Vec<Option<XorbRef>>>;
+    ) -> Result<Vec<Option<ExistingChunkCandidate>>>;
 }
 
 /// Adds local prepared-xorb candidates to the staging cache.
@@ -178,7 +180,7 @@ struct FilePlanSummary {
 async fn prepare_cached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    existing_refs: &[Option<XorbRef>],
+    existing_refs: &[Option<ExistingChunkCandidate>],
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     mut summary: AddPushPlanSummary,
@@ -273,7 +275,7 @@ fn all_file_chunks(files: &[AddPlanFile<'_>]) -> Vec<(MerkleHash, u64)> {
 async fn prepare_uncached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    existing_refs: &[Option<XorbRef>],
+    existing_refs: &[Option<ExistingChunkCandidate>],
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     remote_lookup: bool,
     cancel: &CancellationToken,
@@ -330,7 +332,15 @@ async fn prepare_uncached_file_plans_with_progress(
     };
     let mut summarized_prepared_xorbs = HashSet::new();
     for file_plan in &file_plans {
-        staging.write_file_push_plan(&file_plan.plan).await?;
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_plan.file_hash,
+            file_plan.plan.file_size,
+            file_plan.chunks,
+        )?;
+        staging
+            .write_file_push_plan_for_recipe(&file_plan.plan, &recipe)
+            .await?;
         summary.files += 1;
         summary.chunks += file_plan.chunks.len() as u64;
         summary.existing_candidates += file_plan.plan.existing.len() as u64;
@@ -350,7 +360,7 @@ async fn prepare_uncached_file_plans_with_progress(
 async fn verified_uncached_file_plan<'a>(
     staging: &StagingArea,
     file: &'a AddPlanFile<'_>,
-    existing_refs: &[Option<XorbRef>],
+    existing_refs: &[Option<ExistingChunkCandidate>],
 ) -> Result<UncachedFilePlan<'a>> {
     let file_hash = MerkleHash::from(file.file_hash);
     let verified = verified_staged_chunks(staging, file_hash, file.size, file.chunks).await?;
@@ -358,11 +368,13 @@ async fn verified_uncached_file_plan<'a>(
     plan.prepared_xorbs = verified.local_authority_xorbs;
     let mut uncovered_chunks = HashSet::new();
     for ((chunk_hash, size), existing_ref) in file.chunks.iter().zip(existing_refs.iter()) {
-        if let Some(xorb_ref) = existing_ref
-            && u64::from(xorb_ref.uncompressed_size) == *size
+        if let Some(candidate) = existing_ref
+            && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
-            plan.existing
-                .push(PlannedExistingChunk::from_ref(*chunk_hash, *xorb_ref));
+            plan.existing.push(PlannedExistingChunk::from_candidate(
+                *chunk_hash,
+                *candidate,
+            ));
             continue;
         }
         uncovered_chunks.insert(*chunk_hash);
@@ -383,7 +395,8 @@ async fn verified_staged_chunks(
     expected_chunks: &[(MerkleHash, u64)],
 ) -> Result<VerifiedStagedChunks> {
     if let Some(plan) = staging.load_file_push_plan(&file_hash).await?
-        && plan.chunk_pairs()? == expected_chunks
+        && plan.chunk_count == expected_chunks.len() as u64
+        && plan.sequence_hash()? == crate::push_plan::chunk_sequence_hash(expected_chunks)
         && plan.file_size == file_size
     {
         return Ok(VerifiedStagedChunks {
@@ -563,7 +576,7 @@ async fn prepare_one_file_plan(
 async fn prepare_one_file_plan_with_existing_refs(
     staging: &StagingArea,
     file: &AddPlanFile<'_>,
-    existing_refs: &[Option<XorbRef>],
+    existing_refs: &[Option<ExistingChunkCandidate>],
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     cancel: &CancellationToken,
@@ -592,7 +605,7 @@ async fn prepare_one_file_plan_with_existing_refs(
         .filter_map(|((chunk_hash, size), existing_ref)| {
             existing_ref
                 .as_ref()
-                .filter(|xorb_ref| u64::from(xorb_ref.uncompressed_size) == *size)
+                .filter(|candidate| u64::from(candidate.xorb_ref.uncompressed_size) == *size)
                 .map(|_| *chunk_hash)
         })
         .collect();
@@ -605,11 +618,13 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_xorb_sources = HashSet::new();
     for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
-        if let Some(xorb_ref) = existing_ref
-            && u64::from(xorb_ref.uncompressed_size) == *size
+        if let Some(candidate) = existing_ref
+            && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
-            plan.existing
-                .push(PlannedExistingChunk::from_ref(*chunk_hash, *xorb_ref));
+            plan.existing.push(PlannedExistingChunk::from_candidate(
+                *chunk_hash,
+                *candidate,
+            ));
             seen.insert(*chunk_hash);
             continue;
         }
@@ -721,7 +736,15 @@ async fn prepare_one_file_plan_with_existing_refs(
         prepared_xorbs: plan.prepared_xorbs.len() as u64,
         prepared_bytes: plan.prepared_xorbs.iter().map(|xorb| xorb.bytes).sum(),
     };
-    staging.write_file_push_plan(&plan).await?;
+    let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+        crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+        file_hash,
+        file.size,
+        chunks,
+    )?;
+    staging
+        .write_file_push_plan_for_recipe(&plan, &recipe)
+        .await?;
     Ok(file_summary)
 }
 
@@ -863,7 +886,7 @@ async fn record_prepared_xorb(
 async fn lookup_existing_candidates(
     chunks: &[(MerkleHash, u64)],
     remote_lookup: Option<&dyn ExistingChunkLookup>,
-) -> Result<Vec<Option<XorbRef>>> {
+) -> Result<Vec<Option<ExistingChunkCandidate>>> {
     let Some(remote_lookup) = remote_lookup else {
         return Ok(vec![None; chunks.len()]);
     };
@@ -892,6 +915,41 @@ mod tests {
 
     const CHUNKS_ABOVE_OLD_REMOTE_LOOKUP_CAP: usize = 100_001;
 
+    fn recipe_pairs(
+        staging: &StagingArea,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Vec<(MerkleHash, u64)> {
+        let mut pairs = Vec::new();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = staging.recipe_page(recipe, next).expect("recipe page");
+            pairs.extend(
+                page.chunks
+                    .iter()
+                    .map(|chunk| (chunk.chunk_hash, chunk.len)),
+            );
+            next = page.next_occurrence();
+        }
+        pairs
+    }
+
+    fn remote_chunks(
+        staging: &StagingArea,
+        recipe: &crate::recipe::FileRecipe,
+    ) -> Vec<(MerkleHash, ExistingChunkCandidate)> {
+        let mut chunks = Vec::new();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = staging
+                .recipe_remote_chunk_page(recipe, next)
+                .expect("remote authority page");
+            assert!(page.len() <= crate::recipe::RECIPE_PAGE_ENTRIES);
+            chunks.extend(page);
+            next += crate::recipe::RECIPE_PAGE_ENTRIES as u64;
+        }
+        chunks
+    }
+
     struct AllExistingLookup {
         calls: AtomicUsize,
         chunks_seen: AtomicUsize,
@@ -911,18 +969,23 @@ mod tests {
         async fn lookup_existing_candidates(
             &self,
             chunks: &[(MerkleHash, u64)],
-        ) -> Result<Vec<Option<XorbRef>>> {
+        ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.chunks_seen.fetch_add(chunks.len(), Ordering::Relaxed);
             Ok(chunks
                 .iter()
                 .enumerate()
                 .map(|(idx, (_, size))| {
-                    Some(XorbRef {
-                        xorb_hash: numbered_hash(idx + 1_000_000),
-                        chunk_index: idx as u32,
-                        uncompressed_size: (*size).try_into().expect("test chunk size fits u32"),
-                    })
+                    Some(existing_candidate(
+                        XorbRef {
+                            xorb_hash: numbered_hash(idx + 1_000_000),
+                            chunk_index: idx as u32,
+                            uncompressed_size: (*size)
+                                .try_into()
+                                .expect("test chunk size fits u32"),
+                        },
+                        idx,
+                    ))
                 })
                 .collect())
         }
@@ -947,7 +1010,7 @@ mod tests {
         async fn lookup_existing_candidates(
             &self,
             chunks: &[(MerkleHash, u64)],
-        ) -> Result<Vec<Option<XorbRef>>> {
+        ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.chunks_seen.fetch_add(chunks.len(), Ordering::Relaxed);
             Ok(vec![None; chunks.len()])
@@ -975,17 +1038,24 @@ mod tests {
         async fn lookup_existing_candidates(
             &self,
             chunks: &[(MerkleHash, u64)],
-        ) -> Result<Vec<Option<XorbRef>>> {
+        ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.chunks_seen.fetch_add(chunks.len(), Ordering::Relaxed);
             Ok(chunks
                 .iter()
                 .enumerate()
                 .map(|(idx, (chunk_hash, size))| {
-                    (*chunk_hash == self.existing_hash).then_some(XorbRef {
-                        xorb_hash: numbered_hash(idx + 2_000_000),
-                        chunk_index: idx as u32,
-                        uncompressed_size: (*size).try_into().expect("test chunk size fits u32"),
+                    (*chunk_hash == self.existing_hash).then(|| {
+                        existing_candidate(
+                            XorbRef {
+                                xorb_hash: numbered_hash(idx + 2_000_000),
+                                chunk_index: idx as u32,
+                                uncompressed_size: (*size)
+                                    .try_into()
+                                    .expect("test chunk size fits u32"),
+                            },
+                            idx,
+                        )
                     })
                 })
                 .collect())
@@ -997,6 +1067,14 @@ mod tests {
         bytes[..8].copy_from_slice(&(idx as u64).to_le_bytes());
         bytes[8] = 0xA5;
         MerkleHash::from(bytes)
+    }
+
+    fn existing_candidate(xorb_ref: XorbRef, seed: usize) -> ExistingChunkCandidate {
+        ExistingChunkCandidate {
+            xorb_ref,
+            placement_id: numbered_hash(seed + 2_000_000).into(),
+            origin_proof_id: numbered_hash(seed + 3_000_000).into(),
+        }
     }
 
     async fn stage_synthetic_file(
@@ -1020,6 +1098,19 @@ mod tests {
                 .await
                 .expect("stage synthetic chunk batch");
         }
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            chunks.len() as u64,
+            chunks,
+        )
+        .expect("synthetic recipe");
+        staging
+            .publish_verified_recipe_lease(
+                &std::path::PathBuf::from(format!("synthetic-{}.bin", file_hash.hex())),
+                &recipe,
+            )
+            .expect("publish synthetic recipe");
         file_hash
     }
 
@@ -1044,6 +1135,23 @@ mod tests {
             .stage_chunks_batch(&refs, &file_hash, 0)
             .await
             .expect("stage test file");
+        let chunk_pairs = chunks
+            .iter()
+            .map(|(hash, data)| (*hash, data.len() as u64))
+            .collect::<Vec<_>>();
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            file_hash,
+            total_bytes,
+            &chunk_pairs,
+        )
+        .expect("test recipe");
+        staging
+            .publish_verified_recipe_lease(
+                &std::path::PathBuf::from(format!("test-{}.bin", file_hash.hex())),
+                &recipe,
+            )
+            .expect("publish test recipe");
         file_hash
     }
 
@@ -1155,7 +1263,22 @@ mod tests {
             .await
             .expect("load file push plan")
             .expect("file push plan exists");
-        assert_eq!(plan.existing.len(), CHUNKS_ABOVE_OLD_REMOTE_LOOKUP_CAP);
+        assert!(plan.existing.is_empty());
+        let recipe = staging
+            .published_recipe_for_file(&file_hash)
+            .expect("load published recipe")
+            .expect("published recipe exists");
+        let mut remote_chunks = 0usize;
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = staging
+                .recipe_remote_chunk_page(&recipe, next)
+                .expect("remote authority page");
+            assert!(page.len() <= crate::recipe::RECIPE_PAGE_ENTRIES);
+            remote_chunks += page.len();
+            next += crate::recipe::RECIPE_PAGE_ENTRIES as u64;
+        }
+        assert_eq!(remote_chunks, CHUNKS_ABOVE_OLD_REMOTE_LOOKUP_CAP);
         assert!(plan.prepared_xorbs.is_empty());
     }
 
@@ -1658,10 +1781,15 @@ mod tests {
             .await
             .expect("load second plan")
             .expect("second plan exists");
-        assert_eq!(first_plan.existing.len(), 1);
+        assert!(first_plan.existing.is_empty());
         assert!(first_plan.prepared_xorbs.is_empty());
         assert!(second_plan.existing.is_empty());
         assert_eq!(second_plan.prepared_xorbs.len(), 1);
+        let first_recipe = staging
+            .published_recipe_for_file(&first_hash)
+            .expect("load first recipe")
+            .expect("first recipe exists");
+        assert_eq!(remote_chunks(&staging, &first_recipe).len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1695,7 +1823,11 @@ mod tests {
         )
         .await
         .expect("stage direct xorb authority");
-        assert!(staged.chunk_pairs.len() > 1, "fixture must span chunks");
+        staging
+            .mark_batch_published(&staged.batch_id)
+            .expect("publish direct recipe");
+        let staged_pairs = recipe_pairs(&staging, &staged.recipe);
+        assert!(staged_pairs.len() > 1, "fixture must span chunks");
         let file_hash = MerkleHash::from(staged.file_hash);
         assert!(
             staging
@@ -1705,13 +1837,13 @@ mod tests {
             "direct staging must not retain a raw segment copy"
         );
 
-        let lookup = SelectiveExistingLookup::new(staged.chunk_pairs[0].0);
+        let lookup = SelectiveExistingLookup::new(staged_pairs[0].0);
         let summary = prepare_file_push_plans(
             &staging,
             &[AddPlanFile {
                 file_hash: staged.file_hash,
                 size: staged.size,
-                chunks: &staged.chunk_pairs,
+                chunks: &staged_pairs,
             }],
             &small_raw_xorb_builder,
             Some(&lookup),
@@ -1728,7 +1860,8 @@ mod tests {
             .await
             .expect("load repacked plan")
             .expect("repacked plan exists");
-        assert_eq!(plan.existing.len(), 1);
+        assert!(plan.existing.is_empty());
+        assert_eq!(remote_chunks(&staging, &staged.recipe).len(), 1);
         assert!(
             plan.prepared_xorbs
                 .iter()
@@ -1736,13 +1869,14 @@ mod tests {
                 .all(|xorb| {
                     xorb.placements
                         .iter()
-                        .all(|placement| placement.chunk_hash != staged.chunk_pairs[0].0.hex())
+                        .all(|placement| placement.chunk_hash != staged_pairs[0].0.hex())
                 }),
             "the remotely present chunk must not be repacked"
         );
+        assert_eq!(plan.chunk_count, staged.recipe.chunk_count());
         assert_eq!(
-            plan.chunk_pairs().expect("plan coverage"),
-            staged.chunk_pairs
+            plan.sequence_hash().expect("plan sequence"),
+            staged.recipe.sequence_hash()
         );
     }
 
