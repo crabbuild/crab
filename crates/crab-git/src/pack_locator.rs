@@ -176,12 +176,10 @@ impl PackLocationIter {
 
     pub(crate) fn matches_sorted_object_ids(&self, expected: &[gix_hash::ObjectId]) -> bool {
         self.object_count as usize == expected.len()
-            && self
-                .index
-                .iter()
-                .map(|entry| entry.oid)
+            && (0..self.object_count)
+                .map(|index| self.index.oid_at_index(index).as_bytes())
                 .zip(expected)
-                .all(|(actual, expected)| actual == *expected)
+                .all(|(actual, expected)| actual == expected.as_bytes())
     }
 
     fn location(&self, reverse_position: u32) -> Result<PackObjectLocation, PackLocatorError> {
