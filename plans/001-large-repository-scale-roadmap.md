@@ -1381,6 +1381,21 @@ at two packs at checkpoint 100; exact-prefix cleanup removed 1,111 objects.
 The run remains single-client smoke evidence, so it does not close distributed
 fanout, provider, fault, retention, or rollout gates.
 
+The follow-up experiment `codex-75079ea7-k8s-producer100-selected-shallow-20260830`
+tested direct packed-entry assembly for the unfiltered initial depth-100
+selection. It passed the same 21/21 correctness checks, source immutability,
+and exact-prefix cleanup, with fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+experiment is rejected for this workload: the 966,820-object response needed
+146,960 storage requests, fetched 4,545,656,957 bytes, inflated
+6,132,610,903 bytes, and took 202,447 ms to generate a 951,601,381-byte pack.
+The preceding selected-object repack generated a smaller 747,220,954-byte
+response in 53,201 ms with seven storage requests. Direct assembly remains
+reserved for catalog-exact dense filters; initial shallow responses retain the
+lower-request selected-repack path until a local-source or better-batched
+implementation proves an improvement across producer CPU, response bytes,
+range reads, and client indexing.
+
 The producer patch removes the source-side index bottleneck rather than
 changing pack shape blindly. Large producers now download the committed pack
 body together with its `.idx` and `.rev` sidecars, validate both sidecars

@@ -1956,9 +1956,9 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
             &plan.object_ids,
             !thin_bases.is_empty(),
         );
-        if selected_assembly_response(&request) {
+        if dense_selected_response(&request) {
             repository
-                .generate_pack_cached_with_selected_assembly(
+                .generate_pack_cached_with_dense_selection(
                     &plan.object_ids,
                     cache_key,
                     cancellation,
@@ -2058,15 +2058,6 @@ fn dense_selected_response(request: &FetchRequest) -> bool {
         && request.deepen.is_none()
         && !request.deepen_relative
         && request.filter.is_catalog_exact()
-}
-
-fn selected_assembly_response(request: &FetchRequest) -> bool {
-    dense_selected_response(request)
-        || (request.haves.is_empty()
-            && request.shallow.is_empty()
-            && request.deepen.is_some_and(|depth| depth > 0)
-            && !request.deepen_relative
-            && matches!(request.filter, UploadPackFilter::None))
 }
 
 fn is_likely_lazy_fetch(repository: &RemoteGitRepository, request: &FetchRequest) -> bool {
@@ -2363,32 +2354,6 @@ mod tests {
         request.filter = UploadPackFilter::BlobNone;
         request.deepen = Some(100);
         assert!(!dense_selected_response(&request));
-    }
-
-    #[test]
-    fn selected_assembly_response_allows_unfiltered_initial_shallow_only() {
-        let mut request = FetchRequest {
-            deepen: Some(100),
-            ..FetchRequest::default()
-        };
-        assert!(selected_assembly_response(&request));
-
-        request.filter = UploadPackFilter::TreeDepth(1);
-        assert!(!selected_assembly_response(&request));
-
-        request = FetchRequest {
-            deepen: Some(100),
-            shallow: vec![ObjectId::from([1; 20])],
-            ..FetchRequest::default()
-        };
-        assert!(!selected_assembly_response(&request));
-
-        request = FetchRequest {
-            deepen: Some(100),
-            haves: vec![ObjectId::from([2; 20])],
-            ..FetchRequest::default()
-        };
-        assert!(!selected_assembly_response(&request));
     }
 
     #[tokio::test]
