@@ -1443,30 +1443,49 @@ async fn common_haves_catalog(
     if request.haves.is_empty() {
         return Ok(Vec::new());
     }
+    let visible = visible_objects_catalog(
+        repository,
+        visibility,
+        &request.haves,
+        visible_ref_names,
+        cancellation,
+    )
+    .await?;
+    Ok(request
+        .haves
+        .iter()
+        .copied()
+        .zip(visible)
+        .filter_map(|(have, visible)| visible.then_some(have))
+        .collect())
+}
+
+async fn visible_objects_catalog(
+    repository: &RemoteGitRepository,
+    visibility: &GitCatalogVisibilityIndex,
+    object_ids: &[ObjectId],
+    visible_ref_names: &[String],
+    cancellation: &CancellationToken,
+) -> Result<Vec<bool>> {
     let operation = repository
         .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
         .await
         .map_err(remote_error)?;
     let result = operation
-        .catalog_object_ordinals(&request.haves)
+        .catalog_object_ordinals(object_ids)
         .await
         .map(|ordinals| {
-            request
-                .haves
-                .iter()
-                .copied()
-                .zip(ordinals)
-                .filter_map(|(have, ordinal)| {
-                    ordinal
-                        .filter(|ordinal| {
-                            visibility.contains_ordinal_for_refs(
-                                visible_ref_names.iter().map(String::as_str),
-                                *ordinal,
-                            )
-                        })
-                        .map(|_| have)
+            ordinals
+                .into_iter()
+                .map(|ordinal| {
+                    ordinal.is_some_and(|ordinal| {
+                        visibility.contains_ordinal_for_refs(
+                            visible_ref_names.iter().map(String::as_str),
+                            ordinal,
+                        )
+                    })
                 })
-                .collect::<Vec<_>>()
+                .collect()
         });
     operation.finish(result).await.map_err(remote_error)
 }
@@ -1511,6 +1530,47 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
     tracing::debug!("released upload-pack read admission before request-plan cache wait");
 
     let producer = async {
+        if native_shallow_pack_eligible(request)
+            && let Some(visibility) = proof.as_catalog()
+        {
+            let common_haves = common_haves_catalog(
+                repository,
+                visibility,
+                request,
+                visible_ref_names,
+                cancellation,
+            )
+            .await?;
+            let shallow_visible = visible_objects_catalog(
+                repository,
+                visibility,
+                &request.shallow,
+                visible_ref_names,
+                cancellation,
+            )
+            .await?;
+            if !common_haves.is_empty() && shallow_visible.into_iter().all(|visible| visible) {
+                tracing::info!(
+                    protocol_version = 2,
+                    request_class,
+                    negotiation_rounds,
+                    haves = request.haves.len(),
+                    common_haves = common_haves.len(),
+                    shallow = request.shallow.len(),
+                    visible_objects = proof.object_count_for_refs(visible_ref_names),
+                    "protocol-v2 upload-pack native shallow producer selected"
+                );
+                return repository
+                    .generate_shallow_fetch_pack(
+                        &request.wants,
+                        &common_haves,
+                        &request.shallow,
+                        cancellation,
+                    )
+                    .await
+                    .map_err(remote_error);
+            }
+        }
         let plan = match proof {
             #[cfg(test)]
             UploadPackVisibilityProof::Materialized(visibility) => {
@@ -1854,6 +1914,10 @@ fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
         && matches!(request.filter, UploadPackFilter::None)
 }
 
+fn native_shallow_pack_eligible(request: &FetchRequest) -> bool {
+    request_pack_preplanning_cache_eligible(request) && !request.include_tags
+}
+
 fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     hash.update(b"crab.upload-pack.preplanned-request.v1\0");
@@ -2172,6 +2236,7 @@ mod tests {
             ..FetchRequest::default()
         };
         assert!(request_pack_preplanning_cache_eligible(&request));
+        assert!(native_shallow_pack_eligible(&request));
 
         let digest = preplanned_pack_request_digest(&request);
         let mut changed = request.clone();
@@ -2189,6 +2254,17 @@ mod tests {
         changed = request;
         changed.filter = UploadPackFilter::BlobNone;
         assert!(!request_pack_preplanning_cache_eligible(&changed));
+        let mut changed = FetchRequest {
+            wants: vec![second],
+            haves: vec![first],
+            shallow: vec![first],
+            include_tags: true,
+            ..FetchRequest::default()
+        };
+        assert!(request_pack_preplanning_cache_eligible(&changed));
+        assert!(!native_shallow_pack_eligible(&changed));
+        changed.include_tags = false;
+        assert!(native_shallow_pack_eligible(&changed));
     }
 
     #[test]

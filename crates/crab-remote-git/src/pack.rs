@@ -366,6 +366,80 @@ impl RemoteGitRepository {
             .await
     }
 
+    /// Generate one exact pack for an existing shallow client's negotiation.
+    ///
+    /// The pinned immutable pack inventory is materialized locally so Git can
+    /// apply its shallow-boundary graph semantics without object-store reads
+    /// per traversed object. The generated object index is checked against
+    /// Git's exact revision selection before the pack is returned.
+    pub async fn generate_shallow_fetch_pack(
+        &self,
+        wants: &[ObjectId],
+        common_haves: &[ObjectId],
+        shallow: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<GeneratedPack> {
+        let operation = self
+            .operation(OperationKind::UploadPack, cancellation)
+            .await?;
+        let result = async {
+            let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
+            let inventory_bytes = inventory
+                .iter()
+                .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+            if inventory_bytes > operation.max_fetched_bytes() {
+                return Err(Error::LimitExceeded {
+                    limit: "native shallow source bytes",
+                    actual: inventory_bytes,
+                    maximum: operation.max_fetched_bytes(),
+                });
+            }
+
+            let started = Instant::now();
+            let source_pack_count = inventory.len();
+            let workspace = tempfile::tempdir().map_err(io_error)?;
+            let download_dir = workspace.path().join("source-packs");
+            std::fs::create_dir_all(&download_dir).map_err(io_error)?;
+            let source_download_started = Instant::now();
+            let sources =
+                download_repack_sources(&operation, inventory, &download_dir, cancellation).await?;
+            let source_download_ms = source_download_started.elapsed().as_millis() as u64;
+            let wants = wants.to_vec();
+            let common_haves = common_haves.to_vec();
+            let shallow = shallow.to_vec();
+            let maximum_objects =
+                usize::try_from(operation.max_logical_objects()).unwrap_or(usize::MAX);
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::repack_shallow_fetch(
+                    &sources,
+                    &wants,
+                    &common_haves,
+                    &shallow,
+                    maximum_objects,
+                )
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            let pack = adopt_repacked_pack(&operation, repacked, cancellation).await?;
+            tracing::info!(
+                target: "crab_remote_git::telemetry",
+                telemetry_event = "pack_generation",
+                strategy = "native_shallow_negotiation",
+                source_pack_count,
+                object_count = pack.object_count,
+                source_bytes = inventory_bytes,
+                source_download_ms,
+                response_bytes = pack.size,
+                pack_generation_ms = started.elapsed().as_millis() as u64,
+                "remote Git shallow response pack generated from pinned packs"
+            );
+            Ok(pack)
+        }
+        .await;
+        operation.finish(result).await
+    }
+
     /// Generate a pack that may retain deltas against client-proven base
     /// objects. Every base not in `object_ids` must already be held by the
     /// receiving Git client under the pinned negotiation result.
@@ -594,9 +668,6 @@ impl RemoteGitRepository {
                 (repacked, "complete_pack_consolidation")
             }
         };
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
         })?;
@@ -624,40 +695,8 @@ impl RemoteGitRepository {
                 stage: crate::CorruptionStage::Inventory,
             });
         }
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-
-        let size = generated.pack_size;
-        operation
-            .charge(BudgetDimension::ResponseBytes, size)
-            .await?;
-        let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        })?;
-        let content_hash = generated.pack_hash;
-        let destination = NamedTempFile::new().map_err(io_error)?;
-        let destination_path = destination.path().to_owned();
-        let destination = destination.into_temp_path();
-        std::fs::remove_file(&destination_path).map_err(io_error)?;
-        std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
-        let file = std::fs::File::open(&destination_path).map_err(io_error)?;
-        let file = NamedTempFile::from_parts(file, destination);
-        drop(repacked);
+        let pack = adopt_repacked_pack(operation, repacked, cancellation).await?;
         drop(workspace);
-
-        let pack = GeneratedPack {
-            file: Arc::new(file),
-            size,
-            checksum,
-            content_hash,
-            object_count: u32::try_from(object_ids.len()).map_err(|_| Error::LimitExceeded {
-                limit: "pack object count",
-                actual: object_ids.len() as u64,
-                maximum: u32::MAX as u64,
-            })?,
-        };
-        pack.verify_checksum()?;
         tracing::info!(
             target: "crab_remote_git::telemetry",
             telemetry_event = "pack_generation",
@@ -665,7 +704,7 @@ impl RemoteGitRepository {
             source_pack_count,
             object_count = pack.object_count,
             source_download_ms,
-            response_bytes = size,
+            response_bytes = pack.size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
             "remote Git response pack consolidated from complete pack inventory"
         );
@@ -715,43 +754,8 @@ impl RemoteGitRepository {
         .await
         .map_err(|source| Error::DecodeTask { source })?
         .map_err(|source| Error::ResponsePackConsolidation { source })?;
-        if cancellation.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
-            invariant: "selected-object repack produced no pack",
-        })?;
-        let size = generated.pack_size;
-        operation
-            .charge(BudgetDimension::ResponseBytes, size)
-            .await?;
-        let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        })?;
-        let content_hash = generated.pack_hash;
-        let destination = NamedTempFile::new().map_err(io_error)?;
-        let destination_path = destination.path().to_owned();
-        let destination = destination.into_temp_path();
-        std::fs::remove_file(&destination_path).map_err(io_error)?;
-        std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
-        let file = std::fs::File::open(&destination_path).map_err(io_error)?;
-        let file = NamedTempFile::from_parts(file, destination);
-        let object_count = generated.object_count;
-        drop(repacked);
+        let pack = adopt_repacked_pack(operation, repacked, cancellation).await?;
         drop(workspace);
-
-        let pack = GeneratedPack {
-            file: Arc::new(file),
-            size,
-            checksum,
-            content_hash,
-            object_count: u32::try_from(object_count).map_err(|_| Error::LimitExceeded {
-                limit: "pack object count",
-                actual: object_count,
-                maximum: u32::MAX as u64,
-            })?,
-        };
-        pack.verify_checksum()?;
         tracing::info!(
             target: "crab_remote_git::telemetry",
             telemetry_event = "pack_generation",
@@ -760,7 +764,7 @@ impl RemoteGitRepository {
             object_count = pack.object_count,
             source_bytes = inventory_bytes,
             source_download_ms,
-            response_bytes = size,
+            response_bytes = pack.size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
             "remote Git response pack repacked from selected objects"
         );
@@ -874,6 +878,50 @@ impl RemoteGitRepository {
             .await?;
         Ok(generated.as_ref().clone())
     }
+}
+
+async fn adopt_repacked_pack(
+    operation: &crate::OperationContext,
+    repacked: crab_git::repack::GeometricRepackedRepository,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
+        invariant: "Git repack produced no pack",
+    })?;
+    let object_count = generated.object_count;
+    operation
+        .charge(BudgetDimension::LogicalObjects, object_count)
+        .await?;
+    operation
+        .charge(BudgetDimension::ResponseBytes, generated.pack_size)
+        .await?;
+    let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
+        stage: crate::CorruptionStage::PackEntry,
+    })?;
+    let destination = NamedTempFile::new().map_err(io_error)?;
+    let destination_path = destination.path().to_owned();
+    let destination = destination.into_temp_path();
+    std::fs::remove_file(&destination_path).map_err(io_error)?;
+    std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
+    let file = std::fs::File::open(&destination_path).map_err(io_error)?;
+    let file = NamedTempFile::from_parts(file, destination);
+    let pack = GeneratedPack {
+        file: Arc::new(file),
+        size: generated.pack_size,
+        checksum,
+        content_hash: generated.pack_hash,
+        object_count: u32::try_from(object_count).map_err(|_| Error::LimitExceeded {
+            limit: "pack object count",
+            actual: object_count,
+            maximum: u32::MAX as u64,
+        })?,
+    };
+    drop(repacked);
+    pack.verify_checksum()?;
+    Ok(pack)
 }
 
 async fn download_repack_sources(
