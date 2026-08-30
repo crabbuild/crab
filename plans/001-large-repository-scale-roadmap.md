@@ -1329,13 +1329,15 @@ A follow-up producer microqualification replayed the exact 1,613,477-object
 selection against the read-only Kubernetes object database. Native
 `pack-objects` generated an equivalent 1.1 GiB response shape in 9.47 s, while
 the subsequent redundant `verify-pack -v` traversal took another 30.51 s.
-Commit `175b08db` in PR #120 now reserves that deep second traversal for
-durable maintenance packs. The transient shallow response still verifies the
+Commit `175b08db` in PR #120 reserves that deep second traversal for durable
+maintenance packs. Commit `4d2b956d` additionally carries the already verified
+pack digests through response adoption, removing a second full response-pack
+hash scan. The transient shallow response still verifies the
 pack SHA-1, Blake3 storage identity, index and reverse-index checksums, and
 exact selected object set; it also computes SHA-1 and Blake3 in one streaming
 read instead of reading the entire response twice. Durable maintenance output
 continues to use the deep object traversal.
-A new RustFS producer run from `175b08db` is still required before claiming an
+A new RustFS producer run from `4d2b956d` is still required before claiming an
 end-to-end latency reduction from this microqualification.
 
 The producer patch removes the source-side index bottleneck rather than
@@ -2274,6 +2276,13 @@ environment dumps, or credentials.
 | 6 | PARTIAL; MEANINGFUL 100-CLIENT STALE FANOUT PASS; DISTRIBUTED SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db` | The meaningful stale fanout proves one producer, 99 coalesced callers, bounded 16-slot artifact reads, 96/96 exact-current cache-consumer exits, 100/100 refs/boundaries/fsck, and exact-prefix cleanup. The later 4b6b diagnostic completed 101 replay pushes and the clone matrix but is not green because the source path vanished during its final immutability check. Maximum admission wait was 5,372,007 ms without the retired five-minute timeout. The one-host index tail required qualification-only scheduling and is not a team SLO; distributed clients, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout remain pending |
 
 ### Current branch verification evidence
+
+PR #120's latest producer follow-ups are `175b08db` (structural response
+validation) and `4d2b956d` (single-pass response-pack handoff). The latest
+release build is `crab 1.1.0`, SHA-256
+`588a9bbb21be0b50bbfc94a58852982f2bc1c2beceb7e1881c31fb85e868c213` for the
+former; the latter has the rebuilt release binary with SHA-256
+`0b63759c59b3d324294205cbe1475c12997aa3fdf5ffe19f8e8cf06f6f06232c`.
 
 The earlier broad proof was run with the roadmap target directory:
 
