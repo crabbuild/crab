@@ -139,6 +139,75 @@ pub fn committed_pointers_for_paths(
     Ok(pointers)
 }
 
+/// Refresh Git index stat entries after Crab replaces worktree file contents.
+pub(crate) fn refresh_index_stats(root: &Path, paths: &[PathBuf]) -> Result<usize> {
+    use bstr::ByteSlice;
+
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let mut updates = HashMap::with_capacity(paths.len());
+    for path in paths {
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        let metadata = gix_index::fs::Metadata::from_path_no_follow(path).map_err(CrabError::Io)?;
+        let stat = gix_index::entry::Stat::from_fs(&metadata)
+            .map_err(|error| CrabError::Internal(format!("read worktree file stat: {error}")))?;
+        updates.insert(index_path_bytes(rel), stat);
+    }
+
+    let index_path = WorktreeContext::resolve_from_path(root)?.index_path();
+    let lock = gix_lock::File::acquire_to_update_resource(
+        &index_path,
+        gix_lock::acquire::Fail::Immediately,
+        None,
+    )
+    .map_err(|error| CrabError::Internal(format!("lock Git index: {error}")))?;
+    let mut index = gix_index::File::at(
+        &index_path,
+        gix_hash::Kind::Sha1,
+        true,
+        gix_index::decode::Options::default(),
+    )
+    .map_err(|error| CrabError::Internal(format!("read Git index: {error}")))?;
+    let mut updated = 0usize;
+    for (entry, entry_path) in index.entries_mut_with_paths() {
+        if entry.stage() != gix_index::entry::Stage::Unconflicted {
+            continue;
+        }
+        let Some(stat) = updates.get(entry_path.as_bytes()) else {
+            continue;
+        };
+        entry.stat = *stat;
+        updated += 1;
+    }
+    if updated == 0 {
+        return Ok(0);
+    }
+
+    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, lock);
+    index
+        .write_to(&mut writer, gix_index::write::Options::default())
+        .map_err(|error| CrabError::Internal(format!("write Git index: {error}")))?;
+    let lock = writer
+        .into_inner()
+        .map_err(|error| CrabError::Io(error.into_error()))?;
+    lock.commit()
+        .map_err(|error| CrabError::Internal(format!("commit Git index: {error}")))?;
+    Ok(updated)
+}
+
+#[cfg(unix)]
+fn index_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn index_path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().into_owned().into_bytes()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeContext {
     pub current_worktree_root: PathBuf,

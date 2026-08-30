@@ -667,8 +667,21 @@ async fn stage_file_streaming_inner(
         });
     }
 
-    if let Err(err) = staging.adopt_staged_file(&provisional_merkle, &file_merkle, stage_stats.size)
-    {
+    // A renamed or copied path can resolve entirely to proven remote chunks
+    // while the same canonical recipe is still indexed locally. Its partial
+    // provisional rows are redundant; comparing them with the complete
+    // canonical recipe would falsely report divergent content.
+    let adopt_result = if staging.has_verified_local_recipe(&recipe)? {
+        staging
+            .retire_file(&provisional_merkle)
+            .and_then(|_| staging.unregister_file(&provisional_merkle))
+            .map(|_| ())
+    } else {
+        staging
+            .adopt_staged_file(&provisional_merkle, &file_merkle, stage_stats.size)
+            .map(|_| ())
+    };
+    if let Err(err) = adopt_result {
         fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
         cleanup_staged_file(
             staging,
@@ -2491,6 +2504,53 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(indexed_remote_chunks, unique_recipe_chunks);
         assert!(plan.prepared_xorbs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restaging_identical_recipe_with_remote_authority_reuses_canonical_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let source = repo.join("source.bin");
+        write_pattern_file(&source, 2 * 1024 * 1024);
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+
+        let first = stage_file_streaming_as(
+            &source,
+            &repo,
+            Path::new("models/original.bin"),
+            &staging,
+            StreamStageProgress::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        staging.mark_batch_published(&first.batch_id).unwrap();
+
+        let renamed = stage_file_streaming_as(
+            &source,
+            &repo,
+            Path::new("models/renamed.bin"),
+            &staging,
+            StreamStageProgress {
+                existing_lookup: Some(Arc::new(BatchRemoteLookup { first_only: false })),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(renamed.recipe, first.recipe);
+        staging.mark_batch_published(&renamed.batch_id).unwrap();
+        assert_eq!(
+            staging
+                .published_recipe_for_file(&MerkleHash::from(renamed.file_hash))
+                .unwrap(),
+            Some(first.recipe)
+        );
     }
 
     #[tokio::test]

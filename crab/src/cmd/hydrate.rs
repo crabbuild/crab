@@ -40,7 +40,7 @@ use crate::engine::pointer::is_working_tree_pointer;
 use crate::git::progress::{format_rate, is_tty, render_bar};
 use crate::git::smudge::SmudgeSession;
 use crate::git::worktree::{
-    WorktreeContext, normalize_identity_path, parse_worktree_list_porcelain,
+    WorktreeContext, normalize_identity_path, parse_worktree_list_porcelain, refresh_index_stats,
 };
 use crate::git::worktree_hydration::{
     WorktreeHydrationMode, WorktreeHydrationPolicyFile, WorktreeHydrationPolicyStatus,
@@ -3583,82 +3583,13 @@ fn refresh_hydrated_index_entries(root: &Path, entries: &[(PathBuf, Pointer)]) {
             (!is_working_tree_pointer(path).unwrap_or(true)).then_some(path.clone())
         })
         .collect::<Vec<_>>();
-    if let Err(e) = refresh_hydrated_index_entries_once(root, &paths) {
+    if let Err(e) = refresh_index_stats(root, &paths) {
         debug!(
             files = paths.len(),
             error = %e,
             "failed to refresh hydrated file index stat metadata"
         );
     }
-}
-
-fn refresh_hydrated_index_entries_once(root: &Path, paths: &[PathBuf]) -> Result<usize> {
-    use bstr::ByteSlice;
-
-    if paths.is_empty() {
-        return Ok(0);
-    }
-    let mut updates = HashMap::with_capacity(paths.len());
-    for path in paths {
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let metadata =
-            gix_index::fs::Metadata::from_path_no_follow(path).map_err(error::CrabError::Io)?;
-        let stat = gix_index::entry::Stat::from_fs(&metadata)
-            .map_err(|e| error::CrabError::Internal(format!("read hydrated file stat: {e}")))?;
-        updates.insert(hydrate_index_path_bytes(rel), stat);
-    }
-
-    let index_path = WorktreeContext::resolve_from_path(root)?.index_path();
-    let lock = gix_lock::File::acquire_to_update_resource(
-        &index_path,
-        gix_lock::acquire::Fail::Immediately,
-        None,
-    )
-    .map_err(|e| error::CrabError::Internal(format!("lock Git index: {e}")))?;
-    let mut index = gix_index::File::at(
-        &index_path,
-        gix_hash::Kind::Sha1,
-        true,
-        gix_index::decode::Options::default(),
-    )
-    .map_err(|e| error::CrabError::Internal(format!("read Git index: {e}")))?;
-    let mut updated = 0usize;
-    for (entry, entry_path) in index.entries_mut_with_paths() {
-        if entry.stage() != gix_index::entry::Stage::Unconflicted {
-            continue;
-        }
-        let Some(stat) = updates.get(entry_path.as_bytes()) else {
-            continue;
-        };
-        entry.stat = *stat;
-        updated += 1;
-    }
-    if updated == 0 {
-        return Ok(0);
-    }
-
-    let mut writer = std::io::BufWriter::with_capacity(64 * 1024, lock);
-    index
-        .write_to(&mut writer, gix_index::write::Options::default())
-        .map_err(|e| error::CrabError::Internal(format!("write Git index: {e}")))?;
-    let lock = writer
-        .into_inner()
-        .map_err(|e| error::CrabError::Io(e.into_error()))?;
-    lock.commit()
-        .map_err(|e| error::CrabError::Internal(format!("commit Git index: {e}")))?;
-    Ok(updated)
-}
-
-#[cfg(unix)]
-fn hydrate_index_path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn hydrate_index_path_bytes(path: &Path) -> Vec<u8> {
-    path.to_string_lossy().into_owned().into_bytes()
 }
 
 pub fn resolve_git_pointer_prefetch_candidates(
@@ -4824,7 +4755,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn refresh_hydrated_index_entry_clears_filtered_status_dirty_bit() {
+    fn refresh_index_entry_clears_filtered_status_after_hydrate_and_dehydrate() {
         use std::os::unix::fs::PermissionsExt;
 
         let _git_env = ScopedGitDir::acquire();
@@ -4866,7 +4797,7 @@ mod tests {
         assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
 
         assert_eq!(
-            refresh_hydrated_index_entries_once(&repo, &[repo.join("model.bin")]).unwrap(),
+            refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
             1
         );
 
@@ -4886,6 +4817,14 @@ mod tests {
             gix_index::fs::Metadata::from_path_no_follow(&repo.join("model.bin")).unwrap();
         let expected_stat = gix_index::entry::Stat::from_fs(&metadata).unwrap();
         assert_eq!(entry.stat, expected_stat);
+        assert_eq!(git_stdout(&repo, &["status", "--porcelain=v1"]), "");
+
+        std::fs::write(repo.join("model.bin"), "POINTER\n").unwrap();
+        assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
+        assert_eq!(
+            refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
+            1
+        );
         assert_eq!(git_stdout(&repo, &["status", "--porcelain=v1"]), "");
     }
 
@@ -4932,11 +4871,8 @@ mod tests {
         std::fs::write(repo.join("model.bin"), "hydrated model bytes\n").unwrap();
         std::fs::write(repo.join("adapter.bin"), "hydrated adapter bytes\n").unwrap();
         assert_eq!(
-            refresh_hydrated_index_entries_once(
-                &repo,
-                &[repo.join("model.bin"), repo.join("adapter.bin")],
-            )
-            .unwrap(),
+            refresh_index_stats(&repo, &[repo.join("model.bin"), repo.join("adapter.bin")],)
+                .unwrap(),
             2
         );
 
