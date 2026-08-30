@@ -2866,6 +2866,15 @@ impl StagingArea {
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
     }
 
+    /// Return the newest verified but unpublished recipe for a path when all
+    /// of its chunks remain reusable from local segment or prepared authority.
+    pub fn unpublished_local_recipe_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        lock_index(&self.index)?.unpublished_local_recipe_for_path(&staging_path_bytes(path))
+    }
+
     /// Read one bounded page from an indexed immutable recipe.
     pub fn recipe_page(
         &self,

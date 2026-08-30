@@ -1901,6 +1901,11 @@ class AddCommitPushSmoke:
         self.run_git(repo, ["branch", "-m", "history-a"])
         self.run_git(repo, ["checkout", "--orphan", "main"])
         self.run_git(repo, ["rm", "-rf", "."])
+        self.run_git(
+            repo,
+            ["checkout", "history-a", "--", "crab.toml", ".gitattributes"],
+            name=f"{case_name} retain project configuration",
+        )
 
         model.write_bytes(second_content)
         self.run_crab(
@@ -2001,6 +2006,12 @@ class AddCommitPushSmoke:
             self.report.status = "passed"
             self.write_report()
             return
+        if self.args.only_committed_restage:
+            self.run_committed_restage_before_first_push_case()
+            self.check_credential_disclosure()
+            self.report.status = "passed"
+            self.write_report()
+            return
         self.run_v1_hard_cutover_reset_case()
         self.run_missing_manifest_case()
         self.run_corrupt_manifest_case()
@@ -2066,6 +2077,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push-timeout", type=positive_int, default=240)
     parser.add_argument("--only-cross-repo-duplicate", action="store_true")
     parser.add_argument("--only-partial-overlap", action="store_true")
+    parser.add_argument("--only-committed-restage", action="store_true")
     return parser.parse_args()
 
 

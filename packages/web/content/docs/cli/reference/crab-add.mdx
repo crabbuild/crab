@@ -28,7 +28,11 @@ concurrently.
 After chunking and staging, `crab add` writes Crab pointer blobs directly to
 Git's object database and atomically replaces their index entries — unless
 `--skip-git-add` is specified. Staged recipes become push-visible only after
-that index transaction is durably reconciled.
+that index transaction is durably reconciled. A later `git add` verifies the
+incoming bytes against that prepared recipe and promotes an exact match without
+repeating CDC, compression, payload reads, chunk-index writes, or a full-file
+temporary spool. Concurrent `crab add` processes queue on the repository
+staging lock instead of failing immediately.
 
 For conceptual background on adding files and content-defined chunking, see [Adding Files](/docs/cli/daily-workflow/adding-files).
 

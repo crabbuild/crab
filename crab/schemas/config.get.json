@@ -14,7 +14,7 @@
       "type": "string"
     },
     "source": {
-      "description": "Where the value came from: `\"local\"`, `\"default\"`, `\"env\"`, or `\"remote\"`.",
+      "description": "Where the value came from: `\"project\"`, `\"local\"`, `\"default\"`, or `\"env\"`.",
       "type": "string"
     },
     "value": {

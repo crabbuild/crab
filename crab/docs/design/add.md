@@ -239,8 +239,20 @@ JSONL mode emits:
 The JSONL `push-plan` event reports completed files as `current`, total files as
 `total`, prepared xorb bytes as `bytes`, and prepared xorb count as
 `xorbs_produced`. Because progress events are rate-limited, the terminal
-`AddSummary` also carries `staging_duration_ms`, `planning_duration_ms`,
-`flushing_duration_ms`, and `indexing_duration_ms` for performance analysis.
+`AddSummary` also carries the wall-clock phase durations plus cumulative worker
+time for CDC, bucket-global lookup, compression, and prepared-payload writes.
+Worker durations can exceed wall time because files execute concurrently.
+
+Independent `crab add` processes queue for up to 30 minutes on the staging
+flock. A later process does not fail merely because an earlier large add is
+still preparing or publishing, and rechecks Git's index after ownership so it
+does not repeat work the preceding process just published.
+For `--skip-git-add`, ordinary `git add` verifies the Git-provided stream
+against bounded pages of the retained recipe while buffering at most one
+expected chunk. An exact match promotes the recipe without CDC, payload reads,
+or chunk-index writes. On a mismatch, the filter reconstructs only the verified
+prefix from local chunk authority and continues the complete stream through the
+canonical CDC pipeline.
 
 ## Git Pointer Publication
 

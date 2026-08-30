@@ -15,6 +15,7 @@ use super::segment::ChunkLocator;
 
 type StoredRecipeRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String);
 type StoredRecipeMetadata = (i64, i64, Vec<u8>, i64, Vec<u8>, String);
+type StoredRecipeWithHashRow = (Vec<u8>, i64, i64, Vec<u8>, i64, Vec<u8>, String, Vec<u8>);
 type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
 
 /// Canonical pre-release on-disk layout contract.
@@ -3574,6 +3575,97 @@ impl Index {
             selected = Some(recipe);
         }
         Ok(selected)
+    }
+
+    /// Load the newest verified open recipe for a path when every chunk has
+    /// reusable local segment or prepared-xorb authority.
+    pub fn unpublished_local_recipe_for_path(
+        &self,
+        path_bytes: &[u8],
+    ) -> Result<Option<crate::recipe::FileRecipe>> {
+        let stored: Option<StoredRecipeWithHashRow> = self
+            .conn
+            .query_row(
+                "SELECT recipe.file_hash, recipe.file_size, recipe.chunk_count,
+                        recipe.sequence_hash, recipe.page_count,
+                        recipe.page_root_hash, recipe.policy_id,
+                        recipe.recipe_hash
+                 FROM path_leases AS lease
+                 JOIN staging_batches AS batch USING (batch_id)
+                 JOIN file_recipes AS recipe USING (recipe_hash)
+                 JOIN verified_recipes AS verified USING (recipe_hash)
+                 WHERE lease.path_bytes = ?1
+                   AND batch.state = 'open'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM recipe_occurrences AS occurrence
+                       WHERE occurrence.recipe_hash = recipe.recipe_hash
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM chunk_payloads AS payload
+                             WHERE payload.chunk_hash = occurrence.chunk_hash
+                               AND payload.size = occurrence.chunk_size
+                         )
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM prepared_payload_chunks AS prepared
+                             JOIN prepared_leases AS prepared_lease
+                               ON prepared_lease.xorb_hash = prepared.xorb_hash
+                              AND prepared_lease.recipe_hash = recipe.recipe_hash
+                             WHERE prepared.chunk_hash = occurrence.chunk_hash
+                               AND prepared.uncompressed_size = occurrence.chunk_size
+                         )
+                   )
+                 ORDER BY batch.rowid DESC
+                 LIMIT 1",
+                params![path_bytes],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to query unpublished local recipe for path: {e}"
+                ))
+            })?;
+        let Some((
+            file_hash,
+            file_size,
+            chunk_count,
+            sequence_hash,
+            page_count,
+            page_root_hash,
+            policy_id,
+            recipe_hash,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        let file_hash = decode_hash_blob("unpublished local recipe file hash", file_hash)?;
+        let recipe_hash = decode_hash_blob("unpublished local recipe hash", recipe_hash)?;
+        self.load_stored_recipe(
+            &recipe_hash,
+            &file_hash,
+            (
+                file_size,
+                chunk_count,
+                sequence_hash,
+                page_count,
+                page_root_hash,
+                policy_id,
+            ),
+        )
+        .map(Some)
     }
 
     pub fn verified_local_recipe(

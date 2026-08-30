@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
@@ -216,9 +216,14 @@ struct StreamPreparedXorbRequest {
 
 struct StreamPreparedXorbWriter {
     sender: Option<mpsc::Sender<StreamPreparedXorbRequest>>,
-    task: tokio::task::JoinHandle<Result<Vec<StreamStagePreparedXorb>>>,
+    task: tokio::task::JoinHandle<Result<PreparedXorbWriteResult>>,
     next_sequence: usize,
     factory: StreamStageXorbBuilder,
+}
+
+struct PreparedXorbWriteResult {
+    xorbs: Vec<StreamStagePreparedXorb>,
+    duration: Duration,
 }
 
 impl StreamPreparedXorbWriter {
@@ -232,12 +237,14 @@ impl StreamPreparedXorbWriter {
         let serialized_payload_pool = factory.serialized_payload_pool.clone();
         let task = tokio::spawn(async move {
             let mut prepared_xorbs = Vec::new();
+            let mut duration = Duration::ZERO;
             while let Some(request) = receiver.recv().await {
                 let StreamPreparedXorbRequest {
                     permit,
                     sequence,
                     result,
                 } = request;
+                let write_start = Instant::now();
                 let write_result = stream_prepared_xorb(
                     &staging_root,
                     &file_hash,
@@ -246,6 +253,7 @@ impl StreamPreparedXorbWriter {
                     hooks.before_prepared_xorb_write.as_ref(),
                 )
                 .await;
+                duration = duration.saturating_add(write_start.elapsed());
                 // Keep admission through pool return so the next rollover reuses
                 // this allocation instead of briefly overlapping it.
                 match write_result {
@@ -260,7 +268,10 @@ impl StreamPreparedXorbWriter {
                     }
                 }
             }
-            Ok(prepared_xorbs)
+            Ok(PreparedXorbWriteResult {
+                xorbs: prepared_xorbs,
+                duration,
+            })
         });
         Self {
             sender: Some(sender),
@@ -318,7 +329,7 @@ impl StreamPreparedXorbWriter {
         })
     }
 
-    async fn finish(mut self) -> Result<Vec<StreamStagePreparedXorb>> {
+    async fn finish(mut self) -> Result<PreparedXorbWriteResult> {
         self.sender.take();
         self.task
             .await
@@ -337,7 +348,44 @@ pub struct StreamStageResult {
     pub recipe: crate::recipe::FileRecipe,
     pub prepared_xorbs: Vec<StreamStagePreparedXorb>,
     pub index_stat: Option<VerifiedIndexStat>,
+    pub timings: StreamStageTimings,
     pub duration_ms: u64,
+}
+
+/// Cumulative worker time spent in the expensive add preparation phases.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamStageTimings {
+    /// Cumulative time spent finding CDC boundaries in worker tasks.
+    pub chunking_duration_ms: u64,
+    /// Cumulative time spent consulting the bucket-global remote index.
+    pub remote_lookup_duration_ms: u64,
+    /// Cumulative time spent packing and finalizing compressed xorbs.
+    pub compression_duration_ms: u64,
+    /// Cumulative time spent materializing and installing prepared payloads.
+    pub payload_write_duration_ms: u64,
+}
+
+#[derive(Default)]
+struct StreamStageTimingAccumulator {
+    chunking: Duration,
+    remote_lookup: Duration,
+    compression: Duration,
+    payload_write: Duration,
+}
+
+impl StreamStageTimingAccumulator {
+    fn finish(self) -> StreamStageTimings {
+        StreamStageTimings {
+            chunking_duration_ms: duration_ms(self.chunking),
+            remote_lookup_duration_ms: duration_ms(self.remote_lookup),
+            compression_duration_ms: duration_ms(self.compression),
+            payload_write_duration_ms: duration_ms(self.payload_write),
+        }
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Git-index stat fields captured while the staged bytes were verified.
@@ -633,6 +681,7 @@ async fn stage_file_streaming_inner(
         return Err(with_path(abs_path, err));
     }
 
+    let authority_write_start = Instant::now();
     if xorb_builder.is_some()
         && let Err(err) = persist_stream_prepared_authority(
             staging,
@@ -654,6 +703,12 @@ async fn stage_file_streaming_inner(
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
         let _ = staging.rollback_batch(&batch_id);
         return Err(with_path(abs_path, err));
+    }
+    if xorb_builder.is_some() {
+        stage_stats.timings.payload_write = stage_stats
+            .timings
+            .payload_write
+            .saturating_add(authority_write_start.elapsed());
     }
     if let Some(builder) = &xorb_builder {
         builder.authority_changed();
@@ -718,6 +773,7 @@ async fn stage_file_streaming_inner(
         recipe,
         prepared_xorbs: stage_stats.prepared_xorbs,
         index_stat,
+        timings: stage_stats.timings.finish(),
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -861,12 +917,18 @@ async fn stream_chunk_and_stage(
     .await;
     let writer_result = match xorb_writer {
         Some(writer) => writer.finish().await,
-        None => Ok(Vec::new()),
+        None => Ok(PreparedXorbWriteResult {
+            xorbs: Vec::new(),
+            duration: Duration::ZERO,
+        }),
     };
 
     match stage_result {
         Ok(mut stats) => {
-            stats.prepared_xorbs = writer_result?;
+            let writes = writer_result?;
+            stats.timings.payload_write =
+                stats.timings.payload_write.saturating_add(writes.duration);
+            stats.prepared_xorbs = writes.xorbs;
             Ok(stats)
         }
         Err(error) => {
@@ -918,6 +980,7 @@ async fn stream_chunk_and_stage_producer(
     let mut total_chunks = 0usize;
     let mut remote_existing_chunks = 0u64;
     let mut total = 0u64;
+    let mut timings = StreamStageTimingAccumulator::default();
 
     loop {
         check_cancelled(cancel)?;
@@ -934,7 +997,9 @@ async fn stream_chunk_and_stage_producer(
         if let Some(counter) = chunk_bytes_done {
             counter.fetch_add(n as u64, Relaxed);
         }
+        let chunking_start = Instant::now();
         let emitted = chunker.feed_bytes(&buf.freeze());
+        timings.chunking = timings.chunking.saturating_add(chunking_start.elapsed());
         append_emitted_chunks(
             emitted,
             &mut batch,
@@ -955,13 +1020,17 @@ async fn stream_chunk_and_stage_producer(
             &mut xorb_writer,
             existing_lookup,
             &mut remote_existing_chunks,
+            &mut timings,
             cancel,
             hooks,
         )
         .await?;
     }
 
-    if let Some(last) = chunker.finalize() {
+    let chunking_start = Instant::now();
+    let final_chunk = chunker.finalize();
+    timings.chunking = timings.chunking.saturating_add(chunking_start.elapsed());
+    if let Some(last) = final_chunk {
         append_emitted_chunks(
             vec![last],
             &mut batch,
@@ -983,6 +1052,7 @@ async fn stream_chunk_and_stage_producer(
         &mut xorb_writer,
         existing_lookup,
         &mut remote_existing_chunks,
+        &mut timings,
         cancel,
         hooks,
     )
@@ -997,11 +1067,15 @@ async fn stream_chunk_and_stage_producer(
         } else {
             None
         };
+        let compression_start = Instant::now();
         let finalized = tokio::task::spawn_blocking(move || builder.finalize())
             .await
             .map_err(|error| {
                 CrabError::Internal(format!("direct xorb finalization task failed: {error}"))
             })??;
+        timings.compression = timings
+            .compression
+            .saturating_add(compression_start.elapsed());
         if finalized.len() > 1 {
             return Err(CrabError::Internal(format!(
                 "direct xorb finalization produced {} results after batch draining",
@@ -1022,6 +1096,7 @@ async fn stream_chunk_and_stage_producer(
         chunks: total_chunks,
         recipe_recorder,
         prepared_xorbs: Vec::new(),
+        timings,
     })
 }
 
@@ -1039,6 +1114,7 @@ struct ChunkStageStats {
     chunks: usize,
     recipe_recorder: crate::recipe::RecipeRecorder,
     prepared_xorbs: Vec<StreamStagePreparedXorb>,
+    timings: StreamStageTimingAccumulator,
 }
 
 fn append_emitted_chunks(
@@ -1084,6 +1160,7 @@ async fn flush_full_batches(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
 ) -> Result<()> {
@@ -1106,6 +1183,7 @@ async fn flush_full_batches(
             xorb_writer,
             existing_lookup,
             remote_existing_chunks,
+            timings,
             cancel,
             hooks,
         )
@@ -1167,6 +1245,7 @@ async fn flush_batch(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
 ) -> Result<()> {
@@ -1175,7 +1254,9 @@ async fn flush_batch(
     }
 
     let batch_start = *chunk_index_offset;
+    let lookup_start = Instant::now();
     let mut existing = classify_existing_batch(batch, existing_lookup, cancel).await?;
+    timings.remote_lookup = timings.remote_lookup.saturating_add(lookup_start.elapsed());
     for (candidate, (_, data)) in existing.iter_mut().zip(batch.iter()) {
         if candidate.as_ref().is_some_and(|candidate| {
             u64::from(candidate.xorb_ref.uncompressed_size) != data.len() as u64
@@ -1320,6 +1401,7 @@ async fn flush_batch(
         let mut next_sequence = writer.next_sequence;
         let runtime = tokio::runtime::Handle::current();
         let pack_cancel = cancel.clone();
+        let compression_start = Instant::now();
         let (returned_builder, returned_sequence) = tokio::task::spawn_blocking(move || {
             builder.push_batch_with_rollover_admission(
                 &to_pack,
@@ -1337,6 +1419,9 @@ async fn flush_batch(
         })
         .await
         .map_err(|error| CrabError::Internal(format!("direct xorb pack task failed: {error}")))??;
+        timings.compression = timings
+            .compression
+            .saturating_add(compression_start.elapsed());
         *xorb_builder = Some(returned_builder);
         writer.next_sequence = returned_sequence;
         *xorb_writer = Some(writer);
@@ -1691,6 +1776,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn phase_timings_convert_after_accumulating_submillisecond_work() {
+        let mut timings = StreamStageTimingAccumulator::default();
+        timings.chunking = timings.chunking.saturating_add(Duration::from_micros(600));
+        timings.chunking = timings.chunking.saturating_add(Duration::from_micros(600));
+
+        assert_eq!(timings.finish().chunking_duration_ms, 1);
+    }
+
     #[tokio::test]
     async fn xorb_builder_admission_is_shared_and_cancel_safe() {
         let builders = StreamStageXorbBuilder::new(1, XorbBuilder::new);
@@ -1915,6 +2009,7 @@ mod tests {
 
         assert_eq!(
             first
+                .xorbs
                 .iter()
                 .map(|prepared| prepared.hash)
                 .collect::<Vec<_>>(),
@@ -1922,13 +2017,14 @@ mod tests {
         );
         assert_eq!(
             second
+                .xorbs
                 .iter()
                 .map(|prepared| prepared.hash)
                 .collect::<Vec<_>>(),
             second_hashes
         );
         for prepared in [&first, &second] {
-            for (sequence, prepared) in prepared.iter().enumerate() {
+            for (sequence, prepared) in prepared.xorbs.iter().enumerate() {
                 assert!(prepared.payload_path.exists());
                 assert!(
                     prepared
