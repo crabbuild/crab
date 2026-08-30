@@ -661,6 +661,57 @@ pub async fn load_ref_registry_summary(
     Ok(registry)
 }
 
+/// Loads only the bucket coverage marker for advisory health reporting.
+///
+/// This does not validate every repository record and must not authorize
+/// destructive bucket GC; that boundary must load the complete registry.
+#[cfg(feature = "storage")]
+pub async fn load_ref_registry_coverage_marker(
+    store: &Store,
+    router: &StoreLayout<Store>,
+) -> Result<bool> {
+    let path = registry_coverage_path(router);
+    let coverage = match store.get_with_etag(&path).await {
+        Ok((body, _)) => serde_json::from_slice::<RegistryCoverage>(&body).map_err(|error| {
+            MetadataError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("invalid JSON: {error}"),
+            }
+        })?,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(false),
+        Err(error) => return Err(MetadataError::from(error)),
+    };
+    if coverage.schema_version != REF_REGISTRY_RECORD_SCHEMA_VERSION {
+        return Err(MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: "unsupported partitioned ref-registry coverage schema".to_owned(),
+        });
+    }
+    Ok(coverage.complete)
+}
+
+/// Loads one repository's registry record without scanning bucket peers.
+#[cfg(feature = "storage")]
+pub async fn repo_ref_registry_complete(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    repo_prefix: &str,
+) -> Result<bool> {
+    let path = registry_record_path(router, repo_prefix);
+    let (body, _) = match store.get_with_etag(&path).await {
+        Ok(value) => value,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(false),
+        Err(error) => return Err(MetadataError::from(error)),
+    };
+    let record: RepoRefRecord =
+        serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: format!("invalid JSON: {error}"),
+        })?;
+    validate_record(&record, &path)?;
+    Ok(record.complete)
+}
+
 /// Loads one repository record and one shard-root partition.
 ///
 /// This keeps push-side receipt validation independent of bucket and
@@ -1452,6 +1503,40 @@ mod tests {
 
     #[cfg(feature = "storage")]
     #[tokio::test]
+    async fn targeted_repo_status_ignores_an_unrelated_corrupt_record() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
+        union_register_repo_shards(&store, &router, Vec::new())
+            .await
+            .unwrap();
+        let unrelated = registry_record_path(&router, "org/unrelated");
+        store
+            .put_exact(
+                &unrelated,
+                Bytes::from_static(
+                    br#"{"schema_version":2,"repo_prefix":"org/unrelated","generation":1,"complete":true,"workflow_stage_hashes":[],"workflow_experiment_ids":[],"active_active_coordinator":null}"#,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            repo_ref_registry_complete(&store, &router, "org/models")
+                .await
+                .unwrap()
+        );
+        assert!(load_ref_registry_summary(&store, &router).await.is_err());
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
     async fn manifest_repair_replaces_stale_roots_exactly() {
         use std::sync::Arc;
 
@@ -1476,6 +1561,11 @@ mod tests {
         let registry = load_ref_registry(&store, &router).await.unwrap();
         assert_eq!(registry.repos["org/models"], vec!["base".to_owned()]);
         assert!(registry.is_complete_for_destructive_gc());
+        assert!(
+            load_ref_registry_coverage_marker(&store, &router)
+                .await
+                .unwrap()
+        );
     }
 
     #[cfg(feature = "storage")]

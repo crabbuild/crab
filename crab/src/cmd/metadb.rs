@@ -3635,33 +3635,41 @@ async fn diagnose_acceleration_health(
         },
     };
 
-    let (ref_registry_repo_complete, ref_registry_bucket_complete) =
-        match crab_metadata::ref_registry::load_ref_registry(&storage, &router).await {
-            Ok(registry) => {
-                let repo_complete = registry.schema_version
-                    == crab_metadata::ref_registry::REF_REGISTRY_SCHEMA_VERSION
-                    && registry.complete_repos.contains(repo_prefix)
-                    && registry.repos.contains_key(repo_prefix);
-                let bucket_complete = registry.is_complete_for_destructive_gc();
-                if !repo_complete {
-                    notes.push(
-                    "repository GC roots are incomplete; run `crab gc --repair-registry --bucket <bucket>`"
-                        .to_owned(),
-                );
-                }
-                if !bucket_complete {
-                    notes.push(
-                    "bucket registry discovery is incomplete; destructive bucket GC remains disabled"
-                        .to_owned(),
-                );
-                }
-                (repo_complete, bucket_complete)
-            }
+    let ref_registry_repo_complete = match crab_metadata::ref_registry::repo_ref_registry_complete(
+        &storage,
+        &router,
+        repo_prefix,
+    )
+    .await
+    {
+        Ok(complete) => complete,
+        Err(error) => {
+            notes.push(format!("repository ref registry unavailable: {error}"));
+            false
+        }
+    };
+    if !ref_registry_repo_complete {
+        notes.push(
+            "repository GC roots are incomplete; run `crab gc --repair-registry --bucket <bucket>`"
+                .to_owned(),
+        );
+    }
+    let ref_registry_bucket_complete =
+        match crab_metadata::ref_registry::load_ref_registry_coverage_marker(&storage, &router)
+            .await
+        {
+            Ok(complete) => complete,
             Err(error) => {
-                notes.push(format!("ref registry unavailable: {error}"));
-                (false, false)
+                notes.push(format!("bucket registry coverage unavailable: {error}"));
+                false
             }
         };
+    if !ref_registry_bucket_complete {
+        notes.push(
+            "bucket registry discovery is incomplete; destructive bucket GC remains disabled"
+                .to_owned(),
+        );
+    }
 
     let git_session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
         Arc::clone(store),
