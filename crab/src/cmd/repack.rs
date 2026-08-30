@@ -438,6 +438,7 @@ async fn run_repack_locked(
                     .join(format!("pack-{}.rev", pack.pack_id)),
                 size: pack.size,
                 object_count: pack.object_count,
+                verified_identity: None,
             })
             .collect::<Vec<_>>();
         crab_git::repack::consolidate_pack_suffix_with_concurrency(&sources, download_concurrency)

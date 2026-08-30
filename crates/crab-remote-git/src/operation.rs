@@ -569,7 +569,7 @@ impl OperationContext {
         pack_id: crab_xet::hash::MerkleHash,
         expected_size: u64,
         destination: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<crab_git::pack::VerifiedPackIdentity> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         reader
             .download_pack_to_path(

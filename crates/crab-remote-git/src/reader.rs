@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use crab_git::pack::VerifiedPackIdentity;
 use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
@@ -1584,7 +1585,7 @@ impl RemoteGitReader {
         destination: &std::path::Path,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<VerifiedPackIdentity> {
         use tokio::io::AsyncWriteExt as _;
 
         budget.charge(BudgetDimension::StorageRequests, 1).await?;
@@ -1608,6 +1609,11 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Inventory,
             });
         }
+        if expected_size < 32 {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -1616,6 +1622,7 @@ impl RemoteGitReader {
             .map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
+        let mut verifier = PackStreamVerifier::default();
         let mut written = 0u64;
         while let Some(chunk) = tokio::select! {
             biased;
@@ -1623,6 +1630,7 @@ impl RemoteGitReader {
             chunk = stream.next() => chunk,
         } {
             let chunk = chunk?;
+            verifier.update(&chunk);
             file.write_all(&chunk).await.map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
@@ -1641,7 +1649,14 @@ impl RemoteGitReader {
                 stage: CorruptionStage::PackEntry,
             });
         }
-        Ok(())
+        let identity = verifier.finish()?;
+        let actual_content_hash = blake3::Hash::from_bytes(identity.content_hash).to_hex();
+        if actual_content_hash.as_str() != pack_id.to_string() {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(identity)
     }
 
     pub(crate) async fn download_pack_index_to_path(
@@ -1772,6 +1787,73 @@ impl RemoteGitReader {
             let _ = tokio::fs::remove_file(destination).await;
         }
         result
+    }
+}
+
+#[derive(Default)]
+struct PackStreamVerifier {
+    git_sha1: Sha1,
+    content_hash: blake3::Hasher,
+    trailer: Vec<u8>,
+    header: [u8; 4],
+    header_len: usize,
+}
+
+impl PackStreamVerifier {
+    fn update(&mut self, bytes: &[u8]) {
+        if self.header_len < self.header.len() {
+            let remaining = self.header.len() - self.header_len;
+            let copied = remaining.min(bytes.len());
+            let end = self.header_len + copied;
+            self.header[self.header_len..end].copy_from_slice(&bytes[..copied]);
+            self.header_len = end;
+        }
+        self.content_hash.update(bytes);
+
+        let hash_len = self
+            .trailer
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(20);
+        if hash_len == 0 {
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+        if hash_len <= self.trailer.len() {
+            self.git_sha1.update(&self.trailer[..hash_len]);
+            self.trailer.drain(..hash_len);
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+
+        self.git_sha1.update(&self.trailer);
+        let bytes_to_hash = hash_len - self.trailer.len();
+        self.git_sha1.update(&bytes[..bytes_to_hash]);
+        self.trailer.clear();
+        self.trailer.extend_from_slice(&bytes[bytes_to_hash..]);
+    }
+
+    fn finish(self) -> Result<VerifiedPackIdentity> {
+        if self.header_len != self.header.len()
+            || self.header != *b"PACK"
+            || self.trailer.len() != 20
+        {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        let mut trailer = [0_u8; 20];
+        trailer.copy_from_slice(&self.trailer);
+        let git_sha1: [u8; 20] = self.git_sha1.finalize().into();
+        if git_sha1 != trailer {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(VerifiedPackIdentity {
+            git_sha1,
+            content_hash: *self.content_hash.finalize().as_bytes(),
+        })
     }
 }
 
@@ -2568,6 +2650,45 @@ mod tests {
         )
         .expect_err("object ID mismatch must fail");
         assert!(matches!(error, Error::ObjectIdMismatch { .. }));
+    }
+
+    #[test]
+    fn streamed_pack_identity_matches_git_and_storage_hashes_across_chunks() {
+        let mut content = b"PACK".to_vec();
+        content.extend_from_slice(&2_u32.to_be_bytes());
+        content.extend_from_slice(&3_u32.to_be_bytes());
+        content.extend((0_u8..37).map(|value| value.wrapping_mul(7)));
+        let trailer: [u8; 20] = Sha1::digest(&content).into();
+        let mut pack = content;
+        pack.extend_from_slice(&trailer);
+
+        let mut verifier = PackStreamVerifier::default();
+        for chunk in pack.chunks(7) {
+            verifier.update(chunk);
+        }
+
+        assert_eq!(
+            verifier.finish().expect("valid streamed pack"),
+            VerifiedPackIdentity {
+                git_sha1: trailer,
+                content_hash: *blake3::hash(&pack).as_bytes(),
+            }
+        );
+    }
+
+    #[test]
+    fn streamed_pack_identity_rejects_a_corrupt_trailer() {
+        let mut pack = b"PACK\0\0\0\x02\0\0\0\0payload".to_vec();
+        pack.extend_from_slice(&[0_u8; 20]);
+        let mut verifier = PackStreamVerifier::default();
+        verifier.update(&pack);
+
+        assert!(matches!(
+            verifier.finish(),
+            Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry
+            })
+        ));
     }
 
     #[tokio::test]

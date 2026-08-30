@@ -8,8 +8,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::pack::{
-    PackError, install_pack_file_from_path, install_pack_files_from_paths,
-    verify_and_hash_pack_file,
+    PackError, VerifiedPackIdentity, install_pack_file_from_path,
+    install_pack_files_from_paths_with_identity, verify_and_hash_pack_file,
 };
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 use sha1::{Digest, Sha1};
@@ -33,6 +33,11 @@ pub struct RepackSource {
     pub size: u64,
     /// Object count committed by the source manifest.
     pub object_count: u64,
+    /// Identity verified while the source pack was streamed, when available.
+    ///
+    /// This lets the response producer avoid hashing the same immutable pack
+    /// body again while installing its already-verified sidecars.
+    pub verified_identity: Option<VerifiedPackIdentity>,
 }
 
 /// One authorized annotated tag considered for shallow fetch inclusion.
@@ -723,7 +728,7 @@ fn install_source_pack(
     source: &RepackSource,
     collect_oids: bool,
 ) -> Result<InstalledSourcePack, RepackError> {
-    let installed = install_pack_files_from_paths(
+    let installed = install_pack_files_from_paths_with_identity(
         pack_dir,
         &source.path,
         &source.index_path,
@@ -731,6 +736,7 @@ fn install_source_pack(
         &source.canonical_id,
         source.size,
         source.object_count,
+        source.verified_identity,
     )?;
     let oids =
         if collect_oids {
@@ -1144,7 +1150,13 @@ fn verified_generated_pack(
 }
 
 fn validate_source(source: &RepackSource) -> Result<(), RepackError> {
-    let (_, hash, size) = verify_and_hash_pack_file(&source.path)?;
+    let size = std::fs::metadata(&source.path)
+        .map_err(|error| io_error(format!("metadata {}", source.path.display()), error))?
+        .len();
+    let hash = match source.verified_identity {
+        Some(identity) => identity.content_hash,
+        None => verify_and_hash_pack_file(&source.path)?.1,
+    };
     if size != source.size {
         return Err(RepackError::SourceIntegrity {
             pack_id: source.canonical_id.clone(),
@@ -1364,6 +1376,7 @@ mod tests {
             reverse_index_path: PathBuf::new(),
             size: 0,
             object_count: 0,
+            verified_identity: None,
         };
 
         let error = repack_selected_objects(&[source], &[oid, oid]).unwrap_err();
@@ -1949,6 +1962,7 @@ mod tests {
             reverse_index_path,
             size,
             object_count: locations.object_count(),
+            verified_identity: None,
         })
     }
 

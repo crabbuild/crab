@@ -932,7 +932,7 @@ async fn download_repack_sources(
             // Keep the pack-level fanout bounded by the surrounding stream,
             // while overlapping their latency under the runtime origin
             // semaphore.
-            tokio::try_join!(
+            let (verified_identity, (), ()) = tokio::try_join!(
                 operation.download_pack_to_path(pack.pack_id, pack.pack_size, &path),
                 operation.download_pack_index_to_path(pack.pack_id, index_maximum, &index_path,),
                 operation.download_pack_reverse_index_to_path(
@@ -941,7 +941,7 @@ async fn download_repack_sources(
                     &reverse_index_path,
                 ),
             )?;
-            Ok(())
+            Ok(Some(verified_identity))
         },
     )
     .await
@@ -956,7 +956,7 @@ async fn download_repack_sources_with<F, Fut>(
 ) -> Result<Vec<crab_git::repack::RepackSource>>
 where
     F: Fn(GitPackInventoryEntry, PathBuf) -> Fut + Sync,
-    Fut: Future<Output = Result<()>> + Send,
+    Fut: Future<Output = Result<Option<crab_git::pack::VerifiedPackIdentity>>> + Send,
 {
     let concurrency = inventory.len().min(max_concurrency.max(1)).max(1);
     let mut sources = stream::iter(inventory.into_iter().enumerate().map(|(index, pack)| {
@@ -971,7 +971,7 @@ where
             std::fs::File::create(&path).map_err(io_error)?;
             std::fs::File::create(&index_path).map_err(io_error)?;
             std::fs::File::create(&reverse_index_path).map_err(io_error)?;
-            download(pack, path.clone()).await?;
+            let verified_identity = download(pack, path.clone()).await?;
             Ok::<_, Error>((
                 index,
                 crab_git::repack::RepackSource {
@@ -981,6 +981,7 @@ where
                     reverse_index_path,
                     size: pack.pack_size,
                     object_count: pack.object_count,
+                    verified_identity,
                 },
             ))
         }
@@ -1947,20 +1948,18 @@ async fn try_reuse_single_pack(
 
     let started = Instant::now();
     let file = NamedTempFile::new().map_err(io_error)?;
-    operation
+    let path = file.path().to_owned();
+    let verified_identity = operation
         .download_pack_to_path(inventory.pack_id, inventory.pack_size, file.path())
         .await?;
-    let path = file.path().to_owned();
+    if verified_identity.git_sha1 != expected_checksum {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
     let token = cancellation.clone();
-    let (checksum, content_hash) = tokio::task::spawn_blocking(move || {
-        inspect_reused_pack(
-            &path,
-            inventory.pack_id,
-            inventory.pack_size,
-            inventory.object_count,
-            expected_checksum,
-            &token,
-        )
+    tokio::task::spawn_blocking(move || {
+        inspect_reused_pack(&path, inventory.pack_size, inventory.object_count, &token)
     })
     .await
     .map_err(|source| Error::DecodeTask { source })??;
@@ -1988,20 +1987,21 @@ async fn try_reuse_single_pack(
     Ok(Some(GeneratedPack {
         file: Arc::new(file),
         size: inventory.pack_size,
-        checksum,
-        content_hash,
+        checksum: verified_identity.git_sha1,
+        content_hash: verified_identity.content_hash,
         object_count,
     }))
 }
 
 fn inspect_reused_pack(
     path: &std::path::Path,
-    pack_id: crab_xet::hash::MerkleHash,
     expected_size: u64,
     expected_objects: u64,
-    expected_checksum: [u8; 20],
     cancellation: &CancellationToken,
-) -> Result<([u8; 20], [u8; 32])> {
+) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     if expected_size < 32 {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
@@ -2025,43 +2025,7 @@ fn inspect_reused_pack(
             stage: crate::CorruptionStage::PackEntry,
         });
     }
-
-    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut sha1 = Sha1::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut chunk = [0u8; 1024 * 1024];
-    {
-        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            sha1.update(&chunk[..read]);
-            blake3.update(&chunk[..read]);
-        }
-    }
-    let mut trailer = [0u8; 20];
-    file.read_exact(&mut trailer).map_err(io_error)?;
-    blake3.update(&trailer);
-    let actual_sha1: [u8; 20] = sha1.finalize().into();
-    let actual_blake3 = *blake3.finalize().as_bytes();
-    if actual_sha1 != trailer
-        || trailer != expected_checksum
-        || actual_blake3
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            != pack_id.to_string()
-    {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    Ok((trailer, actual_blake3))
+    Ok(())
 }
 
 async fn generate_pack_with_operation(
@@ -2697,7 +2661,7 @@ mod tests {
                             .await
                             .map_err(io_error)?;
                         active.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(None)
                     }
                 }
             },

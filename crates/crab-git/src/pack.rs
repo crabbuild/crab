@@ -11,6 +11,19 @@ use sha1::{Digest, Sha1};
 /// SHA-1 trailer length in Git pack files.
 pub const PACK_SHA1_LEN: usize = 20;
 
+/// Checksums computed while a complete immutable pack is streamed.
+///
+/// A caller may carry this identity into a later local install to avoid
+/// reading the same pack body again. The source bytes must remain private and
+/// unchanged between verification and install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedPackIdentity {
+    /// Git's SHA-1 over the pack header and entries, excluding the trailer.
+    pub git_sha1: [u8; PACK_SHA1_LEN],
+    /// Crab's Blake3 content identity over the complete pack, including trailer.
+    pub content_hash: [u8; 32],
+}
+
 /// Result alias for Git pack validation.
 pub type Result<T> = std::result::Result<T, PackError>;
 
@@ -328,6 +341,28 @@ pub fn install_pack_files_from_paths(
     max_input_size: u64,
     expected_object_count: u64,
 ) -> Result<InstalledPack> {
+    install_pack_files_from_paths_with_identity(
+        pack_dir,
+        pack_tmp_path,
+        index_tmp_path,
+        reverse_index_tmp_path,
+        canonical_name,
+        max_input_size,
+        expected_object_count,
+        None,
+    )
+}
+
+pub(crate) fn install_pack_files_from_paths_with_identity(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+    verified_identity: Option<VerifiedPackIdentity>,
+) -> Result<InstalledPack> {
     let pack_size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
         .len();
@@ -343,7 +378,10 @@ pub fn install_pack_files_from_paths(
         });
     }
 
-    let (git_sha1, content_hash, verified_size) = verify_and_hash_pack_file(pack_tmp_path)?;
+    let (git_sha1, content_hash, verified_size) = match verified_identity {
+        Some(identity) => (to_hex(&identity.git_sha1), identity.content_hash, pack_size),
+        None => verify_and_hash_pack_file(pack_tmp_path)?,
+    };
     if verified_size != pack_size {
         return Err(PackError::InvalidPackFile {
             path: pack_tmp_path.to_owned(),
@@ -1138,6 +1176,48 @@ mod tests {
         assert_eq!(
             std::fs::read(&installed.pack_path).expect("read installed pack"),
             std::fs::read(&pack_path).expect("read source pack")
+        );
+    }
+
+    #[test]
+    fn indexed_pack_install_accepts_streamed_identity() {
+        let (dir, idx_path, pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let reverse_path = idx_path.with_extension("rev");
+        crate::pack_locator::write_pack_reverse_index(&idx_path, &reverse_path)
+            .expect("write fixture reverse index");
+        let bytes = std::fs::read(&pack_path).expect("read fixture pack");
+        let pack_size = bytes.len() as u64;
+        let locations =
+            crate::pack_locator::PackLocationIter::open(&idx_path, &reverse_path, pack_size)
+                .expect("open fixture indexes");
+        let git_sha1: [u8; PACK_SHA1_LEN] = locations
+            .pack_checksum()
+            .as_bytes()
+            .try_into()
+            .expect("fixture pack checksum is SHA-1");
+        let identity = VerifiedPackIdentity {
+            git_sha1,
+            content_hash: *blake3::hash(&bytes).as_bytes(),
+        };
+        let destination = dir.path().join("installed-with-identity");
+
+        let installed = install_pack_files_from_paths_with_identity(
+            &destination,
+            &pack_path,
+            &idx_path,
+            &reverse_path,
+            &blake3::hash(&bytes).to_hex(),
+            pack_size,
+            locations.object_count(),
+            Some(identity),
+        )
+        .expect("install indexed pack with streamed identity");
+
+        assert_eq!(installed.git_sha1, pack_hash);
+        assert_eq!(
+            std::fs::read(&installed.pack_path).expect("read installed pack"),
+            bytes
         );
     }
 
