@@ -2320,9 +2320,10 @@ environment dumps, or credentials.
 
 PR #120's latest producer follow-ups are `175b08db` (structural response
 validation), `4d2b956d` (single-pass response-pack handoff), `7419fe11`
-(current-head qualification evidence), and `98082cf0` (index-order exact-set
-validation). The latest release build is `crab 1.1.0`, SHA-256
-`99e1c7e28a379fd4bb388ac9d14700afc328da59afee92a3b9e7eb99e1691d28`.
+(current-head qualification evidence), `98082cf0` (index-order exact-set
+validation), and `ab27dc91` (direct index OID traversal). The latest release
+build is `crab 1.1.0`, SHA-256
+`d59d7b58de92fd2e69121885f9cd94e3f1c5e2f72e4bf4cafe0dfe58017a85c6`.
 
 The current-head RustFS smoke is `codex-7419fe11-k8s-producer100-single-20260830`
 against Kubernetes revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`.
@@ -2340,6 +2341,12 @@ for 1,244,255,615 response bytes after 11,746 ms of source download; depth-100
 was 53,201 ms for 747,220,954 response bytes after 14,450 ms of source
 download. The exact-prefix cleanup check deleted 1,111 objects. This remains
 single-client smoke evidence, not full team-load proof.
+
+The final branch refinement in `ab27dc91` changes only the implementation of
+that exact-set comparison: it reads OIDs directly from the validated Git v2
+index instead of constructing transient index entries. The focused regression,
+strict `crab-git` clippy, and release build pass; no new end-to-end timing claim
+is attributed to this refinement beyond the qualified `98082cf0` run.
 
 The earlier broad proof was run with the roadmap target directory:
 
