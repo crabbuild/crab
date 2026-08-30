@@ -15,7 +15,7 @@ flowchart LR
     walker[collect_candidates]
     stream[cmd/stream_stage.rs stage_file_streaming]
     staging[(StagingArea segments + SQLite)]
-    plan[cmd/add_push_plan.rs prepare_file_push_plans]
+    plan[crab-staging canonical authority]
     remote[(optional crab:// remote chunk index)]
     gitblob[gix write_blob]
     gitindex[git update-index -z --index-info]
@@ -37,7 +37,7 @@ The important ownership boundaries are:
 | Surface | Responsibility |
 | --- | --- |
 | `crab/src/cmd/add.rs` | CLI orchestration, candidate discovery, progress, rollback, pointer publication |
-| `crab/src/cmd/stream_stage.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, provisional staging adoption |
+| `crates/crab-staging/src/stream.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, preparation-wide claims, provisional staging adoption |
 | `crates/crab-staging/src/lib.rs` | Segment writes, SQLite rows, flush/promotion, staged-file adoption and retirement |
 | `crates/crab-staging/src/add_push_plan.rs` | Add-time push-plan construction from staged chunk rows |
 | `crates/crab-staging/src/push_plan.rs` | Add-time plan model, prepared-xorb payload helpers, and diagnostics |
@@ -146,55 +146,58 @@ Rollback rules:
 The provisional key is internal staging state. It is not written to pointer
 blobs or committed to Git.
 
-## Add-Time Push Plan
+## Canonical Add-Time Authority
 
-For repositories with a default `crab://` push remote, streaming can emit
-prepared xorbs from the same verified chunks written to staging. After file
-streaming succeeds and before pointer publication, add writes per-file plans for
-those prepared xorbs when they cover the staged chunk sequence. If stream-built
-coverage is unavailable, add falls back to `prepare_file_push_plans_with_progress`
-and packs from authoritative staging rows. Repositories without a Crab remote
-skip add-time push-plan preparation; push can still fall back to the staging rows
-and pack from them later.
+One add preparation spans every direct-stream file in the command. For each
+bounded chunk batch, staging selects exactly one authority in this order:
+
+1. a proof-bearing committed remote placement;
+2. an existing sealed local prepared placement;
+3. a verified staging-segment payload; or
+4. a preparation-wide claim for bytes that must be compressed once.
+
+SQLite owns the claim and `prepared_payload_chunks.chunk_hash` is unique, so
+parallel files and later adds cannot assign the same chunk to different local
+xorbs. Only the claim winner feeds its builder. Other recipe occurrences wait
+for and then lease the winner's placement. The coordination is disk-backed and
+batch-bounded; it does not require a repository-sized in-memory hash map.
 
 ```mermaid
 flowchart LR
-    chunks[staged chunk sequence]
-    validate[validate chunks_for_file_with_sizes]
-    remote{remote context?}
-    existing[mark remote-existing chunks]
-    cache[reuse prepared/local cached xorbs]
-    pack[pack remaining chunks with XorbBuilder]
-    write[write FilePushPlan v3]
+    chunks[verified recipe occurrences]
+    remote{committed remote proof?}
+    prepared{sealed prepared placement?}
+    segment{verified segment payload?}
+    claim[atomic preparation claim]
+    pack[claim winner packs once]
+    normalize[(normalized v1 authority rows)]
 
-    chunks --> validate --> remote
-    remote -- crab:// opened --> existing
-    remote -- none or lookup failed --> cache
-    existing --> cache --> pack --> write
+    chunks --> remote
+    remote -- yes --> normalize
+    remote -- no --> prepared
+    prepared -- yes --> normalize
+    prepared -- no --> segment
+    segment -- yes --> normalize
+    segment -- no --> claim --> pack --> normalize
 ```
 
-Remote behavior is opportunistic:
+Remote lookup is opportunistic. Failure to open or query the remote never
+publishes a guess: add continues using local authority. The bucket-global
+SlateDB contains only committed, origin-bound receipts and is updated after a
+successful push CAS; it never stores add claims, local paths, or pending
+uploads.
 
-- If the default push remote is a valid `crab://` URL and a metadata guard can
-  be opened quickly, planning checks the remote chunk index under a short
-  opportunistic timeout and marks matching chunks as existing candidates.
-- Small batches below the configured minimum xorb size skip the remote chunk
-  index lookup entirely; the possible upload saving is too small to justify
-  adding remote metadata latency to `crab add`.
-- If there is no Crab remote, planning is skipped to keep `crab add` from
-  writing both staging segments and speculative prepared xorbs.
-- If the Crab remote URL cannot be parsed, the store cannot be opened, or the
-  chunk-index lookup fails or times out, planning continues with no remote
-  candidates and treats those chunks as new for this add-time plan.
-- This fallback changes only prepacking work. It does not publish data and does
-  not make `crab add` a push.
+Prepared bodies use one local content-addressed path:
 
-The plan builder no longer reconstructs original contents to prepare the plan. It
-uses the `chunk_pairs` produced by streaming, verifies those pairs against
-the staged file rows, carries each row's segment locator into the packing
-reader, reuses prepared/local xorb cache entries when safe, and reads only
-chunks that still need packing. Carrying locators avoids a second
-hash-to-segment SQLite lookup during planning.
+```text
+.crab/staging/push-plans/payloads/<first-two>/<xorb-hash>.xorb
+```
+
+Sealing validates the xorb identity and full payload digest, fsyncs a unique
+same-directory temporary file, and installs the final name create-once.
+Equivalent concurrent writers coalesce; a different body at the same name is
+corruption and is never overwritten. Writable-open recovery aborts unfinished
+preparations and removes unindexed final bodies and abandoned stream temps.
 
 Before staging, same-size candidates with matching bounded
 head/middle/tail fingerprints are grouped as possible duplicates. A later path
@@ -204,34 +207,16 @@ Duplicate candidates are queued behind only their representative, so they can
 start as soon as the representative finishes instead of waiting for unrelated
 files. Fingerprints are scheduling hints, not identity proof.
 
-Normal Crab-remote adds prefer stream-built prepared xorbs when they cover the
-verified staged chunk sequence. Plan writing still validates segment rows before
-writing or adopting a plan, and plan loading revalidates the current staged rows
-before returning indexed plan data. A verified plan is promoted into the
-staging SQLite index as the authoritative add-time push plan. Prepared xorb
-candidates are indexed by chunk hash so a later `crab add` can ask SQLite for
-only the candidates that intersect the new file instead of scanning sidecar
-files. Candidate reuse also requires the source file's indexed plan to still
-revalidate against its current staged chunk rows and include the candidate
-prepared xorb in the plan body. A prepared xorb may contain sibling-file chunks
-from a multi-file packing batch, but it must cover at least one chunk from the
-file whose plan indexes it.
+Direct-prepared chunks intentionally do not also require a segment copy. Push
+may repack a missing or corrupt prepared body only when every affected recipe
+occurrence has independent verified segment authority. Otherwise it fails
+closed and asks the user to run `crab add` again. Recipe leases and push
+snapshots retain shared bodies until the final owner is released; restaging
+reclaims only globally unleased payloads.
 
-The segment files are still required even when add-time prepared xorbs exist.
-They are the durable staged chunk payloads for reconstruction, rollback,
-verification, status, and fallback push packing. Push may adopt a verified
-add-time plan when the plan still matches the staged chunk rows and the prepared
-xorb files still validate. If the plan is missing, stale, corrupt, or only
-partially useful, push can reread the segment-backed chunks and pack from the
-authoritative staging rows. Retiring, unregistering, or adopting a staged file
-removes indexed plan rows and prepared-xorb candidates so stale prepared xorbs
-do not survive the file lifecycle. Replacing a file's plan also prunes
-prepared-xorb payload files that are no longer referenced by the new plan.
-
-For multi-file adds, the builder performs one remote-candidate lookup for the
-batch even when prepared-cache candidates are present. When no prepared cache is
-available, it also packs uncovered chunks globally so a single prepared xorb can
-cover chunks from multiple files.
+There is no persisted per-file JSON plan or per-file payload copy. Runtime
+`FilePushPlan` values are derived from normalized recipe, remote, prepared, and
+segment rows for the push attempt.
 
 ## Progress and JSONL
 

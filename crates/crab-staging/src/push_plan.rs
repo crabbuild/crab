@@ -3,10 +3,11 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::error::{Result, StagingError};
 use crab_xet::hash::MerkleHash;
@@ -22,8 +23,8 @@ pub use crate::add_push_plan::{
 pub const FILE_PUSH_PLAN_VERSION: u32 = 1;
 
 const PLAN_DIR: &str = "push-plans";
-const FILE_DIR: &str = "files";
-const XORB_DIR: &str = "xorbs";
+const PAYLOAD_DIR: &str = "payloads";
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,7 +123,7 @@ pub struct PreparedXorbCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PreparedXorbSource {
-    StagingFile(MerkleHash),
+    Staging,
     LocalCache(PathBuf),
 }
 
@@ -155,12 +156,8 @@ impl PreparedXorbCache {
             .flat_map(|candidates| candidates.iter().cloned())
     }
 
-    pub fn insert_prepared_xorb(
-        &mut self,
-        source_file_hash: MerkleHash,
-        planned: &PlannedXorb,
-    ) -> Result<()> {
-        self.insert_candidate(PreparedXorbSource::StagingFile(source_file_hash), planned)
+    pub fn insert_prepared_xorb(&mut self, planned: &PlannedXorb) -> Result<()> {
+        self.insert_candidate(PreparedXorbSource::Staging, planned)
     }
 
     pub fn insert_cached_xorb(
@@ -343,41 +340,6 @@ impl FilePushPlan {
     }
 }
 
-pub(crate) fn serialize_file_push_plan(plan: &FilePushPlan) -> Result<Vec<u8>> {
-    if plan.version != FILE_PUSH_PLAN_VERSION {
-        return Err(StagingError::StagingCorrupt(format!(
-            "add-time push plan must use canonical v{FILE_PUSH_PLAN_VERSION}; restage the file"
-        )));
-    }
-    serde_json::to_vec(plan)
-        .map_err(|e| StagingError::Internal(format!("failed to serialize add-time push plan: {e}")))
-}
-
-pub(crate) fn deserialize_file_push_plan(bytes: &[u8]) -> Result<FilePushPlan> {
-    let plan: FilePushPlan = serde_json::from_slice(bytes).map_err(|e| {
-        StagingError::StagingCorrupt(format!(
-            "add-time push plan is not canonical v{FILE_PUSH_PLAN_VERSION}: {e}; restage the file"
-        ))
-    })?;
-    if plan.version != FILE_PUSH_PLAN_VERSION {
-        return Err(StagingError::StagingCorrupt(format!(
-            "add-time push plan version {} is unsupported; restage the file for canonical v{FILE_PUSH_PLAN_VERSION}",
-            plan.version
-        )));
-    }
-    Ok(plan)
-}
-
-pub(crate) fn serialize_planned_xorb(plan: &PlannedXorb) -> Result<Vec<u8>> {
-    serde_json::to_vec(plan)
-        .map_err(|e| StagingError::Internal(format!("failed to serialize prepared xorb plan: {e}")))
-}
-
-pub(crate) fn deserialize_planned_xorb(bytes: &[u8]) -> Result<PlannedXorb> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| StagingError::Internal(format!("failed to parse prepared xorb plan: {e}")))
-}
-
 pub(crate) fn chunk_sequence_hash(chunks: &[(MerkleHash, u64)]) -> [u8; 32] {
     let mut hasher = crate::recipe::new_sequence_hasher();
     for (chunk_hash, size) in chunks {
@@ -445,118 +407,12 @@ impl PlannedPlacement {
     }
 }
 
-pub(crate) fn file_plan_path(root: &Path, file_hash: &MerkleHash) -> PathBuf {
+pub fn prepared_xorb_path(root: &Path, xorb_hash: &MerkleHash) -> PathBuf {
+    let hex = xorb_hash.hex();
     root.join(PLAN_DIR)
-        .join(FILE_DIR)
-        .join(format!("{}.json", file_hash.hex()))
-}
-
-pub fn prepared_xorb_path(root: &Path, file_hash: &MerkleHash, xorb_hash: &MerkleHash) -> PathBuf {
-    root.join(PLAN_DIR)
-        .join(XORB_DIR)
-        .join(file_hash.hex())
-        .join(format!("{}.xorb", xorb_hash.hex()))
-}
-
-#[cfg(test)]
-fn summarize_push_plans(root: &Path) -> Result<PushPlanStats> {
-    summarize_push_plans_with_options(root, PushPlanSummaryOptions::default())
-}
-
-#[cfg(test)]
-fn load_prepared_xorb_cache(root: &Path) -> Result<PreparedXorbCache> {
-    load_prepared_xorb_cache_filtered(root, None)
-}
-
-#[cfg(test)]
-fn load_prepared_xorb_cache_for_chunks(
-    root: &Path,
-    wanted_chunks: &HashSet<MerkleHash>,
-) -> Result<PreparedXorbCache> {
-    load_prepared_xorb_cache_filtered(root, Some(wanted_chunks))
-}
-
-#[cfg(test)]
-fn load_prepared_xorb_cache_filtered(
-    root: &Path,
-    wanted_chunks: Option<&HashSet<MerkleHash>>,
-) -> Result<PreparedXorbCache> {
-    let mut cache = PreparedXorbCache::default();
-    let Some(entries) = read_dir_if_exists(&root.join(PLAN_DIR).join(FILE_DIR))? else {
-        return Ok(cache);
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(plan) = serde_json::from_slice::<FilePushPlan>(&bytes) else {
-            continue;
-        };
-        if plan.version != FILE_PUSH_PLAN_VERSION {
-            continue;
-        }
-        let Ok(file_hash) = plan.file_hash() else {
-            continue;
-        };
-        if path.file_stem().and_then(|stem| stem.to_str()) != Some(file_hash.hex().as_str()) {
-            continue;
-        }
-        if let Some(wanted_chunks) = wanted_chunks
-            && !file_plan_intersects_chunks(&plan, wanted_chunks)
-        {
-            continue;
-        }
-
-        for planned_xorb in &plan.prepared_xorbs {
-            if let Some(wanted_chunks) = wanted_chunks
-                && !planned_xorb_intersects_chunks(planned_xorb, wanted_chunks)
-            {
-                continue;
-            }
-            let Ok(xorb_hash) = planned_xorb.hash() else {
-                continue;
-            };
-            let path = prepared_xorb_path(root, &file_hash, &xorb_hash);
-            if !prepared_xorb_file_matches_cached_plan(&path, &file_hash, &xorb_hash, planned_xorb)
-            {
-                continue;
-            }
-            if cache.insert_prepared_xorb(file_hash, planned_xorb).is_err() {
-                continue;
-            }
-        }
-    }
-
-    Ok(cache)
-}
-
-#[cfg(test)]
-fn planned_xorb_intersects_chunks(
-    planned_xorb: &PlannedXorb,
-    wanted_chunks: &HashSet<MerkleHash>,
-) -> bool {
-    planned_xorb.placements.iter().any(|placement| {
-        parse_hash(&placement.chunk_hash, "planned placement chunk hash")
-            .is_ok_and(|chunk_hash| wanted_chunks.contains(&chunk_hash))
-    })
-}
-
-#[cfg(test)]
-fn file_plan_intersects_chunks(plan: &FilePushPlan, wanted_chunks: &HashSet<MerkleHash>) -> bool {
-    plan.existing.iter().any(|chunk| {
-        parse_hash(&chunk.chunk_hash, "planned existing chunk hash")
-            .is_ok_and(|chunk_hash| wanted_chunks.contains(&chunk_hash))
-    }) || plan
-        .prepared_xorbs
-        .iter()
-        .any(|xorb| planned_xorb_intersects_chunks(xorb, wanted_chunks))
+        .join(PAYLOAD_DIR)
+        .join(&hex[..2])
+        .join(format!("{hex}.xorb"))
 }
 
 pub(crate) fn prepared_xorb_file_matches_cached_plan(
@@ -574,57 +430,36 @@ pub(crate) fn prepared_xorb_file_matches_cached_plan(
     parse_prepared_xorb_metadata(path, file_hash, xorb_hash, planned).is_ok()
 }
 
-pub async fn link_prepared_xorb(
-    root: &Path,
-    source_file_hash: &MerkleHash,
-    target_file_hash: &MerkleHash,
-    planned: &PlannedXorb,
-) -> Result<bool> {
-    let xorb_hash = planned.hash()?;
-    let source = prepared_xorb_path(root, source_file_hash, &xorb_hash);
-    materialize_prepared_xorb_file(root, &source, target_file_hash, planned).await
-}
-
 pub async fn materialize_prepared_xorb(
     root: &Path,
     candidate: &PreparedXorbCandidate,
-    target_file_hash: &MerkleHash,
 ) -> Result<bool> {
     let source = match &candidate.source {
-        PreparedXorbSource::StagingFile(source_file_hash) => {
-            prepared_xorb_path(root, source_file_hash, &candidate.xorb_hash)
-        }
+        PreparedXorbSource::Staging => prepared_xorb_path(root, &candidate.xorb_hash),
         PreparedXorbSource::LocalCache(path) => path.clone(),
     };
-    materialize_prepared_xorb_file(root, &source, target_file_hash, &candidate.planned).await
+    materialize_prepared_xorb_file(root, &source, &candidate.planned).await
 }
 
 async fn materialize_prepared_xorb_file(
     root: &Path,
     source: &Path,
-    target_file_hash: &MerkleHash,
     planned: &PlannedXorb,
 ) -> Result<bool> {
     let xorb_hash = planned.hash()?;
-    let target = prepared_xorb_path(root, target_file_hash, &xorb_hash);
+    let target = prepared_xorb_path(root, &xorb_hash);
     if source == target {
-        return prepared_xorb_file_matches_plan(source, target_file_hash, &xorb_hash, planned)
-            .await;
+        return prepared_xorb_file_matches_plan(source, &xorb_hash, &xorb_hash, planned).await;
     }
 
-    if !prepared_xorb_file_matches_plan(source, target_file_hash, &xorb_hash, planned).await? {
+    if !prepared_xorb_file_matches_plan(source, &xorb_hash, &xorb_hash, planned).await? {
         return Ok(false);
     }
 
-    if prepared_xorb_file_matches_plan(&target, target_file_hash, &xorb_hash, planned).await? {
+    if prepared_xorb_file_matches_plan(&target, &xorb_hash, &xorb_hash, planned).await? {
         return Ok(true);
     }
-    match tokio::fs::metadata(&target).await {
-        Ok(meta) if meta.is_file() => tokio::fs::remove_file(&target).await?,
-        Ok(_) => return Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
+    fail_if_existing_prepared_xorb_is_corrupt(&target, &xorb_hash).await?;
 
     let parent = target
         .parent()
@@ -636,7 +471,7 @@ async fn materialize_prepared_xorb_file(
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            prepared_xorb_file_matches_plan(&target, target_file_hash, &xorb_hash, planned).await
+            prepared_xorb_file_matches_plan(&target, &xorb_hash, &xorb_hash, planned).await
         }
         Err(e)
             if matches!(
@@ -646,7 +481,7 @@ async fn materialize_prepared_xorb_file(
                     | std::io::ErrorKind::PermissionDenied
             ) =>
         {
-            match copy_prepared_xorb(source, &target, target_file_hash, &xorb_hash, planned).await {
+            match copy_prepared_xorb(source, &target, &xorb_hash, planned).await {
                 Ok(copied) => Ok(copied),
                 Err(StagingError::Io(copy_err))
                     if matches!(
@@ -668,7 +503,6 @@ async fn materialize_prepared_xorb_file(
 async fn copy_prepared_xorb(
     source: &Path,
     target: &Path,
-    target_file_hash: &MerkleHash,
     xorb_hash: &MerkleHash,
     planned: &PlannedXorb,
 ) -> Result<bool> {
@@ -676,20 +510,16 @@ async fn copy_prepared_xorb(
         .parent()
         .ok_or_else(|| StagingError::Internal("prepared xorb path has no parent".to_owned()))?;
     tokio::fs::create_dir_all(parent).await?;
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let tmp = target.with_extension(format!("xorb.copy-{}-{nonce}.tmp", std::process::id()));
+    let tmp = unique_prepared_xorb_temp_path(target, "copy");
     let mut tmp_guard = TempFileGuard::new(tmp.clone());
 
     async {
         tokio::fs::copy(source, &tmp).await?;
-        if !prepared_xorb_file_matches_plan(&tmp, target_file_hash, xorb_hash, planned).await? {
+        if !prepared_xorb_file_matches_plan(&tmp, xorb_hash, xorb_hash, planned).await? {
             return Ok(false);
         }
-        tokio::fs::File::open(&tmp).await?.sync_all().await?;
-        tokio::fs::rename(&tmp, target).await?;
-        sync_parent_directory(target).await?;
+        let payload_hash = planned.payload_hash_bytes()?;
+        install_prepared_xorb_temp(&tmp, target, xorb_hash, &payload_hash, planned.bytes).await?;
         tmp_guard.disarm();
         Ok(true)
     }
@@ -806,20 +636,6 @@ pub fn validate_prepared_xorb_metadata(
     Ok(placements)
 }
 
-#[cfg(test)]
-fn summarize_push_plans_with_options(
-    root: &Path,
-    options: PushPlanSummaryOptions,
-) -> Result<PushPlanStats> {
-    let mut stats = new_push_plan_stats(options);
-    let mut referenced_xorbs = HashSet::new();
-
-    scan_file_plans(root, options, &mut stats, &mut referenced_xorbs)?;
-    scan_stale_prepared_xorbs(root, &referenced_xorbs, &mut stats)?;
-
-    Ok(stats)
-}
-
 /// Returns an empty push-plan inventory with the current format metadata.
 pub fn empty_push_plan_stats(options: PushPlanSummaryOptions) -> PushPlanStats {
     PushPlanStats {
@@ -833,48 +649,223 @@ pub(crate) fn new_push_plan_stats(options: PushPlanSummaryOptions) -> PushPlanSt
     empty_push_plan_stats(options)
 }
 
-pub async fn write_prepared_xorb(
-    root: &Path,
-    file_hash: &MerkleHash,
-    xorb_hash: &MerkleHash,
-    bytes: Bytes,
-) -> Result<u64> {
-    let path = prepared_xorb_path(root, file_hash, xorb_hash);
+pub async fn write_prepared_xorb(root: &Path, xorb_hash: &MerkleHash, bytes: Bytes) -> Result<u64> {
+    let path = prepared_xorb_path(root, xorb_hash);
     let parent = path
         .parent()
         .ok_or_else(|| StagingError::Internal("prepared xorb path has no parent".to_owned()))?;
     tokio::fs::create_dir_all(parent).await?;
-    let tmp = path.with_extension("xorb.tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::File::open(&tmp).await?.sync_all().await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    sync_parent_directory(&path).await?;
-    Ok(bytes.len() as u64)
+    validate_prepared_xorb_bytes_identity(&bytes, xorb_hash)?;
+    let payload_hash = *blake3::hash(&bytes).as_bytes();
+    let byte_count = bytes.len() as u64;
+    if prepared_xorb_file_matches_identity(&path, xorb_hash, &payload_hash, byte_count).await? {
+        return Ok(byte_count);
+    }
+    fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
+
+    let tmp = unique_prepared_xorb_temp_path(&path, "write");
+    let mut tmp_guard = TempFileGuard::new(tmp.clone());
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
+        .await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, byte_count).await?;
+    tmp_guard.disarm();
+    Ok(byte_count)
 }
 
 pub async fn move_prepared_xorb(
     root: &Path,
-    file_hash: &MerkleHash,
     xorb_hash: &MerkleHash,
     source_path: &Path,
 ) -> Result<u64> {
-    let path = prepared_xorb_path(root, file_hash, xorb_hash);
+    let path = prepared_xorb_path(root, xorb_hash);
     let parent = path
         .parent()
         .ok_or_else(|| StagingError::Internal("prepared xorb path has no parent".to_owned()))?;
     tokio::fs::create_dir_all(parent).await?;
-    let tmp = path.with_extension("xorb.tmp");
-    match tokio::fs::remove_file(&tmp).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
+    let tmp = unique_prepared_xorb_temp_path(&path, "move");
+    let mut tmp_guard = TempFileGuard::new(tmp.clone());
     tokio::fs::rename(source_path, &tmp).await?;
     let bytes = tokio::fs::metadata(&tmp).await?.len();
+    let payload_hash = hash_prepared_xorb_file_async(&tmp).await?;
+    validate_prepared_xorb_file_identity(&tmp, xorb_hash, bytes).await?;
+    if prepared_xorb_file_matches_identity(&path, xorb_hash, &payload_hash, bytes).await? {
+        tokio::fs::remove_file(&tmp).await?;
+        tmp_guard.disarm();
+        return Ok(bytes);
+    }
+    fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
     tokio::fs::File::open(&tmp).await?.sync_all().await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    sync_parent_directory(&path).await?;
+    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, bytes).await?;
+    tmp_guard.disarm();
     Ok(bytes)
+}
+
+fn unique_prepared_xorb_temp_path(target: &Path, operation: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    target.with_extension(format!(
+        "xorb.{operation}-{}-{nonce}-{sequence}.tmp",
+        std::process::id()
+    ))
+}
+
+async fn install_prepared_xorb_temp(
+    temp: &Path,
+    target: &Path,
+    xorb_hash: &MerkleHash,
+    payload_hash: &[u8; 32],
+    bytes: u64,
+) -> Result<()> {
+    validate_prepared_xorb_file_identity(temp, xorb_hash, bytes).await?;
+    let actual_payload_hash = hash_prepared_xorb_file_async(temp).await?;
+    if &actual_payload_hash != payload_hash {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} temporary payload digest changed before sealing",
+            xorb_hash.hex()
+        )));
+    }
+
+    match tokio::fs::hard_link(temp, target).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !prepared_xorb_file_matches_identity(target, xorb_hash, payload_hash, bytes).await? {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "content-addressed prepared xorb {} already exists with different bytes",
+                    xorb_hash.hex()
+                )));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::remove_file(temp).await?;
+    sync_parent_directory(target).await
+}
+
+async fn fail_if_existing_prepared_xorb_is_corrupt(
+    path: &Path,
+    xorb_hash: &MerkleHash,
+) -> Result<()> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Err(StagingError::StagingCorrupt(format!(
+            "content-addressed prepared xorb {} exists but fails identity validation",
+            xorb_hash.hex()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn prepared_xorb_file_matches_identity(
+    path: &Path,
+    xorb_hash: &MerkleHash,
+    payload_hash: &[u8; 32],
+    bytes: u64,
+) -> Result<bool> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() != bytes {
+        return Ok(false);
+    }
+    if hash_prepared_xorb_file_async(path).await? != *payload_hash {
+        return Ok(false);
+    }
+    Ok(validate_prepared_xorb_file_identity(path, xorb_hash, bytes)
+        .await
+        .is_ok())
+}
+
+async fn hash_prepared_xorb_file_async(path: &Path) -> Result<[u8; 32]> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || hash_prepared_xorb_file(&path))
+        .await
+        .map_err(|error| StagingError::Internal(format!("prepared xorb hash join: {error}")))?
+}
+
+async fn validate_prepared_xorb_file_identity(
+    path: &Path,
+    xorb_hash: &MerkleHash,
+    bytes: u64,
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let xorb_hash = *xorb_hash;
+    tokio::task::spawn_blocking(move || {
+        let len = usize::try_from(bytes).map_err(|_| {
+            StagingError::StagingCorrupt(format!(
+                "prepared xorb {} is too large to validate on this platform",
+                xorb_hash.hex()
+            ))
+        })?;
+        if len < FOOTER_SIZE {
+            return Err(StagingError::StagingCorrupt(format!(
+                "prepared xorb {} is too small for a footer",
+                xorb_hash.hex()
+            )));
+        }
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() != bytes {
+            return Err(StagingError::StagingCorrupt(format!(
+                "prepared xorb {} changed size during validation",
+                xorb_hash.hex()
+            )));
+        }
+        file.seek(SeekFrom::Start((len - FOOTER_SIZE) as u64))?;
+        let mut footer = vec![0; FOOTER_SIZE];
+        file.read_exact(&mut footer)?;
+        let region = xorb_metadata_region(len, &footer)?;
+        file.seek(SeekFrom::Start(region.offset as u64))?;
+        let mut metadata = vec![0; region.len];
+        file.read_exact(&mut metadata)?;
+        let (_, parsed_hash) = xorb_chunks_from_metadata(len, &footer, &metadata)?;
+        if parsed_hash != xorb_hash {
+            return Err(StagingError::StagingCorrupt(format!(
+                "prepared xorb {} body identifies as {}",
+                xorb_hash.hex(),
+                parsed_hash.hex()
+            )));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| StagingError::Internal(format!("prepared xorb validation join: {error}")))?
+}
+
+fn validate_prepared_xorb_bytes_identity(bytes: &[u8], xorb_hash: &MerkleHash) -> Result<()> {
+    if bytes.len() < FOOTER_SIZE {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} is too small for a footer",
+            xorb_hash.hex()
+        )));
+    }
+    let footer = &bytes[bytes.len() - FOOTER_SIZE..];
+    let region = xorb_metadata_region(bytes.len(), footer)?;
+    let metadata = bytes
+        .get(region.offset..region.offset + region.len)
+        .ok_or_else(|| {
+            StagingError::StagingCorrupt(format!(
+                "prepared xorb {} metadata range is outside the payload",
+                xorb_hash.hex()
+            ))
+        })?;
+    let (_, parsed_hash) = xorb_chunks_from_metadata(bytes.len(), footer, metadata)?;
+    if parsed_hash != *xorb_hash {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} body identifies as {}",
+            xorb_hash.hex(),
+            parsed_hash.hex()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -894,71 +885,6 @@ async fn sync_parent_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) async fn write_file_push_plan(root: &Path, plan: &FilePushPlan) -> Result<()> {
-    let file_hash = plan.file_hash()?;
-    let path = file_plan_path(root, &file_hash);
-    let parent = path
-        .parent()
-        .ok_or_else(|| StagingError::Internal("push plan path has no parent".to_owned()))?;
-    tokio::fs::create_dir_all(parent).await?;
-    let bytes = serialize_file_push_plan(plan)?;
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
-}
-
-pub(crate) fn remove_file_push_plan(root: &Path, file_hash: &MerkleHash) -> Result<()> {
-    let plan_path = file_plan_path(root, file_hash);
-    match std::fs::remove_file(&plan_path) {
-        Ok(()) => {}
-        Err(e) if is_missing_sidecar_path(&e) => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    let xorb_dir = root.join(PLAN_DIR).join(XORB_DIR).join(file_hash.hex());
-    match std::fs::remove_dir_all(&xorb_dir) {
-        Ok(()) => {}
-        Err(e) if is_missing_sidecar_path(&e) => {}
-        Err(e) => return Err(e.into()),
-    }
-
-    Ok(())
-}
-
-pub(crate) fn retain_file_prepared_xorbs(
-    root: &Path,
-    file_hash: &MerkleHash,
-    keep_hashes: &HashSet<MerkleHash>,
-) -> Result<()> {
-    let xorb_dir = root.join(PLAN_DIR).join(XORB_DIR).join(file_hash.hex());
-    let Some(entries) = read_dir_if_exists(&xorb_dir)? else {
-        return Ok(());
-    };
-    let keep_files = keep_hashes
-        .iter()
-        .map(|hash| format!("{}.xorb", hash.hex()))
-        .collect::<HashSet<_>>();
-
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        if !file_name.ends_with(".xorb") || keep_files.contains(file_name) {
-            continue;
-        }
-        std::fs::remove_file(entry.path())?;
-    }
-
-    Ok(())
-}
-
 fn parse_hash(value: &str, label: &str) -> Result<MerkleHash> {
     MerkleHash::from_hex(value)
         .map_err(|e| StagingError::Internal(format!("invalid {label} in add-time push plan: {e}")))
@@ -970,59 +896,6 @@ fn parse_hash_bytes(value: &str, label: &str) -> Result<[u8; 32]> {
         .map_err(|error| {
             StagingError::Internal(format!("invalid {label} in add-time push plan: {error}"))
         })
-}
-
-#[cfg(test)]
-fn scan_file_plans(
-    root: &Path,
-    options: PushPlanSummaryOptions,
-    stats: &mut PushPlanStats,
-    referenced_xorbs: &mut HashSet<PathBuf>,
-) -> Result<()> {
-    let Some(entries) = read_dir_if_exists(&root.join(PLAN_DIR).join(FILE_DIR))? else {
-        return Ok(());
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-
-        let bytes = fs::read(&path)?;
-        let Ok(plan) = serde_json::from_slice::<FilePushPlan>(&bytes) else {
-            stats.invalid_plan_files += 1;
-            continue;
-        };
-
-        if !accumulate_file_plan(root, &path, &plan, options, stats, referenced_xorbs)? {
-            stats.invalid_plan_files += 1;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-fn accumulate_file_plan(
-    root: &Path,
-    path: &Path,
-    plan: &FilePushPlan,
-    options: PushPlanSummaryOptions,
-    stats: &mut PushPlanStats,
-    referenced_xorbs: &mut HashSet<PathBuf>,
-) -> Result<bool> {
-    if plan.version != FILE_PUSH_PLAN_VERSION {
-        return Ok(false);
-    }
-    let Ok(file_hash) = plan.file_hash() else {
-        return Ok(false);
-    };
-    if path.file_stem().and_then(|stem| stem.to_str()) != Some(file_hash.hex().as_str()) {
-        return Ok(false);
-    }
-    accumulate_file_plan_for_hash(root, &file_hash, plan, options, stats, referenced_xorbs)
 }
 
 pub(crate) fn accumulate_file_plan_for_hash(
@@ -1070,7 +943,7 @@ pub(crate) fn accumulate_file_plan_for_hash(
         .ok_or_else(|| StagingError::Internal("push-plan chunk count overflowed".to_owned()))?;
     for planned_xorb in &plan.prepared_xorbs {
         let xorb_hash = planned_xorb.hash()?;
-        let path = prepared_xorb_path(root, file_hash, &xorb_hash);
+        let path = prepared_xorb_path(root, &xorb_hash);
         referenced_xorbs.insert(path.clone());
 
         stats.prepared_xorbs = stats
@@ -1260,7 +1133,7 @@ pub(crate) fn scan_stale_prepared_xorbs(
     referenced_xorbs: &HashSet<PathBuf>,
     stats: &mut PushPlanStats,
 ) -> Result<()> {
-    let Some(file_dirs) = read_dir_if_exists(&root.join(PLAN_DIR).join(XORB_DIR))? else {
+    let Some(file_dirs) = read_dir_if_exists(&root.join(PLAN_DIR).join(PAYLOAD_DIR))? else {
         return Ok(());
     };
 
@@ -1322,46 +1195,6 @@ mod tests {
         MerkleHash::from([byte; 32])
     }
 
-    #[test]
-    fn file_push_plan_rejects_non_v1_and_unknown_fields() {
-        let plan = FilePushPlan::new(hash(1), 0, &[]);
-        let mut value = serde_json::to_value(plan).expect("serialize plan");
-        value["version"] = serde_json::json!(2);
-        let error = deserialize_file_push_plan(
-            &serde_json::to_vec(&value).expect("serialize non-v1 fixture"),
-        )
-        .expect_err("non-v1 plan must fail");
-        assert!(error.to_string().contains("restage"));
-
-        value["version"] = serde_json::json!(FILE_PUSH_PLAN_VERSION);
-        value["retired_field"] = serde_json::json!(true);
-        assert!(
-            deserialize_file_push_plan(
-                &serde_json::to_vec(&value).expect("serialize retired fixture")
-            )
-            .is_err()
-        );
-
-        let mut value =
-            serde_json::to_value(FilePushPlan::new(hash(1), 0, &[])).expect("serialize plan");
-        value["existing"] = serde_json::json!([]);
-        assert!(
-            deserialize_file_push_plan(
-                &serde_json::to_vec(&value).expect("serialize embedded authority fixture")
-            )
-            .is_err(),
-            "canonical v1 stores remote authority only in the indexed recipe relation"
-        );
-    }
-
-    fn file_hash_from_chunks(chunks: &[(MerkleHash, Vec<u8>)]) -> MerkleHash {
-        let mut hasher = blake3::Hasher::new();
-        for (_, data) in chunks {
-            hasher.update(data);
-        }
-        MerkleHash::from(*hasher.finalize().as_bytes())
-    }
-
     fn xorb_with_chunks(
         chunks: &[(MerkleHash, Vec<u8>)],
     ) -> (Bytes, MerkleHash, Vec<ChunkPlacement>) {
@@ -1383,45 +1216,6 @@ mod tests {
         (result.bytes, result.hash, result.placements)
     }
 
-    fn write_prepared_plan(
-        root: &Path,
-        file_hash: MerkleHash,
-        chunks: &[(MerkleHash, Vec<u8>)],
-        placements: Vec<ChunkPlacement>,
-        xorb_bytes: Bytes,
-        xorb_hash: MerkleHash,
-    ) -> FilePushPlan {
-        let total_bytes: u64 = chunks.iter().map(|(_, data)| data.len() as u64).sum();
-        let chunk_pairs: Vec<_> = chunks
-            .iter()
-            .map(|(hash, data)| (*hash, data.len() as u64))
-            .collect();
-        let mut plan = FilePushPlan::new_verified_staging(file_hash, total_bytes, &chunk_pairs);
-        plan.prepared_xorbs.push(PlannedXorb {
-            hash: xorb_hash.hex(),
-            payload_hash: blake3::hash(&xorb_bytes).to_hex().to_string(),
-            bytes: xorb_bytes.len() as u64,
-            upload: true,
-            placements: placements
-                .iter()
-                .map(PlannedPlacement::from_placement)
-                .collect(),
-        });
-
-        let plan_path = file_plan_path(root, &file_hash);
-        std::fs::create_dir_all(plan_path.parent().expect("plan parent")).expect("mkdir plan");
-        std::fs::write(
-            &plan_path,
-            serde_json::to_vec(&plan).expect("serialize push plan"),
-        )
-        .expect("write plan");
-
-        let xorb_path = prepared_xorb_path(root, &file_hash, &xorb_hash);
-        std::fs::create_dir_all(xorb_path.parent().expect("xorb parent")).expect("mkdir xorb");
-        std::fs::write(&xorb_path, xorb_bytes).expect("write xorb");
-        plan
-    }
-
     #[test]
     fn proof_identifiers_round_trip_as_raw_bytes() {
         let placement_id = std::array::from_fn(|index| index as u8);
@@ -1438,113 +1232,6 @@ mod tests {
         let planned = PlannedExistingChunk::from_candidate(hash(8), candidate);
 
         assert_eq!(planned.candidate().expect("decode candidate"), candidate);
-    }
-
-    #[test]
-    fn summarize_push_plans_reports_valid_invalid_and_stale_inventory() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let file_hash = hash(1);
-        let xorb_hash = hash(2);
-        let mismatched_xorb_hash = hash(3);
-        let missing_xorb_hash = hash(4);
-        let stale_xorb_hash = hash(5);
-        let chunk_a = hash(11);
-        let chunk_b = hash(12);
-        let chunk_c = hash(13);
-        let chunk_d = hash(14);
-
-        let mut plan = FilePushPlan::new_verified_staging(
-            file_hash,
-            900,
-            &[
-                (chunk_a, 100),
-                (chunk_b, 200),
-                (chunk_c, 300),
-                (chunk_d, 300),
-            ],
-        );
-        plan.existing.push(PlannedExistingChunk::from_candidate(
-            chunk_a,
-            ExistingChunkCandidate {
-                xorb_ref: XorbRef {
-                    xorb_hash: hash(9),
-                    chunk_index: 0,
-                    uncompressed_size: 100,
-                },
-                placement_id: hash(8).into(),
-                origin_proof_id: hash(10).into(),
-            },
-        ));
-        for (xorb_hash, chunk_hash, chunk_index, bytes) in [
-            (xorb_hash, chunk_b, 0, 4),
-            (mismatched_xorb_hash, chunk_c, 1, 5),
-            (missing_xorb_hash, chunk_d, 2, 7),
-        ] {
-            let placement = ChunkPlacement {
-                chunk_hash,
-                xorb_hash,
-                chunk_index,
-                uncompressed_size: bytes as u32,
-            };
-            plan.prepared_xorbs.push(PlannedXorb {
-                hash: xorb_hash.hex(),
-                payload_hash: hash(30 + chunk_index as u8).hex(),
-                bytes,
-                upload: true,
-                placements: vec![PlannedPlacement::from_placement(&placement)],
-            });
-        }
-
-        let plan_path = file_plan_path(tmp.path(), &file_hash);
-        std::fs::create_dir_all(plan_path.parent().expect("plan parent")).expect("mkdir");
-        std::fs::write(
-            &plan_path,
-            serde_json::to_vec(&plan).expect("serialize push plan"),
-        )
-        .expect("write plan");
-        std::fs::write(plan_path.with_file_name("not-json.json"), b"nope").expect("write invalid");
-
-        let xorb_path = prepared_xorb_path(tmp.path(), &file_hash, &xorb_hash);
-        std::fs::create_dir_all(xorb_path.parent().expect("xorb parent")).expect("mkdir");
-        std::fs::write(&xorb_path, [0u8; 4]).expect("write xorb");
-        std::fs::write(
-            prepared_xorb_path(tmp.path(), &file_hash, &mismatched_xorb_hash),
-            [0u8; 6],
-        )
-        .expect("write mismatched xorb");
-        std::fs::write(
-            prepared_xorb_path(tmp.path(), &file_hash, &stale_xorb_hash),
-            [0u8; 8],
-        )
-        .expect("write stale xorb");
-
-        let stats = summarize_push_plans(tmp.path()).expect("summarize");
-        assert_eq!(stats.format_version, FILE_PUSH_PLAN_VERSION);
-        assert_eq!(stats.plan_files, 1);
-        assert_eq!(stats.invalid_plan_files, 1);
-        assert_eq!(stats.planned_file_bytes, 900);
-        assert_eq!(stats.planned_chunks, 4);
-        assert_eq!(stats.existing_chunks, 0);
-        assert_eq!(stats.prepared_xorbs, 3);
-        assert_eq!(stats.prepared_chunks, 3);
-        assert_eq!(stats.prepared_bytes, 16);
-        assert_eq!(stats.referenced_prepared_xorb_files, 2);
-        assert_eq!(stats.referenced_prepared_xorb_file_bytes, 10);
-        assert_eq!(stats.missing_prepared_xorb_files, 1);
-        assert_eq!(stats.mismatched_prepared_xorb_files, 1);
-        assert_eq!(stats.stale_prepared_xorb_files, 1);
-        assert_eq!(stats.stale_prepared_xorb_file_bytes, 8);
-    }
-
-    #[test]
-    fn summarize_push_plans_handles_missing_cache() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let stats = summarize_push_plans(tmp.path()).expect("summarize");
-        assert_eq!(stats.format_version, FILE_PUSH_PLAN_VERSION);
-        assert_eq!(stats.plan_files, 0);
-        assert_eq!(stats.invalid_plan_files, 0);
-        assert_eq!(stats.prepared_xorbs, 0);
-        assert_eq!(stats.stale_prepared_xorb_files, 0);
     }
 
     #[test]
@@ -1567,7 +1254,7 @@ mod tests {
         let mut cache = PreparedXorbCache::default();
 
         let err = cache
-            .insert_prepared_xorb(hash(1), &planned)
+            .insert_prepared_xorb(&planned)
             .expect_err("mismatched placement xorb must not be indexed");
 
         assert!(matches!(err, StagingError::StagingCorrupt(_)));
@@ -1593,26 +1280,23 @@ mod tests {
         let mut cache = PreparedXorbCache::default();
 
         cache
-            .insert_prepared_xorb(hash(1), &planned)
-            .expect("insert first source");
+            .insert_prepared_xorb(&planned)
+            .expect("insert staging source");
         cache
-            .insert_prepared_xorb(hash(1), &planned)
+            .insert_prepared_xorb(&planned)
             .expect("same source should be ignored");
         assert_eq!(cache.candidates_for_chunk(&hash(10)).count(), 1);
 
         cache
-            .insert_prepared_xorb(hash(2), &planned)
-            .expect("alternate source should be retained");
+            .insert_cached_xorb("cached.xorb".into(), &planned)
+            .expect("local cache source should be retained");
 
         let candidates: Vec<_> = cache.candidates_for_chunk(&hash(10)).collect();
         assert_eq!(candidates.len(), 2);
-        assert!(matches!(
-            candidates[0].source,
-            PreparedXorbSource::StagingFile(source) if source == hash(1)
-        ));
+        assert!(matches!(candidates[0].source, PreparedXorbSource::Staging));
         assert!(matches!(
             candidates[1].source,
-            PreparedXorbSource::StagingFile(source) if source == hash(2)
+            PreparedXorbSource::LocalCache(ref path) if path == Path::new("cached.xorb")
         ));
     }
 
@@ -1644,159 +1328,14 @@ mod tests {
         let mut cache = PreparedXorbCache::default();
 
         cache
-            .insert_prepared_xorb(hash(1), &planned)
+            .insert_prepared_xorb(&planned)
             .expect("insert first source");
         let err = cache
-            .insert_prepared_xorb(hash(2), &conflicting)
+            .insert_prepared_xorb(&conflicting)
             .expect_err("same xorb hash with conflicting metadata must be rejected");
 
         assert!(matches!(err, StagingError::StagingCorrupt(_)));
         assert_eq!(cache.candidates_for_chunk(&hash(10)).count(), 1);
-    }
-
-    #[test]
-    fn load_prepared_xorb_cache_skips_metadata_mismatched_xorb() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("load-cache-mismatch-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let file_hash = file_hash_from_chunks(&chunks);
-        let (xorb_bytes, xorb_hash, mut placements) = xorb_with_chunks(&chunks);
-        placements[0].uncompressed_size += 1;
-        let planned_chunk = placements[0].chunk_hash;
-        write_prepared_plan(
-            tmp.path(),
-            file_hash,
-            &chunks,
-            placements,
-            xorb_bytes,
-            xorb_hash,
-        );
-
-        let cache = load_prepared_xorb_cache(tmp.path()).expect("load cache");
-
-        assert_eq!(cache.candidates_for_chunk(&planned_chunk).count(), 0);
-    }
-
-    #[test]
-    fn load_prepared_xorb_cache_for_chunks_skips_unwanted_xorbs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let wanted_chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("wanted-prepared-cache-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let unwanted_chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("unwanted-prepared-cache-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let wanted_file_hash = file_hash_from_chunks(&wanted_chunks);
-        let unwanted_file_hash = file_hash_from_chunks(&unwanted_chunks);
-        let (wanted_xorb_bytes, wanted_xorb_hash, wanted_placements) =
-            xorb_with_chunks(&wanted_chunks);
-        let (unwanted_xorb_bytes, unwanted_xorb_hash, unwanted_placements) =
-            xorb_with_chunks(&unwanted_chunks);
-        write_prepared_plan(
-            tmp.path(),
-            wanted_file_hash,
-            &wanted_chunks,
-            wanted_placements,
-            wanted_xorb_bytes,
-            wanted_xorb_hash,
-        );
-        write_prepared_plan(
-            tmp.path(),
-            unwanted_file_hash,
-            &unwanted_chunks,
-            unwanted_placements,
-            unwanted_xorb_bytes,
-            unwanted_xorb_hash,
-        );
-
-        let wanted_chunk = wanted_chunks[0].0;
-        let unwanted_chunk = unwanted_chunks[0].0;
-        let cache = load_prepared_xorb_cache_for_chunks(tmp.path(), &HashSet::from([wanted_chunk]))
-            .expect("load filtered cache");
-
-        assert_eq!(cache.candidates_for_chunk(&wanted_chunk).count(), 1);
-        assert_eq!(cache.candidates_for_chunk(&unwanted_chunk).count(), 0);
-    }
-
-    #[test]
-    fn load_prepared_xorb_cache_for_chunks_skips_non_overlapping_plan_before_xorbs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let unwanted_chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("non-overlap-plan-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let file_hash = file_hash_from_chunks(&unwanted_chunks);
-        let (xorb_bytes, xorb_hash, mut placements) = xorb_with_chunks(&unwanted_chunks);
-        placements[0].uncompressed_size += 1;
-        let planned_chunk = placements[0].chunk_hash;
-        write_prepared_plan(
-            tmp.path(),
-            file_hash,
-            &unwanted_chunks,
-            placements,
-            xorb_bytes,
-            xorb_hash,
-        );
-
-        let cache = load_prepared_xorb_cache_for_chunks(tmp.path(), &HashSet::from([hash(200)]))
-            .expect("load filtered cache");
-
-        assert_eq!(cache.candidates_for_chunk(&planned_chunk).count(), 0);
-    }
-
-    #[tokio::test]
-    async fn link_prepared_xorb_replaces_stale_target_with_valid_source() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("repair-target-prepared-xorb-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let source_file_hash = file_hash_from_chunks(&chunks);
-        let target_file_hash = hash(99);
-        let (xorb_bytes, xorb_hash, placements) = xorb_with_chunks(&chunks);
-        let source_plan = write_prepared_plan(
-            tmp.path(),
-            source_file_hash,
-            &chunks,
-            placements,
-            xorb_bytes.clone(),
-            xorb_hash,
-        );
-        let planned = source_plan
-            .prepared_xorbs
-            .first()
-            .expect("prepared xorb")
-            .clone();
-        let target_path = prepared_xorb_path(tmp.path(), &target_file_hash, &xorb_hash);
-        std::fs::create_dir_all(target_path.parent().expect("target parent"))
-            .expect("mkdir target");
-        std::fs::write(&target_path, vec![0xA5; xorb_bytes.len()]).expect("write stale target");
-
-        let linked = link_prepared_xorb(tmp.path(), &source_file_hash, &target_file_hash, &planned)
-            .await
-            .expect("link prepared xorb");
-
-        assert!(linked);
-        assert_eq!(
-            std::fs::read(&target_path).expect("read repaired target"),
-            xorb_bytes.to_vec()
-        );
-        parse_prepared_xorb_metadata(&target_path, &target_file_hash, &xorb_hash, &planned)
-            .expect("target metadata validates");
     }
 
     #[tokio::test]
@@ -1808,41 +1347,31 @@ mod tests {
                 (compute_data_hash(&data), data)
             })
             .collect();
-        let source_file_hash = file_hash_from_chunks(&chunks);
-        let target_file_hash = hash(88);
         let (xorb_bytes, xorb_hash, placements) = xorb_with_chunks(&chunks);
-        let source_plan = write_prepared_plan(
-            tmp.path(),
-            source_file_hash,
-            &chunks,
-            placements,
-            xorb_bytes.clone(),
-            xorb_hash,
-        );
-        let planned = source_plan
-            .prepared_xorbs
-            .first()
-            .expect("prepared xorb")
-            .clone();
-        let source_path = prepared_xorb_path(tmp.path(), &source_file_hash, &xorb_hash);
-        let target_path = prepared_xorb_path(tmp.path(), &target_file_hash, &xorb_hash);
+        let planned = PlannedXorb {
+            hash: xorb_hash.hex(),
+            payload_hash: blake3::hash(&xorb_bytes).to_hex().to_string(),
+            bytes: xorb_bytes.len() as u64,
+            upload: true,
+            placements: placements
+                .iter()
+                .map(PlannedPlacement::from_placement)
+                .collect(),
+        };
+        let source_path = tmp.path().join("cached-source.xorb");
+        std::fs::write(&source_path, &xorb_bytes).expect("write cached source");
+        let target_path = prepared_xorb_path(tmp.path(), &xorb_hash);
 
-        let copied = copy_prepared_xorb(
-            &source_path,
-            &target_path,
-            &target_file_hash,
-            &xorb_hash,
-            &planned,
-        )
-        .await
-        .expect("copy prepared xorb");
+        let copied = copy_prepared_xorb(&source_path, &target_path, &xorb_hash, &planned)
+            .await
+            .expect("copy prepared xorb");
 
         assert!(copied);
         assert_eq!(
             std::fs::read(&target_path).expect("read copied target"),
             xorb_bytes.to_vec()
         );
-        parse_prepared_xorb_metadata(&target_path, &target_file_hash, &xorb_hash, &planned)
+        parse_prepared_xorb_metadata(&target_path, &xorb_hash, &xorb_hash, &planned)
             .expect("copied target validates");
     }
 
@@ -1855,39 +1384,29 @@ mod tests {
                 (compute_data_hash(&data), data)
             })
             .collect();
-        let source_file_hash = file_hash_from_chunks(&chunks);
-        let target_file_hash = hash(87);
         let (xorb_bytes, xorb_hash, placements) = xorb_with_chunks(&chunks);
-        let source_plan = write_prepared_plan(
-            tmp.path(),
-            source_file_hash,
-            &chunks,
-            placements,
-            xorb_bytes,
-            xorb_hash,
-        );
-        let mut planned = source_plan
-            .prepared_xorbs
-            .first()
-            .expect("prepared xorb")
-            .clone();
+        let mut planned = PlannedXorb {
+            hash: xorb_hash.hex(),
+            payload_hash: blake3::hash(&xorb_bytes).to_hex().to_string(),
+            bytes: xorb_bytes.len() as u64,
+            upload: true,
+            placements: placements
+                .iter()
+                .map(PlannedPlacement::from_placement)
+                .collect(),
+        };
         planned
             .placements
             .first_mut()
             .expect("planned placement")
             .uncompressed_size += 1;
-        let source_path = prepared_xorb_path(tmp.path(), &source_file_hash, &xorb_hash);
-        let target_path = prepared_xorb_path(tmp.path(), &target_file_hash, &xorb_hash);
+        let source_path = tmp.path().join("invalid-cached-source.xorb");
+        std::fs::write(&source_path, &xorb_bytes).expect("write cached source");
+        let target_path = prepared_xorb_path(tmp.path(), &xorb_hash);
 
-        let copied = copy_prepared_xorb(
-            &source_path,
-            &target_path,
-            &target_file_hash,
-            &xorb_hash,
-            &planned,
-        )
-        .await
-        .expect("copy should report validation miss");
+        let copied = copy_prepared_xorb(&source_path, &target_path, &xorb_hash, &planned)
+            .await
+            .expect("copy should report validation miss");
 
         assert!(!copied);
         assert!(!target_path.exists());
@@ -1898,6 +1417,60 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_identical_prepared_writes_create_one_immutable_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chunks = [(
+            compute_data_hash(b"convergent payload"),
+            b"convergent payload".to_vec(),
+        )];
+        let (bytes, xorb_hash, _) = xorb_with_chunks(&chunks);
+        let root = tmp.path().to_path_buf();
+        let first = tokio::spawn({
+            let root = root.clone();
+            let bytes = bytes.clone();
+            async move { write_prepared_xorb(&root, &xorb_hash, bytes).await }
+        });
+        let second = tokio::spawn({
+            let root = root.clone();
+            let bytes = bytes.clone();
+            async move { write_prepared_xorb(&root, &xorb_hash, bytes).await }
+        });
+
+        assert_eq!(
+            first.await.expect("first task").expect("first write"),
+            bytes.len() as u64
+        );
+        assert_eq!(
+            second.await.expect("second task").expect("second write"),
+            bytes.len() as u64
+        );
+        assert_eq!(
+            std::fs::read(prepared_xorb_path(&root, &xorb_hash)).expect("read sealed body"),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_write_rejects_corrupt_existing_content_addressed_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chunks = [(
+            compute_data_hash(b"immutable payload"),
+            b"immutable payload".to_vec(),
+        )];
+        let (bytes, xorb_hash, _) = xorb_with_chunks(&chunks);
+        let path = prepared_xorb_path(tmp.path(), &xorb_hash);
+        std::fs::create_dir_all(path.parent().expect("payload parent")).expect("create parent");
+        std::fs::write(&path, b"corrupt").expect("write corrupt collision");
+
+        let error = write_prepared_xorb(tmp.path(), &xorb_hash, bytes)
+            .await
+            .expect_err("corrupt content-addressed body must fail closed");
+
+        assert!(matches!(error, StagingError::StagingCorrupt(_)));
+        assert_eq!(std::fs::read(path).expect("read collision"), b"corrupt");
     }
 
     #[test]
@@ -1922,80 +1495,5 @@ mod tests {
         drop(guard);
 
         assert!(path.exists());
-    }
-
-    #[test]
-    fn summarize_push_plans_verifies_prepared_xorb_payload_and_metadata() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("verify-prepared-xorb-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let file_hash = file_hash_from_chunks(&chunks);
-        let (xorb_bytes, xorb_hash, placements) = xorb_with_chunks(&chunks);
-        let xorb_len = xorb_bytes.len() as u64;
-        write_prepared_plan(
-            tmp.path(),
-            file_hash,
-            &chunks,
-            placements,
-            xorb_bytes,
-            xorb_hash,
-        );
-
-        let stats = summarize_push_plans_with_options(
-            tmp.path(),
-            PushPlanSummaryOptions {
-                verify_prepared_xorbs: true,
-            },
-        )
-        .expect("summarize");
-
-        assert!(stats.verified_prepared_xorbs);
-        assert_eq!(stats.plan_files, 1);
-        assert_eq!(stats.prepared_xorbs, 1);
-        assert_eq!(stats.verified_prepared_xorb_files, 1);
-        assert_eq!(stats.verified_prepared_xorb_file_bytes, xorb_len);
-        assert_eq!(stats.payload_hash_mismatched_prepared_xorb_files, 0);
-        assert_eq!(stats.corrupt_prepared_xorb_files, 0);
-        assert_eq!(stats.metadata_mismatched_prepared_xorb_files, 0);
-    }
-
-    #[test]
-    fn summarize_push_plans_reports_prepared_xorb_metadata_mismatch() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let chunks: Vec<(MerkleHash, Vec<u8>)> = (0..2u8)
-            .map(|idx| {
-                let data = format!("mismatch-prepared-xorb-chunk-{idx}").into_bytes();
-                (compute_data_hash(&data), data)
-            })
-            .collect();
-        let file_hash = file_hash_from_chunks(&chunks);
-        let (xorb_bytes, xorb_hash, mut placements) = xorb_with_chunks(&chunks);
-        placements[0].uncompressed_size += 1;
-        write_prepared_plan(
-            tmp.path(),
-            file_hash,
-            &chunks,
-            placements,
-            xorb_bytes,
-            xorb_hash,
-        );
-
-        let stats = summarize_push_plans_with_options(
-            tmp.path(),
-            PushPlanSummaryOptions {
-                verify_prepared_xorbs: true,
-            },
-        )
-        .expect("summarize");
-
-        assert_eq!(stats.plan_files, 1);
-        assert_eq!(stats.prepared_xorbs, 1);
-        assert_eq!(stats.verified_prepared_xorb_files, 0);
-        assert_eq!(stats.metadata_mismatched_prepared_xorb_files, 1);
-        assert_eq!(stats.payload_hash_mismatched_prepared_xorb_files, 0);
     }
 }

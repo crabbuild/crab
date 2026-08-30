@@ -699,7 +699,7 @@ class AddCommitPushSmoke:
             tables = (
                 "chunks",
                 "chunk_payloads",
-                "prepared_xorbs",
+                "prepared_payload_chunks",
                 "prepared_payloads",
                 "recipe_remote_chunks",
             )
@@ -1633,6 +1633,140 @@ class AddCommitPushSmoke:
         self.report.cases.append(asdict(case))
         self.write_report()
 
+    def run_partial_overlap_case(self) -> None:
+        case_name = "partial-overlap-canonical-authority"
+        repo, remote_url, repo_prefix = self.prepare_repo(case_name)
+        shared_size = max(self.args.size_mib, 20) * 1024 * 1024
+        prefix_size = 4 * 1024 * 1024
+        shared = deterministic_bytes(
+            shared_size, f"{self.run_id}:{case_name}:shared"
+        )
+        first_prefix = deterministic_bytes(
+            prefix_size, f"{self.run_id}:{case_name}:first"
+        )
+        second_prefix = deterministic_bytes(
+            prefix_size, f"{self.run_id}:{case_name}:second"
+        )
+        first = first_prefix + shared
+        second = second_prefix + shared
+        (repo / "first.bin").write_bytes(first)
+        (repo / "second.bin").write_bytes(second)
+        first_sha256 = hashlib.sha256(first).hexdigest()
+        second_sha256 = hashlib.sha256(second).hexdigest()
+        before_xorbs = self.list_keys(".crab/xorbs/")
+
+        self.run_crab(
+            repo,
+            ["add", "--jobs", "2", "first.bin", "second.bin"],
+            name=f"{case_name} add overlapping files",
+        )
+        first_pointer = self.assert_index_pointer(repo, "first.bin", len(first))
+        second_pointer = self.assert_index_pointer(repo, "second.bin", len(second))
+        self.check(
+            f"{case_name}-files-remain-distinct",
+            first_pointer.file_hash != second_pointer.file_hash,
+        )
+
+        index_path = repo / ".crab" / "staging" / "index.db"
+        connection = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+        try:
+            prepared_chunks = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM prepared_payload_chunks"
+                ).fetchone()[0]
+            )
+            unique_prepared_chunks = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT chunk_hash) FROM prepared_payload_chunks"
+                ).fetchone()[0]
+            )
+            prepared_payloads = int(
+                connection.execute("SELECT COUNT(*) FROM prepared_payloads").fetchone()[0]
+            )
+            segment_chunks = int(
+                connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            )
+            shared_chunks = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM (
+                        SELECT occurrence.chunk_hash
+                        FROM recipe_occurrences AS occurrence
+                        JOIN file_recipes AS recipe USING (recipe_hash)
+                        WHERE hex(recipe.file_hash) = upper(?)
+                        INTERSECT
+                        SELECT occurrence.chunk_hash
+                        FROM recipe_occurrences AS occurrence
+                        JOIN file_recipes AS recipe USING (recipe_hash)
+                        WHERE hex(recipe.file_hash) = upper(?)
+                    )
+                    """,
+                    (first_pointer.file_hash, second_pointer.file_hash),
+                ).fetchone()[0]
+            )
+        finally:
+            connection.close()
+        payload_files = sum(
+            1
+            for path in (repo / ".crab/staging/push-plans/payloads").rglob("*.xorb")
+            if path.is_file()
+        )
+        self.check(
+            f"{case_name}-fixture-shares-many-chunks",
+            shared_chunks > 8,
+            {"shared_chunks": shared_chunks},
+        )
+        self.check(
+            f"{case_name}-one-canonical-placement-per-chunk",
+            prepared_chunks == unique_prepared_chunks,
+            {
+                "prepared_chunks": prepared_chunks,
+                "unique_prepared_chunks": unique_prepared_chunks,
+            },
+        )
+        self.check(
+            f"{case_name}-one-local-body-per-payload",
+            payload_files == prepared_payloads and prepared_payloads > 0,
+            {"payload_files": payload_files, "prepared_payloads": prepared_payloads},
+        )
+        self.check(
+            f"{case_name}-direct-prepared-needs-no-segment-copy",
+            segment_chunks == 0,
+            {"segment_chunks": segment_chunks},
+        )
+
+        self.run_git(repo, ["commit", "-m", "add partially overlapping files"])
+        self.run_crab(
+            repo,
+            ["push", "origin", "HEAD:refs/heads/main"],
+            name=f"{case_name} push",
+            timeout=self.args.push_timeout,
+        )
+        self.head_key(f"{repo_prefix}/manifest")
+        after_xorbs = self.list_keys(".crab/xorbs/")
+        new_xorbs = len(after_xorbs - before_xorbs)
+        self.check(
+            f"{case_name}-uploads-only-distinct-local-payloads",
+            0 < new_xorbs <= prepared_payloads,
+            {"new_xorbs": new_xorbs, "prepared_payloads": prepared_payloads},
+        )
+
+        clone_dir = self.run_root / case_name / "clone"
+        self.run_cmd(
+            f"{case_name} crab clone",
+            [self.crab_bin, "clone", remote_url, str(clone_dir), "--jsonl"],
+            self.run_root,
+        )
+        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} hydrate")
+        self.check(
+            f"{case_name}-first-file-byte-identical",
+            sha256_file(clone_dir / "first.bin") == first_sha256,
+        )
+        self.check(
+            f"{case_name}-second-file-byte-identical",
+            sha256_file(clone_dir / "second.bin") == second_sha256,
+        )
+
     def run_cross_repository_remote_duplicate_case(self) -> None:
         case_name = "cross-repository-remote-duplicate"
         file_size = self.args.size_mib * 1024 * 1024
@@ -1685,7 +1819,7 @@ class AddCommitPushSmoke:
         )
         self.check(
             f"{case_name}-add-builds-no-prepared-xorb",
-            inventory["prepared_xorbs"] == 0
+            inventory["prepared_payload_chunks"] == 0
             and inventory["prepared_payloads"] == 0,
             inventory,
         )
@@ -1861,6 +1995,12 @@ class AddCommitPushSmoke:
             self.report.status = "passed"
             self.write_report()
             return
+        if self.args.only_partial_overlap:
+            self.run_partial_overlap_case()
+            self.check_credential_disclosure()
+            self.report.status = "passed"
+            self.write_report()
+            return
         self.run_v1_hard_cutover_reset_case()
         self.run_missing_manifest_case()
         self.run_corrupt_manifest_case()
@@ -1872,6 +2012,7 @@ class AddCommitPushSmoke:
         self.run_corrupt_index_failure_case()
         self.run_concurrent_push_case()
         self.run_committed_restage_before_first_push_case()
+        self.run_partial_overlap_case()
         self.run_cross_repository_remote_duplicate_case()
         self.run_case("crab-add-crab-push", use_crab_add=True)
         self.run_case("git-add-git-push", use_crab_add=False)
@@ -1924,6 +2065,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=positive_int, default=120)
     parser.add_argument("--push-timeout", type=positive_int, default=240)
     parser.add_argument("--only-cross-repo-duplicate", action="store_true")
+    parser.add_argument("--only-partial-overlap", action="store_true")
     return parser.parse_args()
 
 

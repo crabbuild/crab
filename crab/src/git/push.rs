@@ -4745,7 +4745,7 @@ impl PackedXorb {
         planned: &PlannedXorb,
     ) -> Result<Self> {
         let hash = planned.hash()?;
-        let path = push_plan::prepared_xorb_path(staging_root, file_hash, &hash);
+        let path = push_plan::prepared_xorb_path(staging_root, &hash);
         let metadata = tokio::fs::metadata(&path).await?;
         if metadata.len() != planned.bytes {
             return Err(CrabError::StagingCorrupt(format!(
@@ -20109,9 +20109,23 @@ mod tests {
     ) {
         use crab_staging::StagingArea;
 
+        let mut payloads = Vec::with_capacity(plan.prepared_xorbs.len());
+        for prepared in &plan.prepared_xorbs {
+            let hash = prepared.hash().expect("prepared xorb hash");
+            let bytes = tokio::fs::read(push_plan::prepared_xorb_path(root, &hash))
+                .await
+                .expect("read prepared fixture before writable recovery");
+            payloads.push((hash, bytes::Bytes::from(bytes)));
+        }
+
         let staging = StagingArea::open(root.to_path_buf())
             .await
             .expect("open staging rw");
+        for (hash, bytes) in payloads {
+            push_plan::write_prepared_xorb(staging.root(), &hash, bytes)
+                .await
+                .expect("seal prepared fixture before metadata");
+        }
         staging
             .write_file_push_plan(plan)
             .await
@@ -29352,7 +29366,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn mixed_add_time_push_plan_keeps_valid_sibling_and_packs_only_missing_plan() {
+    async fn mixed_normalized_plans_keep_prepared_sibling_and_pack_segment_residual() {
         use crate::git::walk::PointerBlob;
         use crab_staging::StagingAreaReadOnly;
         use crab_xet::hash::compute_data_hash;
@@ -29409,8 +29423,8 @@ mod tests {
         pipeline.classify_chunks().await.expect("classify chunks");
         assert_eq!(
             pipeline.test_metrics.add_plan_outcomes(),
-            (1, 1),
-            "one valid plan must be adopted while only its missing sibling falls back"
+            (2, 0),
+            "both normalized recipes are adopted while segment-only authority stays residual"
         );
         assert!(
             !pipeline.xorbs.lock().await.is_empty(),
@@ -29484,7 +29498,7 @@ mod tests {
                 })
                 .collect(),
         });
-        push_plan::write_prepared_xorb(tmp.path(), &file_hash, &prepared_hash, prepared_bytes)
+        push_plan::write_prepared_xorb(tmp.path(), &prepared_hash, prepared_bytes)
             .await
             .expect("write prepared xorb");
         write_add_time_plan_for_test(tmp.path(), &plan).await;
@@ -29903,8 +29917,8 @@ mod tests {
             "reused plan keeps the whole dense xorb metadata"
         );
         assert!(
-            push_plan::prepared_xorb_path(tmp.path(), &second_hash, &first_xorb).exists(),
-            "reused prepared xorb should be hard-linked into the second file plan directory"
+            push_plan::prepared_xorb_path(tmp.path(), &first_xorb).exists(),
+            "reused prepared xorb should remain in the global content-addressed cache"
         );
 
         let metrics = Arc::new(Metrics::new());
@@ -30044,7 +30058,7 @@ mod tests {
             hash: authority_hash.hex(),
             payload_hash: blake3::hash(&authority_bytes).to_hex().to_string(),
             bytes: authority_bytes.len() as u64,
-            upload: false,
+            upload: true,
             placements: chunks
                 .iter()
                 .zip(authority_refs.iter())
@@ -30058,7 +30072,7 @@ mod tests {
                 })
                 .collect(),
         });
-        push_plan::write_prepared_xorb(tmp.path(), &file_hash, &authority_hash, authority_bytes)
+        push_plan::write_prepared_xorb(tmp.path(), &authority_hash, authority_bytes)
             .await
             .expect("write local authority xorb");
         plan.existing.push(planned_existing(
@@ -30070,29 +30084,6 @@ mod tests {
             },
         ));
 
-        let (prepared_bytes, prepared_hash, prepared_refs) = test_xorb_with_chunks(&chunks[1..]);
-        let placements: Vec<PlannedPlacement> = chunks[1..]
-            .iter()
-            .zip(prepared_refs.iter())
-            .map(|((chunk_hash, _), xorb_ref)| {
-                PlannedPlacement::from_placement(&ChunkPlacement {
-                    chunk_hash: *chunk_hash,
-                    xorb_hash: xorb_ref.xorb_hash,
-                    chunk_index: xorb_ref.chunk_index,
-                    uncompressed_size: xorb_ref.uncompressed_size,
-                })
-            })
-            .collect();
-        plan.prepared_xorbs.push(PlannedXorb {
-            hash: prepared_hash.hex(),
-            payload_hash: blake3::hash(&prepared_bytes).to_hex().to_string(),
-            bytes: prepared_bytes.len() as u64,
-            upload: true,
-            placements,
-        });
-        push_plan::write_prepared_xorb(tmp.path(), &file_hash, &prepared_hash, prepared_bytes)
-            .await
-            .expect("write prepared xorb");
         write_add_time_plan_for_test(tmp.path(), &plan).await;
 
         let metrics = Arc::new(Metrics::new());
@@ -30126,7 +30117,7 @@ mod tests {
         assert_eq!(
             pipeline.xorbs.lock().await.len(),
             1,
-            "classification should retain the upload xorb but ignore local-only authority"
+            "stale remote proof should retain the canonical prepared authority"
         );
         let residual = pipeline
             .new_chunk_hashes
@@ -30134,10 +30125,9 @@ mod tests {
             .await
             .clone()
             .expect("partial add plan should publish residual chunk set");
-        assert_eq!(residual.len(), 1);
         assert!(
-            residual.contains(&chunks[0].0),
-            "only the stale existing chunk should be packed from staging"
+            residual.is_empty(),
+            "canonical prepared authority should cover the stale remote occurrence"
         );
         assert_eq!(
             metrics.snapshot().staging_bytes_read,
@@ -30145,16 +30135,19 @@ mod tests {
             "classification should not reread staged bytes for reusable prepared xorbs"
         );
 
-        pipeline.pack_xorbs().await.expect("pack residual chunks");
+        pipeline
+            .pack_xorbs()
+            .await
+            .expect("preserve prepared chunks");
         assert_eq!(
             metrics.snapshot().staging_bytes_read,
-            chunks[0].1.len() as u64,
-            "packing should read only the uncovered residual chunk"
+            0,
+            "packing should not reread bytes covered by canonical prepared authority"
         );
         assert_eq!(
             pipeline.chunk_placement.lock().await.len(),
             chunks.len(),
-            "prepared and residual placements should cover every file chunk"
+            "prepared placements should cover every file chunk"
         );
     }
 
@@ -30177,7 +30170,7 @@ mod tests {
         let plan = load_add_time_plan_for_test(tmp.path(), &file_hash).await;
         let planned_xorb = plan.prepared_xorbs.first().expect("prepared xorb");
         let xorb_hash = planned_xorb.hash().expect("prepared xorb hash");
-        let path = push_plan::prepared_xorb_path(tmp.path(), &file_hash, &xorb_hash);
+        let path = push_plan::prepared_xorb_path(tmp.path(), &xorb_hash);
         let mut bytes = tokio::fs::read(&path).await.expect("read prepared xorb");
         assert!(!bytes.is_empty(), "prepared xorb should not be empty");
         bytes[0] ^= 0x80;
