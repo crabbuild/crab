@@ -480,7 +480,7 @@ pub fn consolidate_pack_suffix_with_concurrency(
             pack_id: "geometric-repack".to_owned(),
             reason: "selected-pack consolidation produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path, GeneratedPackValidation::Full)?;
+    let generated = verified_generated_pack(pack_path, GeneratedPackValidation::Full, None)?;
     let mut generated_locations = PackLocationIter::open(
         generated.index_path(),
         generated.reverse_index_path(),
@@ -646,7 +646,8 @@ pub fn concatenate_complete_pack_inventory(
     let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
     let installed =
         install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
-    let generated = verified_generated_pack(installed.pack_path, GeneratedPackValidation::Full)?;
+    let generated =
+        verified_generated_pack(installed.pack_path, GeneratedPackValidation::Full, None)?;
     if generated.object_count != total_objects {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id,
@@ -1052,48 +1053,13 @@ fn pack_selected_objects(
             pack_id: "selected-pack".to_owned(),
             reason: "selected-object packing produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path, validation)?;
-    let mut generated_locations = PackLocationIter::open(
-        &generated.index_path,
-        &generated.reverse_index_path,
-        generated.pack_size,
-    )?;
-    let mut generated_oids = Vec::<[u8; 20]>::new();
-    for location in &mut generated_locations {
-        let location = location?;
-        let oid =
-            location
-                .oid
-                .as_bytes()
-                .try_into()
-                .map_err(|_| RepackError::SelectedObjectSet {
-                    pack_id: generated.pack_id.clone(),
-                    reason: "generated pack contains a non-SHA1 object".to_owned(),
-                })?;
-        generated_oids.push(oid);
-    }
-    generated_oids.sort_unstable();
-    let selected_matches = generated_oids.len() == selected.len()
-        && generated_oids
-            .iter()
-            .zip(selected)
-            .all(|(generated, selected)| selected.as_bytes() == generated);
-    if !selected_matches {
-        return Err(RepackError::SelectedObjectSet {
-            pack_id: generated.pack_id,
-            reason: format!(
-                "generated {} objects for {} requested objects",
-                generated_oids.len(),
-                selected.len()
-            ),
-        });
-    }
-    Ok(generated)
+    verified_generated_pack(pack_path, validation, Some(selected))
 }
 
 fn verified_generated_pack(
     pack_path: PathBuf,
     validation: GeneratedPackValidation,
+    expected_object_ids: Option<&[gix_hash::ObjectId]>,
 ) -> Result<GeometricRepackedPack, RepackError> {
     let index_path = pack_path.with_extension("idx");
     let reverse_index_path = pack_path.with_extension("rev");
@@ -1137,11 +1103,27 @@ fn verified_generated_pack(
     }
     let (index_hash, index_size) = hash_file(&index_path)?;
     let (reverse_index_hash, reverse_index_size) = hash_file(&reverse_index_path)?;
+    let pack_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
+    if let Some(expected_object_ids) = expected_object_ids {
+        // Git v2 indexes store OIDs in lexicographic order. PackLocationIter::open
+        // has already validated the index and reverse-index as one pair, so this
+        // avoids allocating and sorting every generated OID a second time.
+        if !locations.matches_sorted_object_ids(expected_object_ids) {
+            return Err(RepackError::SelectedObjectSet {
+                pack_id,
+                reason: format!(
+                    "generated {} objects for {} requested objects",
+                    locations.object_count(),
+                    expected_object_ids.len()
+                ),
+            });
+        }
+    }
     Ok(GeometricRepackedPack {
         pack_path,
         index_path,
         reverse_index_path,
-        pack_id: blake3::Hash::from_bytes(pack_hash).to_hex().to_string(),
+        pack_id,
         pack_hash,
         pack_size,
         index_hash,
