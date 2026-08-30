@@ -41,7 +41,8 @@ const LOCATOR_READ_REPAIR_LOCK_TTL: Duration = Duration::from_secs(30);
 const LOCATOR_READ_RETRY_LIMIT: usize = 120;
 const LOCATOR_READ_RETRY_BASE: Duration = Duration::from_millis(100);
 const LOCATOR_READ_RETRY_CAP: Duration = Duration::from_secs(2);
-const READ_ADMISSION_WAIT: Duration = Duration::from_secs(5 * 60);
+const UPLOAD_PACK_MAX_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
+const READ_ADMISSION_WAIT: Duration = UPLOAD_PACK_MAX_DURATION;
 const READ_ADMISSION_RETRY_BASE: Duration = Duration::from_millis(50);
 const READ_ADMISSION_RETRY_CAP: Duration = Duration::from_secs(2);
 const MIB: u64 = 1024 * 1024;
@@ -1135,7 +1136,7 @@ fn upload_pack_repository_options() -> crab_remote_git::Result<RepositoryOptions
     let operation = OperationLimits {
         // Upload-pack is an explicit repository transfer. Its bounded profile must cover the
         // largest supported visibility generation without weakening interactive read defaults.
-        max_duration: Duration::from_secs(2 * 60 * 60),
+        max_duration: UPLOAD_PACK_MAX_DURATION,
         max_logical_objects: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
         max_storage_requests: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
         max_fetched_bytes: 64 * GIB,
@@ -2499,6 +2500,7 @@ mod tests {
             options.operation_limits().max_logical_objects,
             crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
         );
+        assert_eq!(options.operation_limits().max_duration, READ_ADMISSION_WAIT);
         assert!(
             options.operation_limits().max_response_bytes
                 < options.operation_limits().max_inflated_bytes
