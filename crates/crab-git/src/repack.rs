@@ -791,7 +791,10 @@ pub fn repack_selected_objects(
         &object_list,
         &selected,
         "pack-crab-selected",
-        GeneratedPackValidation::Full,
+        // Committed source packs were object-validated at publication. The
+        // response still checks pack/index identity and the exact object set;
+        // the receiving Git client validates object bodies with index-pack.
+        GeneratedPackValidation::Structural,
     )?;
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
