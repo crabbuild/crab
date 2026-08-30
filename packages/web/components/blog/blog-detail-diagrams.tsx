@@ -253,7 +253,7 @@ function ReachabilityMarker() {
       markerHeight="8"
       orient="auto"
     >
-      <path d="M1 1 9 5 1 9 3.5 5Z" fill="#64748b" />
+      <path d="M1 1 9 5 1 9Z" fill="#64748b" />
     </marker>
   )
 }

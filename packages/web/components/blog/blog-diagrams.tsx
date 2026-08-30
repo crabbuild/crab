@@ -48,7 +48,7 @@ export function DiagramFrame({
   return (
     <figure
       className={cn(
-        "not-prose my-10 overflow-hidden rounded-xl border border-border bg-card shadow-sm",
+        "wide-article-visual not-prose my-10 overflow-hidden rounded-xl border border-border bg-card shadow-sm",
         className
       )}
     >
@@ -90,7 +90,7 @@ function ArrowMarker({
       markerHeight="8"
       orient="auto-start-reverse"
     >
-      <path d="M1 1 9 5 1 9 3.5 5Z" fill={color} />
+      <path d="M1 1 9 5 1 9Z" fill={color} />
     </marker>
   )
 }

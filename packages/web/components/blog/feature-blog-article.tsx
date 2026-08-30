@@ -90,7 +90,7 @@ export function FeatureBlogArticle({
 
         <div
           data-feature-article
-          className="mx-auto grid w-full max-w-[88rem] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[13rem_minmax(0,48rem)] lg:items-start lg:justify-center lg:gap-10 lg:px-8 lg:py-24 xl:grid-cols-[14rem_minmax(0,48rem)_14rem] xl:justify-between 2xl:px-12"
+          className="mx-auto grid w-full max-w-[100rem] gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[13rem_minmax(0,48rem)] lg:items-start lg:justify-center lg:gap-10 lg:px-8 lg:py-24 min-[90rem]:grid-cols-[14rem_minmax(0,62rem)_14rem] min-[90rem]:justify-between min-[90rem]:gap-8 2xl:gap-10 2xl:px-12"
         >
           <aside className="min-w-0 lg:sticky lg:top-24 lg:self-start">
             <FeatureArticleRail items={toc} />
@@ -102,7 +102,7 @@ export function FeatureBlogArticle({
             </div>
           </div>
 
-          <aside className="hidden min-w-0 justify-self-end xl:sticky xl:top-24 xl:right-0 xl:col-start-3 xl:row-start-1 xl:block xl:self-start">
+          <aside className="hidden min-w-0 justify-self-end min-[90rem]:sticky min-[90rem]:top-24 min-[90rem]:right-0 min-[90rem]:col-start-3 min-[90rem]:row-start-1 min-[90rem]:block min-[90rem]:self-start">
             <div className="w-56 space-y-5">
               <div className="border-t-2 border-primary pt-4">
                 <div className="flex items-center gap-2 font-mono text-[10px] font-semibold tracking-[0.16em] text-primary uppercase">

@@ -539,12 +539,20 @@ details.faq-item[open] .faq-chevron {
 }
 
 @media (min-width: 64rem) {
-  /* Sticky rails own the outer columns, so wide visuals cannot cover navigation. */
+  /* Wide media fills the center canvas without inheriting viewport breakout offsets. */
   [data-feature-article] .wide-article-visual {
     left: auto;
     width: 100%;
     translate: 0 0 !important;
     transform: none;
+  }
+}
+
+@media (min-width: 90rem) {
+  /* Keep narrative measure focused while diagrams and tables use the wider canvas. */
+  [data-feature-article] .feature-blog-prose > :not(.wide-article-visual, table) {
+    max-width: 48rem;
+    margin-inline: auto;
   }
 }
 
