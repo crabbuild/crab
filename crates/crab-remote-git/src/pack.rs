@@ -918,31 +918,30 @@ async fn download_repack_sources(
         cancellation,
         SOURCE_PACK_DOWNLOAD_CONCURRENCY,
         |pack, path| async move {
-            operation
-                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
-                .await?;
             let index_maximum =
                 crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
                     stage: crate::CorruptionStage::Inventory,
                 })?;
-            operation
-                .download_pack_index_to_path(
-                    pack.pack_id,
-                    index_maximum,
-                    &path.with_extension("idx"),
-                )
-                .await?;
             let reverse_maximum =
                 crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
                     stage: crate::CorruptionStage::Inventory,
                 })?;
-            operation
-                .download_pack_reverse_index_to_path(
+            let index_path = path.with_extension("idx");
+            let reverse_index_path = path.with_extension("rev");
+            // The body and its immutable sidecars are independent objects.
+            // Keep the pack-level fanout bounded by the surrounding stream,
+            // while overlapping their latency under the runtime origin
+            // semaphore.
+            tokio::try_join!(
+                operation.download_pack_to_path(pack.pack_id, pack.pack_size, &path),
+                operation.download_pack_index_to_path(pack.pack_id, index_maximum, &index_path,),
+                operation.download_pack_reverse_index_to_path(
                     pack.pack_id,
                     reverse_maximum,
-                    &path.with_extension("rev"),
-                )
-                .await
+                    &reverse_index_path,
+                ),
+            )?;
+            Ok(())
         },
     )
     .await
