@@ -48,7 +48,7 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 const ADD_INCOMPLETE_PCT_FRACTION: f64 = 0.999;
 const ADD_DUPLICATE_FINGERPRINT_BYTES: usize = 1024 * 1024;
 const ADD_DUPLICATE_REUSE_MIN_BYTES: u64 = 32 * 1024 * 1024;
-const ADD_STAGING_LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30 * 60);
+const ADD_STAGING_LOCK_WAIT_BUDGET: Duration = Duration::from_mins(30);
 
 /// Arguments for the `crab add` command.
 pub struct AddArgs {

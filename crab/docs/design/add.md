@@ -247,10 +247,12 @@ Independent `crab add` processes queue for up to 30 minutes on the staging
 flock. A later process does not fail merely because an earlier large add is
 still preparing or publishing, and rechecks Git's index after ownership so it
 does not repeat work the preceding process just published.
-For `--skip-git-add`, ordinary `git add` hashes the Git-provided stream into an
-anonymous staging-root spool. An exact prepared hash promotes the retained
-recipe without CDC or chunk-index writes; changed bytes replay from that spool
-through the canonical clean pipeline.
+For `--skip-git-add`, ordinary `git add` verifies the Git-provided stream
+against bounded pages of the retained recipe while buffering at most one
+expected chunk. An exact match promotes the recipe without CDC, payload reads,
+or chunk-index writes. On a mismatch, the filter reconstructs only the verified
+prefix from local chunk authority and continues the complete stream through the
+canonical CDC pipeline.
 
 ## Git Pointer Publication
 

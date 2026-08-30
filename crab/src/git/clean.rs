@@ -20,11 +20,11 @@ use crate::core::context::AppContext;
 use crate::core::error::{CrabError, Result};
 use crate::core::pattern::PatternFilter;
 use crate::storage::StoreLayout;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_staging::StagingArea;
-use crab_staging::recipe::{ChunkingPolicyId, FileRecipe, RecipeRecorder};
+use crab_staging::recipe::{ChunkingPolicyId, FileRecipe, RecipeChunk, RecipePage, RecipeRecorder};
 use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use gix_object::Find;
@@ -357,10 +357,22 @@ pub trait ChunkStager: Send {
         Ok(None)
     }
 
-    /// Create a same-filesystem anonymous spool for replay when prepared
-    /// content verification finds that the incoming bytes changed.
-    fn create_promotion_spool(&self) -> Result<std::fs::File> {
-        tempfile::tempfile().map_err(CrabError::Io)
+    /// Read one bounded metadata page from the prepared recipe.
+    fn prepared_recipe_page(
+        &self,
+        _recipe: &FileRecipe,
+        _start_occurrence: u64,
+    ) -> Result<RecipePage> {
+        Err(CrabError::Internal(
+            "prepared recipe paging is unavailable".to_owned(),
+        ))
+    }
+
+    /// Read a bounded ordered group of locally authoritative recipe chunks.
+    fn prepared_chunk_payloads(&self, _chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
+        Err(CrabError::Internal(
+            "prepared chunk replay is unavailable".to_owned(),
+        ))
     }
 
     /// Adopt chunks staged under a provisional hash into the final file hash.
@@ -536,8 +548,35 @@ impl ChunkStager for StagingChunkStager {
             .map_err(CrabError::from)
     }
 
-    fn create_promotion_spool(&self) -> Result<std::fs::File> {
-        tempfile::tempfile_in(self.staging.root()).map_err(CrabError::Io)
+    fn prepared_recipe_page(
+        &self,
+        recipe: &FileRecipe,
+        start_occurrence: u64,
+    ) -> Result<RecipePage> {
+        self.staging
+            .recipe_page(recipe, start_occurrence)
+            .map_err(CrabError::from)
+    }
+
+    fn prepared_chunk_payloads(&self, chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
+        let hashes = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_hash)
+            .collect::<Vec<_>>();
+        let payloads = self
+            .handle
+            .block_on(self.staging.get_chunks_batch(&hashes))?
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect::<Vec<_>>();
+        if payloads.len() != chunks.len() {
+            return Err(CrabError::StagingCorrupt(format!(
+                "prepared replay returned {} chunks for {} recipe terms",
+                payloads.len(),
+                chunks.len()
+            )));
+        }
+        Ok(payloads)
     }
 
     fn adopt_staged_file(
@@ -906,6 +945,322 @@ fn record_clean_chunks(
                 CrabError::StagingCorrupt("clean chunk length cannot be represented".to_owned())
             })?,
         )?;
+    }
+    Ok(())
+}
+
+const PREPARED_REPLAY_BATCH_CHUNKS: usize = 64;
+
+struct PreparedRecipeCursor {
+    recipe: FileRecipe,
+    page: Option<RecipePage>,
+    page_index: usize,
+    next_occurrence: u64,
+    next_offset: u64,
+}
+
+impl PreparedRecipeCursor {
+    fn new(recipe: FileRecipe) -> Self {
+        Self {
+            recipe,
+            page: None,
+            page_index: 0,
+            next_occurrence: 0,
+            next_offset: 0,
+        }
+    }
+
+    fn next(&mut self, stager: &dyn ChunkStager) -> Result<Option<RecipeChunk>> {
+        if self.next_occurrence == self.recipe.chunk_count() {
+            return Ok(None);
+        }
+        if self.next_occurrence > self.recipe.chunk_count() {
+            return Err(CrabError::StagingCorrupt(
+                "prepared recipe cursor exceeded its chunk count".to_owned(),
+            ));
+        }
+
+        if self
+            .page
+            .as_ref()
+            .is_none_or(|page| self.page_index == page.chunks.len())
+        {
+            let page = stager.prepared_recipe_page(&self.recipe, self.next_occurrence)?;
+            if page.start_occurrence != self.next_occurrence
+                || page.start_offset != self.next_offset
+                || page.chunks.is_empty()
+                || page.next_occurrence() > self.recipe.chunk_count()
+            {
+                return Err(CrabError::StagingCorrupt(format!(
+                    "prepared recipe page at occurrence {} is non-contiguous",
+                    self.next_occurrence
+                )));
+            }
+            self.page = Some(page);
+            self.page_index = 0;
+        }
+
+        let chunk = self
+            .page
+            .as_ref()
+            .and_then(|page| page.chunks.get(self.page_index))
+            .copied()
+            .ok_or_else(|| {
+                CrabError::StagingCorrupt(
+                    "prepared recipe page ended before its declared chunks".to_owned(),
+                )
+            })?;
+        if chunk.offset != self.next_offset || chunk.len == 0 {
+            return Err(CrabError::StagingCorrupt(format!(
+                "prepared recipe chunk {} has an invalid byte range",
+                self.next_occurrence
+            )));
+        }
+        self.page_index += 1;
+        self.next_occurrence = self.next_occurrence.checked_add(1).ok_or_else(|| {
+            CrabError::StagingCorrupt("prepared recipe occurrence overflow".to_owned())
+        })?;
+        self.next_offset = self.next_offset.checked_add(chunk.len).ok_or_else(|| {
+            CrabError::StagingCorrupt("prepared recipe byte offset overflow".to_owned())
+        })?;
+        Ok(Some(chunk))
+    }
+}
+
+enum PreparedVerification {
+    Matching,
+    Exact,
+    Changed {
+        verified_occurrences: u64,
+        bytes: Bytes,
+    },
+}
+
+struct PreparedRecipeVerifier {
+    cursor: PreparedRecipeCursor,
+    expected: Option<RecipeChunk>,
+    pending: BytesMut,
+    verified_occurrences: u64,
+}
+
+impl PreparedRecipeVerifier {
+    fn new(recipe: FileRecipe) -> Self {
+        Self {
+            cursor: PreparedRecipeCursor::new(recipe),
+            expected: None,
+            pending: BytesMut::new(),
+            verified_occurrences: 0,
+        }
+    }
+
+    fn feed(&mut self, mut input: &[u8], stager: &dyn ChunkStager) -> Result<PreparedVerification> {
+        while !input.is_empty() {
+            if self.expected.is_none() {
+                self.expected = self.cursor.next(stager)?;
+            }
+            let Some(expected) = self.expected else {
+                return Ok(self.changed(input));
+            };
+            let expected_len = usize::try_from(expected.len).map_err(|_| {
+                CrabError::StagingCorrupt(
+                    "prepared recipe chunk length cannot be represented".to_owned(),
+                )
+            })?;
+            let needed = expected_len
+                .checked_sub(self.pending.len())
+                .ok_or_else(|| {
+                    CrabError::StagingCorrupt(
+                        "prepared verification buffered beyond its chunk boundary".to_owned(),
+                    )
+                })?;
+            let take = needed.min(input.len());
+            self.pending.extend_from_slice(&input[..take]);
+            input = &input[take..];
+            if self.pending.len() != expected_len {
+                return Ok(PreparedVerification::Matching);
+            }
+            if crab_xet::hash::compute_data_hash(&self.pending) != expected.chunk_hash {
+                return Ok(self.changed(input));
+            }
+            self.pending.clear();
+            self.expected = None;
+            self.verified_occurrences =
+                self.verified_occurrences.checked_add(1).ok_or_else(|| {
+                    CrabError::StagingCorrupt(
+                        "prepared verification occurrence overflow".to_owned(),
+                    )
+                })?;
+        }
+        Ok(PreparedVerification::Matching)
+    }
+
+    fn finish(&mut self, stager: &dyn ChunkStager) -> Result<PreparedVerification> {
+        if !self.pending.is_empty() {
+            return Ok(self.changed(&[]));
+        }
+        if self.expected.is_none() {
+            self.expected = self.cursor.next(stager)?;
+        }
+        if self.expected.is_some() {
+            return Ok(self.changed(&[]));
+        }
+        Ok(PreparedVerification::Exact)
+    }
+
+    fn changed(&mut self, remaining: &[u8]) -> PreparedVerification {
+        let mut bytes = std::mem::take(&mut self.pending);
+        bytes.extend_from_slice(remaining);
+        PreparedVerification::Changed {
+            verified_occurrences: self.verified_occurrences,
+            bytes: bytes.freeze(),
+        }
+    }
+}
+
+struct PreparedChangedReplay {
+    chunker: Option<crab_xet::chunker::GearChunker>,
+    buffered: BatchedChunkStager,
+    provisional: Option<ProvisionalChunkStager>,
+    recipe_recorder: RecipeRecorder,
+}
+
+impl PreparedChangedReplay {
+    fn new() -> Self {
+        Self {
+            chunker: Some(crab_xet::chunker::GearChunker::new()),
+            buffered: BatchedChunkStager::new(1),
+            provisional: None,
+            recipe_recorder: RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB),
+        }
+    }
+
+    fn replay_prefix(
+        &mut self,
+        recipe: &FileRecipe,
+        occurrence_count: u64,
+        stager: &mut Box<dyn ChunkStager>,
+        pathname: &str,
+        buffer_cap: usize,
+    ) -> Result<()> {
+        let mut cursor = PreparedRecipeCursor::new(recipe.clone());
+        let mut replayed = 0u64;
+        while replayed < occurrence_count {
+            let remaining = occurrence_count - replayed;
+            let batch_len = usize::try_from(remaining)
+                .unwrap_or(usize::MAX)
+                .min(PREPARED_REPLAY_BATCH_CHUNKS);
+            let mut terms = Vec::with_capacity(batch_len);
+            for _ in 0..batch_len {
+                terms.push(cursor.next(stager.as_ref())?.ok_or_else(|| {
+                    CrabError::StagingCorrupt(
+                        "prepared replay prefix exceeded the recipe".to_owned(),
+                    )
+                })?);
+            }
+            let payloads = stager.prepared_chunk_payloads(&terms)?;
+            if payloads.len() != terms.len() {
+                return Err(CrabError::StagingCorrupt(
+                    "prepared replay payload cardinality mismatch".to_owned(),
+                ));
+            }
+            for (term, payload) in terms.iter().zip(payloads) {
+                if payload.len() as u64 != term.len
+                    || crab_xet::hash::compute_data_hash(&payload) != term.chunk_hash
+                {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "prepared replay payload does not match occurrence {replayed}"
+                    )));
+                }
+                self.feed(&payload, stager, pathname, buffer_cap)?;
+                replayed = replayed.checked_add(1).ok_or_else(|| {
+                    CrabError::StagingCorrupt("prepared replay occurrence overflow".to_owned())
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        stager: &mut Box<dyn ChunkStager>,
+        pathname: &str,
+        buffer_cap: usize,
+    ) -> Result<()> {
+        let chunks = self
+            .chunker
+            .as_mut()
+            .ok_or_else(|| {
+                CrabError::Internal("prepared replay chunker already finalized".to_owned())
+            })?
+            .feed(bytes);
+        buffer_or_stage_clean_chunks(
+            chunks,
+            &mut self.buffered,
+            &mut self.provisional,
+            stager,
+            &mut self.recipe_recorder,
+            pathname,
+            buffer_cap,
+        )
+    }
+
+    fn finish(
+        &mut self,
+        stager: &mut Box<dyn ChunkStager>,
+        pathname: &str,
+        buffer_cap: usize,
+    ) -> Result<()> {
+        if let Some(last) = self
+            .chunker
+            .take()
+            .ok_or_else(|| {
+                CrabError::Internal("prepared replay chunker already finalized".to_owned())
+            })?
+            .finalize()
+        {
+            buffer_or_stage_clean_chunks(
+                vec![last],
+                &mut self.buffered,
+                &mut self.provisional,
+                stager,
+                &mut self.recipe_recorder,
+                pathname,
+                buffer_cap,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn feed_prepared_clean_bytes(
+    bytes: &[u8],
+    prepared: &FileRecipe,
+    verifier: &mut Option<PreparedRecipeVerifier>,
+    replay: &mut Option<PreparedChangedReplay>,
+    stager: &mut Box<dyn ChunkStager>,
+    pathname: &str,
+    buffer_cap: usize,
+) -> Result<()> {
+    if let Some(replay) = replay.as_mut() {
+        return replay.feed(bytes, stager, pathname, buffer_cap);
+    }
+    let outcome = verifier
+        .as_mut()
+        .ok_or_else(|| CrabError::Internal("prepared verifier disappeared".to_owned()))?
+        .feed(bytes, stager.as_ref())?;
+    if let PreparedVerification::Changed {
+        verified_occurrences,
+        bytes,
+    } = outcome
+    {
+        *replay = Some(PreparedChangedReplay::new());
+        *verifier = None;
+        let changed = replay.as_mut().ok_or_else(|| {
+            CrabError::Internal("prepared changed-content replay disappeared".to_owned())
+        })?;
+        changed.replay_prefix(prepared, verified_occurrences, stager, pathname, buffer_cap)?;
+        changed.feed(&bytes, stager, pathname, buffer_cap)?;
     }
     Ok(())
 }
@@ -2113,10 +2468,10 @@ impl CleanSession {
         result
     }
 
-    /// Verify a deferred local recipe with one Blake3 pass and promote it
-    /// without CDC or staging writes. Incoming bytes are spooled so a changed
-    /// file can replay through the canonical clean path instead of failing or
-    /// trusting filesystem metadata.
+    /// Verify a deferred recipe against its ordered local chunks and promote
+    /// it without CDC, staging writes, or a full-file spool. A changed stream
+    /// reconstructs only its verified prefix before continuing through the
+    /// canonical clean path.
     fn crab_clean_prepared_stream<R: std::io::Read>(
         &mut self,
         pathname: &str,
@@ -2125,99 +2480,133 @@ impl CleanSession {
         reached_flush: bool,
         prepared: FileRecipe,
     ) -> Result<Vec<u8>> {
-        use std::io::{Read as _, Seek as _, Write as _};
-
         let verify_start = std::time::Instant::now();
-        let mut spool = self.chunk_stager.create_promotion_spool()?;
         let mut hasher = blake3::Hasher::new();
         let mut file_size = 0u64;
-        let mut append = |bytes: &[u8]| -> Result<()> {
-            spool.write_all(bytes).map_err(CrabError::Io)?;
-            hasher.update(bytes);
-            file_size = file_size.checked_add(bytes.len() as u64).ok_or_else(|| {
-                CrabError::StagingCorrupt("clean promotion byte count overflow".to_owned())
-            })?;
-            Ok(())
-        };
-        append(&first)?;
-        if !reached_flush {
-            while let Some(packet) = reader.read_packet()? {
-                append(packet)?;
-            }
-        }
-        drop(append);
-
-        let file_hash = *hasher.finalize().as_bytes();
-        if prepared.file_hash() == MerkleHash::from(file_hash) && prepared.file_size() == file_size
-        {
-            self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
-            self.chunk_stager
-                .publish_recipe(Path::new(pathname), &prepared)?;
-            let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
-            tracing::info!(
-                path = %pathname,
-                size = file_size,
-                verification_duration_ms = verify_start.elapsed().as_millis() as u64,
-                "clean filter: promoted verified prepared recipe without CDC"
-            );
-            return Ok(pointer_bytes);
-        }
-
-        if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
-            return Ok(pointer_bytes);
-        }
-        if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
-            return Ok(pointer_bytes);
-        }
-
-        self.check_staging_available()?;
-        spool.rewind().map_err(CrabError::Io)?;
-        let mut provisional_stager: Option<ProvisionalChunkStager> = None;
+        let mut verifier = Some(PreparedRecipeVerifier::new(prepared.clone()));
+        let mut replay: Option<PreparedChangedReplay> = None;
         let result = (|| -> Result<Vec<u8>> {
-            let mut chunker = crab_xet::chunker::GearChunker::new();
-            let mut buffered_stager = BatchedChunkStager::new(1);
-            let mut recipe_recorder = RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB);
-            let mut buffer = vec![0u8; 1024 * 1024];
-            loop {
-                let read = spool.read(&mut buffer).map_err(CrabError::Io)?;
-                if read == 0 {
-                    break;
+            self.check_staging_available()?;
+            {
+                let mut append = |bytes: &[u8]| -> Result<()> {
+                    hasher.update(bytes);
+                    file_size = file_size.checked_add(bytes.len() as u64).ok_or_else(|| {
+                        CrabError::StagingCorrupt("clean promotion byte count overflow".to_owned())
+                    })?;
+                    feed_prepared_clean_bytes(
+                        bytes,
+                        &prepared,
+                        &mut verifier,
+                        &mut replay,
+                        &mut self.chunk_stager,
+                        pathname,
+                        self.chunk_buffer_cap,
+                    )
+                };
+                append(&first)?;
+                if !reached_flush {
+                    while let Some(packet) = reader.read_packet()? {
+                        append(packet)?;
+                    }
                 }
-                buffer_or_stage_clean_chunks(
-                    chunker.feed(&buffer[..read]),
-                    &mut buffered_stager,
-                    &mut provisional_stager,
-                    &mut self.chunk_stager,
-                    &mut recipe_recorder,
-                    pathname,
-                    self.chunk_buffer_cap,
-                )?;
-            }
-            if let Some(last) = chunker.finalize() {
-                buffer_or_stage_clean_chunks(
-                    vec![last],
-                    &mut buffered_stager,
-                    &mut provisional_stager,
-                    &mut self.chunk_stager,
-                    &mut recipe_recorder,
-                    pathname,
-                    self.chunk_buffer_cap,
-                )?;
             }
 
+            if replay.is_none() {
+                let outcome = verifier
+                    .as_mut()
+                    .ok_or_else(|| CrabError::Internal("prepared verifier disappeared".to_owned()))?
+                    .finish(self.chunk_stager.as_ref())?;
+                match outcome {
+                    PreparedVerification::Exact => {}
+                    PreparedVerification::Changed {
+                        verified_occurrences,
+                        bytes,
+                    } => {
+                        replay = Some(PreparedChangedReplay::new());
+                        verifier = None;
+                        let changed = replay.as_mut().ok_or_else(|| {
+                            CrabError::Internal(
+                                "prepared changed-content replay disappeared".to_owned(),
+                            )
+                        })?;
+                        changed.replay_prefix(
+                            &prepared,
+                            verified_occurrences,
+                            &mut self.chunk_stager,
+                            pathname,
+                            self.chunk_buffer_cap,
+                        )?;
+                        changed.feed(
+                            &bytes,
+                            &mut self.chunk_stager,
+                            pathname,
+                            self.chunk_buffer_cap,
+                        )?;
+                    }
+                    PreparedVerification::Matching => {
+                        return Err(CrabError::Internal(
+                            "prepared verifier remained incomplete at EOF".to_owned(),
+                        ));
+                    }
+                }
+            }
+
+            let file_hash = *hasher.finalize().as_bytes();
+            if replay.is_none() {
+                if prepared.file_hash() != MerkleHash::from(file_hash)
+                    || prepared.file_size() != file_size
+                {
+                    return Err(CrabError::StagingCorrupt(
+                        "prepared recipe chunks matched but its file identity did not".to_owned(),
+                    ));
+                }
+                self.preserve_committed_recipe_before_publication(pathname, &file_hash)?;
+                self.chunk_stager
+                    .publish_recipe(Path::new(pathname), &prepared)?;
+                let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
+                self.remember_hydrated_pointer(pathname, &pointer_bytes);
+                tracing::info!(
+                    path = %pathname,
+                    size = file_size,
+                    verification_duration_ms = verify_start.elapsed().as_millis() as u64,
+                    "clean filter: promoted verified prepared recipe without CDC or spool"
+                );
+                return Ok(pointer_bytes);
+            }
+
+            let changed = replay.as_mut().ok_or_else(|| {
+                CrabError::Internal("prepared changed-content replay disappeared".to_owned())
+            })?;
+            changed.finish(&mut self.chunk_stager, pathname, self.chunk_buffer_cap)?;
+
+            if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
+                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
+                self.remember_hydrated_pointer(pathname, &pointer_bytes);
+                return Ok(pointer_bytes);
+            }
+            if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
+                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
+                self.remember_hydrated_pointer(pathname, &pointer_bytes);
+                return Ok(pointer_bytes);
+            }
+
+            let recipe_recorder = std::mem::replace(
+                &mut changed.recipe_recorder,
+                RecipeRecorder::new(ChunkingPolicyId::XetGearV1_64KiB),
+            );
             let recipe = recipe_recorder.seal(MerkleHash::from(file_hash), file_size)?;
             if self.chunk_stager.has_recipe(&recipe)? {
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
+                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
             } else {
-                if provisional_stager.is_none() {
+                if changed.provisional.is_none() {
                     let mut provisional = ProvisionalChunkStager::new(pathname);
-                    buffered_stager.spill_into(&mut provisional, &mut self.chunk_stager)?;
-                    provisional_stager = Some(provisional);
+                    changed
+                        .buffered
+                        .spill_into(&mut provisional, &mut self.chunk_stager)?;
+                    changed.provisional = Some(provisional);
                 }
-                provisional_stager
+                changed
+                    .provisional
                     .as_mut()
                     .ok_or_else(|| CrabError::Internal("missing clean staging attempt".to_owned()))?
                     .checkpoint(&mut self.chunk_stager, &file_hash, file_size)?;
@@ -2231,13 +2620,14 @@ impl CleanSession {
                 path = %pathname,
                 size = file_size,
                 verification_duration_ms = verify_start.elapsed().as_millis() as u64,
-                "clean filter: prepared recipe changed; replayed spooled bytes through CDC"
+                "clean filter: prepared recipe changed; reconstructed verified prefix and replayed through CDC"
             );
             Ok(pointer_bytes)
         })();
         if result.is_err()
+            && let Some(changed) = replay.as_mut()
             && let Err(error) =
-                discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)
+                discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)
         {
             tracing::warn!(
                 path = %pathname,
@@ -2642,7 +3032,9 @@ mod tests {
 
     struct PreparedPromotionChunkStager {
         recipe: FileRecipe,
+        prepared_chunks: Vec<Bytes>,
         stage_calls: Arc<AtomicUsize>,
+        payload_reads: Arc<AtomicUsize>,
         publications: Arc<AtomicUsize>,
     }
 
@@ -2665,6 +3057,78 @@ mod tests {
 
         fn unpublished_local_recipe_for_path(&self, _path: &Path) -> Result<Option<FileRecipe>> {
             Ok(Some(self.recipe.clone()))
+        }
+
+        fn prepared_recipe_page(
+            &self,
+            _recipe: &FileRecipe,
+            start_occurrence: u64,
+        ) -> Result<RecipePage> {
+            use crab_diff::chunk_sequence::{ChunkOrigin, ChunkSpan};
+
+            let start = usize::try_from(start_occurrence).map_err(|_| {
+                CrabError::StagingCorrupt("prepared test recipe occurrence overflow".to_owned())
+            })?;
+            let start_offset =
+                self.prepared_chunks
+                    .iter()
+                    .take(start)
+                    .try_fold(0u64, |offset, payload| {
+                        offset.checked_add(payload.len() as u64).ok_or_else(|| {
+                            CrabError::StagingCorrupt(
+                                "prepared test recipe offset overflow".to_owned(),
+                            )
+                        })
+                    })?;
+            let mut offset = start_offset;
+            let chunks = self
+                .prepared_chunks
+                .iter()
+                .skip(start)
+                .take(crab_staging::recipe::RECIPE_PAGE_ENTRIES)
+                .map(|payload| {
+                    let len = payload.len() as u64;
+                    let chunk = ChunkSpan {
+                        chunk_hash: crab_xet::hash::compute_data_hash(payload),
+                        offset,
+                        len,
+                        origin: ChunkOrigin {
+                            xorb_hash: None,
+                            xorb_chunk_index: None,
+                        },
+                    };
+                    offset = offset.saturating_add(len);
+                    chunk
+                })
+                .collect();
+            Ok(RecipePage {
+                start_occurrence,
+                start_offset,
+                chunks,
+            })
+        }
+
+        fn prepared_chunk_payloads(&self, chunks: &[RecipeChunk]) -> Result<Vec<Bytes>> {
+            self.payload_reads
+                .fetch_add(chunks.len(), Ordering::Relaxed);
+            chunks
+                .iter()
+                .map(|term| {
+                    self.prepared_chunks
+                        .iter()
+                        .find(|payload| {
+                            payload.len() as u64 == term.len
+                                && crab_xet::hash::compute_data_hash(payload) == term.chunk_hash
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            CrabError::StagingCorrupt(format!(
+                                "prepared test payload {} is unavailable",
+                                term.chunk_hash.hex()
+                            ))
+                        })
+                })
+                .collect()
         }
     }
 
@@ -4182,10 +4646,13 @@ size 45\n";
         )
         .unwrap();
         let stage_calls = Arc::new(AtomicUsize::new(0));
+        let payload_reads = Arc::new(AtomicUsize::new(0));
         let publications = Arc::new(AtomicUsize::new(0));
         let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
             recipe,
+            prepared_chunks: vec![Bytes::from(content.clone())],
             stage_calls: Arc::clone(&stage_calls),
+            payload_reads: Arc::clone(&payload_reads),
             publications: Arc::clone(&publications),
         });
         let mut session = CleanSession::with_deps(
@@ -4206,6 +4673,7 @@ size 45\n";
             <[u8; 32]>::from(file_hash)
         );
         assert_eq!(stage_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(payload_reads.load(Ordering::Relaxed), 0);
         assert_eq!(publications.load(Ordering::Relaxed), 1);
     }
 
@@ -4225,10 +4693,13 @@ size 45\n";
         )
         .unwrap();
         let stage_calls = Arc::new(AtomicUsize::new(0));
+        let payload_reads = Arc::new(AtomicUsize::new(0));
         let publications = Arc::new(AtomicUsize::new(0));
         let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
             recipe,
+            prepared_chunks: vec![Bytes::from(prepared_content)],
             stage_calls: Arc::clone(&stage_calls),
+            payload_reads: Arc::clone(&payload_reads),
             publications: Arc::clone(&publications),
         });
         let mut session = CleanSession::with_deps(
@@ -4249,6 +4720,84 @@ size 45\n";
             *blake3::hash(&incoming).as_bytes()
         );
         assert!(stage_calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(payload_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(publications.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn clean_stream_changed_prepared_content_reconstructs_verified_prefix() {
+        use crate::git::filter_process::PktLineReader;
+        use crab_xet::chunker::GearChunker;
+
+        let mut state = 0x0123_4567_89ab_cdefu64;
+        let prepared_content = (0..8 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let mut chunker = GearChunker::new();
+        let mut chunks = chunker.feed(&prepared_content);
+        if let Some(chunk) = chunker.finalize() {
+            chunks.push(chunk);
+        }
+        assert!(chunks.len() > 4);
+
+        let prepared_chunks = chunks
+            .iter()
+            .map(|chunk| chunk.data.clone())
+            .collect::<Vec<_>>();
+        let recipe_terms = chunks
+            .iter()
+            .map(|chunk| (chunk.hash, chunk.data.len() as u64))
+            .collect::<Vec<_>>();
+        let prepared_hash = MerkleHash::from(*blake3::hash(&prepared_content).as_bytes());
+        let recipe = FileRecipe::from_staged_chunks(
+            ChunkingPolicyId::XetGearV1_64KiB,
+            prepared_hash,
+            prepared_content.len() as u64,
+            &recipe_terms,
+        )
+        .unwrap();
+        let verified_prefix_size = chunks
+            .iter()
+            .take(3)
+            .map(|chunk| chunk.data.len())
+            .sum::<usize>();
+        let mut incoming = prepared_content;
+        incoming[verified_prefix_size + 17] ^= 0xff;
+
+        let stage_calls = Arc::new(AtomicUsize::new(0));
+        let payload_reads = Arc::new(AtomicUsize::new(0));
+        let publications = Arc::new(AtomicUsize::new(0));
+        let stager: Box<dyn ChunkStager> = Box::new(PreparedPromotionChunkStager {
+            recipe,
+            prepared_chunks,
+            stage_calls: Arc::clone(&stage_calls),
+            payload_reads: Arc::clone(&payload_reads),
+            publications: Arc::clone(&publications),
+        });
+        let mut session = CleanSession::with_deps(
+            AppContext::default(),
+            Box::new(NoopFileIndexChecker),
+            stager,
+            &[],
+            u64::MAX,
+            1,
+        );
+        let framed = frame_as_pktlines(&incoming);
+        let mut reader = PktLineReader::from_slice(&framed);
+
+        let pointer = session.clean_stream("model.bin", &mut reader).unwrap();
+
+        assert_eq!(
+            Pointer::parse(&pointer).unwrap().file_hash,
+            *blake3::hash(&incoming).as_bytes()
+        );
+        assert!(stage_calls.load(Ordering::Relaxed) > 0);
+        assert!(payload_reads.load(Ordering::Relaxed) >= 3);
         assert_eq!(publications.load(Ordering::Relaxed), 1);
     }
 

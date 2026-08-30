@@ -1901,6 +1901,11 @@ class AddCommitPushSmoke:
         self.run_git(repo, ["branch", "-m", "history-a"])
         self.run_git(repo, ["checkout", "--orphan", "main"])
         self.run_git(repo, ["rm", "-rf", "."])
+        self.run_git(
+            repo,
+            ["checkout", "history-a", "--", "crab.toml", ".gitattributes"],
+            name=f"{case_name} retain project configuration",
+        )
 
         model.write_bytes(second_content)
         self.run_crab(
