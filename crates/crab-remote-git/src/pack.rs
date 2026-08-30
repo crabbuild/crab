@@ -696,11 +696,17 @@ impl RemoteGitRepository {
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
-        if !Self::complete_pack_consolidation_candidate(
+        let exact_candidate = Self::complete_pack_consolidation_candidate(
             inventory.len(),
             inventory_objects,
             object_ids.len(),
-        ) {
+        );
+        let near_candidate = Self::near_complete_pack_consolidation_candidate(
+            inventory.len(),
+            inventory_objects,
+            object_ids.len(),
+        );
+        if !exact_candidate && !near_candidate {
             return Ok(None);
         }
         if source_artifact_bytes > operation.max_fetched_bytes() {
@@ -717,57 +723,71 @@ impl RemoteGitRepository {
             download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
 
-        let concat_sources = sources.clone();
-        let concatenated = tokio::task::spawn_blocking(move || {
-            crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
-        })
-        .await
-        .map_err(|source| Error::DecodeTask { source })?;
-        let (repacked, strategy) = match concatenated {
-            Ok(repacked) => (repacked, "complete_pack_concatenation"),
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    error_debug = ?error,
-                    "complete pack concatenation was not usable; falling back to Git consolidation"
-                );
-                let repack_sources = sources;
-                let repacked = tokio::task::spawn_blocking(move || {
-                    crab_git::repack::consolidate_pack_suffix(&repack_sources)
-                })
-                .await
-                .map_err(|source| Error::DecodeTask { source })?
-                .map_err(|source| Error::ResponsePackConsolidation { source })?;
-                (repacked, "complete_pack_consolidation")
+        let (repacked, strategy) = if exact_candidate {
+            let concat_sources = sources.clone();
+            let concatenated = tokio::task::spawn_blocking(move || {
+                crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?;
+            match concatenated {
+                Ok(repacked) => (repacked, "complete_pack_concatenation"),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        error_debug = ?error,
+                        "complete pack concatenation was not usable; falling back to Git consolidation"
+                    );
+                    let repack_sources = sources.clone();
+                    let repacked = tokio::task::spawn_blocking(move || {
+                        crab_git::repack::consolidate_pack_suffix(&repack_sources)
+                    })
+                    .await
+                    .map_err(|source| Error::DecodeTask { source })?
+                    .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                    (repacked, "complete_pack_consolidation")
+                }
             }
+        } else {
+            // Whole-pack consolidation can include a small amount of repeated
+            // inventory; the exact-union check below keeps the response bound
+            // to the request before adopting the faster result.
+            let repack_sources = sources.clone();
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::consolidate_pack_suffix(&repack_sources)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            (repacked, "near_complete_pack_consolidation")
         };
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
         })?;
-        let locations = crab_git::pack_locator::PackLocationIter::open(
-            generated.index_path(),
-            generated.reverse_index_path(),
-            generated.pack_size,
-        )
-        .map_err(|source| Error::ResponsePackConsolidation {
-            source: crab_git::repack::RepackError::from(source),
-        })?;
-        let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
-        for location in locations {
-            let location = location.map_err(|source| Error::ResponsePackConsolidation {
-                source: crab_git::repack::RepackError::from(source),
-            })?;
-            if !requested.remove(&location.oid) {
-                return Err(Error::Corrupt {
-                    stage: crate::CorruptionStage::Inventory,
-                });
-            }
-        }
-        if !requested.is_empty() {
+        let matches_selection = generated_pack_matches_object_ids(generated, object_ids)?;
+        let (repacked, strategy) = if matches_selection {
+            (repacked, strategy)
+        } else if near_candidate {
+            tracing::debug!(
+                inventory_objects,
+                selected_objects = object_ids.len(),
+                "near-complete pack consolidation contained a different object set; reusing staged sources for exact selected repack"
+            );
+            drop(repacked);
+            let repack_sources = sources.clone();
+            let selected_oids = object_ids.to_vec();
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            (repacked, "selected_object_repack")
+        } else {
             return Err(Error::Corrupt {
                 stage: crate::CorruptionStage::Inventory,
             });
-        }
+        };
         let pack = adopt_repacked_pack(operation, repacked, cancellation).await?;
         drop(workspace);
         tracing::info!(
@@ -776,10 +796,12 @@ impl RemoteGitRepository {
             strategy,
             source_pack_count,
             object_count = pack.object_count,
+            inventory_objects,
+            selected_objects = object_ids.len(),
             source_download_ms,
             response_bytes = pack.size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
-            "remote Git response pack consolidated from complete pack inventory"
+            "remote Git response pack consolidated from staged pack inventory"
         );
         Ok(Some(pack))
     }
@@ -853,6 +875,20 @@ impl RemoteGitRepository {
         pack_count > 1
             && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
             && inventory_objects == selected_objects as u64
+    }
+
+    fn near_complete_pack_consolidation_candidate(
+        pack_count: usize,
+        inventory_objects: u64,
+        selected_objects: usize,
+    ) -> bool {
+        // Incremental packs can repeat OIDs already present in older packs.
+        let selected_objects = u64::try_from(selected_objects).unwrap_or(u64::MAX);
+        let extra_objects = inventory_objects.saturating_sub(selected_objects);
+        pack_count > 1
+            && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64
+            && extra_objects > 0
+            && extra_objects <= selected_objects / 100
     }
 
     fn selected_pack_repack_candidate(
@@ -958,6 +994,30 @@ impl RemoteGitRepository {
             .await?;
         Ok(generated.as_ref().clone())
     }
+}
+
+fn generated_pack_matches_object_ids(
+    generated: &crab_git::repack::GeometricRepackedPack,
+    object_ids: &[ObjectId],
+) -> Result<bool> {
+    let locations = crab_git::pack_locator::PackLocationIter::open(
+        generated.index_path(),
+        generated.reverse_index_path(),
+        generated.pack_size,
+    )
+    .map_err(|source| Error::ResponsePackConsolidation {
+        source: crab_git::repack::RepackError::from(source),
+    })?;
+    let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
+    for location in locations {
+        let location = location.map_err(|source| Error::ResponsePackConsolidation {
+            source: crab_git::repack::RepackError::from(source),
+        })?;
+        if !requested.remove(&location.oid) {
+            return Ok(false);
+        }
+    }
+    Ok(requested.is_empty())
 }
 
 async fn adopt_repacked_pack(
@@ -2711,6 +2771,22 @@ mod tests {
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64 + 1,
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
         ));
+    }
+
+    #[test]
+    fn near_complete_pack_consolidation_allows_small_duplicate_slack() {
+        assert!(
+            RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 101_000, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 102_001, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 99_999, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(1, 101_000, 100_000,)
+        );
     }
 
     #[test]

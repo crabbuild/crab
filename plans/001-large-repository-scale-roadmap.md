@@ -1453,6 +1453,45 @@ and regression evidence, not an accepted end-to-end speedup claim. Repeated
 isolated runs, distributed clients, and provider/fault matrices remain
 required before changing the response-pack SLO.
 
+### 2026-08-30 near-complete response-pack consolidation follow-up
+
+The producer had one remaining dense-inventory gap: incremental push packs can
+repeat OIDs already present in older packs, so the sum of manifest
+`object_count` values can be slightly larger than the exact full response
+selection. The strict complete-inventory gate then chose selected-object
+repacking even though Git could consolidate the whole staged inventory and
+deduplicate the overlap.
+
+The follow-up keeps the exact complete-inventory path unchanged and adds a
+near-complete gate only when a multi-pack selection has at least 100,000
+objects and the inventory count has no more than 1% extra entries. It stages
+the committed pack bodies and sidecars once, runs Git's whole-pack
+`--stdin-packs` consolidation, and compares the generated index union with the
+requested OID set before adoption. A near-complete mismatch falls back to the
+exact selected-object repack using the already staged source files, so the
+heuristic cannot broaden the response or double the object-store download.
+Depth-100 and other sparse selections remain below the gate.
+
+A qualification-only pack-shape experiment on the read-only Kubernetes
+object database used 1,795,042 source objects plus 100 synthetic incremental
+commits. Whole-pack consolidation with the duplicate-safe inventory path
+completed in 24.5 s and produced 1,330,704,913 bytes; selected `pack-objects`
+with two threads took 60.5 s for the same full object set. A partial 966,821
+object selection showed the opposite trade-off—33.7 s with two threads versus
+132.2 s with one—so the shared response thread cap remains unchanged. These
+local measurements are direction-setting evidence, not a product latency SLO;
+the current-binary RustFS/Kubernetes rerun and distributed client matrix still
+need to exercise the new near-complete branch.
+
+The current cache-read follow-up also moves generated-pack verification into
+the object-store-to-temp-file stream. It checks the bounded size, pack header
+and object count, Git SHA-1 trailer, and Crab Blake3 identity before exposing a
+cache hit, so a warm response no longer performs a second full local pack
+scan. A manual current-binary warm full clone against the same RustFS snapshot
+reported a cache hit, matched the Kubernetes tip, and passed `git fsck --full`;
+it is an isolated cache correctness smoke rather than an accepted speedup or
+distributed-client SLO.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
