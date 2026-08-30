@@ -16,6 +16,7 @@ use sha1::{Digest, Sha1};
 
 const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
 const MAX_VERIFY_PACKS_PER_COMMAND: usize = 512;
+const RESPONSE_PACK_THREADS: usize = 2;
 
 /// A downloaded canonical pack selected by a pinned repository manifest.
 #[derive(Debug, Clone)]
@@ -1023,6 +1024,9 @@ fn pack_selected_objects(
             .arg("--reuse-delta")
             .arg("--reuse-object")
             .arg("--delta-base-offset")
+            // Git's automatic thread count multiplies delta-window memory;
+            // cap each shared response producer without changing maintenance geometry.
+            .arg(format!("--threads={RESPONSE_PACK_THREADS}"))
             .arg("--depth=64")
             .arg(&output_prefix)
             .stdin(Stdio::from(stdin))
