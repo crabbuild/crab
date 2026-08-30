@@ -1752,8 +1752,8 @@ class ProtocolV2PartialCloneSmoke:
         # object admission before any raw-object probe so both paths exercise
         # the same repository policy without changing the production default.
         # Upload-pack admission is an internal repository policy. Keep it in
-        # `.crab/config.toml`, which is the file loaded by the remote helper;
-        # `.crab.toml` only carries project metadata such as the remote URL.
+        # `.crab/local.toml`, which is the file loaded by the remote helper;
+        # `crab.toml` only carries project metadata such as the remote URL.
         self.configure_reachable_oid_admission(self.filtered, True)
         tags = self.run_git(
             self.filtered,

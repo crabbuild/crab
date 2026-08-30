@@ -89,6 +89,9 @@ enum Cmd {
         /// Bucket-GC listing policy configured locally for this operator.
         #[arg(long, value_name = "PROFILE", value_parser = ["adaptive", "cost", "latency"])]
         gc_list_profile: Option<String>,
+        /// AWS shared-config profile used on this machine.
+        #[arg(long, value_name = "PROFILE")]
+        aws_profile: Option<String>,
         /// Track an explicit large-file pattern (can repeat).
         #[arg(long = "track", value_name = "PATTERN")]
         track: Vec<String>,
@@ -102,7 +105,7 @@ enum Cmd {
     /// Initialize a new crab repository at a remote URL.
     Init {
         /// Remote URL to initialize (e.g. `crab://bucket/repo`).
-        /// If omitted, re-applies configuration from an existing `.crab.toml`.
+        /// If omitted, re-applies configuration from an existing `crab.toml`.
         url: Option<String>,
         /// Storage backend used by the Crab remote.
         #[arg(long, value_name = "PROVIDER", value_parser = ["s3", "gcs", "azure", "auto"])]
@@ -126,7 +129,7 @@ enum Cmd {
     /// Configure large-file tracking for a repository.
     ///
     /// Scans for large files, writes `.gitattributes` patterns, installs
-    /// the filter driver, and updates `.crab.toml`. Run after `crab init`
+    /// the filter driver, and updates `crab.toml`. Run after `crab init`
     /// to complete repository setup.
     Setup {
         /// Skip scanning for large files; only install the filter driver.
@@ -564,7 +567,7 @@ enum Cmd {
         /// Read the manifest from a Git ref (e.g. `HEAD:.crab/manifests/ci.txt`).
         #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "profile"])]
         manifest_ref: Option<String>,
-        /// Named prefetch profile from `.crab/prefetch.toml`.
+        /// Named prefetch profile from `crab.toml`.
         #[arg(long, value_name = "NAME", conflicts_with_all = ["manifest", "manifest_ref"])]
         profile: Option<String>,
         /// Ignore sparse-checkout config during hydrate.
@@ -2476,12 +2479,12 @@ impl Cmd {
     }
 }
 
-/// Auto-configure `.crab/config.toml` from `.crab.toml` when the filter
+/// Auto-configure `.crab/local.toml` from `crab.toml` when the filter
 /// driver is invoked globally but the repo hasn't been explicitly initialized.
 ///
-/// This runs once per repo — subsequent filter invocations find `.crab/config.toml`
+/// This runs once per repo — subsequent filter invocations find `.crab/local.toml`
 /// and skip. If neither config exists, the filter passes through unchanged
-/// (non-crab repo). If `.crab.toml` exists but has no `[remote]` section,
+/// (non-crab repo). If `crab.toml` exists but has no `[remote]` section,
 /// logs a warning and passes through.
 fn auto_configure_from_project_config() {
     let cwd = match std::env::current_dir() {
@@ -2490,31 +2493,31 @@ fn auto_configure_from_project_config() {
     };
 
     let crab_dir = cwd.join(".crab");
-    let config_path = crab_dir.join("config.toml");
+    let config_path = crab_dir.join("local.toml");
 
-    // If .crab/config.toml already exists, nothing to do.
+    // If .crab/local.toml already exists, nothing to do.
     if config_path.exists() {
         return;
     }
 
-    let crab_toml_path = cwd.join(".crab.toml");
+    let crab_toml_path = cwd.join("crab.toml");
     if !crab_toml_path.exists() {
         // Neither config exists — non-crab repo, filter passes through.
         return;
     }
 
-    // Try to load .crab.toml.
+    // Try to load crab.toml.
     let project_config = match crab::core::project_config::ProjectConfig::load(&crab_toml_path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, ".crab.toml exists but failed to parse, passing through");
+            tracing::warn!(error = %e, "crab.toml exists but failed to parse, passing through");
             return;
         }
     };
 
     // Verify the remote section has a URL.
     if project_config.remote.url.is_empty() {
-        tracing::warn!(".crab.toml exists but [remote] URL is empty, passing through");
+        tracing::warn!("crab.toml exists but [remote] URL is empty, passing through");
         return;
     }
 
@@ -2524,22 +2527,16 @@ fn auto_configure_from_project_config() {
         return;
     }
 
-    let config_content = "# Crab configuration (auto-generated from .crab.toml)\n";
+    let config_content = "# Crab local settings (not committed)\n";
     if let Err(e) = std::fs::write(&config_path, config_content) {
-        tracing::warn!(error = %e, "failed to write .crab/config.toml");
+        tracing::warn!(error = %e, "failed to write .crab/local.toml");
         return;
     }
 
-    let remote_path = crab_dir.join("remote");
-    if let Err(e) = std::fs::write(&remote_path, &project_config.remote.url) {
-        tracing::warn!(error = %e, "failed to write .crab/remote");
-        return;
-    }
-
-    tracing::debug!("auto-configured from .crab.toml");
+    tracing::debug!("auto-configured from crab.toml");
 }
 
-/// Sync `.gitattributes` with `[track]` patterns from `.crab.toml`.
+/// Sync `.gitattributes` with `[track]` patterns from `crab.toml`.
 ///
 /// Ensures each pattern has a corresponding `filter=crab` rule. Patterns
 /// already present are skipped.
@@ -3054,6 +3051,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             remote,
             provider,
             gc_list_profile,
+            aws_profile,
             track,
             no_auto_track,
             dry_run,
@@ -3071,6 +3069,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                     remote,
                     storage_provider,
                     gc_list_profile,
+                    aws_profile,
                     track,
                     no_auto_track,
                     dry_run,
@@ -3253,9 +3252,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::FilterProcess) => {
             let _span = tracing::info_span!("filter_process").entered();
 
-            // Auto-configure from .crab.toml if .crab/config.toml is missing.
+            // Auto-configure from crab.toml if .crab/local.toml is missing.
             // This enables the global filter driver to activate automatically
-            // in repos that have .crab.toml but haven't run `crab init`.
+            // in repos that have crab.toml but haven't run `crab init`.
             auto_configure_from_project_config();
 
             let config = crab::core::config::Config::resolve_local().unwrap_or_else(|e| {
@@ -3316,11 +3315,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let resolved_url = match url {
                 Some(u) => u,
                 None => {
-                    // Re-apply mode: discover URL from .crab.toml
+                    // Re-apply mode: discover URL from crab.toml
                     // Collaborator onboarding: after cloning from GitHub, collaborators
                     // just run `crab init` (no URL needed) to get fully configured with
-                    // filter driver, hooks, and hydration from the committed .crab.toml.
-                    match crab::core::project_config::ProjectConfig::discover(&cwd) {
+                    // filter driver, hooks, and hydration from the committed crab.toml.
+                    match crab::core::project_config::ProjectConfig::load_for_repo(&cwd)? {
                         Some(config) => {
                             let u = config.remote.url.clone();
                             let _span = tracing::info_span!("init", %u).entered();
@@ -3335,7 +3334,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             .await?;
                             crab::cmd::init::initialize_remote_repository(&u, &cwd, &cancel)
                                 .await?;
-                            // Sync .gitattributes with [track] patterns from .crab.toml
+                            // Sync .gitattributes with [track] patterns from crab.toml
                             if let Some(ref track) = config.track {
                                 sync_gitattributes_from_track(&cwd, &track.patterns);
                             }
@@ -3350,7 +3349,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                     .stderr(std::process::Stdio::null())
                                     .status();
                                 eprintln!(
-                                    "Mirror mode detected. Configured crab remote + hooks from .crab.toml"
+                                    "Mirror mode detected. Configured crab remote + hooks from crab.toml"
                                 );
                             }
                             // Collaborator onboarding: if [hydrate] config is present, hydrate
@@ -3379,7 +3378,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 )
                                 .await;
                             }
-                            eprintln!("Re-applied configuration from .crab.toml");
+                            eprintln!("Re-applied configuration from crab.toml");
                             return Ok(ExitCode::SUCCESS);
                         }
                         None => {
@@ -4015,8 +4014,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 .remote_url
                 .as_deref()
                 .ok_or_else(|| CrabError::Configuration {
-                    key: "missing [remote] url in .crab/config.toml".into(),
-                    origin: ".crab/config.toml".into(),
+                    key: "remote.url".into(),
+                    origin: "crab.toml is missing [remote].url".into(),
                 })?;
             let parsed = crab::git::url::CrabUrl::parse(url)?;
             let prefix = parsed.repo_path.clone();
@@ -4228,23 +4227,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 ignore_sparse,
                 recover_from,
             };
-            let config = match Config::resolve_local() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to load config for hydrate, using defaults");
-                    Config::default()
-                }
-            };
+            let config = Config::resolve_local()?;
 
-            // Try to create a cloud-backed hydrator from .crab/remote.
+            // Try to create a cloud-backed hydrator from crab.toml.
             // Falls back to the SmudgeSession hydrator only when the remote is
             // absent. Configured remotes fail closed so forced replica policies
             // cannot silently hydrate from another source.
-            let remote_path = crab::git::discover::resolve_crab_dir().map_or_else(
-                || std::path::PathBuf::from(".crab/remote"),
-                |d| d.join("remote"),
-            );
-            if let Some(parsed) = resolve_hydrate_remote_url(&remote_path)? {
+            if let Some(parsed) = resolve_hydrate_remote_url(&config)? {
                 let selection =
                     crab::replication::select_read_store(&config, &parsed, "hydrate", &cancel)
                         .await?;
@@ -5632,8 +5621,8 @@ async fn run_repack_command(
         .remote_url
         .as_deref()
         .ok_or_else(|| CrabError::Configuration {
-            key: "missing [remote] url in .crab/config.toml".into(),
-            origin: ".crab/config.toml".into(),
+            key: "remote.url".into(),
+            origin: "crab.toml is missing [remote].url".into(),
         })?;
     let parsed = crab::git::url::CrabUrl::parse(url)?;
     let prefix = parsed.repo_path.clone();
@@ -5974,11 +5963,7 @@ async fn build_filter_process_remote_smudge(
         return FilterProcessRemoteSmudge::default();
     }
 
-    let remote_path = crab::git::discover::resolve_crab_dir().map_or_else(
-        || std::path::PathBuf::from(".crab/remote"),
-        |d| d.join("remote"),
-    );
-    let parsed = match resolve_hydrate_remote_url(&remote_path) {
+    let parsed = match resolve_hydrate_remote_url(config) {
         Ok(Some(parsed)) => parsed,
         Ok(None) => {
             tracing::debug!(
@@ -6068,20 +6053,17 @@ fn format_bytes_size(bytes: u64) -> String {
     }
 }
 
-fn resolve_hydrate_remote_url(path: &Path) -> Result<Option<crab::git::url::CrabUrl>> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
+fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crab::git::url::CrabUrl>> {
+    let Some(url) = config.remote_url.as_deref() else {
+        return Ok(None);
     };
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
+    if url.trim().is_empty() {
         return Err(CrabError::Configuration {
-            key: ".crab/remote".into(),
-            origin: format!("{} is empty", path.display()),
+            key: "remote.url".into(),
+            origin: "crab.toml contains an empty [remote].url".into(),
         });
     }
-    crab::git::url::CrabUrl::parse(trimmed).map(Some)
+    crab::git::url::CrabUrl::parse(url).map(Some)
 }
 
 /// Implementation of `crab cache stats`. Reports both cache families:
@@ -6396,21 +6378,19 @@ mod tests {
 
     #[test]
     fn hydrate_remote_missing_allows_local_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let remote_path = dir.path().join(".crab").join("remote");
+        let config = Config::default();
 
-        let resolved = resolve_hydrate_remote_url(&remote_path).unwrap();
+        let resolved = resolve_hydrate_remote_url(&config).unwrap();
 
         assert!(resolved.is_none());
     }
 
     #[test]
     fn hydrate_remote_parses_crab_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let remote_path = dir.path().join("remote");
-        std::fs::write(&remote_path, "crab://primary-bucket/org/repo\n").unwrap();
+        let mut config = Config::default();
+        config.remote_url = Some("crab://primary-bucket/org/repo".to_owned());
 
-        let resolved = resolve_hydrate_remote_url(&remote_path).unwrap().unwrap();
+        let resolved = resolve_hydrate_remote_url(&config).unwrap().unwrap();
 
         assert_eq!(resolved.bucket, "primary-bucket");
         assert_eq!(resolved.repo_path, "org/repo");
@@ -6418,25 +6398,23 @@ mod tests {
 
     #[test]
     fn hydrate_remote_rejects_empty_configured_remote() {
-        let dir = tempfile::tempdir().unwrap();
-        let remote_path = dir.path().join("remote");
-        std::fs::write(&remote_path, "\n").unwrap();
+        let mut config = Config::default();
+        config.remote_url = Some(String::new());
 
-        let err = resolve_hydrate_remote_url(&remote_path).unwrap_err();
+        let err = resolve_hydrate_remote_url(&config).unwrap_err();
 
         assert!(matches!(
             err,
-            CrabError::Configuration { ref key, .. } if key == ".crab/remote"
+            CrabError::Configuration { ref key, .. } if key == "remote.url"
         ));
     }
 
     #[test]
     fn hydrate_remote_rejects_malformed_configured_remote() {
-        let dir = tempfile::tempdir().unwrap();
-        let remote_path = dir.path().join("remote");
-        std::fs::write(&remote_path, "not-a-crab-url\n").unwrap();
+        let mut config = Config::default();
+        config.remote_url = Some("not-a-crab-url".to_owned());
 
-        let err = resolve_hydrate_remote_url(&remote_path).unwrap_err();
+        let err = resolve_hydrate_remote_url(&config).unwrap_err();
 
         assert!(matches!(err, CrabError::Configuration { .. }));
     }

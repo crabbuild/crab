@@ -524,7 +524,7 @@ git checkout main
 **Configuration:**
 
 ```ini
-# Per-repo: .crab/config.toml
+# Per-repo: .crab/local.toml
 [checkout]
 lazy = true
 
@@ -603,7 +603,7 @@ Like Git-LFS's `lfs.fetchinclude` and `lfs.fetchexclude`, crab supports
 persistent patterns so users don't have to specify them on every command:
 
 ```ini
-# .crab/config.toml
+# .crab/local.toml
 [hydrate]
 include = ["models/**", "data/current/**"]
 exclude = ["data/archive/**"]

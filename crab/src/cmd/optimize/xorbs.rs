@@ -44,7 +44,7 @@ const OPTIMIZE_XORBS_OPERATION: &str = "optimize xorbs";
 const OPTIMIZE_XORBS_PLAN_SCHEMA: &str = "optimize.xorbs.plan";
 const OPTIMIZE_XORBS_EVENT_SCHEMA: &str = "optimize.xorbs.event";
 
-/// Read the remote URL from `.crab/remote` and build a Store.
+/// Read the remote URL from `crab.toml` and build a Store.
 ///
 /// Resolve the configured remote and build the store used by planning and
 /// execution. Remote operations fail closed because an empty source snapshot
@@ -53,16 +53,9 @@ async fn try_build_store(
     cfg: &Config,
     cancel: &CancellationToken,
 ) -> Result<(Store, crate::git::url::CrabUrl)> {
-    let remote_path = crate::git::discover::resolve_crab_dir()
-        .map_or_else(|| PathBuf::from(".crab/remote"), |d| d.join("remote"));
-    let url = std::fs::read_to_string(&remote_path).map_err(|error| CrabError::Configuration {
-        key: "remote".to_string(),
-        origin: format!(
-            "failed to read {}: {error}; run `crab init <url>` first",
-            remote_path.display()
-        ),
-    })?;
-    let parsed = crate::git::url::CrabUrl::parse(url.trim())?;
+    let cwd = std::env::current_dir()?;
+    let url = crate::core::project_config::ProjectConfig::remote_url(&cwd)?;
+    let parsed = crate::git::url::CrabUrl::parse(&url)?;
     let store = crate::auth::build_repository_url_store(
         cfg,
         &parsed,

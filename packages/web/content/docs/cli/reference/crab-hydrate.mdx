@@ -45,7 +45,7 @@ For conceptual background on hydration and lazy checkout, see [Hydrating Files](
 | `--all` | `false` | Hydrate all tracked pointer files |
 | `--manifest <path>` | | Hydrate files listed in a manifest file |
 | `--manifest-ref <ref>` | | Read manifest from a committed file (git revision syntax) |
-| `--profile <name>` | | Use a named prefetch profile from `.crab/prefetch.toml` |
+| `--profile <name>` | | Use a named prefetch profile from `crab.toml` |
 | `--ignore-sparse` | `false` | Ignore sparse-checkout rules during hydration |
 | `--recover-from <path>` | | Recover matching files from a local file or directory before fetching remotely |
 | `--restore` | `false` | Restore archived xorbs before downloading them |
@@ -122,7 +122,7 @@ Patterns are resolved in this order of precedence:
 2. `--include` / `--exclude` flags
 3. `--all` flag (overrides all patterns)
 4. If none specified, falls back to `hydrate.include` / `hydrate.exclude` from
-   `.crab/config.toml`
+   `.crab/local.toml`
 5. If still nothing, prints help and exits
 
 ## Manifest Format

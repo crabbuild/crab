@@ -2072,9 +2072,7 @@ mod tests {
     // --- build_profile_protection tests ---
 
     fn setup_prefetch_dir(root: &Path, toml_content: &str) {
-        let crab_dir = root.join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
-        std::fs::write(crab_dir.join("prefetch.toml"), toml_content).unwrap();
+        std::fs::write(root.join("crab.toml"), toml_content).unwrap();
     }
 
     #[test]
@@ -2082,7 +2080,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.md\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.md\"]\n",
         );
         let result = build_profile_protection(dir.path(), true);
         assert!(result.is_none());
@@ -2100,7 +2098,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"ci\"\npaths = [\"tests/**\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.ci]\npaths = [\"tests/**\"]\n",
         );
         let result = build_profile_protection(dir.path(), false);
         assert!(result.is_none());
@@ -2111,7 +2109,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.md\", \"src/**/*.rs\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.md\", \"src/**/*.rs\"]\n",
         );
         let glob_set = build_profile_protection(dir.path(), false).unwrap();
         assert!(glob_set.is_match("README.md"));
@@ -2133,7 +2131,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = []\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = []\n",
         );
         let result = build_profile_protection(dir.path(), false);
         assert!(result.is_none());
@@ -2146,7 +2144,7 @@ mod tests {
         let dir = setup_tracked_dir();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.bin\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.bin\"]\n",
         );
         std::fs::write(dir.path().join("model.bin"), vec![0xAB; 4096]).unwrap();
 
@@ -2166,7 +2164,7 @@ mod tests {
         let dir = setup_tracked_dir();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.bin\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.bin\"]\n",
         );
         std::fs::write(dir.path().join("model.bin"), vec![0xAB; 4096]).unwrap();
 
@@ -2188,7 +2186,7 @@ mod tests {
         // Protect only *.md files, not *.bin.
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.md\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.md\"]\n",
         );
         std::fs::write(dir.path().join("data.bin"), vec![0xAB; 4096]).unwrap();
 
@@ -2208,7 +2206,7 @@ mod tests {
         let dir = setup_tracked_dir();
         setup_prefetch_dir(
             dir.path(),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.bin\"]\n",
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.bin\"]\n",
         );
         std::fs::write(dir.path().join("model.bin"), vec![0xAB; 4096]).unwrap();
 

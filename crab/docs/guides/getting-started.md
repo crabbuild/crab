@@ -21,7 +21,7 @@ deployment.
    ```bash
    crab install --global
    ```
-   This registers the git drivers machine-wide so any repo with `.crab.toml`
+   This registers the git drivers machine-wide so any repo with `crab.toml`
    works automatically on clone.
 
 3. Cloud credentials configured for your backend:
@@ -57,7 +57,7 @@ git status
 
 Init and setup do this:
 - Initializes git (if needed)
-- Creates `.crab.toml` with your remote URL
+- Creates `crab.toml` with your remote URL
 - Records the storage provider so collaborators inherit it
 - Auto-detects and tracks large file patterns during `crab setup`
 - Installs the filter and diff drivers
@@ -71,12 +71,12 @@ crab ship -m "initial commit"
 ```
 
 That's the aha moment: one commit pushed through Crab stores large files in
-your bucket while Git keeps small pointer blobs. The `.crab.toml` is committed
+your bucket while Git keeps small pointer blobs. The `crab.toml` is committed
 so collaborators inherit the remote, storage provider, and tracking rules.
 
 ## Existing Repository (Collaborator)
 
-When you clone a repo that already has `.crab.toml`:
+When you clone a repo that already has `crab.toml`:
 
 ```bash
 git clone git@github.com:team/project.git
@@ -84,16 +84,16 @@ cd project
 crab init
 ```
 
-Running `crab init` with no URL reads the configuration from `.crab.toml` and
+Running `crab init` with no URL reads the configuration from `crab.toml` and
 sets up everything locally:
 - Installs the filter and diff drivers
 - Syncs `.gitattributes` with tracked patterns
 - Configures the Crab Git remote
-- Reads the storage provider from `.crab.toml`
+- Reads the storage provider from `crab.toml`
 - Checks for credentials
 
 If you ran `crab install --global` earlier, even the `crab init` step is
-optional — the global git drivers auto-configure from `.crab.toml`.
+optional — the global git drivers auto-configure from `crab.toml`.
 
 ## Daily Workflow
 
@@ -133,7 +133,7 @@ cat model.bin  # triggers automatic hydration
 
 ## What's Next
 
-- [Project Configuration](project-config.md) — customize `.crab.toml`
+- [Project Configuration](project-config.md) — customize `crab.toml`
 - [Mirror Mode](mirror-mode.md) — use GitHub for code review + Crab for large files
 - [Adopting Existing Repos](adopting-existing-repos.md) — migrate repos with large files already committed
 - [`crab ship`](ship.md) — detailed ship command reference

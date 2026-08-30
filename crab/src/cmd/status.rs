@@ -627,8 +627,8 @@ pub fn run_status_in(root: &Path, porcelain: bool, mode: OutputMode) -> Result<(
         emit_json("status", "1.0", payload);
     } else if !porcelain {
         print_summary(&stats);
-        // Mirror status section: check if .crab.toml has a [mirror] config.
-        print_mirror_status(root);
+        // Mirror status section: check if crab.toml has a [mirror] config.
+        print_mirror_status(root)?;
     }
 
     Ok(())
@@ -1064,16 +1064,16 @@ fn print_summary(stats: &StatusStats) {
     );
 }
 
-/// Print mirror status section if a [mirror] config is present in .crab.toml.
-fn print_mirror_status(root: &Path) {
+/// Print mirror status section if a [mirror] config is present in crab.toml.
+fn print_mirror_status(root: &Path) -> Result<()> {
     use crate::core::project_config::ProjectConfig;
 
-    let Some(config) = ProjectConfig::discover(root) else {
-        return;
+    let Some(config) = ProjectConfig::load_for_repo(root)? else {
+        return Ok(());
     };
 
     let Some(mirror) = config.mirror else {
-        return;
+        return Ok(());
     };
 
     println!();
@@ -1114,6 +1114,7 @@ fn print_mirror_status(root: &Path) {
         "Mirror: {} ↔ {} | {}",
         mirror.origin_remote, mirror.crab_remote, status
     );
+    Ok(())
 }
 
 fn staging_path_for_status_root(root: &Path) -> PathBuf {

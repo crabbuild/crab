@@ -1154,7 +1154,7 @@ fn worktree_add_plain_no_checkout_uses_clone_default_policy_without_git_config_m
     };
     let repo = tmp.path().join("repo");
     std::fs::write(
-        repo.join(".crab.toml"),
+        repo.join("crab.toml"),
         b"[remote]\nurl = \"crab://bucket/repo\"\n\n[hydrate]\ndefault = \"eager\"\n",
     )
     .expect("project config");
@@ -1239,7 +1239,7 @@ fn worktree_add_checked_out_reuses_clone_default_hydration_policy() {
             return;
         };
         let repo = tmp.path().join("repo");
-        std::fs::write(repo.join(".crab.toml"), config).expect("project config");
+        std::fs::write(repo.join("crab.toml"), config).expect("project config");
 
         let requested = tmp.path().join(format!("clone-default-{name}"));
         let output = Command::new(crab_bin())
@@ -1374,15 +1374,9 @@ fn worktree_add_checked_out_runs_selective_hydration_policies() {
     run_git(&repo, ["add", "manifest.txt"]).expect("git add manifest");
     let commit = run_git(&repo, ["commit", "-qm", "add hydrate manifest"]).expect("commit");
     if !commit.status.success() {
-        eprintln!("SKIP: failed to commit manifest fixture");
+        eprintln!("SKIP: failed to commit hydrate fixture");
         return;
     }
-    std::fs::create_dir_all(repo.join(".crab")).expect("shared crab dir");
-    std::fs::write(
-        repo.join(".crab").join("prefetch.toml"),
-        "version = 1\n\n[[profile]]\nname = \"hot\"\npaths = [\"*.bin\"]\n",
-    )
-    .expect("prefetch profile");
 
     let cases: &[(&str, &[&str], &str)] = &[
         (
@@ -1400,7 +1394,6 @@ fn worktree_add_checked_out_runs_selective_hydration_policies() {
             &["--hydrate-manifest-ref", "HEAD:manifest.txt"],
             "manifest-ref",
         ),
-        ("profile", &["--hydrate-profile", "hot"], "profile"),
     ];
 
     for (name, selector_args, expected_kind) in cases {
@@ -1507,7 +1500,7 @@ fn worktree_add_prefetch_uses_eager_clone_defaults_as_cache_only_selector() {
     };
     let repo = tmp.path().join("repo");
     std::fs::write(
-        repo.join(".crab.toml"),
+        repo.join("crab.toml"),
         b"[remote]\nurl = \"crab://bucket/repo\"\n\n[hydrate]\ndefault = \"eager\"\n",
     )
     .expect("project config");

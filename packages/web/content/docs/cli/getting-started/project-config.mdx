@@ -1,19 +1,21 @@
 ---
 title: "Project Configuration"
-description: "Reference for .crab.toml — the project-level config file that travels with your repository and auto-configures collaborators."
+description: "Reference for crab.toml — the project-level config file that travels with your repository and auto-configures collaborators."
 meta:
   contentType: Conceptual
   goal: "Understand Project Configuration and the system boundaries it defines."
   audience: "Crab users who want the system model behind this feature."
 ---
 
-# Project Configuration (`.crab.toml`)
+# Project Configuration (`crab.toml`)
 
-The `.crab.toml` file lives in your repository root and declares how Crab should behave for this project. It's committed to git so every collaborator inherits the same configuration.
+The `crab.toml` file lives in your repository root and declares how Crab should behave for this project. It's committed to git so every collaborator inherits the same configuration.
 
 ## Full Schema
 
 ```toml
+version = 1
+
 # Required: cloud storage location for xorbs and manifests
 [remote]
 url = "crab://my-bucket/my-repo"
@@ -35,7 +37,16 @@ crab_remote = "crab"
 # Optional: credential hints
 [auth]
 storage_provider = "s3"             # "s3" | "gcs" | "azure" | "auto"
-profile = "my-profile"
+
+# Optional: shared hydration sets
+[prefetch.profiles.always]
+paths = ["README.md", "src/**"]
+
+# Optional: shared workflow policy
+[workflow]
+enabled = true
+discover = "root"
+parallelism = 4
 
 ```
 
@@ -102,29 +113,36 @@ Explicit credential hints. Rarely needed — Crab's credential discovery chain f
 ```toml
 [auth]
 storage_provider = "s3"
-profile = "ml-team"
 ```
 
-Use this when your team uses a non-default AWS profile or needs to override auto-detection.
+AWS profile names are machine-specific and do not belong in committed project
+configuration. Select one with `crab configure --aws-profile ml-team`, `crab
+config set auth.aws_profile ml-team`, or `AWS_PROFILE=ml-team`.
 
 ## Precedence
 
 Configuration resolves in this order (highest priority first):
 
 1. **CLI flags** — `--pattern`, `--eager`, `--mirror`, etc.
-2. **`.crab.toml`** — project-level defaults
+2. **`crab.toml`** — project-level defaults
 3. **Built-in defaults** — lazy hydration, auto-detection
 
-## `.crab.toml` vs `.crab/config.toml`
+## `crab.toml` vs `.crab/local.toml`
 
-| | `.crab.toml` | `.crab/config.toml` |
+| | `crab.toml` | `.crab/local.toml` |
 |---|---|---|
 | Location | Repo root | `.crab/` directory |
-| Purpose | Project config (shared) | Internal state (local) |
+| Purpose | Shared project policy | Machine-local settings |
 | Committed to git | Yes | No |
 | Edited by | Users, `crab init` | Crab automatically |
 
-Think of `.crab.toml` as "what this repo needs" and `.crab/config.toml` as "what this machine has done."
+Think of `crab.toml` as "what this repo needs" and `.crab/local.toml` as
+"how this machine accesses and runs it." Staging, caches, journals, and locks
+also live under `.crab/`; staging may contain unpublished data and should not
+be treated as a disposable cache.
+
+The retired `.crab.toml` filename is not read. Rename it to `crab.toml` and
+commit the rename.
 
 ## Examples
 
@@ -184,14 +202,13 @@ auto_patterns = ["*.py", "*.rs", "*.toml"]
 
 [auth]
 storage_provider = "s3"
-profile = "ml-team"
 ```
 
 Code goes to GitHub via `origin`. Large files go to S3 via `crab`. The team's PR workflow stays unchanged.
 
 ## How It's Generated
 
-`crab init <url>` creates `.crab.toml` automatically with:
+`crab init <url>` creates `crab.toml` automatically with:
 - `[remote]` from the provided URL
 - `[auth]` when a storage provider is selected
 - `[mirror]` if `--mirror` flag was used
@@ -202,5 +219,5 @@ Run `crab setup` to add or refresh `[track]` patterns and the matching
 ## Related
 
 - [Mirror Mode](/docs/cli/getting-started/mirror-mode) — GitHub + Crab coexistence
-- [`crab init`](/docs/cli/reference/crab-init) — generates `.crab.toml`
+- [`crab init`](/docs/cli/reference/crab-init) — generates `crab.toml`
 - [`crab track`](/docs/cli/reference/crab-track) — updates tracked file patterns

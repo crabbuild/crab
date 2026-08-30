@@ -280,7 +280,7 @@ class Smoke:
         split = self.run_root / "split-lockfile"
         split.mkdir(parents=True)
         self.write(
-            split / ".crab/config.toml",
+            split / ".crab/local.toml",
             "[workflow]\nenabled = true\ndiscover = \"recursive\"\n",
         )
         self.write(split / "split-raw.txt", "raw\n")

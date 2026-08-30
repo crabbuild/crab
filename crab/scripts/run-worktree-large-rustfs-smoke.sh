@@ -192,7 +192,7 @@ if data.get("planned_file_bytes", sum(item["size"] for item in manifest.values()
 ):
     raise SystemExit(f"expected dedup to reduce planned file bytes: {data}")
 PY
-git -C "$SEED" add .crab.toml .gitattributes large-directory
+git -C "$SEED" add crab.toml .gitattributes large-directory
 git -C "$SEED" commit -m "seed large worktree fixture" >"$RUN_ROOT/logs/git-commit.log"
 run_crab "$SEED" "$RUN_ROOT/cache/seed" push >"$RUN_ROOT/logs/crab-push.log" 2>&1
 with_env "$RUN_ROOT/cache/preflight" aws --endpoint-url "$ENDPOINT_URL" \

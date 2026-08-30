@@ -2,25 +2,20 @@
 //! write configuration entries via the CLI.
 //!
 //! Keys are routed to the appropriate config file:
-//! - Internal keys (checkout.*, push.*, staging.*, etc.) → `.crab/config.toml`
-//! - Project keys (remote.url, track.patterns, etc.) → `.crab.toml`
+//! - Internal keys (checkout.*, push.*, staging.*, etc.) → `.crab/local.toml`
+//! - Project keys (remote.url, track.patterns, etc.) → `crab.toml`
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::core::config::CACHE_SERVICE_URL_ENV;
+use crate::core::config::{CACHE_SERVICE_URL_ENV, REPO_CONFIG_REL};
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{OutputMode, emit_json};
+use crate::core::project_config::CONFIG_FILE_NAME;
 
-/// Per-repo internal config path relative to the repo root.
-const REPO_CONFIG_REL: &str = ".crab/config.toml";
-
-/// Project config file name.
-const PROJECT_CONFIG_NAME: &str = ".crab.toml";
-
-/// Project-level configuration keys targeting `.crab.toml`.
+/// Project-level configuration keys targeting `crab.toml`.
 const PROJECT_KEYS: &[&str] = &[
     "remote.url",
     "track.patterns",
@@ -29,16 +24,7 @@ const PROJECT_KEYS: &[&str] = &[
     "mirror.origin_remote",
     "mirror.crab_remote",
     "auth.provider",
-    "auth.profile",
     "auth.storage_provider",
-];
-
-/// Internal configuration keys targeting `.crab/config.toml`.
-const INTERNAL_KEYS: &[&str] = &[
-    "checkout.lazy",
-    "hydrate.include",
-    "hydrate.exclude",
-    "hydrate.auto",
     "workflow.enabled",
     "workflow.discover",
     "workflow.lockfile",
@@ -48,6 +34,15 @@ const INTERNAL_KEYS: &[&str] = &[
     "workflow.max_out_bytes",
     "workflow.lock_timeout_secs",
     "workflow.remote_cache_readonly",
+];
+
+/// Internal configuration keys targeting `.crab/local.toml`.
+const INTERNAL_KEYS: &[&str] = &[
+    "checkout.lazy",
+    "auth.aws_profile",
+    "hydrate.include",
+    "hydrate.exclude",
+    "hydrate.auto",
     "hydra.enabled",
     "hydra.config_dir",
     "hydra.config_name",
@@ -96,7 +91,7 @@ pub struct ConfigGetPayload {
     pub key: String,
     /// The resolved value as a string.
     pub value: String,
-    /// Where the value came from: `"local"`, `"default"`, `"env"`, or `"remote"`.
+    /// Where the value came from: `"project"`, `"local"`, `"default"`, or `"env"`.
     pub source: String,
 }
 
@@ -137,10 +132,10 @@ pub fn run_config_set_at(key: &str, value: &str, path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Project config (.crab.toml) operations
+// Project config (crab.toml) operations
 // ---------------------------------------------------------------------------
 
-/// Read a project config value from `.crab.toml`.
+/// Read a project config value from `crab.toml`.
 fn run_project_config_get(key: &str, mode: OutputMode) -> Result<()> {
     let table = load_or_default()?;
     let value = resolve_dotted_key(&table, key)?;
@@ -149,7 +144,12 @@ fn run_project_config_get(key: &str, mode: OutputMode) -> Result<()> {
         let payload = ConfigGetPayload {
             key: key.to_owned(),
             value: value.clone(),
-            source: if value.is_empty() { "default" } else { "local" }.to_owned(),
+            source: if value.is_empty() {
+                "default"
+            } else {
+                "project"
+            }
+            .to_owned(),
         };
         emit_json("config.get", "1.0", payload);
         return Ok(());
@@ -163,16 +163,25 @@ fn run_project_config_get(key: &str, mode: OutputMode) -> Result<()> {
     Ok(())
 }
 
-/// Set a project config value in `.crab.toml`.
+/// Set a project config value in `crab.toml`.
 fn run_project_config_set(key: &str, value: &str) -> Result<()> {
     let mut table = load_or_default()?;
+    if table.is_empty() {
+        if key != "remote.url" {
+            return Err(CrabError::Configuration {
+                key: key.to_owned(),
+                origin: "crab.toml does not exist; run `crab configure <REMOTE>` first".to_owned(),
+            });
+        }
+        table.insert("version".to_owned(), toml::Value::Integer(1));
+    }
     set_dotted_key(&mut table, key, value)?;
     atomic_write(&table)?;
     tracing::info!(key, value, "project config updated");
     Ok(())
 }
 
-/// Load `.crab.toml` as a TOML table, creating a default if missing.
+/// Load `crab.toml` as a TOML table, creating a default if missing.
 fn load_or_default() -> Result<toml::Table> {
     let path = find_project_config_path();
     read_toml(&path)
@@ -225,7 +234,7 @@ fn set_dotted_key(table: &mut toml::Table, key: &str, value: &str) -> Result<()>
         .and_then(|v| v.as_table_mut())
         .ok_or_else(|| CrabError::Configuration {
             key: format!("{section} is not a table"),
-            origin: PROJECT_CONFIG_NAME.into(),
+            origin: CONFIG_FILE_NAME.into(),
         })?;
 
     match key {
@@ -236,7 +245,7 @@ fn set_dotted_key(table: &mut toml::Table, key: &str, value: &str) -> Result<()>
                 .or_insert_with(|| toml::Value::Array(Vec::new()));
             let arr = arr.as_array_mut().ok_or_else(|| CrabError::Configuration {
                 key: format!("{key} is not an array"),
-                origin: PROJECT_CONFIG_NAME.into(),
+                origin: CONFIG_FILE_NAME.into(),
             })?;
             arr.push(toml::Value::String(value.to_owned()));
         }
@@ -250,7 +259,7 @@ fn set_dotted_key(table: &mut toml::Table, key: &str, value: &str) -> Result<()>
                 _ => {
                     return Err(CrabError::Configuration {
                         key: format!("{key}: expected \"lazy\" or \"eager\", got \"{value}\""),
-                        origin: PROJECT_CONFIG_NAME.into(),
+                        origin: CONFIG_FILE_NAME.into(),
                     });
                 }
             }
@@ -262,6 +271,43 @@ fn set_dotted_key(table: &mut toml::Table, key: &str, value: &str) -> Result<()>
                 toml::Value::String(provider.toml_value().to_owned()),
             );
         }
+        "workflow.enabled" | "workflow.remote_cache_readonly" => {
+            let b = parse_bool(value, key, Path::new(CONFIG_FILE_NAME))?;
+            section_table.insert(field.to_owned(), toml::Value::Boolean(b));
+        }
+        "workflow.parallelism"
+        | "workflow.graceful_shutdown_timeout_secs"
+        | "workflow.max_outs_per_stage"
+        | "workflow.max_out_bytes"
+        | "workflow.lock_timeout_secs" => {
+            let n: i64 = value.parse().map_err(|_| CrabError::Configuration {
+                key: format!("{key}: expected integer, got \"{value}\""),
+                origin: CONFIG_FILE_NAME.into(),
+            })?;
+            section_table.insert(field.to_owned(), toml::Value::Integer(n));
+        }
+        "workflow.discover" => match value.to_lowercase().as_str() {
+            "root" | "recursive" => {
+                section_table.insert(field.to_owned(), toml::Value::String(value.to_lowercase()));
+            }
+            _ => {
+                return Err(CrabError::Configuration {
+                    key: format!("{key}: expected \"root\" or \"recursive\", got \"{value}\""),
+                    origin: CONFIG_FILE_NAME.into(),
+                });
+            }
+        },
+        "workflow.lockfile" => match value.to_lowercase().as_str() {
+            "single" | "split" => {
+                section_table.insert(field.to_owned(), toml::Value::String(value.to_lowercase()));
+            }
+            _ => {
+                return Err(CrabError::Configuration {
+                    key: format!("{key}: expected \"single\" or \"split\", got \"{value}\""),
+                    origin: CONFIG_FILE_NAME.into(),
+                });
+            }
+        },
         _ => {
             // All other project keys are plain strings.
             section_table.insert(field.to_owned(), toml::Value::String(value.to_owned()));
@@ -281,7 +327,7 @@ fn atomic_write(table: &toml::Table) -> Result<()> {
     }
 
     let body = toml::to_string_pretty(table).map_err(|e| CrabError::Configuration {
-        key: format!("failed to serialize .crab.toml: {e}"),
+        key: format!("failed to serialize crab.toml: {e}"),
         origin: path.display().to_string(),
     })?;
 
@@ -291,13 +337,13 @@ fn atomic_write(table: &toml::Table) -> Result<()> {
     Ok(())
 }
 
-/// Discover the `.crab.toml` path. Walks up from CWD looking for an
+/// Discover the `crab.toml` path. Walks up from CWD looking for an
 /// existing file; falls back to CWD if not found.
 fn find_project_config_path() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut current = cwd.as_path();
     loop {
-        let candidate = current.join(PROJECT_CONFIG_NAME);
+        let candidate = current.join(CONFIG_FILE_NAME);
         if candidate.is_file() {
             return candidate;
         }
@@ -307,11 +353,11 @@ fn find_project_config_path() -> PathBuf {
         }
     }
     // Not found — default to CWD.
-    cwd.join(PROJECT_CONFIG_NAME)
+    cwd.join(CONFIG_FILE_NAME)
 }
 
 // ---------------------------------------------------------------------------
-// Internal config (.crab/config.toml) operations
+// Internal config (.crab/local.toml) operations
 // ---------------------------------------------------------------------------
 
 /// Testable inner implementation for `get` that accepts an explicit path.
@@ -444,8 +490,6 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         }
         "checkout.lazy"
         | "hydrate.auto"
-        | "workflow.enabled"
-        | "workflow.remote_cache_readonly"
         | "hydra.enabled"
         | "push.thin_packs"
         | "fetch.ref_filtering"
@@ -468,11 +512,6 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         | "push.max_cas_retries"
         | "push.upload_concurrency"
         | "push.xorb_target_size"
-        | "workflow.parallelism"
-        | "workflow.graceful_shutdown_timeout_secs"
-        | "workflow.max_outs_per_stage"
-        | "workflow.max_out_bytes"
-        | "workflow.lock_timeout_secs"
         | "repack.auto_threshold"
         | "staging.segment_target_bytes"
         | "staging.segment_target_size"
@@ -486,28 +525,6 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
             })?;
             section_table.insert(field.to_owned(), toml::Value::Integer(n));
         }
-        "workflow.discover" => match value.to_lowercase().as_str() {
-            "root" | "recursive" => {
-                section_table.insert(field.to_owned(), toml::Value::String(value.to_lowercase()));
-            }
-            _ => {
-                return Err(CrabError::Configuration {
-                    key: format!("{key}: expected \"root\" or \"recursive\", got \"{value}\""),
-                    origin: path.display().to_string(),
-                });
-            }
-        },
-        "workflow.lockfile" => match value.to_lowercase().as_str() {
-            "single" | "split" => {
-                section_table.insert(field.to_owned(), toml::Value::String(value.to_lowercase()));
-            }
-            _ => {
-                return Err(CrabError::Configuration {
-                    key: format!("{key}: expected \"single\" or \"split\", got \"{value}\""),
-                    origin: path.display().to_string(),
-                });
-            }
-        },
         "cache.service_mode" => match value.to_lowercase().as_str() {
             "cache" | "dedup" | "cache+dedup" => {
                 section_table.insert(field.to_owned(), toml::Value::String(value.to_lowercase()));
@@ -542,6 +559,7 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
             section_table.insert(field.to_owned(), toml::Value::Float(f));
         }
         "remote.url"
+        | "auth.aws_profile"
         | "cache.service_url"
         | "cache.chunk_cache_dir"
         | "cache.service_token_path"
@@ -565,7 +583,7 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Returns true if the key targets `.crab.toml` (project config).
+/// Returns true if the key targets `crab.toml` (project config).
 fn is_project_key(key: &str) -> bool {
     PROJECT_KEYS.contains(&key)
 }
@@ -645,7 +663,7 @@ mod tests {
     use super::*;
 
     fn internal_config_path(dir: &Path) -> PathBuf {
-        dir.join(".crab").join("config.toml")
+        dir.join(".crab").join("local.toml")
     }
 
     fn setup_dir() -> tempfile::TempDir {
@@ -674,6 +692,20 @@ mod tests {
 
         let table = read_toml(&path).unwrap();
         assert_eq!(table["hydrate"]["auto"], toml::Value::Boolean(false));
+    }
+
+    #[test]
+    fn set_aws_profile_is_local() {
+        let dir = setup_dir();
+        let path = internal_config_path(dir.path());
+
+        run_internal_config_set("auth.aws_profile", "ml-team", &path).unwrap();
+
+        let table = read_toml(&path).unwrap();
+        assert_eq!(
+            table["auth"]["aws_profile"],
+            toml::Value::String("ml-team".to_owned())
+        );
     }
 
     #[test]
@@ -710,20 +742,16 @@ mod tests {
 
     #[test]
     fn set_workflow_config_keys() {
-        let dir = setup_dir();
-        let path = internal_config_path(dir.path());
-
-        run_internal_config_set("workflow.enabled", "true", &path).unwrap();
-        run_internal_config_set("workflow.discover", "recursive", &path).unwrap();
-        run_internal_config_set("workflow.lockfile", "split", &path).unwrap();
-        run_internal_config_set("workflow.parallelism", "4", &path).unwrap();
-        run_internal_config_set("workflow.graceful_shutdown_timeout_secs", "9", &path).unwrap();
-        run_internal_config_set("workflow.max_outs_per_stage", "16", &path).unwrap();
-        run_internal_config_set("workflow.max_out_bytes", "1048576", &path).unwrap();
-        run_internal_config_set("workflow.lock_timeout_secs", "30", &path).unwrap();
-        run_internal_config_set("workflow.remote_cache_readonly", "true", &path).unwrap();
-
-        let table = read_toml(&path).unwrap();
+        let mut table = toml::Table::new();
+        set_dotted_key(&mut table, "workflow.enabled", "true").unwrap();
+        set_dotted_key(&mut table, "workflow.discover", "recursive").unwrap();
+        set_dotted_key(&mut table, "workflow.lockfile", "split").unwrap();
+        set_dotted_key(&mut table, "workflow.parallelism", "4").unwrap();
+        set_dotted_key(&mut table, "workflow.graceful_shutdown_timeout_secs", "9").unwrap();
+        set_dotted_key(&mut table, "workflow.max_outs_per_stage", "16").unwrap();
+        set_dotted_key(&mut table, "workflow.max_out_bytes", "1048576").unwrap();
+        set_dotted_key(&mut table, "workflow.lock_timeout_secs", "30").unwrap();
+        set_dotted_key(&mut table, "workflow.remote_cache_readonly", "true").unwrap();
         assert_eq!(table["workflow"]["enabled"], toml::Value::Boolean(true));
         assert_eq!(
             table["workflow"]["discover"],
@@ -758,13 +786,12 @@ mod tests {
 
     #[test]
     fn workflow_enum_values_validate() {
-        let dir = setup_dir();
-        let path = internal_config_path(dir.path());
+        let mut table = toml::Table::new();
 
-        let err = run_internal_config_set("workflow.discover", "everywhere", &path).unwrap_err();
+        let err = set_dotted_key(&mut table, "workflow.discover", "everywhere").unwrap_err();
         assert!(matches!(err, CrabError::Configuration { .. }));
 
-        let err = run_internal_config_set("workflow.lockfile", "many", &path).unwrap_err();
+        let err = set_dotted_key(&mut table, "workflow.lockfile", "many").unwrap_err();
         assert!(matches!(err, CrabError::Configuration { .. }));
     }
 
@@ -1001,7 +1028,7 @@ mod tests {
     #[test]
     fn project_config_set_and_get_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(PROJECT_CONFIG_NAME);
+        let path = dir.path().join(CONFIG_FILE_NAME);
 
         // Manually set and read to test the core logic.
         let mut table = toml::Table::new();

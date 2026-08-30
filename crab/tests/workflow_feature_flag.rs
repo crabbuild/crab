@@ -35,7 +35,7 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_crab")
 }
 
-/// Write `.crab/config.toml` with the requested `[workflow] enabled`
+/// Write `.crab/local.toml` with the requested `[workflow] enabled`
 /// value. Any prior file at that path is replaced.
 fn write_workflow_config(repo: &Path, enabled: bool) {
     let cfg_dir = repo.join(".crab");

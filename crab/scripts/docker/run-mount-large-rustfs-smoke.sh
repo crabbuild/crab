@@ -195,7 +195,7 @@ cd "$SEED"
 git init -b main >/e2e/logs/git-init.log
 crab init "$REMOTE_URL" >/e2e/logs/crab-init.log 2>&1
 crab track "*.bin" >/e2e/logs/crab-track.log 2>&1
-git add .crab.toml .gitattributes
+git add crab.toml .gitattributes
 mkdir -p models archive
 
 python3 - "$SEED_MIB" <<'PY'

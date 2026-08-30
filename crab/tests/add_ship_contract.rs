@@ -224,7 +224,7 @@ fn ship_json_stops_when_metadata_staging_fails() {
     let head_before = git(dir.path(), &["rev-parse", "HEAD"]);
     assert_success(&head_before, "git rev-parse");
 
-    let config = dir.path().join(".crab.toml");
+    let config = dir.path().join("crab.toml");
     let mut config_bytes = std::fs::read(&config).expect("read config");
     config_bytes.extend_from_slice(b"\n# pending metadata\n");
     std::fs::write(config, config_bytes).expect("update config");

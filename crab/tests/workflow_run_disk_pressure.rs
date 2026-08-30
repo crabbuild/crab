@@ -117,7 +117,7 @@ fn readonly_cache_dir_stages_execute_without_caching() {
     fs::set_permissions(&cache_dir, perms).unwrap();
     let _restore = RestorePerms(&cache_dir);
 
-    // Create .crab/config.toml to enable workflow.
+    // Create .crab/local.toml to enable workflow.
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
         root.join(".crab").join("config.toml"),

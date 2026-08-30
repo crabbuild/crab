@@ -58,7 +58,7 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
 }
 
 /// Produce a scratch repo with:
-/// - workflow enabled via `.crab/config.toml`
+/// - workflow enabled via `.crab/local.toml`
 /// - a `params.yaml` with `model.lr: 0.001`
 /// - a `crab.yaml` with a single `copy` stage that copies
 ///   `params.yaml` to `out.txt`, with `params: [model.lr]` so the
@@ -78,7 +78,7 @@ fn init_scratch_repo() -> TempDir {
     // environment-variable noise.
     fs::create_dir_all(repo.join(".crab")).unwrap();
     fs::write(
-        repo.join(".crab/config.toml"),
+        repo.join(".crab/local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -123,7 +123,7 @@ fn init_checkpoint_repo() -> TempDir {
 
     fs::create_dir_all(repo.join(".crab")).unwrap();
     fs::write(
-        repo.join(".crab/config.toml"),
+        repo.join(".crab/local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -856,7 +856,7 @@ fn exp_run_composes_hydra_config_groups_before_param_overrides() {
 
     fs::create_dir_all(repo.join(".crab")).unwrap();
     fs::write(
-        repo.join(".crab/config.toml"),
+        repo.join(".crab/local.toml"),
         "[workflow]\nenabled = true\n\n[hydra]\nenabled = true\n",
     )
     .unwrap();
@@ -900,7 +900,7 @@ fn exp_run_composes_hydra_config_groups_before_param_overrides() {
         ),
     )
     .unwrap();
-    git(repo, &["add", "-f", ".crab/config.toml"]);
+    git(repo, &["add", "-f", ".crab/local.toml"]);
     git(repo, &["add", "conf", "crab.yaml"]);
     git(repo, &["commit", "-m", "hydra workflow"]);
 
@@ -948,7 +948,7 @@ fn exp_run_composes_hydra_nested_defaults_and_package_overrides() {
 
     fs::create_dir_all(repo.join(".crab")).unwrap();
     fs::write(
-        repo.join(".crab/config.toml"),
+        repo.join(".crab/local.toml"),
         "[workflow]\nenabled = true\n\n[hydra]\nenabled = true\n",
     )
     .unwrap();
@@ -1020,7 +1020,7 @@ fn exp_run_composes_hydra_nested_defaults_and_package_overrides() {
         ),
     )
     .unwrap();
-    git(repo, &["add", "-f", ".crab/config.toml"]);
+    git(repo, &["add", "-f", ".crab/local.toml"]);
     git(repo, &["add", "conf", "crab.yaml"]);
     git(repo, &["commit", "-m", "hydra nested workflow"]);
 

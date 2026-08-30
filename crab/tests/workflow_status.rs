@@ -32,7 +32,7 @@ fn scaffold_repo(root: &Path) {
     .unwrap();
     fs::write(root.join("a.txt"), b"hello").unwrap();
 
-    // Workflow layer opt-in. The gate lives in `.crab/config.toml`
+    // Workflow layer opt-in. The gate lives in `.crab/local.toml`
     // and mirrors the other integration tests in this directory.
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(

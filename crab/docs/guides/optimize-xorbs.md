@@ -21,7 +21,7 @@ profile from median source-object size:
 
 ## Custom Profiles
 
-Custom profiles live in `.crab/config.toml`:
+Custom profiles live in `.crab/local.toml`:
 
 ```toml
 [optimize.xorbs.profiles.my-profile]

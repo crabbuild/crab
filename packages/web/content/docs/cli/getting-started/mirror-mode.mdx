@@ -36,7 +36,7 @@ This command:
 1. Validates that the `origin` remote exists
 2. Adds a `crab` remote pointing to your bucket
 3. Installs `pre-push`, `post-checkout`, and `post-merge` hooks
-4. Generates `.crab.toml` with a `[mirror]` section
+4. Generates `crab.toml` with a `[mirror]` section
 5. Run `crab setup` to auto-track large file patterns in `.gitattributes`
 
 ### Push the configuration
@@ -46,7 +46,7 @@ crab setup
 crab ship . -m "enable crab for large files"
 ```
 
-Now `.crab.toml` is on GitHub. Collaborators will inherit the mirror setup.
+Now `crab.toml` is on GitHub. Collaborators will inherit the mirror setup.
 
 ## Setup: Collaborator
 
@@ -58,13 +58,13 @@ cd project
 crab init
 ```
 
-Running `crab init` with no URL detects the `[mirror]` section in `.crab.toml` and automatically:
+Running `crab init` with no URL detects the `[mirror]` section in `crab.toml` and automatically:
 - Adds the `crab` remote
 - Installs mirror hooks
 - Hydrates files per `[hydrate]` settings
 
 If the collaborator previously ran `crab install --global`, the global filter
-driver can activate from `.crab.toml`, but still run `crab init` when the repo
+driver can activate from `crab.toml`, but still run `crab init` when the repo
 needs the mirror remote and hooks installed locally.
 
 ## How Hooks Work
@@ -124,7 +124,7 @@ Mirror: origin ↔ crab (crab://my-bucket/my-repo) | healthy
 
 ## Configuration
 
-The `[mirror]` section in `.crab.toml`:
+The `[mirror]` section in `crab.toml`:
 
 ```toml
 [mirror]
@@ -190,6 +190,6 @@ This means the pre-push hook didn't fire. Check that:
 
 ## Related
 
-- [Project Configuration](/docs/cli/getting-started/project-config) — `.crab.toml` reference
+- [Project Configuration](/docs/cli/getting-started/project-config) — `crab.toml` reference
 - [`crab init`](/docs/cli/reference/crab-init) — the `--mirror` flag
 - [`crab ship`](/docs/cli/reference/crab-ship) — one-command commit + push

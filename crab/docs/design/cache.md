@@ -524,7 +524,7 @@ first, then falls back to `~/.cache/crab`.
 
 ### Cache Service
 
-In `~/.config/crab/config.toml` or `.crab/config.toml`:
+In `~/.config/crab/config.toml` or `.crab/local.toml`:
 
 ```toml
 [cache]

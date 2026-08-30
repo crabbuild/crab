@@ -7163,7 +7163,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join(".crab")).unwrap();
         std::fs::write(
-            root.join(".crab/config.toml"),
+            root.join(".crab/local.toml"),
             "[workflow]\nenabled = true\n",
         )
         .unwrap();
@@ -7200,7 +7200,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join(".crab")).unwrap();
         std::fs::write(
-            root.join(".crab/config.toml"),
+            root.join(".crab/local.toml"),
             "[workflow]\nenabled = true\n",
         )
         .unwrap();
@@ -7211,7 +7211,7 @@ mod tests {
         .unwrap();
         run_git(
             root,
-            &["add", ".crab/config.toml", "crab.yaml"],
+            &["add", ".crab/local.toml", "crab.yaml"],
             "git add workflow",
         )
         .unwrap();
@@ -7239,7 +7239,7 @@ mod tests {
         std::fs::create_dir_all(root.join("models")).unwrap();
         std::fs::create_dir_all(root.join("eval")).unwrap();
         std::fs::write(
-            root.join(".crab/config.toml"),
+            root.join(".crab/local.toml"),
             "[workflow]\nenabled = true\n",
         )
         .unwrap();

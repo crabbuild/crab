@@ -553,7 +553,7 @@ fn resolve_remote_helper_config() -> Result<crate::core::config::Config> {
         crate::core::config::Config::resolve_for_repo,
     )?;
     if let Ok(cwd) = std::env::current_dir()
-        && let Some(project) = crate::core::project_config::ProjectConfig::discover(&cwd)
+        && let Some(project) = crate::core::project_config::ProjectConfig::load_for_repo(&cwd)?
     {
         if config.remote_url.is_none() {
             config.remote_url = Some(project.remote.url.clone());
@@ -616,10 +616,9 @@ pub async fn run_remote_helper(
     io: impl StdIo,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    // Serialize the helper-invocation URL once so fetch_packs can write
-    // it into `.crab/remote` without re-deriving from the prefix or
-    // shelling out to `git remote get-url`. `gix_url::Url::to_bstring`
-    // produces the same canonical form git itself used to spawn us.
+    // Serialize the helper-invocation URL once for routing and replica
+    // discovery. `gix_url::Url::to_bstring` produces the same canonical form
+    // Git itself used to spawn us.
     let invocation_url: String = url.to_bstring().to_string();
 
     // Check CRAB_PROGRESS_FORMAT env var for structured output mode.
@@ -1769,7 +1768,6 @@ where
             entries,
             &options.fetch_options,
             options.filter_requested,
-            remote_url,
             &cfg,
             writer,
             read_caching_store.as_ref().or(caching_store),
@@ -2371,10 +2369,6 @@ fn remote_graph_oid(value: &str) -> Result<[u8; 20]> {
 /// pack selection, concurrent download, and atomic installation to the shared
 /// fetch pipeline.
 ///
-/// `remote_url` is the full `crab://bucket/repo...` URL the remote helper was
-/// invoked with, threaded from `dispatch_batch` so the `.crab/remote` file can
-/// be written with the authoritative URL instead of reconstructing it from the
-/// prefix or shelling out to `git remote get-url`.
 #[expect(
     clippy::too_many_arguments,
     reason = "fetch pack transfer carries store, routing, protocol writer, cache, and cancellation state"
@@ -2385,7 +2379,6 @@ async fn fetch_packs(
     entries: &[FetchEntry],
     fetch_options: &FetchOptions,
     filter_requested: bool,
-    remote_url: Option<&str>,
     config: &crate::core::config::Config,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     caching_store: Option<&crab_cache_store::CachingStore>,
@@ -2528,55 +2521,8 @@ async fn fetch_packs(
         tracing::warn!(error = %e, "failed to exclude local .crab state after fetch");
     }
 
-    // Write the remote URL to .crab/remote so `crab hydrate` can
-    // find the S3 bucket for reconstruction. Prefer the authoritative
-    // URL threaded from the remote-helper invocation; only fall back
-    // to `gix::Repository::find_remote("origin")` (under `gix-transport`)
-    // or `git remote get-url origin` (legacy) when the caller didn't
-    // provide one — older callers and test harnesses still hit that
-    // branch.
     let crab_dir = repo_root.join(".crab");
     std::fs::create_dir_all(&crab_dir)?;
-    let remote_file = crab_dir.join("remote");
-    if let Some(url) = remote_url.filter(|url| !url.is_empty()) {
-        std::fs::write(&remote_file, url.as_bytes())?;
-        tracing::debug!(url = %url, "wrote remote URL from helper invocation");
-    } else if !remote_file.exists() {
-        #[cfg(feature = "gix-transport")]
-        {
-            match crate::git::fetch_transport::remote_origin_url(&repo_root) {
-                Ok(Some(url)) if !url.is_empty() => {
-                    let _ = std::fs::write(&remote_file, url.as_bytes());
-                    tracing::debug!(
-                        url = %url,
-                        "wrote remote URL via gix::Repository::find_remote"
-                    );
-                }
-                Ok(_) => {
-                    tracing::debug!("no origin remote configured; leaving .crab/remote empty");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "gix find_remote failed; leaving .crab/remote empty");
-                }
-            }
-        }
-        #[cfg(not(feature = "gix-transport"))]
-        {
-            // SHELLOUT: fallback lookup for the remote URL. Under
-            // `--features gix-transport` this path is replaced by
-            // `crate::git::fetch_transport::remote_origin_url` above.
-            if let Ok(output) = std::process::Command::new("git")
-                .args(["remote", "get-url", "origin"])
-                .output()
-            {
-                let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                if !url.is_empty() {
-                    let _ = std::fs::write(&remote_file, url.as_bytes());
-                    tracing::debug!(url = %url, "wrote remote URL from git config (fallback)");
-                }
-            }
-        }
-    }
     ensure_lazy_checkout_config_for_new_helper_repo(&repo_root);
 
     // Git accepts the producer proof only when the helper also identifies one
@@ -2892,7 +2838,7 @@ async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &s
 }
 
 fn ensure_lazy_checkout_config_for_new_helper_repo(repo_root: &std::path::Path) {
-    let config_path = repo_root.join(".crab").join("config.toml");
+    let config_path = repo_root.join(".crab").join("local.toml");
     if config_path.exists() {
         return;
     }
@@ -5889,7 +5835,7 @@ mod tests {
 
         ensure_lazy_checkout_config_for_new_helper_repo(tmp.path());
 
-        let config = std::fs::read_to_string(tmp.path().join(".crab/config.toml")).unwrap();
+        let config = std::fs::read_to_string(tmp.path().join(".crab/local.toml")).unwrap();
         assert!(
             config.contains("[checkout]"),
             "config should contain checkout table: {config}"
@@ -5903,7 +5849,7 @@ mod tests {
     #[test]
     fn helper_fetch_preserves_existing_checkout_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let config_path = tmp.path().join(".crab/config.toml");
+        let config_path = tmp.path().join(".crab/local.toml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, "[checkout]\nlazy = false\n").unwrap();
 
@@ -5930,7 +5876,7 @@ mod tests {
             .status()
             .expect("run git init");
         assert!(init.success());
-        let config_path = repo.join(".crab/config.toml");
+        let config_path = repo.join(".crab/local.toml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(
             &config_path,

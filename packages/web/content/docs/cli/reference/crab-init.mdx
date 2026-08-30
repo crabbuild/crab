@@ -21,7 +21,7 @@ crab init [OPTIONS] [URL]
 
 `crab init` creates or validates the canonical v1 remote layout and empty
 generation-0 manifest, then connects a local Git repository to that remote. It
-creates or updates `.crab/` and `.crab.toml`, registers the Crab filter and
+creates or updates `.crab/` and `crab.toml`, registers the Crab filter and
 diff drivers, and adds a Git remote. It does not scan the working tree.
 
 If no git repository exists in the current directory, `crab init` automatically
@@ -29,7 +29,7 @@ runs `git init` first — no need to initialize git separately.
 
 Run `crab setup` afterward to scan for large files and write `.gitattributes`
 tracking rules. With no URL, `crab init` re-applies the configuration from an
-existing `.crab.toml`.
+existing `crab.toml`.
 
 For conceptual background, see [Creating a Repository](/docs/cli/getting-started/first-repository).
 
@@ -37,7 +37,7 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `[URL]` | No | Cloud storage URL; omit it to re-apply an existing `.crab.toml` |
+| `[URL]` | No | Cloud storage URL; omit it to re-apply an existing `crab.toml` |
 
 ## Options
 
@@ -53,7 +53,7 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 ## What It Does
 
 1. **Creates a git repository** (if `.git` doesn't exist)
-2. **Creates `.crab/config.toml`** with the remote URL
+2. **Creates `.crab/local.toml`** for machine-specific settings
 3. **Registers the filter and diff drivers** in `.git/config`
 4. **Adds or updates a Git remote** for the canonical `crab://` URL
 5. **Creates or validates the canonical v1 layout descriptor** remotely
@@ -73,7 +73,7 @@ convert or synthesize repository state.
 mkdir my-ml-project && cd my-ml-project
 crab init crab://my-bucket/ml-models
 # ✓ Initialized git repository
-# ✓ Created .crab/config.toml
+# ✓ Created .crab/local.toml
 # ✓ Registered filter.crab driver
 # Next: crab setup
 ```
@@ -83,7 +83,7 @@ crab init crab://my-bucket/ml-models
 ```bash
 cd my-existing-repo
 crab init s3://team-bucket/my-repo
-# ✓ Created .crab/config.toml
+# ✓ Created .crab/local.toml
 # ✓ Registered filter.crab driver
 # Next: crab setup
 ```

@@ -299,7 +299,7 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
             code: "CRAB-E0050",
             summary: "Configuration error",
             causes: "\
-  - Malformed TOML in ~/.config/crab/config.toml or .crab/config.toml\n\
+  - Malformed TOML in ~/.config/crab/config.toml or .crab/local.toml\n\
   - Invalid value for a configuration key\n\
   - Unrecognized configuration key in a config file",
             remediation: "\
@@ -1114,17 +1114,17 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
             code: "CRAB-E0401",
             summary: "Prefetch config error",
             causes: "\
-  - `.crab/prefetch.toml` is malformed or contains invalid globs",
+  - `crab.toml` is malformed or contains invalid globs",
             remediation: "\
-  Validate the TOML syntax and glob patterns in `.crab/prefetch.toml`.",
+  Validate the TOML syntax and glob patterns in `crab.toml`.",
         }),
         "CRAB-E0402" => Some(ErrorExplanation {
             code: "CRAB-E0402",
             summary: "Prefetch profile not found",
             causes: "\
-  - The requested profile name does not exist in `.crab/prefetch.toml`",
+  - The requested profile name does not exist in `crab.toml`",
             remediation: "\
-  Check available profile names in `.crab/prefetch.toml` and retry\n\
+  Check available profile names in `crab.toml` and retry\n\
   with a valid `--profile=<name>`.",
         }),
         "CRAB-E0410" => Some(ErrorExplanation {

@@ -35,7 +35,7 @@ crab init --storage-provider gcs   crab://my-gcs-bucket/my-repo
 crab init --storage-provider azure crab://my-container/my-repo
 ```
 
-`crab init` writes the choice to `.crab.toml` so collaborators use the same
+`crab init` writes the choice to `crab.toml` so collaborators use the same
 backend after cloning.
 
 ## Step 2: Configure
@@ -45,7 +45,7 @@ backend after cloning.
 If you're using S3, you don't need to change anything. The default config is:
 
 ```toml
-# ~/.config/crab/config.toml (or .crab/config.toml)
+# ~/.config/crab/config.toml (or .crab/local.toml)
 [auth]
 provider = "static"
 storage_provider = "s3"
@@ -67,9 +67,10 @@ export AWS_SESSION_TOKEN=... # required for temporary STS credentials
 export AWS_REGION=us-west-2
 ```
 
-The current S3 provider does not read `AWS_PROFILE`, `~/.aws/config`, or
-`~/.aws/credentials`. Export the temporary credentials produced by an SSO or
-profile workflow into the Crab process.
+Crab uses the AWS SDK default credential chain, including shared profiles,
+AWS SSO, web identity, ECS task roles, and EC2 instance roles. Select a profile
+with `crab configure --aws-profile <name>`, `crab config set auth.aws_profile
+<name>`, or `AWS_PROFILE`.
 
 ### Option B: Google Cloud Storage
 

@@ -79,9 +79,9 @@ When Crab initializes a repository, it sets up:
 | Component | Location | Purpose |
 |-----------|----------|---------|
 | Filter driver | `.git/config` | Routes tracked files through Crab |
-| Remote URL | `.crab/remote` | Points to your cloud bucket |
-| Config | `.crab/config.toml` | Local Crab settings |
-| Staging area | `.crab/staging/` | Temporary chunk storage |
+| Remote URL | `crab.toml` | Points to your cloud bucket |
+| Config | `.crab/local.toml` | Local Crab settings |
+| Staging area | `.crab/staging/` | Unpublished chunks awaiting push; not a disposable cache |
 
 The filter driver entry in `.git/config` looks like:
 

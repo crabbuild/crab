@@ -1877,7 +1877,7 @@ fn mount_helper_filenames(name: &str, is_windows: bool) -> Vec<String> {
 /// Build pipeline config for a local mount source.
 ///
 /// Validates the local repo, computes a cache hash from the absolute path,
-/// and attempts to read a StoreLayout from the repo's `.crab/config.toml`
+/// and attempts to read a StoreLayout from the repo's committed `crab.toml`
 /// for pointer-file hydration.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn build_local_pipeline_config(
@@ -1931,7 +1931,7 @@ async fn build_local_pipeline_config(
         cancel_token: cancel,
     };
 
-    // Attempt to read StoreLayout from the repo's .crab/config.toml
+    // Attempt to read StoreLayout from the repo's committed crab.toml
     // for pointer-file hydration from object storage.
     let crab_dir = repo_path.join(".crab");
     let read_context = resolve_mount_read_context_from_local_repo(&crab_dir).await;
@@ -2011,7 +2011,7 @@ async fn build_remote_pipeline_config(
     Ok((config, Some(read_context), cache_lock))
 }
 
-/// Attempt to construct a `StoreLayout` from a local repo's `.crab/config.toml`.
+/// Attempt to construct a `StoreLayout` from a local repo's `crab.toml`.
 ///
 /// This enables pointer-file hydration for local mounts that have a crab
 /// remote configured. If no remote is configured, returns `None` and
@@ -2020,7 +2020,7 @@ async fn build_remote_pipeline_config(
 async fn resolve_mount_read_context_from_local_repo(
     crab_dir: &Path,
 ) -> Option<crate::vfs::MountReadContext> {
-    // Reuse the existing helper that reads from .crab/config.toml.
+    // Reuse the existing helper that reads from crab.toml.
     resolve_mount_read_context_from_config(crab_dir).await
 }
 
@@ -2361,74 +2361,20 @@ async fn build_mount_components(
     Ok((output.resolver, output.engine))
 }
 
-/// Read the remote URL from the `.crab/config.toml` or `.crab/remote` file.
+/// Read the remote URL from the committed `crab.toml` file.
 ///
-/// Tries in order:
-/// 1. `<crab_dir>/config.toml` → `[remote] url`
-/// 2. `<crab_dir>/remote` (legacy plain-text file)
-/// 3. `git remote get-url origin` (if it's a crab:// URL)
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 fn read_remote_url_from_crab_dir(crab_dir: &Path) -> Result<String> {
-    // Try config.toml first.
-    let config_path = crab_dir.join("config.toml");
-    if config_path.is_file() {
-        let content =
-            std::fs::read_to_string(&config_path).map_err(|e| CrabError::Configuration {
-                key: format!("failed to read {}: {e}", config_path.display()),
-                origin: config_path.display().to_string(),
-            })?;
-        let table: toml::Table = content.parse().map_err(|e| CrabError::Configuration {
-            key: format!("failed to parse {}: {e}", config_path.display()),
-            origin: config_path.display().to_string(),
-        })?;
-        if let Some(url) = table
-            .get("remote")
-            .and_then(|v| v.get("url"))
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.to_owned());
-        }
-    }
-
-    // Try legacy .crab/remote file.
-    let remote_path = crab_dir.join("remote");
-    if remote_path.is_file() {
-        let url = std::fs::read_to_string(&remote_path).map_err(|e| CrabError::Configuration {
-            key: format!("failed to read {}: {e}", remote_path.display()),
-            origin: remote_path.display().to_string(),
-        })?;
-        let trimmed = url.trim().to_owned();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
-
-    // Try git remote origin.
-    let git_dir = crab_dir
-        .parent()
-        .map_or_else(|| PathBuf::from(".git"), |p| p.join(".git"));
-
-    let output = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .env("GIT_DIR", &git_dir)
-        .output()
-        .ok();
-    if let Some(o) = output.filter(|o| o.status.success()) {
-        let url = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-        if url.starts_with("crab://") {
-            return Ok(url);
-        }
-    }
-
-    Err(CrabError::Configuration {
-        key: "no crab remote configured".into(),
-        origin: crab_dir.display().to_string(),
-    })
+    let repo_root = crab_dir.parent().ok_or_else(|| CrabError::Configuration {
+        key: "remote.url".into(),
+        origin: "cannot locate repository root from .crab directory".into(),
+    })?;
+    crate::core::project_config::ProjectConfig::remote_url(repo_root)
 }
 
 /// Attempt to construct a `StoreLayout` from the crab remote config.
 ///
-/// Reads the remote URL from `.crab/config.toml`, parses it as a crab URL,
+/// Reads the remote URL from `crab.toml`, parses it as a Crab URL,
 /// builds an authenticated object store, and returns the layout. Returns
 /// `None` if any step fails (e.g. no remote configured, auth unavailable).
 /// Pointer-file hydration will fall back to stub resolvers in that case.
@@ -5863,7 +5809,7 @@ mod nfs_tests {
 mod tests {
     use super::*;
 
-    /// Verify that `read_remote_url_from_crab_dir` reads from config.toml.
+    /// Verify that `read_remote_url_from_crab_dir` reads from crab.toml.
     #[test]
     fn read_remote_url_from_config_toml() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5871,24 +5817,21 @@ mod tests {
         std::fs::create_dir_all(&crab_dir).unwrap();
 
         let config_content = "[remote]\nurl = \"crab://my-bucket/org/models\"\n";
-        std::fs::write(crab_dir.join("config.toml"), config_content).unwrap();
+        std::fs::write(tmp.path().join("crab.toml"), config_content).unwrap();
 
         let url = read_remote_url_from_crab_dir(&crab_dir).unwrap();
         assert_eq!(url, "crab://my-bucket/org/models");
     }
 
-    /// Verify that `read_remote_url_from_crab_dir` falls back to the legacy
-    /// `.crab/remote` file.
     #[test]
-    fn read_remote_url_from_legacy_remote_file() {
+    fn read_remote_url_ignores_retired_remote_file() {
         let tmp = tempfile::tempdir().unwrap();
         let crab_dir = tmp.path().join(".crab");
         std::fs::create_dir_all(&crab_dir).unwrap();
 
         std::fs::write(crab_dir.join("remote"), "crab://bucket/repo\n").unwrap();
 
-        let url = read_remote_url_from_crab_dir(&crab_dir).unwrap();
-        assert_eq!(url, "crab://bucket/repo");
+        assert!(read_remote_url_from_crab_dir(&crab_dir).is_err());
     }
 
     /// Verify that `read_remote_url_from_crab_dir` returns an error when
@@ -5992,7 +5935,7 @@ mod tests {
     /// Verify that `build_mount_components` executes the pipeline
     /// successfully for a local git repo with a `.crab` directory.
     ///
-    /// This test creates a minimal git repo, sets up `.crab/config.toml`,
+    /// This test creates a minimal git repo, sets up `crab.toml`,
     /// and verifies the pipeline produces a resolver and engine.
     #[tokio::test(flavor = "multi_thread")]
     async fn build_mount_components_local_repo() {
@@ -6179,7 +6122,7 @@ mod tests {
     }
 
     /// Verify that `build_local_pipeline_config` returns None for store_layout
-    /// when no .crab/config.toml exists (no crab remote configured).
+    /// when no crab.toml exists (no crab remote configured).
     #[tokio::test(flavor = "multi_thread")]
     async fn local_pipeline_config_no_crab_remote_returns_none_layout() {
         let tmp = tempfile::tempdir().unwrap();

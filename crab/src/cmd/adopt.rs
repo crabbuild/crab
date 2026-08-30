@@ -2,7 +2,7 @@
 //! crab pointers in the current working tree.
 //!
 //! Walks the working tree for files matching the given patterns (or
-//! auto-detected patterns from `.crab.toml` / large-file scan), replaces
+//! auto-detected patterns from `crab.toml` / large-file scan), replaces
 //! their content with pointer blobs, stages the chunks via the same
 //! pipeline as `crab add`, and updates `.gitattributes`.
 //!
@@ -128,12 +128,12 @@ pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<(
     // Discover the git repo root.
     let repo_root = discover_repo_root(&cwd)?;
 
-    // Resolve patterns: CLI args → .crab.toml [track] → auto-detect.
-    let patterns = resolve_patterns(&args.patterns, &repo_root);
+    // Resolve patterns: CLI args → crab.toml [track] → auto-detect.
+    let patterns = resolve_patterns(&args.patterns, &repo_root)?;
 
     if patterns.is_empty() {
         if !args.mode.is_machine() {
-            eprintln!("No patterns to adopt. Specify --pattern or configure [track] in .crab.toml");
+            eprintln!("No patterns to adopt. Specify --pattern or configure [track] in crab.toml");
         }
         return Ok(());
     }
@@ -179,23 +179,23 @@ pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<(
 // Pattern resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve patterns from args, .crab.toml, or auto-detection.
-fn resolve_patterns(cli_patterns: &[String], repo_root: &Path) -> Vec<String> {
+/// Resolve patterns from args, crab.toml, or auto-detection.
+fn resolve_patterns(cli_patterns: &[String], repo_root: &Path) -> Result<Vec<String>> {
     // 1. CLI patterns take priority.
     if !cli_patterns.is_empty() {
-        return cli_patterns.to_vec();
+        return Ok(cli_patterns.to_vec());
     }
 
-    // 2. Try .crab.toml [track] patterns.
-    if let Some(config) = ProjectConfig::discover(repo_root)
+    // 2. Try crab.toml [track] patterns.
+    if let Some(config) = ProjectConfig::load_for_repo(repo_root)?
         && let Some(track) = config.track
         && !track.patterns.is_empty()
     {
-        return track.patterns;
+        return Ok(track.patterns);
     }
 
     // 3. Auto-detect by scanning for large files (same logic as init).
-    auto_detect_patterns(repo_root)
+    Ok(auto_detect_patterns(repo_root))
 }
 
 /// Scan the working tree for large files and return glob patterns for
@@ -717,9 +717,9 @@ fn git_add_files(root: &Path, paths: &[PathBuf], include_gitattributes: bool) ->
         args_list.push(".gitattributes".to_string());
     }
 
-    // Also add .crab.toml if it exists.
-    if root.join(".crab.toml").exists() {
-        args_list.push(".crab.toml".to_string());
+    // Also add crab.toml if it exists.
+    if root.join("crab.toml").exists() {
+        args_list.push("crab.toml".to_string());
     }
 
     let output = Command::new("git")

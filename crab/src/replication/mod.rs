@@ -9526,13 +9526,13 @@ fn sanitize_cache_component(value: &str) -> String {
 pub fn project_config_path(root: &Path) -> PathBuf {
     let mut current = root;
     loop {
-        let candidate = current.join(".crab.toml");
+        let candidate = current.join("crab.toml");
         if candidate.is_file() {
             return candidate;
         }
         match current.parent() {
             Some(parent) => current = parent,
-            None => return root.join(".crab.toml"),
+            None => return root.join("crab.toml"),
         }
     }
 }

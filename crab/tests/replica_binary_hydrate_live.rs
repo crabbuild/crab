@@ -619,7 +619,7 @@ rpo = "standard"
         harness.provider.config_provider(),
         harness.region
     );
-    std::fs::write(repo.join(".crab.toml"), config)?;
+    std::fs::write(repo.join("crab.toml"), config)?;
     Ok(())
 }
 
@@ -759,7 +759,7 @@ async fn run_binary_hydrate_proof(
         workspace,
         harness,
         &repo,
-        &["add", ".gitattributes", ".crab.toml"],
+        &["add", ".gitattributes", "crab.toml"],
     )?;
     run_git(
         workspace,

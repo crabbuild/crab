@@ -33,7 +33,6 @@ crab-xet = { workspace = true }
 crc32fast = { version = "1", optional = true }
 filetime = { version = "0.2", optional = true }
 futures-util = { workspace = true, optional = true }
-globset = "0.4"
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"], optional = true }
 rusqlite = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -41,7 +40,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"], optional = true }
 tokio-util = { workspace = true, features = ["rt"], optional = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 xet-client = { workspace = true, optional = true }
 xet-runtime = { workspace = true, optional = true }

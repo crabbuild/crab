@@ -1,17 +1,19 @@
-# Project Configuration (`.crab.toml`)
+# Project Configuration (`crab.toml`)
 
-The `.crab.toml` file is a project-level configuration that travels with your
+The `crab.toml` file is a project-level configuration that travels with your
 repository. It tells Crab how the repo is configured so collaborators don't
 repeat setup steps.
 
 ## Synopsis
 
-Place a `.crab.toml` file in your repository root. It's generated automatically
+Place a `crab.toml` file in your repository root. It's generated automatically
 by `crab init` and should be committed to version control.
 
 ## Full Schema
 
 ```toml
+version = 1
+
 # Required: Crab Git remote URL
 [remote]
 url = "crab://my-bucket/my-repo"
@@ -40,12 +42,16 @@ crab_remote = "crab"
 [auth]
 # Object-store backend for this Crab remote: "s3" | "gcs" | "azure" | "auto"
 storage_provider = "s3"
-# Optional provider-specific profile name
-profile = "my-profile"
 
-# Optional: named workflow artifact remotes for outs.remote
-[workflow.remotes.models]
-url = "crab://ml-cache/models"
+# Optional: shared hydration sets
+[prefetch.profiles.always]
+paths = ["README.md", "src/**"]
+
+# Optional: shared workflow policy
+[workflow]
+enabled = true
+discover = "root"
+parallelism = 4
 ```
 
 ## Sections
@@ -114,34 +120,43 @@ same backend.
 |-------|------|-------------|
 | `storage_provider` | String | Object-store backend: `"s3"`, `"gcs"`, `"azure"`, or `"auto"` |
 | `provider` | String | Optional auth provider hint |
-| `profile` | String | Provider-specific profile name (e.g. AWS profile) |
+
+AWS profile selection is machine-specific. Set it in `.crab/local.toml` with
+`crab config set auth.aws_profile <name>`, pass `crab configure --aws-profile
+<name>`, or use `AWS_PROFILE`.
 
 ## Precedence
 
 Configuration is resolved in this order (highest priority first):
 
 1. **CLI flags** — e.g. `--pattern`, `--eager`, `--mirror`
-2. **`.crab.toml`** — project-level defaults committed to the repo
+2. **`crab.toml`** — project-level defaults committed to the repo
 3. **Built-in defaults** — lazy hydration, auto-detection for patterns
 
-Example: if `.crab.toml` sets `default = "lazy"` but you run
+Example: if `crab.toml` sets `default = "lazy"` but you run
 `crab clone --eager`, the clone will hydrate everything.
 
-## `.crab.toml` vs `.crab/config.toml`
+## `crab.toml` vs `.crab/local.toml`
 
 These two files serve different purposes:
 
-| | `.crab.toml` | `.crab/config.toml` |
+| | `crab.toml` | `.crab/local.toml` |
 |---|---|---|
 | **Location** | Repo root | `.crab/` directory |
-| **Purpose** | User-facing project config | Internal state |
-| **Committed** | Yes (travels with repo) | No (in `.gitignore`) |
+| **Purpose** | Shared project policy | Machine-local settings |
+| **Committed** | Yes (travels with repo) | No (`.crab/` is added to `.git/info/exclude`) |
 | **Audience** | Collaborators | Crab internals |
-| **Contains** | Remote URL, patterns, hydration policy | Local cache paths, staging state, lock info |
-| **Edited by** | Users and `crab init` | Crab commands only |
+| **Contains** | Remote URL, patterns, hydration/prefetch/workflow policy | AWS profile, local cache paths, GC tuning |
+| **Edited by** | Users and Crab commands | Users and Crab commands |
 
-Think of `.crab.toml` as the "what should this repo do" declaration, and
-`.crab/config.toml` as the "what has this repo done locally" state.
+Think of `crab.toml` as the "what should this repo do" declaration, and
+`.crab/local.toml` as the "how this machine accesses and runs it" settings.
+Other uncommitted operational data—staging, caches, journals, and locks—also
+lives under `.crab/`. Staging can contain unpublished work and is not a
+throwaway cache.
+
+The retired `.crab.toml` filename is not read. Rename it to `crab.toml` and
+commit the rename before running Crab commands.
 
 ## How It's Used
 
@@ -152,19 +167,19 @@ Generated automatically with a `[remote]` section. If it already exists,
 
 ### By `crab init` (no URL, re-apply mode)
 
-Reads `.crab.toml` and re-applies the configuration: installs the git drivers,
+Reads `crab.toml` and re-applies the configuration: installs the git drivers,
 syncs `.gitattributes`, configures remotes, and installs mirror hooks if
 `[mirror]` is present.
 
 ### By the global git drivers
 
-When `crab install --global` is active and a repo has `.crab.toml` but no
-`.crab/config.toml`, the filter auto-configures from `.crab.toml` on first
+When `crab install --global` is active and a repo has `crab.toml` but no
+`.crab/local.toml`, the filter auto-configures from `crab.toml` on first
 activation. This makes "clone from GitHub → files just work" possible.
 
 ### By `crab clone`
 
-After cloning, reads `.crab.toml` to determine hydration behavior. If
+After cloning, reads `crab.toml` to determine hydration behavior. If
 `[hydrate]` specifies eager mode or auto-patterns, those files are hydrated
 automatically.
 
@@ -223,7 +238,7 @@ auto_patterns = ["*.py", "*.rs"]
 
 ## Related Commands
 
-- [`crab init`](init.md) — generates `.crab.toml`
+- [`crab init`](init.md) — generates `crab.toml`
 - [`crab doctor`](doctor.md) — validates configuration
 - [`crab adopt`](adopting-existing-repos.md) — uses `[track]` patterns
 - [`crab clone`](clone.md) — reads `[hydrate]` settings

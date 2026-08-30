@@ -26,8 +26,8 @@ This is the first command to run when something isn't working as expected.
 | Git repository | The current directory is inside a git repository |
 | Git drivers | `filter.crab.process`, `.required`, and `diff.crab.command` are configured in git config |
 | `.gitattributes` | At least one pattern with `filter=crab` exists |
-| Crab config | `.crab/config.toml` exists and is parseable |
-| Remote URL | `.crab/remote` contains a valid crab URL |
+| Crab config | `.crab/local.toml` exists and is parseable |
+| Remote URL | `crab.toml` contains a valid crab URL |
 | Credentials | AWS credentials are available and can authenticate to the configured bucket |
 | Staging area | `.crab/staging/` exists and is accessible |
 | Cache | The local cache directory exists |
@@ -50,7 +50,7 @@ crab doctor
   ✓ Git repository       /home/user/my-repo
   ✓ Git drivers          filter.crab.* and diff.crab.command configured
   ✓ .gitattributes       2 crab patterns found
-  ✓ Crab config        .crab/config.toml valid
+  ✓ Crab config        .crab/local.toml valid
   ✓ Remote URL           crab://my-bucket/my-repo
   ✓ Credentials          authenticated to my-bucket
   ⚠ Staging area         .crab/staging/ (12.3 MB)

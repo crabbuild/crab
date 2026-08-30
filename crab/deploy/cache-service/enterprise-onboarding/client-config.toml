@@ -1,7 +1,7 @@
 # Crab client cache-service config.
 #
-# Install into ~/.crab/config.toml for user-wide rollout, or into
-# <repo>/.crab/config.toml when one repository should opt in.
+# Install into ~/.crab/local.toml for user-wide rollout, or into
+# <repo>/.crab/local.toml when one repository should opt in.
 
 [cache]
 service_url = "https://crab-cache.example.com:8443"

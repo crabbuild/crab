@@ -128,7 +128,7 @@ crab-cache-server onboarding probe --bundle-dir . \
 
 ```bash
 install -d -m 0750 ~/.crab
-install -m 0640 client-config.toml ~/.crab/config.toml
+install -m 0640 client-config.toml ~/.crab/local.toml
 set -a
 . ./client.env
 set +a

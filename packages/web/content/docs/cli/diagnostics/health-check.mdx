@@ -20,8 +20,8 @@ meta:
 | Git repository | Current directory is inside a git repo |
 | Filter driver | `filter.crab.process`, `.clean`, `.smudge`, `.required` are configured |
 | `.gitattributes` | At least one pattern with `filter=crab` exists |
-| Crab config | `.crab/config.toml` exists and is parseable |
-| Remote URL | `.crab/remote` contains a valid crab URL |
+| Crab config | `.crab/local.toml` exists and is parseable |
+| Remote URL | `crab.toml` contains a valid crab URL |
 | Remote access | Can reach the bucket and open the repository layout |
 | Staging area | `.crab/staging/` exists and is accessible |
 | Cache | Local cache directory exists |
@@ -41,7 +41,7 @@ crab doctor
   ✓ Git repository       /home/user/my-repo
   ✓ Filter driver        filter.crab.process configured
   ✓ .gitattributes       2 crab patterns found
-  ✓ Crab config          .crab/config.toml valid
+  ✓ Crab config          .crab/local.toml valid
   ✓ Remote URL           crab://my-bucket/my-repo
   ✓ Remote access        bucket 'my-bucket' and repository 'my-repo' reachable
   ⚠ Staging area         .crab/staging/ (12.3 MB)

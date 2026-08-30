@@ -63,9 +63,9 @@ crab configure s3://my-bucket/my-project
 This command:
 
 1. Selects or infers S3, GCS, or Azure Blob Storage
-2. Finds credentials from environment variables or cloud SDK profiles and prints provider-specific setup help when none are available
+2. Finds credentials through the provider SDK chain; use `--aws-profile <name>` to select an AWS profile
 3. Runs `git init` if no Git repository exists
-4. Creates `.crab/` and `.crab.toml` with remote configuration
+4. Creates `.crab/` and `crab.toml` with remote configuration
 5. Registers the filter and diff drivers in `.git/config`
 6. Scans for large files and writes matching `.gitattributes` rules
 
@@ -86,9 +86,10 @@ Auto-tracked 3 extension(s) in .gitattributes
 | Created | Purpose |
 |---------|---------|
 | `.git/` | Git repository (created if missing) |
-| `.crab/remote` | Stores the remote bucket URL |
-| `.crab/config.toml` | Local configuration (concurrency, cache settings) |
-| `.crab/staging/` | Local staging area for chunks between add and push |
+| `crab.toml` | Committed remote, provider, tracking, hydration, prefetch, and workflow policy |
+| `.crab/local.toml` | Uncommitted machine settings such as an AWS profile selector and cache tuning |
+| `.crab/staging/` | Uncommitted chunks awaiting push; may contain the only unpublished copy |
+| `.crab/cache/` | Rebuildable local cache data |
 | `.git/config` changes | Registers the Crab filter driver |
 | `.gitattributes` | Tracking rules for large file extensions (auto-generated) |
 
@@ -143,7 +144,7 @@ provider flag (`--provider` for `configure`, `--storage-provider` for `init`). P
 canonical `crab://` Git remote. For an unprefixed `crab://` URL, set the
 provider explicitly when it is not S3:
 
-```toml title=".crab/config.toml"
+```toml title=".crab/local.toml"
 [auth]
 storage_provider = "gcs"   # "s3" | "gcs" | "azure" | "auto"
 ```

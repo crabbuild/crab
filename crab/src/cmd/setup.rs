@@ -2,7 +2,7 @@
 //!
 //! This is the "conversion" step that `crab init` deliberately defers.
 //! `crab init` only wires up the remote; `crab setup` scans the working
-//! tree, auto-tracks large files, updates `.crab.toml`, and installs the
+//! tree, auto-tracks large files, updates `crab.toml`, and installs the
 //! filter driver so git invokes the crab clean/smudge pipeline.
 //!
 //! # Enterprise hardening
@@ -106,12 +106,12 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
         });
     }
 
-    // .crab.toml must exist (created by `crab init`).
-    let project_config_path = root.join(".crab.toml");
+    // crab.toml must exist (created by `crab init`).
+    let project_config_path = root.join("crab.toml");
     if !project_config_path.exists() {
         return Err(CrabError::Configuration {
-            key: ".crab.toml".into(),
-            origin: "Missing .crab.toml — run `crab init <url>` first.".into(),
+            key: "crab.toml".into(),
+            origin: "Missing crab.toml — run `crab init <url>` first.".into(),
         });
     }
 
@@ -194,7 +194,7 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
 
     check_cancelled(cancel)?;
 
-    // ---- Step 3: Update .crab.toml ----
+    // ---- Step 3: Update crab.toml ----
     if !tracked_patterns.is_empty() {
         if !args.dry_run {
             let mut config = ProjectConfig::load(&project_config_path)?;
@@ -210,7 +210,7 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
             eprintln!(
                 "{}",
                 style.ok(&format!(
-                    "Updated .crab.toml with {} track pattern(s)",
+                    "Updated crab.toml with {} track pattern(s)",
                     tracked_patterns.len()
                 ))
             );
@@ -226,7 +226,7 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
         if root.join(".gitattributes").exists() {
             paths.push(".gitattributes");
         }
-        paths.push(".crab.toml");
+        paths.push("crab.toml");
         crate::git::index::stage_paths(root, &paths)?;
     }
 

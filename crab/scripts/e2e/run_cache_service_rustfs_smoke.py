@@ -4210,7 +4210,7 @@ class CacheServiceRustfsSmoke:
         self.configure_repo_cache_service(repo, env=env)
         self.run_cmd("cli source crab track", [self.crab_bin, "track", "*.bin"], repo, env=env)
         tracked_config = [
-            name for name in (".crab.toml", ".gitattributes") if (repo / name).exists()
+            name for name in ("crab.toml", ".gitattributes") if (repo / name).exists()
         ]
         if tracked_config:
             self.run_cmd(
@@ -4332,7 +4332,7 @@ class CacheServiceRustfsSmoke:
         self.configure_repo_cache_service(repo, env=env)
         self.run_cmd("cli dedup crab track", [self.crab_bin, "track", "*.bin"], repo, env=env)
         tracked_config = [
-            name for name in (".crab.toml", ".gitattributes") if (repo / name).exists()
+            name for name in ("crab.toml", ".gitattributes") if (repo / name).exists()
         ]
         if tracked_config:
             self.run_cmd(

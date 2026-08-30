@@ -125,12 +125,12 @@ Crab accepts provider-prefixed URLs during setup, then records a canonical `crab
 
 | Backend | Configure with | Common credential sources |
 | --- | --- | --- |
-| Amazon S3 | `crab configure s3://bucket/repository` | Web identity, ECS or EC2 role, access-key environment variables |
+| Amazon S3 | `crab configure s3://bucket/repository` | AWS shared profiles/SSO, web identity, ECS or EC2 role, access-key environment variables |
 | S3-compatible storage | `crab configure crab://bucket/repository --provider s3` | Access-key environment variables and `AWS_ENDPOINT_URL` |
 | Google Cloud Storage | `crab configure gs://bucket/repository` | Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS` |
 | Azure Blob Storage | `crab configure azure://container/repository` | Workload or managed identity, connection string, account key, Shared Access Signature (SAS) credentials |
 
-Never commit cloud credentials or place secret values in `.crab.toml`. Read the [authentication guide](https://crab.build/docs/cli/authentication/configuration) for provider-specific setup.
+Never commit cloud credentials or place secret values in `crab.toml`. Read the [authentication guide](https://crab.build/docs/cli/authentication/configuration) for provider-specific setup.
 
 ## Build from source
 
@@ -170,7 +170,7 @@ crab hydrate --all
 ~~~
 
 Hydration can also use a newline-delimited manifest, a manifest stored in a
-Git ref, or a named profile in `.crab/prefetch.toml`:
+Git ref, or a named profile in `crab.toml`:
 
 ~~~bash
 crab hydrate --manifest .crab/manifests/ci.txt
@@ -255,7 +255,7 @@ and a force push. Use `--dry-run` first and read
 
 ## Project configuration
 
-`.crab.toml` is the repository-committed project configuration. It tells
+`crab.toml` is the repository-committed project configuration. It tells
 collaborators which Crab remote and storage provider to use and can declare
 tracking and hydration policy:
 
@@ -274,30 +274,30 @@ default = "lazy"
 auto_patterns = ["README*", "*.toml", "src/**/*.rs"]
 ~~~
 
-The local `.crab/config.toml` stores machine-specific state such as local
-cache, staging, and operational settings. It should not be committed.
+The local `.crab/local.toml` stores machine-specific settings such as an AWS
+profile selector, cache paths, and operational tuning. It should not be
+committed. Staging, caches, journals, and locks live elsewhere under `.crab/`;
+staging may contain unpublished data and is not a disposable cache.
 
 Useful configuration commands:
 
 ~~~bash
 crab config get auth.storage_provider
 crab config set auth.storage_provider gcs
+crab config set auth.aws_profile ml-team
 crab config set checkout.lazy true
 crab config set hydrate.include '*.safetensors'
 ~~~
 
-For teams that want named hydration sets, commit a
-`.crab/prefetch.toml` file:
+For teams that want named hydration sets, add them to `crab.toml`:
 
 ~~~toml
 version = 1
 
-[[profile]]
-name = "always"
+[prefetch.profiles.always]
 paths = ["README.md", "*.toml", "src/**/*.rs"]
 
-[[profile]]
-name = "ci"
+[prefetch.profiles.ci]
 paths = ["tests/fixtures/**", "scripts/**"]
 ~~~
 

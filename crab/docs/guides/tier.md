@@ -99,7 +99,7 @@ former.
 
 ## Configuration
 
-All tiering settings live under the `[tier]` section in `.crab/config.toml`.
+All tiering settings live under the `[tier]` section in `.crab/local.toml`.
 Every field has a sensible default; an absent `[tier]` block means defaults
 apply. An unreadable or invalid Crab configuration is an error; maintenance
 does not silently substitute defaults.

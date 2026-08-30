@@ -344,7 +344,7 @@ pub struct SplitArgs {
     pub keep: bool,
 
     /// Also flip `[workflow] lockfile = "split"` in the repo
-    /// `.crab/config.toml` so subsequent `crab run` invocations
+    /// `.crab/local.toml` so subsequent `crab run` invocations
     /// use the new layout automatically.
     #[arg(long, default_value_t = false)]
     pub update_config: bool,
@@ -449,7 +449,7 @@ pub fn split_in(args: &SplitArgs, repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Flip `[workflow] lockfile = "split"` in `.crab/config.toml`.
+/// Flip `[workflow] lockfile = "split"` in `.crab/local.toml`.
 ///
 /// Idempotent: if the key already holds `"split"` the file isn't
 /// rewritten. Preserves surrounding comments and formatting — we
@@ -462,7 +462,7 @@ pub fn split_in(args: &SplitArgs, repo_root: &Path) -> Result<()> {
 ///    key as the first line of the table.
 /// 3. `lockfile =` already present → rewrite the value to `"split"`.
 fn update_config_to_split(repo_root: &Path) -> Result<()> {
-    let config_path = repo_root.join(".crab").join("config.toml");
+    let config_path = repo_root.join(".crab").join("local.toml");
     let existing = match std::fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),

@@ -199,7 +199,7 @@ pub(crate) async fn build_remote_store_for(
     cancel: &CancellationToken,
 ) -> Result<(WorkflowStore, String)> {
     check_cancelled(cancel)?;
-    // Read the crab remote URL from git's remote configuration.
+    // Read the project remote, or an explicitly selected Git remote.
     let url_str = read_crab_remote_url_for(repo_root, remote_name)?;
     let crab_url = CrabUrl::parse(&url_str)?;
     let prefix = crab_url.repo_path.clone();
@@ -261,19 +261,17 @@ pub(crate) async fn build_workflow_artifact_stores(
     stores
 }
 
-/// Read the crab:// remote URL from git config.
+/// Read the canonical repository URL from `crab.toml`.
 pub fn read_crab_remote_url(repo_root: &Path) -> Result<String> {
     read_crab_remote_url_for(repo_root, None)
 }
 
-/// Read a named crab:// remote URL from git config.
+/// Read the project URL, or an explicitly named Crab Git remote.
 pub fn read_crab_remote_url_for(repo_root: &Path, remote_name: Option<&str>) -> Result<String> {
-    let remote_name = remote_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("origin");
+    let Some(remote_name) = remote_name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return crate::core::project_config::ProjectConfig::remote_url(repo_root);
+    };
 
-    // Try reading from the selected git remote first.
     let mut command = std::process::Command::new("git");
     command
         .args(["remote", "get-url", remote_name])
@@ -295,27 +293,8 @@ pub fn read_crab_remote_url_for(repo_root: &Path, remote_name: Option<&str>) -> 
         }
     }
 
-    // Fall back to .crab/config if present.
-    let config_path = repo_root.join(".crab").join("config");
-    if config_path.exists() {
-        let text = std::fs::read_to_string(&config_path).map_err(CrabError::Io)?;
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("url") {
-                let val = val
-                    .trim_start_matches(|c: char| c == ' ' || c == '=')
-                    .trim();
-                if val.starts_with("crab://") {
-                    return Ok(val.to_owned());
-                }
-            }
-        }
-    }
-
     Err(CrabError::Configuration {
-        key: format!(
-            "no crab:// remote URL found; configure with `crab init` or set git remote {remote_name}"
-        ),
+        key: format!("Git remote {remote_name} is not configured with a crab:// URL"),
         origin: "workflow remote cache".into(),
     })
 }

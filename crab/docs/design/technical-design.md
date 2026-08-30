@@ -1206,11 +1206,11 @@ For repos where this is too large, crab uses the on-disk SQLite-backed `Persiste
 The simplest form of global dedup: multiple repos share an `xet/` prefix in the same bucket.
 
 ```toml
-# .crab/config in repo A
+# .crab/local.toml in repo A
 [dedup]
 xet_prefix = "shared-xet"  # overrides default xet/
 
-# .crab/config in repo B
+# .crab/local.toml in repo B
 [dedup]
 xet_prefix = "shared-xet"
 ```
@@ -1307,10 +1307,10 @@ crab uses cloud-native authentication exclusively. No custom usernames, password
 |Azure     |Entra ID, managed identity                          |
 |R2 / MinIO|S3-compatible access key pair                       |
 
-Credentials are discovered by `object_store`'s provider chain. The current S3
-provider supports environment credentials, web identity, ECS task credentials,
-and EC2 instance metadata; it does not read shared AWS profiles or credential
-files.
+S3 credentials are discovered through the AWS SDK default chain, including
+environment variables, shared config and credentials profiles, AWS SSO, web
+identity, ECS task credentials, and EC2 instance metadata. Crab adapts the
+refreshable SDK provider into the object-store client.
 
 For human users who don’t already have cloud credentials: crab documents how to set up short-lived STS tokens via SSO providers (AWS IAM Identity Center, Google Workload Identity, etc.). Writing yet-another-auth system is explicitly non-goals.
 
@@ -1686,7 +1686,7 @@ Each repo has a `config` object in its S3 bucket (§5.1). It is read on every co
 
 ### 15.3 Local Configuration
 
-`~/.config/crab/config.toml` per-user, `.crab/config.toml` per-repo (checked into git alongside `.gitattributes`).
+`~/.config/crab/config.toml` per-user, `.crab/local.toml` per-repo (checked into git alongside `.gitattributes`).
 
 ```toml
 [cache]

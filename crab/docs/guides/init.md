@@ -50,7 +50,7 @@ crab://<bucket>/<repo-path>
 
 Use the `crab://` scheme for Git remotes. `crab init` also accepts
 provider-prefixed repository URLs and normalizes them to `crab://` in local
-config, `.crab.toml`, and the Git remote:
+config, `crab.toml`, and the Git remote:
 
 ```bash
 crab init s3://my-s3-bucket/my-repo
@@ -86,7 +86,7 @@ crab init --gc-list-profile adaptive crab://my-bucket/my-repo
 switches to parallel hash partitions after a bounded provider-aware probe.
 `cost` always minimizes LIST streams. `latency` immediately scans populated
 partitions concurrently. This preference is stored only in
-`.crab/config.toml`; it does not alter the bucket-global object layout and can
+`.crab/local.toml`; it does not alter the bucket-global object layout and can
 safely differ between operators.
 
 For Azure, the URL host is the Blob container; the storage account comes from
@@ -97,8 +97,8 @@ Azure credentials, user config, or environment variables.
 1. Runs `git init` if no `.git` directory exists.
 2. Validates the provided URL.
 3. Creates the `.crab/` directory in the repository root.
-4. Writes the remote URL to `.crab/remote`.
-5. Creates `.crab/config.toml` with `[remote]` and optional `[auth]` sections.
+4. Writes the remote URL to `crab.toml`.
+5. Creates `.crab/local.toml` for machine-specific settings.
 6. Registers the crab git drivers in the local `.git/config`:
    - `filter.crab.process` — the long-running filter process command.
    - `filter.crab.clean` — the clean filter fallback.
@@ -181,10 +181,10 @@ automatically.
 | File | Purpose |
 |------|---------|
 | `.git/` | Git repository (created if missing) |
-| `.crab/remote` | Stores the remote URL |
-| `.crab/config.toml` | Local crab configuration |
+| `crab.toml` | Stores the remote URL |
+| `.crab/local.toml` | Local crab configuration |
 | `.git/config` (modified) | Filter and diff driver registration |
-| `.crab.toml` | Committed project configuration |
+| `crab.toml` | Committed project configuration |
 
 ## Related Commands
 

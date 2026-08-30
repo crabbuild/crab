@@ -31,7 +31,7 @@ When you fetch, Crab:
 3. Checks each object against the local cache — already-cached objects are skipped.
 4. Downloads missing objects and writes them to the cache directory.
 
-The local cache lives at `~/.cache/crab/` by default (configurable via `$CRAB_CACHE_DIR` or `.crab/config.toml`).
+The local cache lives at `~/.cache/crab/` by default (configurable via `$CRAB_CACHE_DIR` or `.crab/local.toml`).
 
 ## Selective Fetching
 
@@ -79,7 +79,7 @@ The fetch cache persists across operations and repositories. Over time it can gr
 - `crab prune` — Evict oldest cache objects until cache budgets are satisfied
 - `crab cache clean` — Clear the entire cache
 
-You can also set a maximum cache size in `.crab/config.toml`:
+You can also set a maximum cache size in `.crab/local.toml`:
 
 ```toml
 [cache]

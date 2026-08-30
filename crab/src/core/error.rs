@@ -4811,7 +4811,7 @@ mod tests {
             },
             CrabError::Configuration {
                 key: "remote".into(),
-                origin: ".crab.toml".into(),
+                origin: "crab.toml".into(),
             },
         ];
 

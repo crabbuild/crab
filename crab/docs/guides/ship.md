@@ -40,7 +40,7 @@ Uses the native `crab push` pipeline for concurrent xorb uploads rather than
 
 1. Runs `crab add <patterns>` (parallel chunking + dedup + staging).
 2. Publishes auto-generated `.gitattributes` rules in the same locked Git-index
-   update as the pointers, then checked-stages `.gitattributes` and `.crab.toml`.
+   update as the pointers, then checked-stages `.gitattributes` and `crab.toml`.
    If Git rejects metadata staging, ship stops before committing.
 3. Runs `git commit -m <message>`.
 4. Runs `crab push <remote>` (native concurrent push pipeline).

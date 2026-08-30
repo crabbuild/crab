@@ -275,17 +275,13 @@ fn resolve_cache_dir() -> PathBuf {
     crate::cache::default_cache_root()
 }
 
-/// Read the remote URL from `.crab/remote` (best-effort).
+/// Read the remote URL from `crab.toml` (best-effort).
 fn read_remote_url(root: &Path) -> Option<String> {
-    let path = crate::git::worktree::WorktreeContext::resolve_from_path(root).map_or_else(
-        |_| root.join(".crab").join("remote"),
-        |ctx| ctx.shared_crab_dir.join("remote"),
-    );
-
-    std::fs::read_to_string(path)
+    crate::core::project_config::ProjectConfig::load_for_repo(root)
         .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+        .flatten()
+        .map(|config| config.remote.url)
+        .filter(|url| !url.trim().is_empty())
 }
 
 /// Query the remote for total storage size.
@@ -511,8 +507,13 @@ mod tests {
             .status();
 
         std::fs::write(root.join("README.md"), b"initial").unwrap();
+        std::fs::write(
+            root.join("crab.toml"),
+            b"[remote]\nurl = \"crab://bucket/worktree-du\"\n",
+        )
+        .unwrap();
         let _ = std::process::Command::new("git")
-            .args(["add", "README.md"])
+            .args(["add", "README.md", "crab.toml"])
             .current_dir(&root)
             .status();
         let committed = std::process::Command::new("git")
@@ -538,13 +539,6 @@ mod tests {
         if added.is_err() || !added.unwrap().success() {
             return;
         }
-        std::fs::create_dir_all(root.join(".crab")).unwrap();
-        std::fs::write(
-            root.join(".crab").join("remote"),
-            b"crab://bucket/worktree-du\n",
-        )
-        .unwrap();
-
         let (staging_path, git_dir_path) = resolve_repository_usage_paths(&linked);
         let root = root.canonicalize().unwrap();
 

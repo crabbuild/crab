@@ -89,6 +89,7 @@ gix-worktree = "0.52.0"
 gix-worktree-state = "0.30.0"
 
 aws-config = "1"
+aws-credential-types = "1"
 aws-sdk-dynamodb = "1"
 aws-sdk-iam = "1"
 aws-sdk-s3 = "1"

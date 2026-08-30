@@ -37,7 +37,7 @@ pub use provider_options::{
 pub use provider_store::{
     AzureAuthorization, BuiltObjectStore, ObjectStoreCredentials, StaticEnvStoreTarget,
     StaticEnvStoreTargetSelection, StaticEnvStoreUrlForm, StaticEnvStoreUrlParts, UrlObjectStore,
-    build_object_store, build_object_store_with_endpoint,
+    build_object_store, build_object_store_with_endpoint, build_s3_object_store_with_provider,
     build_static_env_azure_account_container_store, build_static_env_store,
     build_static_env_target_store, build_url_object_store, resolve_static_env_provider,
     resolve_static_env_provider_value, static_env_target_selection,

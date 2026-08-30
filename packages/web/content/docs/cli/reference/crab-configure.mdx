@@ -31,7 +31,7 @@ crab configure [REMOTE] [OPTIONS]
 5. Scans for large files and writes tracking rules
 6. Prints the next commands to verify and ship the repository
 
-Crab never copies long-lived cloud secrets into `.crab.toml`. When credentials
+Crab never copies long-lived cloud secrets into `crab.toml`. When credentials
 are missing, the setup output gives the provider-specific login command; run
 `crab doctor` afterward to verify access.
 
@@ -66,6 +66,16 @@ Provider-prefixed URLs let Crab infer the provider, so `--provider` is optional
 in those examples. Use it with a canonical `crab://` URL when the provider is
 not S3.
 
+Select a named AWS profile without committing the profile name:
+
+```bash
+crab configure s3://team-data/models --aws-profile ml-team
+```
+
+Crab stores the selector in `.crab/local.toml` and uses the AWS SDK default
+credential chain. Without the flag it honors `AWS_PROFILE`, then shared AWS
+configuration, web identity, ECS credentials, and EC2 instance credentials.
+
 Choose the local bucket-GC listing policy during setup when desired:
 
 ```bash
@@ -92,7 +102,7 @@ Install the integration without scanning:
 crab configure s3://team-data/models --no-auto-track
 ```
 
-Preview the plan without creating `.git`, `.crab/`, `.crab.toml`, or tracking
+Preview the plan without creating `.git`, `.crab/`, `crab.toml`, or tracking
 rules:
 
 ```bash
@@ -101,7 +111,7 @@ crab configure s3://team-data/models --provider s3 --dry-run
 
 ## Existing project configuration
 
-With no `REMOTE`, `crab configure` reuses a discovered `.crab.toml`. This is a
+With no `REMOTE`, `crab configure` reuses a discovered `crab.toml`. This is a
 convenient way to repair local Git integration and refresh tracking after a
 regular Git clone.
 

@@ -9,13 +9,17 @@ meta:
 
 ## Crab's Configuration System
 
-Every Crab repository has a local configuration file at `.crab/config.toml` that controls behavior like lazy checkout, hydration patterns, download concurrency, and storage tier policies. This file is separate from git's own config and manages Crab-specific settings.
+Crab separates shared project policy from machine-specific settings.
+`crab.toml` is committed at the repository root; `.crab/local.toml` is local
+and must not be committed.
 
 ```mermaid
 flowchart TD
-    Default[Built-in Defaults] --> Env[Environment Variables]
-    Env --> Local[".crab/config.toml"]
-    Local --> CLI[CLI Flags]
+    Default[Built-in Defaults] --> User["User config"]
+    User --> Local[".crab/local.toml"]
+    Local --> Project["crab.toml"]
+    Project --> Env[Environment Variables]
+    Env --> CLI[CLI Flags]
     CLI --> Effective[Effective Value]
 ```
 
@@ -26,13 +30,16 @@ When Crab resolves a configuration value, it checks sources in priority order. H
 | Priority | Source | Example |
 |----------|--------|---------|
 | Highest | CLI flags | `--log-level debug` |
-| | Local config | `.crab/config.toml` |
 | | Environment variables | `CRAB_LOG=debug` |
+| | Project config | `crab.toml` |
+| | Local config | `.crab/local.toml` |
+| | User config | `~/.config/crab/config.toml` |
 | Lowest | Built-in defaults | Sensible out-of-the-box values |
 
 ## Reading and Writing Config
 
-Use `crab config get` and `crab config set` to interact with the local config file:
+Use `crab config get` and `crab config set`; Crab routes each supported key to
+the correct file:
 
 ```bash
 # Read a value
@@ -51,11 +58,14 @@ Keys use dotted notation: `<section>.<key>`. Missing keys return no output (exit
 
 ## Config File Format
 
-The file uses TOML and lives at `.crab/config.toml` in your repository root:
+The file uses TOML and lives at `.crab/local.toml` in your repository root:
 
 ```toml
 [checkout]
 lazy = true
+
+[auth]
+aws_profile = "ml-team"
 
 [hydrate]
 include = ["*.safetensors", "*.bin"]
@@ -126,7 +136,10 @@ crab config get checkout.lazy --json
 }
 ```
 
-The `source` field indicates the origin: `"default"`, `"env"`, `"local"`, or `"remote"`.
+The `source` field indicates the origin: `"default"`, `"env"`, `"local"`, or `"project"`.
+
+The retired `.crab.toml` filename is not read. Rename it to `crab.toml` and
+commit the rename.
 
 ## CLI Reference
 

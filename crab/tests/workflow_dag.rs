@@ -177,7 +177,7 @@ fn fails_when_workflow_disabled() {
     .unwrap();
     fs::create_dir_all(tmp.path().join(".crab")).unwrap();
     fs::write(
-        tmp.path().join(".crab/config.toml"),
+        tmp.path().join(".crab/local.toml"),
         "[workflow]\nenabled = false\n",
     )
     .unwrap();

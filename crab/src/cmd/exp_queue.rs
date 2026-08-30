@@ -1597,7 +1597,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join(".crab")).unwrap();
         std::fs::write(
-            root.join(".crab/config.toml"),
+            root.join(".crab/local.toml"),
             "[workflow]\nenabled = true\n",
         )
         .unwrap();
@@ -1631,7 +1631,7 @@ mod tests {
 
         std::fs::create_dir_all(root.join(".crab")).unwrap();
         std::fs::write(
-            root.join(".crab/config.toml"),
+            root.join(".crab/local.toml"),
             "[workflow]\nenabled = true\n",
         )
         .unwrap();
@@ -1648,7 +1648,7 @@ mod tests {
             ),
         )
         .unwrap();
-        run_git(root, &["add", ".crab/config.toml", "crab.yaml"]);
+        run_git(root, &["add", ".crab/local.toml", "crab.yaml"]);
         run_git(root, &["commit", "-m", "initial workflow"]);
         std::fs::write(root.join("secret.txt"), "queued\n").unwrap();
     }

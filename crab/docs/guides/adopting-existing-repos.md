@@ -69,7 +69,7 @@ crab ship -m "adopt large files into crab"
 `crab adopt` determines which files to convert using this priority:
 
 1. **Explicit `--pattern` flags**: `crab adopt --pattern "*.bin" --pattern "datasets/**"`
-2. **`.crab.toml` `[track]` section**: if no flags provided, reads patterns from config
+2. **`crab.toml` `[track]` section**: if no flags provided, reads patterns from config
 3. **Auto-detection**: if no config either, scans for files >1 MiB and well-known binary extensions
 
 ## HEAD-Only Mode (Default)
@@ -136,17 +136,17 @@ coordinate a re-clone, or for repos that haven't been shared yet.
 crab adopt --pattern "*.safetensors" --pattern "*.bin"
 ```
 
-### Adopt using `.crab.toml` patterns
+### Adopt using `crab.toml` patterns
 
 ```bash
-# .crab.toml has [track] patterns = ["*.bin", "datasets/**"]
+# crab.toml has [track] patterns = ["*.bin", "datasets/**"]
 crab adopt
 ```
 
 ### Adopt with auto-detection
 
 ```bash
-# No patterns specified, no .crab.toml — scans for large files
+# No patterns specified, no crab.toml — scans for large files
 crab adopt
 ```
 
@@ -183,7 +183,7 @@ git diff --cached --stat
 crab ship -m "migrate large files to crab"
 
 # 6. Tell collaborators to re-init
-# They run: crab init (reads .crab.toml, sets up filter)
+# They run: crab init (reads crab.toml, sets up filter)
 ```
 
 ## Related

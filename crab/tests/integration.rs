@@ -42,15 +42,15 @@ async fn happy_path_init_track_clean_pointer_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let cancel = CancellationToken::new();
 
-    // Step 1: init — creates .crab/config.toml
+    // Step 1: init — creates .crab/local.toml
     crab::cmd::init::run_init_in("crab://test-bucket/test-repo", dir.path(), &cancel)
         .await
         .expect("init should succeed");
 
-    let config_path = dir.path().join(".crab/config.toml");
+    let config_path = dir.path().join(".crab/local.toml");
     assert!(
         config_path.exists(),
-        ".crab/config.toml must exist after init"
+        ".crab/local.toml must exist after init"
     );
     let config_content = std::fs::read_to_string(&config_path).unwrap();
     assert!(
@@ -111,7 +111,7 @@ async fn init_idempotent_updates_config() {
         .await
         .unwrap();
 
-    let content = std::fs::read_to_string(dir.path().join(".crab/config.toml")).unwrap();
+    let content = std::fs::read_to_string(dir.path().join(".crab/local.toml")).unwrap();
     assert!(content.contains("crab://bucket/v2"));
 }
 

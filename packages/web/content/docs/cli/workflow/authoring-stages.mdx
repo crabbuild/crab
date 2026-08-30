@@ -229,8 +229,9 @@ stages:
       - models/model.pkl
 ```
 
-For object-store outputs, configure workflow remotes in `.crab/config.toml` and
-use them consistently across stages. Keep credentials out of committed files.
+For object-store outputs, configure workflow remotes in committed `crab.toml`
+and use them consistently across stages. Keep credentials and machine-specific
+profile names in `.crab/local.toml` or the provider SDK.
 
 ## Validate Before Running
 

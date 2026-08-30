@@ -138,7 +138,7 @@ pub struct HydrateArgs {
     pub manifest: Option<String>,
     /// Git ref to read the manifest from (e.g. `HEAD:.crab/manifests/ci.txt`).
     pub manifest_ref: Option<String>,
-    /// Named prefetch profile from `.crab/prefetch.toml`.
+    /// Named prefetch profile from `crab.toml`.
     pub profile: Option<String>,
     /// Ignore sparse-checkout config during hydrate.
     ///
@@ -4297,7 +4297,7 @@ fn is_safe_repo_relative_path(path: &Path) -> bool {
 ///
 /// `--manifest <path>` reads from a file (or stdin when `path` is `-`).
 /// `--manifest-ref <ref>` reads from a Git ref via `git show <ref>`.
-/// `--profile <name>` loads the named profile from `.crab/prefetch.toml`.
+/// `--profile <name>` loads the named profile from `crab.toml`.
 fn resolve_manifest(
     args: &HydrateArgs,
     root: &Path,
@@ -4468,7 +4468,7 @@ fn print_help() {
     eprintln!("  crab hydrate --manifest-ref HEAD:.crab/manifests/ci.txt");
     eprintln!("  crab hydrate --profile ci");
     eprintln!();
-    eprintln!("Or set persistent patterns in .crab/config.toml:");
+    eprintln!("Or set persistent patterns in .crab/local.toml:");
     eprintln!("  [hydrate]");
     eprintln!("  include = [\"models/current/**\"]");
     eprintln!("  exclude = [\"models/current/archive/**\"]");
@@ -6820,11 +6820,9 @@ mod tests {
     #[test]
     fn resolve_manifest_profile_returns_glob_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
         std::fs::write(
-            crab_dir.join("prefetch.toml"),
-            "version = 1\n\n[[profile]]\nname = \"ci\"\npaths = [\"tests/**\", \"*.toml\"]\n",
+            dir.path().join("crab.toml"),
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.ci]\npaths = [\"tests/**\", \"*.toml\"]\n",
         )
         .unwrap();
 
@@ -6847,11 +6845,9 @@ mod tests {
     #[test]
     fn resolve_manifest_profile_not_found_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let crab_dir = dir.path().join(".crab");
-        std::fs::create_dir_all(&crab_dir).unwrap();
         std::fs::write(
-            crab_dir.join("prefetch.toml"),
-            "version = 1\n\n[[profile]]\nname = \"always\"\npaths = [\"*.md\"]\n",
+            dir.path().join("crab.toml"),
+            "version = 1\n\n[remote]\nurl = \"crab://bucket/repo\"\n\n[prefetch.profiles.always]\npaths = [\"*.md\"]\n",
         )
         .unwrap();
 
@@ -6874,7 +6870,7 @@ mod tests {
     #[test]
     fn resolve_manifest_profile_missing_toml_errors() {
         let dir = tempfile::tempdir().unwrap();
-        // No .crab/prefetch.toml — load_prefetch returns empty config,
+        // No crab.toml — load_prefetch returns empty config,
         // so the profile lookup should fail with PrefetchProfileNotFound.
         let args = HydrateArgs {
             profile: Some("ci".to_string()),

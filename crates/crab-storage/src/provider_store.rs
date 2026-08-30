@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use object_store::aws::{AmazonS3, AmazonS3Builder, S3CopyIfNotExists};
+use object_store::aws::{AmazonS3, AmazonS3Builder, AwsCredentialProvider, S3CopyIfNotExists};
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
 use object_store::path::Path;
@@ -289,6 +289,20 @@ pub fn build_object_store(
     credentials: ObjectStoreCredentials,
 ) -> Result<BuiltObjectStore> {
     build_object_store_inner(bucket, credentials, None, true)
+}
+
+/// Builds an S3 object store with a caller-supplied refreshable credential provider.
+pub fn build_s3_object_store_with_provider(
+    bucket: &str,
+    region: &str,
+    credentials: AwsCredentialProvider,
+) -> Result<BuiltObjectStore> {
+    let builder = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_region(region)
+        .with_credentials(credentials)
+        .with_client_options(default_client_options());
+    build_s3_object_store(bucket, builder, None, true)
 }
 
 /// Builds an object-store backend with an optional grant-pinned endpoint.

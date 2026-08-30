@@ -639,7 +639,7 @@ crab config set workflow.discover recursive
 which writes:
 
 ```toml
-# .crab/config.toml
+# .crab/local.toml
 [workflow]
 enabled = true
 discover = "recursive"
@@ -726,7 +726,7 @@ crab workflow lockfile split --update-config
 ```
 
 `--update-config` appends (or edits) `[workflow] lockfile = "split"`
-in `.crab/config.toml` so the next `crab run` uses the new layout
+in `.crab/local.toml` so the next `crab run` uses the new layout
 automatically. Without `--update-config`, the split files are written
 but subsequent runs stay on `single` mode and will recreate
 `crab.lock` alongside the new per-file lockfiles — the `--keep`
@@ -1211,7 +1211,7 @@ Options:
 |--------|-------------|
 | `--dry-run` | Print the partition plan and exit. No files written. |
 | `--keep` | Preserve `crab.lock` after writing the split files. Useful for mixed repos where some stages live in `crab.yaml`. |
-| `--update-config` | Also set `[workflow] lockfile = "split"` in `.crab/config.toml` so subsequent runs use the new layout automatically. |
+| `--update-config` | Also set `[workflow] lockfile = "split"` in `.crab/local.toml` so subsequent runs use the new layout automatically. |
 | `--json` | Emit the `workflow.lockfile_split` envelope instead of text. |
 
 Runs succeed idempotently: if every partition is empty (no stages have
@@ -1561,7 +1561,7 @@ Behavior:
    or small fixtures that are needed by a stage but should not be committed.
 3. Compose Hydra config groups into `params.yaml` when
    `crab config set hydra.enabled true` has enabled `[hydra]` in
-   `.crab/config.toml`.
+   `.crab/local.toml`.
 4. Apply `--set-param` overrides, or the shorter `--set` alias, by
    writing them to the tmpdir's params files on disk. Overrides
    participate in `stage_hash` exactly as on-disk params would — no
@@ -1962,7 +1962,7 @@ It was a cache hit. Either:
 
 - **Stage count**: default cap 10 000 outs per stage
   (`max_outs_per_stage`), 1 TiB per out (`max_out_bytes`). Override in
-  `.crab/config.toml` under `[workflow]`.
+  `.crab/local.toml` under `[workflow]`.
 - **Symlinks/FIFOs/devices**: rejected as deps and outs with
   `StageDepMalformed` / `StageOutMalformed`. Regular files and
   directories only.
