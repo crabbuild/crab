@@ -1337,8 +1337,32 @@ pack SHA-1, Blake3 storage identity, index and reverse-index checksums, and
 exact selected object set; it also computes SHA-1 and Blake3 in one streaming
 read instead of reading the entire response twice. Durable maintenance output
 continues to use the deep object traversal.
-A new RustFS producer run from `4d2b956d` is still required before claiming an
-end-to-end latency reduction from this microqualification.
+A current-head RustFS qualification, `codex-7419fe11-k8s-producer100-single-20260830`,
+now exercises the same path against Kubernetes revision
+`e72c2715ade37738aa5c029e8de5285cbe1c9441`. It completed 101 pushes, all 21
+declared smoke checks, full/filtered/shallow/incremental clone correctness,
+source immutability, and exact-prefix cleanup; the standalone verifier passes
+with `--allow-smoke` and reports fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+current `7419fe11` release binary has SHA-256
+`d15744440a7cfdb7d8b4cd5b1f1a02a63933695637733bb1334b2ebc202f4cfb`.
+
+At checkpoint 100, the active inventory remained two packs (1,279,007,682
+bytes of physical pack data; 103 historical immutable packs remained in the
+store for retention/GC). The cold full response selected 1,646,244 objects,
+downloaded two committed packs plus sidecars in 12,688 ms, and generated a
+1,244,255,615-byte response in 36,036 ms; the prior diagnostic generated a
+similar response in 68,062 ms. The depth-100 response selected 966,820 objects
+and took 54,677 ms to generate 747,286,081 bytes, making it the next measured
+pack-shape/producer target. Warm full-clone generation was a cache hit with
+1,986 ms of server operation time, while its 1.24-GB transfer still dominated
+the client wall time. Owner convergence at checkpoint 100 took 175,786 ms and
+peaked at 1,590,673,408 bytes of child RSS, so maintenance remains a separate
+large-repository bottleneck.
+
+This is valid current-head single-client smoke evidence, not a team SLO: it
+does not include the verifier's 100-client fanout, provider matrix, injected
+faults, or sustained rollout window.
 
 The producer patch removes the source-side index bottleneck rather than
 changing pack shape blindly. Large producers now download the committed pack
@@ -2269,20 +2293,28 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT DENSE/FANOUT CORRECTNESS PASS; SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db` | The current meaningful replay ends with 2 active packs. One native shallow producer selected 1,613,477 objects in 133,907 ms, while 99 callers coalesced; 96 exact-current cache consumers then streamed and exited zero under bounded admission. The later 4b6b diagnostic completed 101 pushes and the clone matrix but is invalidated only by the missing final source path, so it is not a green qualification. All 100 refs, shallow boundaries, and full fsck checks passed in the accepted run. Distributed-client pack-shape, provider, retention, and sustained response-pack SLOs remain open |
+| 2 | IMPLEMENTED; CURRENT DENSE/FANOUT CORRECTNESS PASS; SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; current smoke `codex-7419fe11-k8s-producer100-single-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11` | The current-head smoke passed all 21 declared checks, 101 pushes, exact refs/boundaries/fsck/sample/source/cleanup, and the current response path cut checkpoint-100 full-pack generation to 36,036 ms. Active inventory stayed at 2 packs while 103 historical immutable packs remained for retention/GC. The meaningful distributed stale fanout still proves one producer and 99 coalesced callers, but distributed-client pack-shape, provider, retention, and sustained response-pack SLOs remain open |
 | 3 | IMPLEMENTED; HIDDEN-TIER REPACK FIXED; REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9`; `de493ab0` | Renewal proof remains valid, but the exact 1,000-replay diagnostic found 92 active packs at checkpoint 100 because a stable tiny tail hid higher-tier collisions. The selector now scans every lower tier and focused regressions pass; exact live proof that checkpoint pack counts remain logarithmic plus the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
-| 4 | CORRECTNESS PASS; DIFFERENTIAL/SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db` | The earlier no-op wave remains withdrawn. The accepted meaningful replay proves native-Git parity for the dense stale-shallow closure, graph-only authorization in 10 ms without locator access, 96/96 exact-current fetch exits, and 100/100 refs, boundaries, and full fsck. The later diagnostic completed the producer/clone matrix but failed only its final source-path immutability check. The 10,000-push shallow differential, distributed client SLO, provider range behavior, and rollout evidence remain open |
+| 4 | CORRECTNESS PASS; DIFFERENTIAL/SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; current smoke `codex-7419fe11-k8s-producer100-single-20260830` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11` | The current-head smoke now proves the response-validation and handoff changes with exact refs, boundaries, fsck, sample, source immutability, and cleanup; checkpoint-100 full-pack generation is 36,036 ms for a 1.24-GB response. The accepted distributed stale fanout remains correctness evidence, while the 10,000-push shallow differential, distributed client SLO, provider range behavior, and rollout evidence remain open |
 | 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; stale membership cleanup now uses bounded scan read-ahead, while pack-sidecar intake, repack publication, and recovery restore are bounded. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL; MEANINGFUL 100-CLIENT STALE FANOUT PASS; DISTRIBUTED SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db` | The meaningful stale fanout proves one producer, 99 coalesced callers, bounded 16-slot artifact reads, 96/96 exact-current cache-consumer exits, 100/100 refs/boundaries/fsck, and exact-prefix cleanup. The later 4b6b diagnostic completed 101 replay pushes and the clone matrix but is not green because the source path vanished during its final immutability check. Maximum admission wait was 5,372,007 ms without the retired five-minute timeout. The one-host index tail required qualification-only scheduling and is not a team SLO; distributed clients, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout remain pending |
+| 6 | PARTIAL; MEANINGFUL 100-CLIENT STALE FANOUT PASS; DISTRIBUTED SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; current smoke `codex-7419fe11-k8s-producer100-single-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11` | The meaningful stale fanout proves one producer, 99 coalesced callers, bounded 16-slot artifact reads, 96/96 exact-current cache-consumer exits, 100/100 refs/boundaries/fsck, and exact-prefix cleanup. The current-head smoke proves 101-push single-client correctness and cuts checkpoint-100 full response generation to 36,036 ms, but it is not the team gate: the one-host index tail, distributed clients, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout remain pending |
 
 ### Current branch verification evidence
 
 PR #120's latest producer follow-ups are `175b08db` (structural response
-validation) and `4d2b956d` (single-pass response-pack handoff). The latest
-release build is `crab 1.1.0`, SHA-256
-`588a9bbb21be0b50bbfc94a58852982f2bc1c2beceb7e1881c31fb85e868c213` for the
-former; the latter has the rebuilt release binary with SHA-256
-`0b63759c59b3d324294205cbe1475c12997aa3fdf5ffe19f8e8cf06f6f06232c`.
+validation), `4d2b956d` (single-pass response-pack handoff), and `7419fe11`
+(current-head qualification evidence). The latest release build is
+`crab 1.1.0`, SHA-256
+`d15744440a7cfdb7d8b4cd5b1f1a02a63933695637733bb1334b2ebc202f4cfb`.
+
+The current-head RustFS smoke is `codex-7419fe11-k8s-producer100-single-20260830`
+against Kubernetes revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`.
+It passed 21/21 declared checks, 101 replay pushes, full/filtered/shallow/
+incremental correctness, source immutability, and exact-prefix cleanup; the
+standalone verifier accepts it with `--allow-smoke` and reports fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+report is intentionally single-client smoke evidence; the full verifier
+rejects it without `--allow-smoke` because no team-load section was recorded.
 
 The earlier broad proof was run with the roadmap target directory:
 
