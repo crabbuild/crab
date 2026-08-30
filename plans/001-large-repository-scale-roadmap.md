@@ -1492,6 +1492,18 @@ reported a cache hit, matched the Kubernetes tip, and passed `git fsck --full`;
 it is an isolated cache correctness smoke rather than an accepted speedup or
 distributed-client SLO.
 
+The response producer now uses a response-specific whole-pack consolidator.
+Durable `crab repack` keeps the full source and generated `verify-pack` scans
+and exact inventory-union comparison. A generated response already has an
+exact requested-OID comparison at the remote boundary, while its immutable
+source packs have publication-time object validation and streamed identity
+checks. The response consolidator therefore retains pack/index/trailer
+integrity checks, skips the redundant source-OID materialization and full
+graph scans, and lets the remote exact-set check remain the final admission
+gate. This removes repository-sized duplicate CPU and memory work without
+weakening the maintenance contract; a current-head RustFS/Kubernetes replay
+still needs to measure the production delta.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary

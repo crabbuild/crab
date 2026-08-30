@@ -740,7 +740,7 @@ impl RemoteGitRepository {
                     );
                     let repack_sources = sources.clone();
                     let repacked = tokio::task::spawn_blocking(move || {
-                        crab_git::repack::consolidate_pack_suffix(&repack_sources)
+                        crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
                     })
                     .await
                     .map_err(|source| Error::DecodeTask { source })?
@@ -754,7 +754,7 @@ impl RemoteGitRepository {
             // to the request before adopting the faster result.
             let repack_sources = sources.clone();
             let repacked = tokio::task::spawn_blocking(move || {
-                crab_git::repack::consolidate_pack_suffix(&repack_sources)
+                crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
             })
             .await
             .map_err(|source| Error::DecodeTask { source })?

@@ -375,7 +375,23 @@ pub fn consolidate_pack_suffix(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    consolidate_pack_suffix_with_concurrency(sources, concurrency)
+    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Full)
+}
+
+/// Consolidate immutable source packs for a generated response pack.
+///
+/// Source packs must already have passed the publication-time object check,
+/// and callers must compare the generated pack with their exact response
+/// selection. This path retains pack/index integrity validation while avoiding
+/// a second full object-graph scan that the response exact-set check supersedes.
+pub fn consolidate_pack_suffix_for_response(
+    sources: &[RepackSource],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Response)
 }
 
 /// Consolidate selected packs with bounded local index parallelism.
@@ -386,6 +402,20 @@ pub fn consolidate_pack_suffix(
 pub fn consolidate_pack_suffix_with_concurrency(
     sources: &[RepackSource],
     index_concurrency: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    consolidate_pack_suffix_with_options(sources, index_concurrency, ConsolidationValidation::Full)
+}
+
+#[derive(Clone, Copy)]
+enum ConsolidationValidation {
+    Full,
+    Response,
+}
+
+fn consolidate_pack_suffix_with_options(
+    sources: &[RepackSource],
+    index_concurrency: usize,
+    validation: ConsolidationValidation,
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
@@ -408,34 +438,37 @@ pub fn consolidate_pack_suffix_with_concurrency(
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
     let install_started = Instant::now();
+    let collect_source_oids = matches!(validation, ConsolidationValidation::Full);
     let (mut source_oids, source_indexes) =
-        install_source_packs(&pack_dir, sources, index_concurrency, true)?;
+        install_source_packs(&pack_dir, sources, index_concurrency, collect_source_oids)?;
     tracing::debug!(
         source_pack_count = sources.len(),
         index_concurrency = index_concurrency.max(1).min(sources.len()),
         elapsed_ms = install_started.elapsed().as_millis() as u64,
         "installed source packs for consolidation"
     );
-    // Selected suffixes may reference stable packs outside this operation;
-    // validate each selected pack's own body and index without requiring a
-    // complete repository graph.
-    let verify_started = Instant::now();
-    for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
-        let mut verify = Command::new("git");
-        verify
-            .arg("verify-pack")
-            .arg("--")
-            .args(index_batch)
-            .stdout(Stdio::null());
-        run_git(&mut verify, "verify consolidated source packs")?;
+    if collect_source_oids {
+        // Selected suffixes may reference stable packs outside this operation;
+        // validate each selected pack's own body and index without requiring a
+        // complete repository graph.
+        let verify_started = Instant::now();
+        for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
+            let mut verify = Command::new("git");
+            verify
+                .arg("verify-pack")
+                .arg("--")
+                .args(index_batch)
+                .stdout(Stdio::null());
+            run_git(&mut verify, "verify consolidated source packs")?;
+        }
+        tracing::debug!(
+            source_pack_count = source_indexes.len(),
+            elapsed_ms = verify_started.elapsed().as_millis() as u64,
+            "verified consolidated source packs"
+        );
+        source_oids.sort_unstable();
+        source_oids.dedup();
     }
-    tracing::debug!(
-        source_pack_count = source_indexes.len(),
-        elapsed_ms = verify_started.elapsed().as_millis() as u64,
-        "verified consolidated source packs"
-    );
-    source_oids.sort_unstable();
-    source_oids.dedup();
 
     let pack_list = workspace.path().join("selected-packs.txt");
     let mut input = File::create(&pack_list)
@@ -485,32 +518,39 @@ pub fn consolidate_pack_suffix_with_concurrency(
             pack_id: "geometric-repack".to_owned(),
             reason: "selected-pack consolidation produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path, GeneratedPackValidation::Full, None)?;
-    let mut generated_locations = PackLocationIter::open(
-        generated.index_path(),
-        generated.reverse_index_path(),
-        generated.pack_size,
-    )?;
-    let mut generated_oids = Vec::<[u8; 20]>::new();
-    for location in &mut generated_locations {
-        let location = location?;
-        let oid = location
-            .oid
-            .as_bytes()
-            .try_into()
-            .map_err(|_| RepackError::SourceIntegrity {
+    let generated_validation = match validation {
+        ConsolidationValidation::Full => GeneratedPackValidation::Full,
+        ConsolidationValidation::Response => GeneratedPackValidation::Structural,
+    };
+    let generated = verified_generated_pack(pack_path, generated_validation, None)?;
+    if matches!(validation, ConsolidationValidation::Full) {
+        let mut generated_locations = PackLocationIter::open(
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )?;
+        let mut generated_oids = Vec::<[u8; 20]>::new();
+        for location in &mut generated_locations {
+            let location = location?;
+            let oid =
+                location
+                    .oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| RepackError::SourceIntegrity {
+                        pack_id: generated.pack_id.clone(),
+                        reason: "consolidated pack contains a non-SHA1 object".to_owned(),
+                    })?;
+            generated_oids.push(oid);
+        }
+        generated_oids.sort_unstable();
+        generated_oids.dedup();
+        if generated_oids != source_oids {
+            return Err(RepackError::SourceIntegrity {
                 pack_id: generated.pack_id.clone(),
-                reason: "consolidated pack contains a non-SHA1 object".to_owned(),
-            })?;
-        generated_oids.push(oid);
-    }
-    generated_oids.sort_unstable();
-    generated_oids.dedup();
-    if generated_oids != source_oids {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: generated.pack_id.clone(),
-            reason: "consolidated pack does not preserve the selected object set".to_owned(),
-        });
+                reason: "consolidated pack does not preserve the selected object set".to_owned(),
+            });
+        }
     }
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
@@ -1645,6 +1685,12 @@ mod tests {
         let selected = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
+        let response = consolidate_pack_suffix_for_response(&sources)?;
+        assert_eq!(response.packs().len(), 1);
+        assert_eq!(
+            response.packs()[0].object_count,
+            selected.packs()[0].object_count
+        );
 
         let selected_oids = git_output(
             Command::new("git")
