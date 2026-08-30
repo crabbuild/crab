@@ -14,7 +14,7 @@ from typing import Any
 
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.2"
+VERSION = "1.3"
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 SECRET_KEYS = {
@@ -248,6 +248,14 @@ def verify_team_load(team_load: Any, *, require_release_counts: bool = False) ->
 
     fetch_seed = team_load.get("fetch_seed")
     require(isinstance(fetch_seed, dict), "team_load.fetch_seed is missing")
+    seed_checkpoint = require_nonnegative_int(
+        fetch_seed.get("checkpoint"), "team_load.fetch_seed.checkpoint"
+    )
+    seed_tip = fetch_seed.get("tip")
+    require(
+        isinstance(seed_tip, str) and OID_RE.fullmatch(seed_tip) is not None,
+        "team_load.fetch_seed.tip must be a Git object ID",
+    )
     fetch_clients = require_nonnegative_int(
         fetch_seed.get("clients"), "team_load.fetch_seed.clients"
     )
@@ -288,6 +296,25 @@ def verify_team_load(team_load: Any, *, require_release_counts: bool = False) ->
 
     fetch = team_load.get("concurrent_incremental_fetches")
     require(isinstance(fetch, dict), "team_load.concurrent_incremental_fetches is missing")
+    from_checkpoint = require_nonnegative_int(
+        fetch.get("from_checkpoint"),
+        "team_load.concurrent_incremental_fetches.from_checkpoint",
+    )
+    to_checkpoint = require_nonnegative_int(
+        fetch.get("to_checkpoint"),
+        "team_load.concurrent_incremental_fetches.to_checkpoint",
+    )
+    require(
+        from_checkpoint == seed_checkpoint and to_checkpoint > from_checkpoint,
+        "incremental fetch fanout must span replay commits after its seed",
+    )
+    require(
+        fetch.get("from_tip") == seed_tip
+        and isinstance(fetch.get("to_tip"), str)
+        and OID_RE.fullmatch(fetch["to_tip"]) is not None
+        and fetch["to_tip"] != seed_tip,
+        "incremental fetch fanout must move from the seed tip to a different Git object ID",
+    )
     require(fetch.get("clients") == fetch_clients, "incremental fetch fanout mismatch")
     require(fetch.get("successful") == fetch_clients, "incremental fetches did not all succeed")
     require(fetch.get("failed") == 0, "incremental fetch failures were recorded")
@@ -683,6 +710,7 @@ def verify_report(
         required_team_checks = {
             "concurrent-fetch-seed-clones",
             "concurrent-fetch-seed-generated-pack-producers",
+            "concurrent-incremental-fetch-span",
             "concurrent-incremental-fetches",
             "independent_ref_pushes-outcomes",
             "independent-ref-pushes-preserved",

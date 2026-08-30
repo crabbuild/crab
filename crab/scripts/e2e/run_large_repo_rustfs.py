@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
-VERSION = "1.2"
+VERSION = "1.3"
 DEFAULT_SOURCE = Path("/Volumes/Workspace/Github/kubernetes/kubernetes")
 DEFAULT_ROOT = Path("/Volumes/Workspace/CrabBuild/crabbuild-qualification")
 DEFAULT_BUCKET = "crab"
@@ -1308,7 +1308,7 @@ class LargeRepositoryQualification:
                 )
         self.write_report()
 
-    def prepare_fetch_fanout(self, checkpoint: int) -> None:
+    def prepare_fetch_fanout(self, checkpoint: int, expected: str) -> None:
         count = self.args.fetch_fanout
         barrier = threading.Barrier(count)
 
@@ -1364,6 +1364,7 @@ class LargeRepositoryQualification:
         )
         self.report["team_load"]["fetch_seed"] = {
             "checkpoint": checkpoint,
+            "tip": expected,
             "clients": count,
             "successful_clones": successful,
             "generated_pack_producers": producers,
@@ -1397,6 +1398,18 @@ class LargeRepositoryQualification:
     def concurrent_incremental_fetches(self, expected: str) -> None:
         count = self.args.fetch_fanout
         barrier = threading.Barrier(count)
+        seed = self.report["team_load"].get("fetch_seed", {})
+        self.check(
+            "concurrent-incremental-fetch-span",
+            seed.get("checkpoint", self.args.replay_count) < self.args.replay_count
+            and seed.get("tip") != expected,
+            {
+                "from_checkpoint": seed.get("checkpoint"),
+                "to_checkpoint": self.args.replay_count,
+                "from_tip": seed.get("tip"),
+                "to_tip": expected,
+            },
+        )
 
         def worker(ordinal: int) -> dict[str, Any]:
             target = self.fetch_root / f"client-{ordinal:03d}"
@@ -1459,6 +1472,10 @@ class LargeRepositoryQualification:
         durations = [int(result["duration_ms"]) for result in results]
         successful = sum(result["failure_category"] == "ok" for result in results)
         self.report["team_load"]["concurrent_incremental_fetches"] = {
+            "from_checkpoint": seed.get("checkpoint"),
+            "to_checkpoint": self.args.replay_count,
+            "from_tip": seed.get("tip"),
+            "to_tip": expected,
             "clients": count,
             "successful": successful,
             "failed": count - successful,
@@ -1718,6 +1735,7 @@ class LargeRepositoryQualification:
             for checkpoint in (1, 10, 100, self.args.replay_count)
             if checkpoint <= self.args.replay_count
         }
+        fetch_seed_checkpoint = 100 if self.args.replay_count > 100 else 10
         for ordinal, commit in enumerate(commits, start=1):
             self.push_commit(commit, ordinal, f"replay push {ordinal:04d}")
             if ordinal in checkpoints:
@@ -1725,12 +1743,12 @@ class LargeRepositoryQualification:
                 self.incremental_fetch(ordinal, commit)
                 self.active_pack_snapshot(str(ordinal))
                 self.store_snapshot(str(ordinal))
-            if self.args.team_load and ordinal == 100:
+            if self.args.team_load and ordinal == fetch_seed_checkpoint:
                 # Seed fanout only after checkpoint maintenance has published
                 # the generation required by protocol-v2 readers. Starting it
                 # before the owner run makes the harness wait on clients that
                 # are, correctly, waiting on that same owner run.
-                self.prepare_fetch_fanout(ordinal)
+                self.prepare_fetch_fanout(ordinal, commit)
 
     def final_clones(self) -> Path:
         cold = self.clone_root / "full-cold"

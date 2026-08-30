@@ -180,7 +180,7 @@ def valid_report() -> dict[str, Any]:
     }
     return {
         "schema": "crab.large-repository-rustfs",
-        "version": "1.2",
+        "version": "1.3",
         "profile": "smoke",
         "run_id": "test-run",
         "status": "ok",
@@ -340,6 +340,8 @@ def valid_team_load() -> dict[str, Any]:
         "independent_pushes": independent_count,
         "contended_pushes": contended_count,
         "fetch_seed": {
+            "checkpoint": 1,
+            "tip": "1" * 40,
             "clients": fetch_count,
             "successful_clones": fetch_count,
             "generated_pack_producers": 1,
@@ -350,6 +352,10 @@ def valid_team_load() -> dict[str, Any]:
             "results": team_results(fetch_count, ["ok"] * fetch_count),
         },
         "concurrent_incremental_fetches": {
+            "from_checkpoint": 1,
+            "to_checkpoint": 3,
+            "from_tip": "1" * 40,
+            "to_tip": "2" * 40,
             "clients": fetch_count,
             "successful": fetch_count,
             "failed": 0,
@@ -472,6 +478,7 @@ class ReportVerificationTests(unittest.TestCase):
             for name in (
                 "concurrent-fetch-seed-clones",
                 "concurrent-fetch-seed-generated-pack-producers",
+                "concurrent-incremental-fetch-span",
                 "concurrent-incremental-fetches",
                 "independent_ref_pushes-outcomes",
                 "independent-ref-pushes-preserved",
@@ -553,6 +560,19 @@ class ReportVerificationTests(unittest.TestCase):
         report = valid_team_load()
         report["fetch_seed"]["cache_misses"] = 99
         with self.assertRaisesRegex(VERIFY.VerificationError, "cache events"):
+            VERIFY.verify_team_load(report)
+
+    def test_incremental_fetch_rejects_a_noop_seed(self) -> None:
+        report = valid_team_load()
+        report["concurrent_incremental_fetches"]["to_checkpoint"] = 1
+        report["concurrent_incremental_fetches"]["to_tip"] = "1" * 40
+        with self.assertRaisesRegex(VERIFY.VerificationError, "span replay commits"):
+            VERIFY.verify_team_load(report)
+
+    def test_incremental_fetch_requires_the_recorded_seed_tip(self) -> None:
+        report = valid_team_load()
+        report["concurrent_incremental_fetches"]["from_tip"] = "3" * 40
+        with self.assertRaisesRegex(VERIFY.VerificationError, "move from the seed tip"):
             VERIFY.verify_team_load(report)
 
     def test_prevalidated_owner_path_allows_no_remote_visibility_build(self) -> None:
