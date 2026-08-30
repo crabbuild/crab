@@ -942,6 +942,15 @@ struct VisibilityObjectSelection {
     common_haves: Vec<ObjectId>,
 }
 
+fn visibility_selection_request_supported(request: &UploadPackRequest) -> bool {
+    // A shallow have proves only the boundary object is present. Treating its full
+    // remote ancestry as present can omit side histories that Git must receive.
+    !request.wants.is_empty()
+        && request.shallow.is_empty()
+        && request.deepen.is_none()
+        && !request.deepen_relative
+}
+
 async fn visibility_object_selection(
     operation: &OperationContext,
     references: &[RepositoryRef],
@@ -950,7 +959,7 @@ async fn visibility_object_selection(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<VisibilityObjectSelection>> {
-    if request.wants.is_empty() || request.deepen.is_some() || request.deepen_relative {
+    if !visibility_selection_request_supported(request) {
         return Ok(None);
     }
 
@@ -1103,9 +1112,7 @@ fn plan_from_visibility(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
-    if request.wants.is_empty()
-        || request.deepen.is_some()
-        || request.deepen_relative
+    if !visibility_selection_request_supported(request)
         || !matches!(request.filter, UploadPackFilter::None)
     {
         return Ok(None);
@@ -1283,11 +1290,7 @@ async fn plan_from_visibility_catalog(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
-    if !request.filter.is_catalog_exact()
-        || request.wants.is_empty()
-        || request.deepen.is_some()
-        || request.deepen_relative
-    {
+    if !request.filter.is_catalog_exact() || !visibility_selection_request_supported(request) {
         return Ok(None);
     }
     if request.haves.is_empty() {
@@ -1571,9 +1574,7 @@ async fn plan_from_visibility_source(
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
-    if request.wants.is_empty()
-        || request.deepen.is_some()
-        || request.deepen_relative
+    if !visibility_selection_request_supported(request)
         || !matches!(request.filter, UploadPackFilter::None)
     {
         return Ok(None);
@@ -2217,6 +2218,12 @@ mod tests {
             },
             UploadPackRequest {
                 wants: vec![oid('1')],
+                haves: vec![oid('3')],
+                shallow: vec![oid('3')],
+                ..UploadPackRequest::default()
+            },
+            UploadPackRequest {
+                wants: vec![oid('1')],
                 deepen: Some(1),
                 ..UploadPackRequest::default()
             },
@@ -2558,7 +2565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visibility_plan_uses_a_proven_fast_forward_transition_for_haves() {
+    async fn visibility_plan_does_not_treat_shallow_haves_as_complete_closures() {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
         let mut base = Manifest::default_for_repo("refs/heads/main");
@@ -2626,8 +2633,8 @@ mod tests {
         let request = UploadPackRequest {
             wants: vec![oid('3')],
             haves: vec![oid('1'), oid('f')],
-            // A normal fetch from a shallow clone does not move its boundary.
-            // The generation-bound transition is therefore exact and avoids a tree walk.
+            // The client has the boundary object, not every object reachable through its
+            // parents. A visibility difference would omit side histories required by Git.
             shallow: vec![oid('1')],
             ..UploadPackRequest::default()
         };
@@ -2643,13 +2650,9 @@ mod tests {
             &request,
             10,
         )
-        .expect("valid transition plan")
-        .expect("transition avoids object traversal");
+        .expect("fallback decision");
 
-        assert_eq!(plan.object_ids, vec![oid('3'), oid('4')]);
-        assert_eq!(plan.common_haves, vec![oid('1')]);
-        assert!(plan.shallow.is_empty());
-        assert!(plan.unshallow.is_empty());
+        assert!(plan.is_none());
     }
 
     #[test]

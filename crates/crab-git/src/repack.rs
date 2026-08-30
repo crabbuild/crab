@@ -168,6 +168,8 @@ pub fn geometric_repack_cut(object_counts: &[u64], factor: u64) -> usize {
 /// verified compressed pack bytes. The smallest tier is promoted only after it
 /// has accumulated enough weight to be comparable with its next tier, and the
 /// largest pack is left untouched whenever a lower-tier promotion is possible.
+/// Every lower tier is inspected, so a stable tiny tail cannot hide a collision
+/// between larger packs accumulated since the previous maintenance pass.
 /// Two packs are consolidated only when the smaller pack has reached the next
 /// tier; a tiny tail must not rewrite the repository-sized pack.
 #[must_use]
@@ -186,21 +188,20 @@ pub fn incremental_repack_cut(weights: &[u64], factor: u64) -> usize {
         };
     }
 
-    let mut selected_count = 1;
-    let mut selected_weight = weights[weights.len() - 1];
-    for candidate_index in (1..weights.len().saturating_sub(1)).rev() {
-        let candidate_weight = weights[candidate_index];
-        if selected_weight.saturating_mul(factor) <= candidate_weight {
-            break;
-        }
-        selected_count += 1;
-        selected_weight = selected_weight.saturating_add(candidate_weight);
+    let Some(mut start) = (1..weights.len() - 1)
+        .find(|index| weights[*index] < weights[*index + 1].saturating_mul(factor))
+    else {
+        return 0;
+    };
+    let mut selected_weight = weights[start..]
+        .iter()
+        .copied()
+        .fold(0_u64, u64::saturating_add);
+    while start > 1 && selected_weight.saturating_mul(factor) > weights[start - 1] {
+        start -= 1;
+        selected_weight = selected_weight.saturating_add(weights[start]);
     }
-    if selected_count > 1 {
-        selected_count
-    } else {
-        0
-    }
+    weights.len() - start
 }
 
 /// Consolidates source packs using Git's geometric pack policy.
@@ -1085,6 +1086,15 @@ mod tests {
     #[test]
     fn incremental_cut_keeps_the_largest_pack_out_of_lower_tier_promotions() {
         assert_eq!(incremental_repack_cut(&[900, 700, 600, 400], 2), 3);
+    }
+
+    #[test]
+    fn incremental_cut_scans_past_a_stable_tiny_tail() {
+        assert_eq!(incremental_repack_cut(&[1_000_000, 100, 60, 1], 2), 3);
+        assert_eq!(
+            incremental_repack_cut(&[1_000_000, 900, 600, 100, 60, 1], 2),
+            5
+        );
     }
 
     #[test]
