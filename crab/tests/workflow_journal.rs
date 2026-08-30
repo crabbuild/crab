@@ -28,7 +28,7 @@ fn bin() -> &'static str {
 fn enable_workflow(repo: &Path) {
     fs::create_dir_all(repo.join(".crab")).unwrap();
     fs::write(
-        repo.join(".crab").join("config.toml"),
+        repo.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();

@@ -44,7 +44,7 @@ fn scaffold_side_effects_repo(root: &Path) {
 
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -71,7 +71,7 @@ fn scaffold_failing_hook_repo(root: &Path) {
 
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -97,7 +97,7 @@ fn scaffold_no_hook_repo(root: &Path) {
 
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -322,7 +322,7 @@ exit 0
 
     fs::create_dir_all(tmp.path().join(".crab")).unwrap();
     fs::write(
-        tmp.path().join(".crab").join("config.toml"),
+        tmp.path().join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();

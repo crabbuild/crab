@@ -807,9 +807,9 @@ extendedKeyUsage = clientAuth
             repo,
             env=env,
         )
-        self.report.artifacts["client_config"] = str(repo / ".crab" / "config.toml")
+        self.report.artifacts["client_config"] = str(repo / ".crab" / "local.toml")
         self.write_report()
-        config = (repo / ".crab" / "config.toml").read_text()
+        config = (repo / ".crab" / "local.toml").read_text()
         self.check(
             "client-cache-service-url-not-written-to-config",
             self.report.cache_service_url not in config,

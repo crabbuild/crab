@@ -120,7 +120,7 @@ fn readonly_cache_dir_stages_execute_without_caching() {
     // Create .crab/local.toml to enable workflow.
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();
@@ -223,7 +223,7 @@ exit 0
 
     fs::create_dir_all(root.join(".crab")).unwrap();
     fs::write(
-        root.join(".crab").join("config.toml"),
+        root.join(".crab").join("local.toml"),
         "[workflow]\nenabled = true\n",
     )
     .unwrap();

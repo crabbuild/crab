@@ -487,7 +487,7 @@ class ProtocolV2PartialCloneSmoke:
 
     def configure_reachable_oid_admission(self, repo: Path, enabled: bool) -> None:
         """Set the internal policy used by a fixture's raw-OID probes."""
-        policy_path = repo / ".crab" / "config.toml"
+        policy_path = repo / ".crab" / "local.toml"
         policy_path.parent.mkdir(parents=True, exist_ok=True)
         policy = policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
         value = "true" if enabled else "false"
@@ -505,7 +505,7 @@ class ProtocolV2PartialCloneSmoke:
 
     def configure_hidden_refs(self, repo: Path) -> None:
         """Hide the security fixture's branch through internal config."""
-        policy_path = repo / ".crab" / "config.toml"
+        policy_path = repo / ".crab" / "local.toml"
         policy_path.parent.mkdir(parents=True, exist_ok=True)
         policy = policy_path.read_text(encoding="utf-8") if policy_path.exists() else ""
         if "[transfer]" not in policy:

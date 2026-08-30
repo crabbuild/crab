@@ -1,6 +1,6 @@
 # Crab client cache-service config.
 #
-# Install into ~/.crab/local.toml for user-wide rollout, or into
+# Install into ~/.config/crab/config.toml for user-wide rollout, or into
 # <repo>/.crab/local.toml when one repository should opt in.
 
 [cache]

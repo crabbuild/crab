@@ -1686,7 +1686,9 @@ Each repo has a `config` object in its S3 bucket (§5.1). It is read on every co
 
 ### 15.3 Local Configuration
 
-`~/.config/crab/config.toml` per-user, `.crab/local.toml` per-repo (checked into git alongside `.gitattributes`).
+`~/.config/crab/config.toml` per-user and `.crab/local.toml` per-repo. Both
+store machine-specific settings and stay out of Git; shared policy belongs in
+the committed `crab.toml` alongside `.gitattributes`.
 
 ```toml
 [cache]

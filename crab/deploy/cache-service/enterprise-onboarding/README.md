@@ -127,8 +127,8 @@ crab-cache-server onboarding probe --bundle-dir . \
 ## 4. Wire Crab Clients
 
 ```bash
-install -d -m 0750 ~/.crab
-install -m 0640 client-config.toml ~/.crab/local.toml
+install -d -m 0750 ~/.config/crab
+install -m 0640 client-config.toml ~/.config/crab/config.toml
 set -a
 . ./client.env
 set +a

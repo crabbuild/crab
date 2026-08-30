@@ -1694,7 +1694,7 @@ class CacheServiceRustfsSmoke:
             repo,
         )
         self.configure_repo_cache_service(repo)
-        config_path = repo / ".crab" / "config.toml"
+        config_path = repo / ".crab" / "local.toml"
         config = config_path.read_text(encoding="utf-8")
         self.set_report_artifact("client_config", config_path)
         self.check("client-cache-service-url-configured", self.cache_service_url in config)
@@ -1704,7 +1704,7 @@ class CacheServiceRustfsSmoke:
     def configure_repo_cache_service(self, repo: Path, *, env: dict[str, str] | None = None) -> None:
         if self.onboarding_bundle is None:
             raise SmokeError("enterprise onboarding bundle is not rendered")
-        config_path = repo / ".crab" / "config.toml"
+        config_path = repo / ".crab" / "local.toml"
         client_config_path = self.onboarding_bundle / "client-config.toml"
         existing = config_path.read_text(encoding="utf-8")
         client_config = client_config_path.read_text(encoding="utf-8")

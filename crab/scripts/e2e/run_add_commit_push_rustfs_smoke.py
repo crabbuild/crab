@@ -1058,7 +1058,7 @@ class AddCommitPushSmoke:
             denied.exit_code != 0,
             {"exit_code": denied.exit_code, "sha": first},
         )
-        with (raw_fetch / ".crab" / "config.toml").open("a", encoding="utf-8") as config:
+        with (raw_fetch / ".crab" / "local.toml").open("a", encoding="utf-8") as config:
             config.write("\n[uploadpack]\nallow_reachable_sha_in_want = true\n")
         self.run_git(
             raw_fetch,
