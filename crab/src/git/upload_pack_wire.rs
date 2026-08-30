@@ -1488,7 +1488,7 @@ async fn visible_objects_catalog(
     operation.finish(result).await.map_err(remote_error)
 }
 
-async fn native_shallow_visibility(
+fn native_shallow_visibility(
     repository: &RemoteGitRepository,
     request: &FetchRequest,
     visible_ref_names: &[String],
@@ -1509,12 +1509,10 @@ async fn native_shallow_visibility(
         .into_iter()
         .collect::<Vec<_>>();
     let started = Instant::now();
-    let operation = repository
-        .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
-        .await
-        .map_err(remote_error)?;
-    let result = operation.commits_reachable_from(&object_ids, &roots);
-    let Some(visible) = operation.finish(result).await.map_err(remote_error)? else {
+    let Some(visible) = repository
+        .commits_reachable_from(&object_ids, &roots, cancellation)
+        .map_err(remote_error)?
+    else {
         tracing::debug!(
             candidate_commits = object_ids.len(),
             visible_roots = roots.len(),
@@ -1587,8 +1585,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
     let producer = async {
         if native_shallow_pack_eligible(request) && proof.as_catalog().is_some() {
             let (common_haves, shallow_visible) =
-                native_shallow_visibility(repository, request, visible_ref_names, cancellation)
-                    .await?;
+                native_shallow_visibility(repository, request, visible_ref_names, cancellation)?;
             if !common_haves.is_empty() && shallow_visible {
                 tracing::info!(
                     protocol_version = 2,

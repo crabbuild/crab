@@ -835,6 +835,28 @@ impl RemoteGitRepository {
         OperationContext::open(Arc::clone(&self.state), kind, cancellation).await
     }
 
+    /// Prove which candidate commits are reachable from any pinned graph root.
+    ///
+    /// Returns `None` when the pinned repository has no complete commit graph.
+    /// This metadata-only proof never opens the object-locator database.
+    pub fn commits_reachable_from(
+        &self,
+        candidates: &[ObjectId],
+        roots: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Option<Vec<bool>>> {
+        let _task_token = self.state.runtime.operation_token();
+        let runtime_cancellation = self.state.runtime.background_cancellation();
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        let Some(graph) = self.state.commit_graph.as_ref() else {
+            return Ok(None);
+        };
+        let reachable = graph.reachable_from_roots(candidates, roots, cancellation)?;
+        check_cancelled(&runtime_cancellation)?;
+        Ok(Some(reachable))
+    }
+
     /// Resolve a reference or reachable full commit ID against pinned refs.
     ///
     /// Reference names are resolved deterministically. Unqualified names are
