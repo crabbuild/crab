@@ -9,8 +9,8 @@ use crate::StagingArea;
 use crate::error::{Result, StagingError};
 use crate::push_plan::{
     ExistingChunkCandidate, FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb,
-    PreparedXorbCache, PreparedXorbCandidate, PreparedXorbSource, link_prepared_xorb,
-    materialize_prepared_xorb, write_prepared_xorb,
+    PreparedXorbCache, PreparedXorbCandidate, PreparedXorbSource, materialize_prepared_xorb,
+    write_prepared_xorb,
 };
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder};
@@ -262,7 +262,6 @@ struct UncachedFilePlan<'a> {
 
 struct VerifiedStagedChunks {
     chunks: Vec<(MerkleHash, u64)>,
-    local_authority_xorbs: Vec<PlannedXorb>,
 }
 
 fn all_file_chunks(files: &[AddPlanFile<'_>]) -> Vec<(MerkleHash, u64)> {
@@ -365,7 +364,6 @@ async fn verified_uncached_file_plan<'a>(
     let file_hash = MerkleHash::from(file.file_hash);
     let verified = verified_staged_chunks(staging, file_hash, file.size, file.chunks).await?;
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, file.chunks);
-    plan.prepared_xorbs = verified.local_authority_xorbs;
     let mut uncovered_chunks = HashSet::new();
     for ((chunk_hash, size), existing_ref) in file.chunks.iter().zip(existing_refs.iter()) {
         if let Some(candidate) = existing_ref
@@ -401,14 +399,6 @@ async fn verified_staged_chunks(
     {
         return Ok(VerifiedStagedChunks {
             chunks: expected_chunks.to_vec(),
-            local_authority_xorbs: plan
-                .prepared_xorbs
-                .into_iter()
-                .map(|mut xorb| {
-                    xorb.upload = false;
-                    xorb
-                })
-                .collect(),
         });
     }
     let located_chunks = staging.chunks_for_file_with_locators(&file_hash)?;
@@ -442,7 +432,6 @@ async fn verified_staged_chunks(
             .into_iter()
             .map(|chunk| (chunk.hash, chunk.size))
             .collect(),
-        local_authority_xorbs: Vec::new(),
     })
 }
 
@@ -524,30 +513,13 @@ async fn record_uncached_prepared_xorb(
             "prepared xorb has no owning add file".to_owned(),
         ));
     };
-    let owner_hash = file_plans[owner_idx].file_hash;
-    write_prepared_xorb(
-        staging.root(),
-        &owner_hash,
-        &result.hash,
-        result.bytes.clone(),
-    )
-    .await?;
+    write_prepared_xorb(staging.root(), &result.hash, result.bytes.clone()).await?;
     file_plans[owner_idx]
         .plan
         .prepared_xorbs
         .push(planned.clone());
 
     for idx in linked_idxs {
-        let target_hash = file_plans[*idx].file_hash;
-        if !link_prepared_xorb(staging.root(), &owner_hash, &target_hash, &planned).await? {
-            write_prepared_xorb(
-                staging.root(),
-                &target_hash,
-                &result.hash,
-                result.bytes.clone(),
-            )
-            .await?;
-        }
         file_plans[*idx].plan.prepared_xorbs.push(planned.clone());
     }
     Ok(())
@@ -593,7 +565,12 @@ async fn prepare_one_file_plan_with_existing_refs(
     let verified = verified_staged_chunks(staging, file_hash, file.size, chunks).await?;
     let located_chunks = verified.chunks;
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, chunks);
-    plan.prepared_xorbs = verified.local_authority_xorbs;
+    let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+        crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+        file_hash,
+        file.size,
+        chunks,
+    )?;
 
     let mut file_chunk_sizes = HashMap::new();
     for (chunk_hash, size) in chunks {
@@ -648,6 +625,16 @@ async fn prepare_one_file_plan_with_existing_refs(
         let mut used_cached_candidate = false;
         for choice in choices {
             let candidate = choice.candidate;
+            let contains_remote = candidate
+                .placements
+                .iter()
+                .any(|placement| remote_existing_chunks.contains(&placement.chunk_hash));
+            if contains_remote
+                && staging
+                    .prepared_payload_exclusive_to_recipe(&candidate.xorb_hash, &recipe.hash())?
+            {
+                continue;
+            }
             if planned_prepared_xorbs.contains(&candidate.xorb_hash) {
                 cache_chunks += mark_prepared_cache_coverage(
                     &choice.covered_chunks,
@@ -658,7 +645,7 @@ async fn prepare_one_file_plan_with_existing_refs(
                 break;
             }
 
-            if materialize_prepared_xorb(staging.root(), &candidate, &file_hash).await? {
+            if materialize_prepared_xorb(staging.root(), &candidate).await? {
                 let mut planned = candidate.planned.clone();
                 planned.upload = true;
                 if let Some(authority) = plan
@@ -718,13 +705,12 @@ async fn prepare_one_file_plan_with_existing_refs(
 
         if !to_pack.is_empty() {
             builder.push_batch(&to_pack)?;
-            write_completed_xorbs(staging, &file_hash, &mut builder, &mut plan, prepared_cache)
-                .await?;
+            write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
         }
     }
 
     for result in builder.finalize()? {
-        record_prepared_xorb(staging, &file_hash, &mut plan, prepared_cache, result).await?;
+        record_prepared_xorb(staging, &mut plan, prepared_cache, result).await?;
     }
 
     let file_summary = FilePlanSummary {
@@ -736,12 +722,6 @@ async fn prepare_one_file_plan_with_existing_refs(
         prepared_xorbs: plan.prepared_xorbs.len() as u64,
         prepared_bytes: plan.prepared_xorbs.iter().map(|xorb| xorb.bytes).sum(),
     };
-    let recipe = crate::recipe::FileRecipe::from_staged_chunks(
-        crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
-        file_hash,
-        file.size,
-        chunks,
-    )?;
     staging
         .write_file_push_plan_for_recipe(&plan, &recipe)
         .await?;
@@ -845,20 +825,18 @@ fn mark_prepared_cache_coverage(
 
 async fn write_completed_xorbs(
     staging: &StagingArea,
-    file_hash: &MerkleHash,
     builder: &mut XorbBuilder,
     plan: &mut FilePushPlan,
     prepared_cache: &mut PreparedXorbCache,
 ) -> Result<()> {
     while let Some(result) = builder.take_completed() {
-        record_prepared_xorb(staging, file_hash, plan, prepared_cache, result).await?;
+        record_prepared_xorb(staging, plan, prepared_cache, result).await?;
     }
     Ok(())
 }
 
 async fn record_prepared_xorb(
     staging: &StagingArea,
-    file_hash: &MerkleHash,
     plan: &mut FilePushPlan,
     prepared_cache: &mut PreparedXorbCache,
     result: crab_xet::xorb::builder::XorbResult,
@@ -870,7 +848,7 @@ async fn record_prepared_xorb(
         .iter()
         .map(PlannedPlacement::from_placement)
         .collect();
-    write_prepared_xorb(staging.root(), file_hash, &result.hash, result.bytes).await?;
+    write_prepared_xorb(staging.root(), &result.hash, result.bytes).await?;
     let planned = PlannedXorb {
         hash: result.hash.hex(),
         payload_hash,
@@ -878,7 +856,7 @@ async fn record_prepared_xorb(
         upload: true,
         placements,
     };
-    prepared_cache.insert_prepared_xorb(*file_hash, &planned)?;
+    prepared_cache.insert_prepared_xorb(&planned)?;
     plan.prepared_xorbs.push(planned);
     Ok(())
 }
@@ -908,7 +886,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use bytes::Bytes;
     use crab_xet::hash::compute_data_hash;
     use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression};
     use crab_xet::xorb::format::CompressionScheme;
@@ -1165,56 +1142,6 @@ mod tests {
         builder
     }
 
-    async fn write_json_only_prepared_plan(
-        staging: &StagingArea,
-        source_file_hash: MerkleHash,
-        chunk_hash: MerkleHash,
-        data: &[u8],
-    ) -> MerkleHash {
-        let mut builder = small_raw_xorb_builder();
-        builder
-            .push(
-                &Chunk {
-                    hash: chunk_hash,
-                    data: Bytes::copy_from_slice(data),
-                },
-                RunId(0),
-            )
-            .expect("push JSON-only chunk");
-        let mut results = builder.finalize().expect("finalize JSON-only xorb");
-        assert_eq!(results.len(), 1);
-        let result = results.pop().expect("JSON-only xorb result");
-        let payload_hash = blake3::hash(&result.bytes).to_hex().to_string();
-
-        write_prepared_xorb(
-            staging.root(),
-            &source_file_hash,
-            &result.hash,
-            result.bytes.clone(),
-        )
-        .await
-        .expect("write legacy prepared xorb");
-
-        let chunk_pairs = [(chunk_hash, data.len() as u64)];
-        let mut plan =
-            FilePushPlan::new_verified_staging(source_file_hash, data.len() as u64, &chunk_pairs);
-        plan.prepared_xorbs.push(PlannedXorb {
-            hash: result.hash.hex(),
-            payload_hash,
-            bytes: result.bytes.len() as u64,
-            upload: true,
-            placements: result
-                .placements
-                .iter()
-                .map(PlannedPlacement::from_placement)
-                .collect(),
-        });
-        crate::push_plan::write_file_push_plan(staging.root(), &plan)
-            .await
-            .expect("write JSON-only plan");
-        result.hash
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn large_add_batches_still_use_remote_existing_lookup() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1350,7 +1277,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn repeated_add_reuses_indexed_prepared_xorb_without_json_cache() {
+    async fn repeated_add_reuses_global_prepared_xorb() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
@@ -1386,10 +1313,6 @@ mod tests {
             .expect("load first plan")
             .expect("first plan exists");
         let first_xorb_hash = first_plan.prepared_xorbs[0].hash.clone();
-        assert!(
-            !crate::push_plan::file_plan_path(staging.root(), &file_hash).exists(),
-            "add-time plans should be stored in the staging index only"
-        );
 
         let second_summary = prepare_file_push_plans(
             &staging,
@@ -1416,22 +1339,10 @@ mod tests {
             .expect("load second plan")
             .expect("second plan exists");
         assert_eq!(second_plan.prepared_xorbs[0].hash, first_xorb_hash);
-
-        assert!(
-            staging
-                .unregister_file(&file_hash)
-                .expect("unregister file")
-        );
-        let wanted_chunks = chunk_pairs
-            .iter()
-            .map(|(chunk_hash, _)| *chunk_hash)
-            .collect::<std::collections::HashSet<_>>();
-        assert!(
-            staging
-                .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
-                .expect("load prepared cache after unregister")
-                .is_empty()
-        );
+        let first_xorb_hash = first_plan.prepared_xorbs[0]
+            .hash()
+            .expect("first xorb hash");
+        assert!(crate::push_plan::prepared_xorb_path(staging.root(), &first_xorb_hash).is_file());
     }
 
     #[test]
@@ -1488,7 +1399,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn retire_file_removes_indexed_prepared_cache() {
+    async fn retiring_segment_rows_preserves_recipe_prepared_authority() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let staging = StagingArea::open(tmp.path().to_path_buf())
             .await
@@ -1530,7 +1441,7 @@ mod tests {
             .expect("prepared plan exists");
         let prepared_xorb_hash = plan.prepared_xorbs[0].hash().expect("prepared xorb hash");
         let prepared_xorb_path =
-            crate::push_plan::prepared_xorb_path(staging.root(), &file_hash, &prepared_xorb_hash);
+            crate::push_plan::prepared_xorb_path(staging.root(), &prepared_xorb_hash);
         assert!(prepared_xorb_path.exists());
 
         let retired = staging.retire_file(&file_hash).expect("retire file");
@@ -1541,7 +1452,7 @@ mod tests {
             .map(|(chunk_hash, _)| *chunk_hash)
             .collect::<std::collections::HashSet<_>>();
         assert!(
-            staging
+            !staging
                 .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
                 .expect("load prepared cache after retire")
                 .is_empty()
@@ -1551,108 +1462,9 @@ mod tests {
                 .load_file_push_plan(&file_hash)
                 .await
                 .expect("load retired push plan")
-                .is_none()
+                .is_some()
         );
-        assert!(!prepared_xorb_path.exists());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn prepared_cache_ignores_json_only_candidates() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let staging = StagingArea::open(tmp.path().to_path_buf())
-            .await
-            .expect("open staging");
-
-        let indexed_data = vec![0x88; 10];
-        let indexed_chunks = vec![(compute_data_hash(&indexed_data), indexed_data.clone())];
-        let indexed_file_hash = stage_file_with_data(&staging, &indexed_chunks).await;
-        let indexed_pairs: Vec<(MerkleHash, u64)> = indexed_chunks
-            .iter()
-            .map(|(hash, data)| (*hash, data.len() as u64))
-            .collect();
-        let indexed_summary = prepare_file_push_plans(
-            &staging,
-            &[AddPlanFile {
-                file_hash: indexed_file_hash.into(),
-                size: indexed_data.len() as u64,
-                chunks: &indexed_pairs,
-            }],
-            &small_raw_xorb_builder,
-            None,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("prepare indexed source plan");
-        assert_eq!(indexed_summary.prepared_xorbs, 1);
-
-        let indexed_plan = staging
-            .load_file_push_plan(&indexed_file_hash)
-            .await
-            .expect("load indexed source plan")
-            .expect("indexed source plan exists");
-        let indexed_xorb_hash = indexed_plan.prepared_xorbs[0].hash.clone();
-        assert!(
-            !crate::push_plan::file_plan_path(staging.root(), &indexed_file_hash).exists(),
-            "indexed source should not have a JSON plan mirror"
-        );
-
-        let json_only_data = vec![0x99; 11];
-        let json_only_chunk_hash = compute_data_hash(&json_only_data);
-        let json_only_source_hash = compute_data_hash(b"json-only-source");
-        let json_only_xorb_hash = write_json_only_prepared_plan(
-            &staging,
-            json_only_source_hash,
-            json_only_chunk_hash,
-            &json_only_data,
-        )
-        .await;
-
-        let target_chunks = vec![
-            (indexed_chunks[0].0, indexed_data),
-            (json_only_chunk_hash, json_only_data),
-        ];
-        let target_file_hash = stage_file_with_data(&staging, &target_chunks).await;
-        let target_pairs: Vec<(MerkleHash, u64)> = target_chunks
-            .iter()
-            .map(|(hash, data)| (*hash, data.len() as u64))
-            .collect();
-        let target_size = target_pairs.iter().map(|(_, size)| *size).sum();
-
-        let summary = prepare_file_push_plans(
-            &staging,
-            &[AddPlanFile {
-                file_hash: target_file_hash.into(),
-                size: target_size,
-                chunks: &target_pairs,
-            }],
-            &small_raw_xorb_builder,
-            None,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("prepare target plan");
-
-        assert_eq!(summary.prepared_cache_chunks, 1);
-        assert_eq!(summary.prepared_cache_xorbs, 1);
-        assert_eq!(summary.prepared_xorbs, 2);
-
-        let target_plan = staging
-            .load_file_push_plan(&target_file_hash)
-            .await
-            .expect("load target plan")
-            .expect("target plan exists");
-        let planned_hashes = target_plan
-            .prepared_xorbs
-            .iter()
-            .map(|planned| planned.hash.clone())
-            .collect::<std::collections::HashSet<_>>();
-        assert!(planned_hashes.contains(&indexed_xorb_hash));
-        assert!(
-            planned_hashes.contains(&json_only_xorb_hash.hex()),
-            "the target should build its own deterministic xorb for the uncached chunk"
-        );
+        assert!(prepared_xorb_path.exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -108,7 +108,7 @@ pub async fn run_reset(args: &ResetArgs, cancel: &CancellationToken) -> Result<(
         let rel = abs_path.strip_prefix(&repo_root).unwrap_or(abs_path);
         let file_hash = MerkleHash::from(pointer.file_hash);
 
-        match staging.unregister_file(&file_hash) {
+        match staging.release_published_path(rel, &file_hash) {
             Ok(true) => {
                 debug!(path = %rel.display(), "cleaned staging data");
                 summary.staging_cleaned += 1;
@@ -193,7 +193,7 @@ async fn run_sync_mode(
         let rel = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
         let file_hash = MerkleHash::from(pointer.file_hash);
 
-        match staging.unregister_file(&file_hash) {
+        match staging.release_published_path(rel, &file_hash) {
             Ok(true) => {
                 debug!(path = %rel.display(), "cleaned orphaned staging data");
                 cleaned += 1;

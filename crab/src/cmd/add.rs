@@ -131,6 +131,14 @@ impl StreamPreparedXorbPlan {
             .contains(path)
             .then(|| self.builder.clone())
     }
+
+    fn bind_preparation(&mut self, preparation_id: crab_staging::AddPreparationId) {
+        self.builder = self.builder.clone().bind_preparation(preparation_id);
+    }
+
+    fn preparation_id(&self) -> Option<&crab_staging::AddPreparationId> {
+        self.builder.preparation_id()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1025,6 +1033,9 @@ async fn execute_add(
     let total_files = candidates.len() as u64;
     let total_bytes: u64 = candidates.iter().map(|(_, s)| *s).sum();
     let mut execution_plans = add_execution_plans(&candidates, total_bytes);
+    if let Some(plan) = execution_plans.stream_xorb_plan.as_mut() {
+        plan.bind_preparation(staging.create_add_preparation()?);
+    }
     execution_plans.remote_classifier = open_add_remote_classifier(cancel).await;
 
     // Build the optional JSONL stream for streaming mode.
@@ -1223,6 +1234,32 @@ async fn execute_add(
         classifier.close().await;
     }
     summary.staging_duration_ms = staging_phase_start.elapsed().as_millis() as u64;
+
+    if let Some(preparation_id) = execution_plans
+        .stream_xorb_plan
+        .as_ref()
+        .and_then(StreamPreparedXorbPlan::preparation_id)
+    {
+        if summary.files_failed > 0 || cancel.is_cancelled() {
+            if let Err(error) = staging.abort_add_preparation(preparation_id) {
+                stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+                return Err(error.into());
+            }
+        } else if let Err(error) = staging.finalize_add_preparation(preparation_id) {
+            let _ = staging.abort_add_preparation(preparation_id);
+            if let Err(cleanup_error) = rollback_unpublished_open_entries(
+                &staging,
+                &mut summary,
+                &mut staged_entries,
+                "failed to finalize canonical prepared ownership",
+            ) {
+                stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+                return Err(cleanup_error);
+            }
+            stop_progress_ticker(ticker.take(), &ticker_cancel).await;
+            return Err(error.into());
+        }
+    }
 
     if summary.files_failed > 0
         && let Err(e) = rollback_unpublished_open_entries(
@@ -1818,6 +1855,14 @@ async fn process_duplicate_candidate(
     let file_merkle = MerkleHash::from(file_hash);
     let rel_path = abs_path.strip_prefix(repo_root).unwrap_or(abs_path);
     let batch_id = staging.create_batch()?;
+    if let Some(preparation_id) = fallback_xorb_builder
+        .as_ref()
+        .and_then(crate::cmd::stream_stage::StreamStageXorbBuilder::preparation_id)
+        && let Err(error) = staging.attach_add_preparation_batch(preparation_id, &batch_id)
+    {
+        let _ = staging.rollback_batch(&batch_id);
+        return Err(error.into());
+    }
     let recipe = reusable.recipe.clone();
     if let Err(error) = staging.record_verified_recipe_lease(&batch_id, rel_path, &recipe) {
         let _ = staging.rollback_batch(&batch_id);
@@ -4030,7 +4075,7 @@ mod tests {
             entries[0].recipe.sequence_hash()
         );
         for prepared in &entries[0].prepared_xorbs {
-            assert!(prepared_xorb_path(staging.root(), &file_hash, &prepared.hash).exists());
+            assert!(prepared_xorb_path(staging.root(), &prepared.hash).exists());
             assert!(
                 !prepared.payload_path.exists(),
                 "stream-prepared temp file should be moved into push-plan cache"

@@ -68,24 +68,28 @@ It consists of:
   - `chunks`: (file_hash, chunk_index) → chunk_hash, size, segment_id, segment_offset
   - `pending_chunks`: same schema as `chunks`, buffered before flush
   - `file_paths`: optional file_hash → worktree path metadata for UX
-  - `file_push_plans`: authoritative verified add-time push plans
-  - `prepared_xorbs`: prepared xorb metadata owned by a staged file
-  - `prepared_xorb_chunks`: chunk_hash → prepared xorb candidate index
+  - `file_recipes` and `recipe_occurrences`: immutable verified file recipes
+  - `recipe_remote_chunks`: proof-bearing committed remote authority
+  - `prepared_payloads`: global local xorb identity, digest, and byte count
+  - `prepared_payload_chunks`: one canonical prepared placement per chunk hash
+  - `prepared_leases`: many-to-one recipe ownership of prepared payloads
+  - `add_preparations` and `prepared_chunk_claims`: temporary cross-file ownership
   - `staging_meta`: key-value store for layout_version and other metadata
 - **Segment files** (`segments/{id}.seg`) — append-only binary files containing
   compressed chunk data. Each segment is sealed when it reaches a size threshold.
-- **Prepared xorb payload files** (`push-plans/xorbs/`) — derived xorb bytes
-  produced at add time. SQLite stores the authoritative plan and candidate
-  metadata; these files are validated before push adopts them.
+- **Prepared xorb payload files**
+  (`push-plans/payloads/<first-two>/<xorb-hash>.xorb`) — immutable local
+  pending authority produced at add time and shared across every recipe lease.
 
 The staging area provides:
 - `stage_chunks_batch()` — write positioned chunks to the current segment + index
 - `chunks_for_file(file_hash)` — return all chunk hashes for a file version
 - `get_chunk(hash)` — read a chunk by hash (segment_id + offset from index)
 - `batch_dedup_check()` — check which chunks already exist in staging
-- `write_file_push_plan()` — promote a verified add-time plan into SQLite
-- `load_file_push_plan()` — load an indexed plan only after it still matches the
-  current staged chunk rows
+- `write_file_push_plan()` — normalize a verified runtime authority DTO into
+  recipe remote/prepared relationships
+- `load_file_push_plan()` — derive a runtime DTO from the published recipe's
+  normalized authority rows
 - `load_prepared_xorb_cache_for_chunks()` — load prepared xorb candidates by
   wanted chunk hash from the indexed candidate table
 - `compact()` — merge segments with high dead-chunk ratios
@@ -95,20 +99,13 @@ The staging area is opened with an exclusive flock during `git add` (write
 path) and a shared flock during `git push` (read-only path). Stale locks
 from crashed processes are detected via PID liveness checks.
 
-Add-time push plans are an optimization, not the durability boundary. A plan row
-is authoritative for the plan body only after the staged chunk sequence is
-verified against `chunks`/`pending_chunks`. Prepared xorb candidates are indexed
-so repeated `crab add` runs can reuse already-formed xorbs without scanning all
-sidecar files. Indexed candidates are reused only while their source file's
-indexed plan still revalidates against current staged rows and includes the
-candidate in the plan body. Multi-file prepared xorbs may index sibling chunks,
-but each source-file candidate must cover at least one chunk from that source
-file. Segment files remain the authoritative staged bytes:
-push can reread them to repack if a plan or prepared xorb is missing, stale, or
-corrupt. File retirement, unregister, and staged-file adoption delete both
-indexed plan rows and prepared-xorb candidates for the affected file hash. Plan
-replacement prunes stale prepared-xorb payload files that the new plan no longer
-references.
+Prepared authority is normalized rather than owned by a file or serialized
+plan. `prepared_payload_chunks.chunk_hash` is unique, so partial overlaps and
+sequential adds reuse one placement. Recipe leases and push snapshots retain a
+body globally. Direct-prepared chunks may have no segment copy; a missing or
+corrupt body therefore fails closed unless the exact recipe independently has
+complete verified segment authority. Writable-open recovery removes unindexed
+content-addressed bodies and abandoned stream temps.
 
 #### PersistentChunkIndex (`chunk-index.sqlite`)
 

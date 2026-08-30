@@ -6,20 +6,18 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::StagingArea;
-use crate::push_plan::{
-    ExistingChunkCandidate, ExistingChunkLookup, FilePushPlan, PlannedPlacement, PlannedXorb,
-    move_prepared_xorb,
-};
+use crate::index::{PreparedChunkClaim, RecordingAuthorityState};
+use crate::push_plan::{ExistingChunkCandidate, ExistingChunkLookup, move_prepared_xorb};
 use crate::{Result, StagingError as CrabError};
 use crab_xet::chunker::GearChunker;
 use crab_xet::hash::MerkleHash;
@@ -69,6 +67,13 @@ pub struct StreamStageXorbBuilder {
     admission: Arc<Semaphore>,
     materialization: Arc<Semaphore>,
     serialized_payload_pool: SerializedPayloadPool,
+    coordination: Option<Arc<PreparedAuthorityCoordination>>,
+}
+
+struct PreparedAuthorityCoordination {
+    preparation_id: crate::AddPreparationId,
+    changed: Notify,
+    failed: AtomicBool,
 }
 
 impl StreamStageXorbBuilder {
@@ -82,6 +87,72 @@ impl StreamStageXorbBuilder {
             admission: Arc::new(Semaphore::new(max_in_flight)),
             materialization: Arc::new(Semaphore::new(1)),
             serialized_payload_pool: SerializedPayloadPool::new(1),
+            coordination: None,
+        }
+    }
+
+    #[must_use]
+    pub fn bind_preparation(mut self, preparation_id: crate::AddPreparationId) -> Self {
+        self.coordination = Some(Arc::new(PreparedAuthorityCoordination {
+            preparation_id,
+            changed: Notify::new(),
+            failed: AtomicBool::new(false),
+        }));
+        self
+    }
+
+    #[must_use]
+    pub fn preparation_id(&self) -> Option<&crate::AddPreparationId> {
+        self.coordination
+            .as_ref()
+            .map(|coordination| &coordination.preparation_id)
+    }
+
+    pub fn fail_preparation(&self) {
+        if let Some(coordination) = &self.coordination {
+            coordination.failed.store(true, Relaxed);
+            coordination.changed.notify_waiters();
+        }
+    }
+
+    fn authority_changed(&self) {
+        if let Some(coordination) = &self.coordination {
+            coordination.changed.notify_waiters();
+        }
+    }
+
+    async fn wait_for_recording_authority(
+        &self,
+        staging: &StagingArea,
+        batch_id: &crate::StagingBatchId,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let Some(coordination) = &self.coordination else {
+            return Ok(());
+        };
+        loop {
+            let changed = coordination.changed.notified();
+            match staging.recording_authority_state(batch_id)? {
+                RecordingAuthorityState::Complete => return Ok(()),
+                RecordingAuthorityState::Missing => {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "direct add batch {} has no complete prepared, segment, or remote authority",
+                        batch_id.as_str()
+                    )));
+                }
+                RecordingAuthorityState::Pending => {}
+            }
+            if coordination.failed.load(Relaxed) {
+                return Err(CrabError::Internal(
+                    "another file failed while resolving preparation-wide chunk ownership"
+                        .to_owned(),
+                ));
+            }
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                () = changed => {}
+            }
         }
     }
 
@@ -441,6 +512,24 @@ async fn stage_file_streaming_inner(
     }
     let mut read_file = tokio::fs::File::from_std(descriptor.try_clone()?);
     let batch_id = staging.create_batch()?;
+    let mut xorb_builder = progress.xorb_builder.clone();
+    let owned_preparation = if let Some(builder) = xorb_builder.as_mut()
+        && builder.preparation_id().is_none()
+    {
+        let preparation_id = staging.create_add_preparation()?;
+        *builder = builder.clone().bind_preparation(preparation_id.clone());
+        Some(preparation_id)
+    } else {
+        None
+    };
+    if let Some(preparation_id) = xorb_builder
+        .as_ref()
+        .and_then(StreamStageXorbBuilder::preparation_id)
+        && let Err(error) = staging.attach_add_preparation_batch(preparation_id, &batch_id)
+    {
+        let _ = staging.rollback_batch(&batch_id);
+        return Err(with_path(abs_path, error));
+    }
     let provisional_merkle = provisional_file_hash(&rel_path, &batch_id);
     let retired = staging.retire_file(&provisional_merkle)?;
     if retired.rows_deleted > 0 {
@@ -453,7 +542,7 @@ async fn stage_file_streaming_inner(
     }
     staging.unregister_file(&provisional_merkle)?;
 
-    if progress.xorb_builder.is_some() {
+    if xorb_builder.is_some() {
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
     }
     staging.pre_register_file_with_path(&provisional_merkle, 0, &rel_path.to_string_lossy())?;
@@ -465,7 +554,7 @@ async fn stage_file_streaming_inner(
         progress.bytes_done.as_ref(),
         progress.chunk_bytes_done.as_ref(),
         progress.chunks_done.as_ref(),
-        progress.xorb_builder.as_ref(),
+        xorb_builder.as_ref(),
         progress.existing_lookup.as_deref(),
         cancel,
         &hooks,
@@ -475,6 +564,12 @@ async fn stage_file_streaming_inner(
     let mut stage_stats = match stage_result {
         Ok(stats) => stats,
         Err(err) => {
+            if let Some(builder) = &xorb_builder {
+                builder.fail_preparation();
+            }
+            if let Some(preparation_id) = &owned_preparation {
+                let _ = staging.abort_add_preparation(preparation_id);
+            }
             cleanup_staged_file(
                 staging,
                 &provisional_merkle,
@@ -488,13 +583,22 @@ async fn stage_file_streaming_inner(
     };
 
     let file_merkle = MerkleHash::from(stage_stats.file_hash);
-    let recipe = stage_stats
+    let recipe = match stage_stats
         .recipe_recorder
-        .seal(file_merkle, stage_stats.size)?;
+        .seal(file_merkle, stage_stats.size)
+    {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
+            let _ = staging.rollback_batch(&batch_id);
+            return Err(with_path(abs_path, error));
+        }
+    };
     let after_descriptor_stat = VerifiedIndexStat::from_file(&descriptor);
     let after_path_stat = VerifiedIndexStat::from_path_no_follow(abs_path);
     if after_descriptor_stat != Some(before_stream_stat) || after_path_stat != after_descriptor_stat
     {
+        fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
         cleanup_staged_file(
             staging,
             &provisional_merkle,
@@ -517,6 +621,7 @@ async fn stage_file_streaming_inner(
 
     if let Err(err) = staging.adopt_staged_file(&provisional_merkle, &file_merkle, stage_stats.size)
     {
+        fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
         cleanup_staged_file(
             staging,
             &provisional_merkle,
@@ -528,23 +633,53 @@ async fn stage_file_streaming_inner(
         return Err(with_path(abs_path, err));
     }
 
-    if (!stage_stats.prepared_xorbs.is_empty() || stage_stats.remote_existing_chunks > 0)
-        && let Err(err) = persist_stream_prepared_plan(
+    if xorb_builder.is_some()
+        && let Err(err) = persist_stream_prepared_authority(
             staging,
-            &file_merkle,
-            &recipe,
             &batch_id,
             &mut stage_stats.prepared_xorbs,
+            xorb_builder
+                .as_ref()
+                .and_then(StreamStageXorbBuilder::preparation_id),
         )
         .await
     {
+        if let Some(builder) = &xorb_builder {
+            builder.fail_preparation();
+        }
+        if let Some(preparation_id) = &owned_preparation {
+            let _ = staging.abort_add_preparation(preparation_id);
+        }
         let _ = staging.retire_file_if_unleased(&file_merkle);
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
         let _ = staging.rollback_batch(&batch_id);
         return Err(with_path(abs_path, err));
     }
+    if let Some(builder) = &xorb_builder {
+        builder.authority_changed();
+    }
+
+    if let Some(builder) = &xorb_builder
+        && let Err(err) = builder
+            .wait_for_recording_authority(staging, &batch_id, cancel)
+            .await
+    {
+        builder.fail_preparation();
+        if let Some(preparation_id) = &owned_preparation {
+            let _ = staging.abort_add_preparation(preparation_id);
+        }
+        let _ = staging.retire_file_if_unleased(&file_merkle);
+        let _ = staging.rollback_batch(&batch_id);
+        return Err(with_path(abs_path, err));
+    }
 
     if let Err(err) = staging.record_verified_recipe_lease(&batch_id, &rel_path, &recipe) {
+        if let Some(builder) = &xorb_builder {
+            builder.fail_preparation();
+        }
+        if let Some(preparation_id) = &owned_preparation {
+            let _ = staging.abort_add_preparation(preparation_id);
+        }
         let _ = staging.retire_file_if_unleased(&file_merkle);
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
         let _ = staging.rollback_batch(&batch_id);
@@ -552,7 +687,16 @@ async fn stage_file_streaming_inner(
     }
 
     if let Err(err) = staging.record_file_path(&file_merkle, &rel_path.to_string_lossy()) {
+        fail_stream_preparation(staging, xorb_builder.as_ref(), owned_preparation.as_ref());
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
+        let _ = staging.rollback_batch(&batch_id);
+        return Err(with_path(abs_path, err));
+    }
+
+    if let Some(preparation_id) = &owned_preparation
+        && let Err(err) = staging.finalize_add_preparation(preparation_id)
+    {
+        let _ = staging.abort_add_preparation(preparation_id);
         let _ = staging.rollback_batch(&batch_id);
         return Err(with_path(abs_path, err));
     }
@@ -576,6 +720,19 @@ async fn stage_file_streaming_inner(
         index_stat,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+fn fail_stream_preparation(
+    staging: &StagingArea,
+    builder: Option<&StreamStageXorbBuilder>,
+    owned_preparation: Option<&crate::AddPreparationId>,
+) {
+    if let Some(builder) = builder {
+        builder.fail_preparation();
+    }
+    if let Some(preparation_id) = owned_preparation {
+        let _ = staging.abort_add_preparation(preparation_id);
+    }
 }
 
 fn cleanup_staged_file(
@@ -865,7 +1022,6 @@ async fn stream_chunk_and_stage_producer(
         chunks: total_chunks,
         recipe_recorder,
         prepared_xorbs: Vec::new(),
-        remote_existing_chunks,
     })
 }
 
@@ -883,7 +1039,6 @@ struct ChunkStageStats {
     chunks: usize,
     recipe_recorder: crate::recipe::RecipeRecorder,
     prepared_xorbs: Vec<StreamStagePreparedXorb>,
-    remote_existing_chunks: u64,
 }
 
 fn append_emitted_chunks(
@@ -1102,10 +1257,46 @@ async fn flush_batch(
         ))
     })?;
     if xorb_builder.is_some() {
+        let mut pack = vec![false; batch.len()];
+        let coordination = xorb_writer
+            .as_ref()
+            .and_then(|writer| writer.factory.coordination.as_ref());
+        if let Some(coordination) = coordination {
+            let misses = batch
+                .iter()
+                .zip(existing.iter())
+                .filter_map(|((hash, data), candidate)| {
+                    candidate.is_none().then_some((*hash, data.len() as u64))
+                })
+                .collect::<Vec<_>>();
+            let claims =
+                staging.claim_prepared_chunks(&coordination.preparation_id, batch_id, &misses)?;
+            let mut claims = claims.into_iter();
+            for (index, candidate) in existing.iter().enumerate() {
+                if candidate.is_some() {
+                    continue;
+                }
+                let claim = claims.next().ok_or_else(|| {
+                    CrabError::Internal(
+                        "prepared ownership claim cardinality was truncated".to_owned(),
+                    )
+                })?;
+                pack[index] = matches!(claim, PreparedChunkClaim::Claimed);
+            }
+            if claims.next().is_some() {
+                return Err(CrabError::Internal(
+                    "prepared ownership claim cardinality exceeded input".to_owned(),
+                ));
+            }
+        } else {
+            for (index, candidate) in existing.iter().enumerate() {
+                pack[index] = candidate.is_none();
+            }
+        }
         let to_pack: Vec<_> = batch
             .iter()
-            .zip(existing.iter())
-            .filter(|(_, candidate)| candidate.is_none())
+            .zip(pack)
+            .filter(|(_, should_pack)| *should_pack)
             .map(|((hash, data), _)| {
                 (
                     Chunk {
@@ -1197,22 +1388,18 @@ async fn classify_existing_batch(
     }
 }
 
-async fn persist_stream_prepared_plan(
+async fn persist_stream_prepared_authority(
     staging: &StagingArea,
-    file_hash: &MerkleHash,
-    recipe: &crate::recipe::FileRecipe,
     batch_id: &crate::StagingBatchId,
     prepared_xorbs: &mut [StreamStagePreparedXorb],
+    preparation_id: Option<&crate::AddPreparationId>,
 ) -> Result<()> {
-    let mut plan = FilePushPlan::new_verified_recipe(recipe);
-    for prepared in prepared_xorbs {
-        let written = move_prepared_xorb(
-            staging.root(),
-            file_hash,
-            &prepared.hash,
-            &prepared.payload_path,
-        )
-        .await?;
+    let preparation_id = preparation_id.ok_or_else(|| {
+        CrabError::Internal("direct prepared authority has no add preparation".to_owned())
+    })?;
+    for prepared in prepared_xorbs.iter_mut() {
+        let written =
+            move_prepared_xorb(staging.root(), &prepared.hash, &prepared.payload_path).await?;
         if written != prepared.bytes {
             return Err(CrabError::StagingCorrupt(format!(
                 "stream-prepared xorb {} changed size while becoming authoritative: expected {} bytes, found {written}",
@@ -1220,21 +1407,9 @@ async fn persist_stream_prepared_plan(
                 prepared.bytes
             )));
         }
-        plan.prepared_xorbs.push(PlannedXorb {
-            hash: prepared.hash.hex(),
-            payload_hash: prepared.payload_hash.clone(),
-            bytes: prepared.bytes,
-            upload: true,
-            placements: prepared
-                .placements
-                .iter()
-                .map(PlannedPlacement::from_placement)
-                .collect(),
-        });
     }
-    staging
-        .write_file_push_plan_for_open_recipe(&plan, recipe, batch_id)
-        .await
+    staging.register_preparation_payloads(preparation_id, batch_id, prepared_xorbs)?;
+    Ok(())
 }
 
 async fn stream_prepared_xorb(
@@ -1559,6 +1734,126 @@ mod tests {
         assert_eq!(builders.available_materialization_permits(), 0);
         drop(second);
         assert_eq!(builders.available_materialization_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn direct_stream_partial_overlap_has_one_canonical_prepared_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_path = dir.path().join("shared.bin");
+        let first_prefix_path = dir.path().join("first-prefix.bin");
+        let second_prefix_path = dir.path().join("second-prefix.bin");
+        write_pattern_file_with_salt(&shared_path, 3 * 1024 * 1024, 17);
+        write_pattern_file_with_salt(&first_prefix_path, 1024 * 1024, 29);
+        write_pattern_file_with_salt(&second_prefix_path, 1024 * 1024, 41);
+        let shared = std::fs::read(shared_path).unwrap();
+        let mut first_bytes = std::fs::read(first_prefix_path).unwrap();
+        first_bytes.extend_from_slice(&shared);
+        let mut second_bytes = std::fs::read(second_prefix_path).unwrap();
+        second_bytes.extend_from_slice(&shared);
+        let first_path = dir.path().join("first.bin");
+        let second_path = dir.path().join("second.bin");
+        std::fs::write(&first_path, &first_bytes).unwrap();
+        std::fs::write(&second_path, &second_bytes).unwrap();
+
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+        let preparation = staging.create_add_preparation().unwrap();
+        let builders =
+            StreamStageXorbBuilder::new(2, XorbBuilder::new).bind_preparation(preparation.clone());
+        let cancel = CancellationToken::new();
+        let first = stage_file_streaming(
+            &first_path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(builders.clone()),
+                ..StreamStageProgress::default()
+            },
+            &cancel,
+        );
+        let second = stage_file_streaming(
+            &second_path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(builders),
+                ..StreamStageProgress::default()
+            },
+            &cancel,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        staging.finalize_add_preparation(&preparation).unwrap();
+        staging.mark_batch_published(&first.batch_id).unwrap();
+        staging.mark_batch_published(&second.batch_id).unwrap();
+
+        let first_recipe = recipe_pairs(&staging, &first);
+        let second_recipe = recipe_pairs(&staging, &second);
+        let first_hashes = first_recipe
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<std::collections::HashSet<_>>();
+        let second_hashes = second_recipe
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<std::collections::HashSet<_>>();
+        let shared_hashes = first_hashes
+            .intersection(&second_hashes)
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            shared_hashes.len() > 8,
+            "fixture must share multiple CDC chunks"
+        );
+
+        let first_plan = staging
+            .load_file_push_plan(&MerkleHash::from(first.file_hash))
+            .await
+            .unwrap()
+            .unwrap();
+        let second_plan = staging
+            .load_file_push_plan(&MerkleHash::from(second.file_hash))
+            .await
+            .unwrap()
+            .unwrap();
+        let placement_map = |plan: &crate::push_plan::FilePushPlan| {
+            plan.prepared_xorbs
+                .iter()
+                .flat_map(|xorb| {
+                    xorb.placements.iter().map(|placement| {
+                        (
+                            MerkleHash::from_hex(&placement.chunk_hash).unwrap(),
+                            MerkleHash::from_hex(&placement.xorb_hash).unwrap(),
+                        )
+                    })
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let first_placements = placement_map(&first_plan);
+        let second_placements = placement_map(&second_plan);
+        for chunk_hash in shared_hashes {
+            assert_eq!(
+                first_placements.get(&chunk_hash),
+                second_placements.get(&chunk_hash),
+                "shared chunk must resolve to one canonical prepared xorb"
+            );
+        }
+        for (result, expected) in [(&first, &first_bytes), (&second, &second_bytes)] {
+            let hashes = recipe_pairs(&staging, result)
+                .into_iter()
+                .map(|(hash, _)| hash)
+                .collect::<Vec<_>>();
+            let reconstructed = staging
+                .get_chunks_batch(&hashes)
+                .await
+                .unwrap()
+                .into_iter()
+                .flat_map(|(_, bytes)| bytes)
+                .collect::<Vec<_>>();
+            assert_eq!(&reconstructed, expected);
+        }
     }
 
     #[tokio::test]
@@ -2016,7 +2311,6 @@ mod tests {
             assert!(!prepared.payload_path.exists());
             let payload = std::fs::read(crate::push_plan::prepared_xorb_path(
                 staging.root(),
-                &MerkleHash::from(result.file_hash),
                 &prepared.hash,
             ))
             .unwrap();
@@ -2240,9 +2534,7 @@ mod tests {
         let prepared_paths = first
             .prepared_xorbs
             .iter()
-            .map(|prepared| {
-                crate::push_plan::prepared_xorb_path(staging.root(), &first_hash, &prepared.hash)
-            })
+            .map(|prepared| crate::push_plan::prepared_xorb_path(staging.root(), &prepared.hash))
             .collect::<Vec<_>>();
         assert!(prepared_paths.iter().all(|path| path.is_file()));
         staging.close().await.unwrap();
@@ -2280,6 +2572,15 @@ mod tests {
                 .unwrap(),
             Some(second.recipe.clone())
         );
+        let second_prepared = staging
+            .load_file_push_plan(&MerkleHash::from(second.file_hash))
+            .await
+            .unwrap()
+            .unwrap()
+            .prepared_xorbs
+            .into_iter()
+            .map(|xorb| xorb.hash().unwrap())
+            .collect::<std::collections::HashSet<_>>();
         staging.close().await.unwrap();
 
         let reader = crate::StagingAreaReadOnly::open(staging_root)
@@ -2290,7 +2591,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retired.len(), 1);
-        assert!(prepared_paths.iter().all(|path| !path.exists()));
+        for prepared in &first.prepared_xorbs {
+            let path = crate::push_plan::prepared_xorb_path(reader.root(), &prepared.hash);
+            assert_eq!(
+                path.exists(),
+                second_prepared.contains(&prepared.hash),
+                "restage must retain only content-addressed payloads leased by the new recipe"
+            );
+        }
         let second_chunks = reader
             .chunks_for_file(&MerkleHash::from(second.file_hash))
             .unwrap();
@@ -2337,7 +2645,7 @@ mod tests {
                 .map(|mut entries| entries.next().is_none())
                 .unwrap_or(true)
         );
-        assert!(!staging_root.join("push-plans/xorbs").exists());
+        assert!(!staging_root.join("push-plans/payloads").exists());
     }
 
     #[tokio::test]
@@ -2480,6 +2788,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writable_reopen_rolls_back_every_batch_in_unfinished_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unfinished.bin");
+        write_pattern_file(&path, 2 * 1024 * 1024);
+        let staging_root = dir.path().join(".crab/staging");
+        let staging = StagingArea::open(staging_root.clone()).await.unwrap();
+        let preparation = staging.create_add_preparation().unwrap();
+        let result = stage_file_streaming(
+            &path,
+            dir.path(),
+            &staging,
+            StreamStageProgress {
+                xorb_builder: Some(
+                    StreamStageXorbBuilder::new(1, XorbBuilder::new).bind_preparation(preparation),
+                ),
+                ..StreamStageProgress::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let payloads = result
+            .prepared_xorbs
+            .iter()
+            .map(|prepared| crate::push_plan::prepared_xorb_path(&staging_root, &prepared.hash))
+            .collect::<Vec<_>>();
+        assert!(payloads.iter().all(|path| path.is_file()));
+        staging.close().await.unwrap();
+
+        let recovered = StagingArea::open(staging_root).await.unwrap();
+
+        assert!(recovered.list_files().unwrap().is_empty());
+        assert!(payloads.iter().all(|path| !path.exists()));
+        assert_eq!(
+            recovered
+                .lifecycle_health()
+                .unwrap()
+                .open_batches_without_publication,
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_after_batch_flush_retires_partial_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cancel.bin");
@@ -2565,7 +2916,7 @@ mod tests {
                 .map(|mut entries| entries.next().is_none())
                 .unwrap_or(true)
         );
-        assert!(!staging_root.join("push-plans/xorbs").exists());
+        assert!(!staging_root.join("push-plans/payloads").exists());
     }
 
     #[tokio::test]
