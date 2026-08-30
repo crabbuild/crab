@@ -646,8 +646,15 @@ pub fn concatenate_complete_pack_inventory(
     let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
     let installed =
         install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
-    let generated =
-        verified_generated_pack(installed.pack_path, GeneratedPackValidation::Full, None)?;
+    // `index-pack --fsck-objects` above already validates every copied object
+    // while creating the response index. A second `verify-pack -v` traversal
+    // only repeats repository-sized work on the latency-sensitive response
+    // path; durable maintenance continues to use full validation below.
+    let generated = verified_generated_pack(
+        installed.pack_path,
+        GeneratedPackValidation::Structural,
+        None,
+    )?;
     if generated.object_count != total_objects {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id,
