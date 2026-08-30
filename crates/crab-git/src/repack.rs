@@ -27,6 +27,15 @@ pub struct RepackSource {
     pub object_count: u64,
 }
 
+/// One authorized annotated tag considered for shallow fetch inclusion.
+#[derive(Debug, Clone, Copy)]
+pub struct ShallowFetchTag {
+    /// Annotated tag object referenced by the visible tag ref.
+    pub target: gix_hash::ObjectId,
+    /// Final object referenced by the annotated tag chain.
+    pub peeled: gix_hash::ObjectId,
+}
+
 /// A verified pack produced by geometric consolidation.
 #[derive(Debug)]
 pub struct GeometricRepackedPack {
@@ -807,6 +816,7 @@ pub fn repack_shallow_fetch(
     wants: &[gix_hash::ObjectId],
     common_haves: &[gix_hash::ObjectId],
     shallow: &[gix_hash::ObjectId],
+    included_tags: &[ShallowFetchTag],
     maximum_objects: usize,
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.is_empty() || wants.is_empty() || common_haves.is_empty() || shallow.is_empty() {
@@ -864,6 +874,13 @@ pub fn repack_shallow_fetch(
         "enumerate shallow fetch objects",
     )?;
     let selected = read_selected_oids(&object_list, maximum_objects, "shallow-fetch")?;
+    let selected = include_reachable_tag_objects(
+        &source_git,
+        &object_list,
+        selected,
+        included_tags,
+        maximum_objects,
+    )?;
     let generated = pack_selected_objects(
         &source_git,
         &pack_dir,
@@ -875,6 +892,67 @@ pub fn repack_shallow_fetch(
         _workspace: workspace,
         packs: vec![generated],
     })
+}
+
+fn include_reachable_tag_objects(
+    source_git: &Path,
+    object_list: &Path,
+    mut selected: Vec<gix_hash::ObjectId>,
+    included_tags: &[ShallowFetchTag],
+    maximum_objects: usize,
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+    let included_tags = included_tags
+        .iter()
+        .filter(|tag| tag.target != tag.peeled && selected_set.contains(&tag.peeled))
+        .collect::<Vec<_>>();
+    if included_tags.is_empty() {
+        return Ok(selected);
+    }
+
+    let workspace = object_list
+        .parent()
+        .ok_or_else(|| RepackError::SelectedObjectSet {
+            pack_id: "shallow-fetch".to_owned(),
+            reason: "shallow fetch object list has no parent directory".to_owned(),
+        })?;
+    let revisions_path = workspace.join("shallow-fetch-tag-revisions.txt");
+    let mut revisions = File::create(&revisions_path)
+        .map_err(|source| io_error(format!("create {}", revisions_path.display()), source))?;
+    for tag in included_tags {
+        writeln!(revisions, "{}\n^{}", tag.target, tag.peeled)
+            .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
+    }
+    drop(revisions);
+
+    let tag_objects_path = workspace.join("shallow-fetch-tag-objects.txt");
+    let revision_input = File::open(&revisions_path)
+        .map_err(|source| io_error(format!("open {}", revisions_path.display()), source))?;
+    let object_output = File::create(&tag_objects_path)
+        .map_err(|source| io_error(format!("create {}", tag_objects_path.display()), source))?;
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", source_git.display()))
+            .args(["rev-list", "--stdin", "--objects", "--no-object-names"])
+            .stdin(Stdio::from(revision_input))
+            .stdout(Stdio::from(object_output)),
+        "enumerate shallow fetch tag objects",
+    )?;
+    let remaining = maximum_objects.saturating_sub(selected.len());
+    let tag_objects = read_selected_oids(&tag_objects_path, remaining, "shallow-fetch-tags")?;
+    let mut selected_set = selected_set;
+    let mut object_list = std::fs::OpenOptions::new()
+        .append(true)
+        .open(object_list)
+        .map_err(|source| io_error("open shallow fetch object list for tags", source))?;
+    for oid in tag_objects {
+        if selected_set.insert(oid) {
+            writeln!(object_list, "{oid}")
+                .map_err(|source| io_error("append shallow fetch tag object", source))?;
+            selected.push(oid);
+        }
+    }
+    normalize_selected_oids(&selected, "shallow-fetch")
 }
 
 fn normalize_selected_oids(
@@ -1378,6 +1456,40 @@ mod tests {
             "resolve side commit",
         )?;
         run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "tag",
+                "--annotate",
+                "--message=included tag",
+                "included-tag",
+                &side_commit,
+            ]),
+            "create included shallow-fetch tag",
+        )?;
+        let included_tag = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "included-tag^{tag}"]),
+            "resolve included tag object",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "tag",
+                "--annotate",
+                "--message=excluded tag",
+                "excluded-tag",
+                &shallow_parent,
+            ]),
+            "create excluded shallow-fetch tag",
+        )?;
+        let excluded_tag = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "excluded-tag^{tag}"]),
+            "resolve excluded tag object",
+        )?;
+        run_git(
             Command::new("git")
                 .arg("-C")
                 .arg(&repository)
@@ -1423,6 +1535,16 @@ mod tests {
             &[oid(&want)?],
             &[oid(&shallow_tip)?],
             &[oid(&shallow_tip)?],
+            &[
+                ShallowFetchTag {
+                    target: oid(&included_tag)?,
+                    peeled: oid(&side_commit)?,
+                },
+                ShallowFetchTag {
+                    target: oid(&excluded_tag)?,
+                    peeled: oid(&shallow_parent)?,
+                },
+            ],
             100,
         )?;
         let pack = generated
@@ -1441,7 +1563,9 @@ mod tests {
 
         assert!(objects.contains(&oid(&want)?));
         assert!(objects.contains(&oid(&side_commit)?));
+        assert!(objects.contains(&oid(&included_tag)?));
         assert!(!objects.contains(&oid(&shallow_parent)?));
+        assert!(!objects.contains(&oid(&excluded_tag)?));
         Ok(())
     }
 

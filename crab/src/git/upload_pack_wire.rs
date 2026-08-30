@@ -1587,6 +1587,32 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
             let (common_haves, shallow_visible) =
                 native_shallow_visibility(repository, request, visible_ref_names, cancellation)?;
             if !common_haves.is_empty() && shallow_visible {
+                let visible_tag_refs = visible_ref_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let included_tags = request
+                    .include_tags
+                    .then(|| {
+                        repository
+                            .refs()
+                            .entries
+                            .iter()
+                            .filter(|reference| {
+                                reference.name.starts_with("refs/tags/")
+                                    && visible_tag_refs.contains(reference.name.as_str())
+                            })
+                            .filter_map(|reference| {
+                                reference
+                                    .peeled
+                                    .map(|peeled| crab_git::repack::ShallowFetchTag {
+                                        target: reference.target,
+                                        peeled,
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 tracing::info!(
                     protocol_version = 2,
                     request_class,
@@ -1602,6 +1628,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
                         &request.wants,
                         &common_haves,
                         &request.shallow,
+                        &included_tags,
                         cancellation,
                     )
                     .await
@@ -1847,10 +1874,8 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     }
     let generated = if request.haves.is_empty() {
         let authorization_digest = proof.authorization_digest_for_refs(visible_ref_names);
-        let request_digest = generated_pack_request_digest(request, &plan.shallow, &plan.unshallow);
         let cache_key = repository.generated_pack_cache_key(
             authorization_digest,
-            request_digest,
             &plan.object_ids,
             !thin_bases.is_empty(),
         );
@@ -1903,46 +1928,6 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     write_response_end(writer, cancellation).await
 }
 
-fn generated_pack_request_digest(
-    request: &FetchRequest,
-    response_shallow: &[ObjectId],
-    response_unshallow: &[ObjectId],
-) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"crab.upload-pack.generated-request.v1\0");
-    let filter = request.filter.canonical_spec();
-    hash.update(&(filter.len() as u64).to_be_bytes());
-    hash.update(filter.as_bytes());
-    hash.update(&[
-        u8::from(request.deepen_relative),
-        u8::from(request.include_tags),
-        u8::from(request.thin_pack),
-        u8::from(request.ofs_delta),
-    ]);
-    match request.deepen {
-        Some(depth) => {
-            hash.update(&[1]);
-            hash.update(&depth.to_be_bytes());
-        }
-        None => {
-            hash.update(&[0]);
-        }
-    }
-    for objects in [
-        request.shallow.as_slice(),
-        response_shallow,
-        response_unshallow,
-    ] {
-        let mut objects = objects.to_vec();
-        objects.sort_unstable();
-        hash.update(&(objects.len() as u64).to_be_bytes());
-        for oid in objects {
-            hash.update(oid.as_bytes());
-        }
-    }
-    *hash.finalize().as_bytes()
-}
-
 fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
     !request.haves.is_empty()
         && !request.shallow.is_empty()
@@ -1952,7 +1937,7 @@ fn request_pack_preplanning_cache_eligible(request: &FetchRequest) -> bool {
 }
 
 fn native_shallow_pack_eligible(request: &FetchRequest) -> bool {
-    request_pack_preplanning_cache_eligible(request) && !request.include_tags
+    request_pack_preplanning_cache_eligible(request)
 }
 
 fn preplanned_pack_request_digest(request: &FetchRequest) -> [u8; 32] {
@@ -2233,33 +2218,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_pack_request_digest_is_canonical_and_policy_bound() {
-        let first =
-            ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
-        let second =
-            ObjectId::from_hex(b"2222222222222222222222222222222222222222").expect("object ID");
-        let request = FetchRequest {
-            shallow: vec![second, first],
-            include_tags: true,
-            filter: UploadPackFilter::BlobNone,
-            ..FetchRequest::default()
-        };
-        let mut reordered = request.clone();
-        reordered.shallow.reverse();
-
-        let digest = generated_pack_request_digest(&request, &[second, first], &[]);
-        assert_eq!(
-            digest,
-            generated_pack_request_digest(&reordered, &[first, second], &[])
-        );
-        reordered.thin_pack = true;
-        assert_ne!(
-            digest,
-            generated_pack_request_digest(&reordered, &[first, second], &[])
-        );
-    }
-
-    #[test]
     fn preplanned_pack_request_digest_binds_shallow_incremental_negotiation() {
         let first =
             ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID");
@@ -2291,7 +2249,7 @@ mod tests {
         changed = request;
         changed.filter = UploadPackFilter::BlobNone;
         assert!(!request_pack_preplanning_cache_eligible(&changed));
-        let mut changed = FetchRequest {
+        let changed = FetchRequest {
             wants: vec![second],
             haves: vec![first],
             shallow: vec![first],
@@ -2299,8 +2257,6 @@ mod tests {
             ..FetchRequest::default()
         };
         assert!(request_pack_preplanning_cache_eligible(&changed));
-        assert!(!native_shallow_pack_eligible(&changed));
-        changed.include_tags = false;
         assert!(native_shallow_pack_eligible(&changed));
     }
 

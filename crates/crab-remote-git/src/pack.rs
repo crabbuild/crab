@@ -315,13 +315,15 @@ impl GeneratedPack {
 }
 
 impl RemoteGitRepository {
-    /// Bind canonical request semantics and object selection to this pinned
-    /// repository and authorization state.
+    /// Bind an exact object selection to this pinned repository and authorization state.
+    ///
+    /// Request policy is intentionally excluded after planning: shallow boundaries and
+    /// filters travel separately on the wire, while a self-contained pack is determined
+    /// by its authorized object set and thin-pack mode.
     #[must_use]
     pub fn generated_pack_cache_key(
         &self,
         authorization_digest: [u8; 32],
-        request_digest: [u8; 32],
         object_ids: &[ObjectId],
         thin_pack: bool,
     ) -> GeneratedPackCacheKey {
@@ -329,7 +331,6 @@ impl RemoteGitRepository {
             &self.state.identity,
             &self.state.git_validation_digest,
             authorization_digest,
-            request_digest,
             object_ids,
             thin_pack,
         )
@@ -377,6 +378,7 @@ impl RemoteGitRepository {
         wants: &[ObjectId],
         common_haves: &[ObjectId],
         shallow: &[ObjectId],
+        included_tags: &[crab_git::repack::ShallowFetchTag],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
         let operation = self
@@ -407,6 +409,7 @@ impl RemoteGitRepository {
             let wants = wants.to_vec();
             let common_haves = common_haves.to_vec();
             let shallow = shallow.to_vec();
+            let included_tags = included_tags.to_vec();
             let maximum_objects =
                 usize::try_from(operation.max_logical_objects()).unwrap_or(usize::MAX);
             let repacked = tokio::task::spawn_blocking(move || {
@@ -415,6 +418,7 @@ impl RemoteGitRepository {
                     &wants,
                     &common_haves,
                     &shallow,
+                    &included_tags,
                     maximum_objects,
                 )
             })
@@ -987,17 +991,15 @@ fn generated_pack_cache_key(
     identity: &crate::RepositoryIdentity,
     git_validation_digest: &str,
     authorization_digest: [u8; 32],
-    request_digest: [u8; 32],
     object_ids: &[ObjectId],
     thin_pack: bool,
 ) -> GeneratedPackCacheKey {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"crab.generated-pack.request\0");
+    hash.update(b"crab.generated-pack.selection.v1\0");
     hash.update(&GENERATED_PACK_CACHE_VERSION.to_be_bytes());
     identity.hash_cache_identity(&mut hash);
     hash.update(git_validation_digest.as_bytes());
     hash.update(&authorization_digest);
-    hash.update(&request_digest);
     hash.update(&[u8::from(thin_pack)]);
     let selection_digest = selected_object_digest(object_ids);
     hash.update(&selection_digest);
@@ -2400,14 +2402,7 @@ mod tests {
             .expect("moved repository identity");
         let objects = [ObjectId::from([1; 20])];
         let key = |identity, validation_digest| {
-            generated_pack_cache_key(
-                identity,
-                validation_digest,
-                [2; 32],
-                [3; 32],
-                &objects,
-                false,
-            )
+            generated_pack_cache_key(identity, validation_digest, [2; 32], &objects, false)
         };
 
         let base = key(&identity, "validation-a");
@@ -2437,12 +2432,12 @@ mod tests {
         let identity =
             crate::RepositoryIdentity::new("memory", "org/repo", 1).expect("repository identity");
         let objects = [ObjectId::from([1; 20])];
-        let current =
-            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], &objects, false);
+        let current = generated_pack_cache_key(&identity, "validation", [2; 32], &objects, false);
 
         let selection_digest = selected_object_digest(&objects);
         let mut previous_hash = blake3::Hasher::new();
-        previous_hash.update(b"crab.generated-pack.request.v1\0");
+        previous_hash.update(b"crab.generated-pack.request\0");
+        previous_hash.update(&GENERATED_PACK_CACHE_VERSION.to_be_bytes());
         identity.hash_cache_identity(&mut previous_hash);
         previous_hash.update(b"validation");
         previous_hash.update(&[2; 32]);
@@ -2487,7 +2482,7 @@ mod tests {
         let first = ObjectId::from([1; 20]);
         let second = ObjectId::from([2; 20]);
         let key = |objects: &[ObjectId]| {
-            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], objects, false)
+            generated_pack_cache_key(&identity, "validation", [2; 32], objects, false)
         };
 
         assert_eq!(key(&[first, second]), key(&[second, first]));

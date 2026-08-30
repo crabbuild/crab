@@ -1381,6 +1381,7 @@ async fn shallow_fetch_pack_uses_pinned_inventory_and_exact_boundary() {
             &[want],
             &[fixture.root_commit],
             &[fixture.root_commit],
+            &[],
             &CancellationToken::new(),
         )
         .await
@@ -1507,7 +1508,7 @@ async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([3; 32], [4; 32], &object_ids, false);
+        .generated_pack_cache_key([3; 32], &object_ids, false);
 
     let cold = fixture
         .repository
@@ -1547,7 +1548,7 @@ async fn generated_pack_cache_rejects_corrupt_artifact_bytes() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [8; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1603,7 +1604,7 @@ async fn generated_pack_cache_rejects_an_oversized_artifact() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [10; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1658,7 +1659,7 @@ async fn generated_pack_cache_rejects_corrupt_request_descriptor() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [9; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1710,7 +1711,7 @@ async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellatio
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([5; 32], [6; 32], &object_ids, false);
+        .generated_pack_cache_key([5; 32], &object_ids, false);
     let cancelled = CancellationToken::new();
     let first_objects = object_ids.clone();
     let first_cancellation = cancelled.clone();
@@ -1920,21 +1921,20 @@ impl GeneratedPackLease for TestGeneratedPackLease {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn generated_pack_cache_key_binds_authorization_request_policy_and_selection() {
+async fn generated_pack_cache_key_binds_authorization_selection_and_pack_mode() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let first = fixture.target;
     let second = fixture.root_commit;
-    let key = |authorization, request, objects: &[gix_hash::ObjectId], thin_pack| {
+    let key = |authorization, objects: &[gix_hash::ObjectId], thin_pack| {
         fixture
             .repository
-            .generated_pack_cache_key(authorization, request, objects, thin_pack)
+            .generated_pack_cache_key(authorization, objects, thin_pack)
     };
 
-    let base = key([1; 32], [2; 32], &[first], false);
-    assert_ne!(base, key([9; 32], [2; 32], &[first], false));
-    assert_ne!(base, key([1; 32], [9; 32], &[first], false));
-    assert_ne!(base, key([1; 32], [2; 32], &[first], true));
-    assert_ne!(base, key([1; 32], [2; 32], &[first, second], false));
+    let base = key([1; 32], &[first], false);
+    assert_ne!(base, key([9; 32], &[first], false));
+    assert_ne!(base, key([1; 32], &[first], true));
+    assert_ne!(base, key([1; 32], &[first, second], false));
     let error = fixture
         .repository
         .generate_pack_cached(&[second], base, &CancellationToken::new())
