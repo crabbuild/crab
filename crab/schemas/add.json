@@ -1,70 +1,100 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "AddSummary",
   "description": "Summary of a completed add operation.",
-  "type": "object",
+  "properties": {
+    "bytes_processed": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "chunking_worker_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "chunks_staged": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "compression_worker_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "files_failed": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "files_skipped": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "files_staged": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "flushing_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "indexing_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "lock_wait_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "payload_write_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "planning_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "remote_lookup_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "staging_duration_ms": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
   "required": [
     "bytes_processed",
+    "chunking_worker_duration_ms",
     "chunks_staged",
+    "compression_worker_duration_ms",
     "duration_ms",
     "files_failed",
     "files_skipped",
     "files_staged",
     "flushing_duration_ms",
     "indexing_duration_ms",
+    "lock_wait_duration_ms",
+    "payload_write_duration_ms",
     "planning_duration_ms",
+    "remote_lookup_duration_ms",
     "staging_duration_ms"
   ],
-  "properties": {
-    "bytes_processed": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "chunks_staged": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "duration_ms": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "files_failed": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "files_skipped": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "files_staged": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "flushing_duration_ms": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "indexing_duration_ms": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "planning_duration_ms": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "staging_duration_ms": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    }
-  }
+  "title": "AddSummary",
+  "type": "object"
 }

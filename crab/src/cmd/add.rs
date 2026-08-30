@@ -48,6 +48,7 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 const ADD_INCOMPLETE_PCT_FRACTION: f64 = 0.999;
 const ADD_DUPLICATE_FINGERPRINT_BYTES: usize = 1024 * 1024;
 const ADD_DUPLICATE_REUSE_MIN_BYTES: u64 = 32 * 1024 * 1024;
+const ADD_STAGING_LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30 * 60);
 
 /// Arguments for the `crab add` command.
 pub struct AddArgs {
@@ -71,6 +72,11 @@ pub struct AddSummary {
     pub files_failed: u64,
     pub chunks_staged: u64,
     pub bytes_processed: u64,
+    pub lock_wait_duration_ms: u64,
+    pub chunking_worker_duration_ms: u64,
+    pub remote_lookup_duration_ms: u64,
+    pub compression_worker_duration_ms: u64,
+    pub payload_write_duration_ms: u64,
     pub staging_duration_ms: u64,
     pub planning_duration_ms: u64,
     pub flushing_duration_ms: u64,
@@ -98,6 +104,7 @@ struct FileResult {
     prepared_xorbs: Vec<crate::cmd::stream_stage::StreamStagePreparedXorb>,
     /// Stat snapshot captured while the staged bytes were verified.
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
+    timings: crab_staging::stream::StreamStageTimings,
     /// Wall-clock duration of the operation in milliseconds.
     duration_ms: u64,
 }
@@ -1004,17 +1011,15 @@ async fn execute_add(
     let total_candidate_files = candidates.len() as u64;
     let total_candidate_bytes: u64 = candidates.iter().map(|(_, s)| *s).sum();
     let jobs = effective_add_jobs(args.jobs);
+
+    // Acquire ownership before consulting the index so a queued add observes
+    // pointers published by the process that just released the staging lock.
+    let staging_root = worktree_ctx.shared_staging_dir();
+    let lock_wait_start = Instant::now();
+    let staging = Arc::new(open_add_staging(&staging_root, &repo_root).await?);
+    let lock_wait_duration_ms = lock_wait_start.elapsed().as_millis() as u64;
     let (candidates, clean_skipped) =
         filter_clean_indexed_candidates(&repo_root, candidates, jobs, cancel).await?;
-
-    // Open the staging area.
-    let staging_root = worktree_ctx.shared_staging_dir();
-    if staging_root.join("index.db").exists() {
-        let recovery = StagingAreaReadOnly::open(staging_root.clone()).await?;
-        reconcile_publication_intents(&recovery, &repo_root).await?;
-        drop(recovery);
-    }
-    let staging = Arc::new(StagingArea::open(staging_root.clone()).await?);
 
     if jobs != args.jobs {
         warn!(
@@ -1121,6 +1126,11 @@ async fn execute_add(
         files_failed: 0,
         chunks_staged: 0,
         bytes_processed: 0,
+        lock_wait_duration_ms,
+        chunking_worker_duration_ms: 0,
+        remote_lookup_duration_ms: 0,
+        compression_worker_duration_ms: 0,
+        payload_write_duration_ms: 0,
         staging_duration_ms: 0,
         planning_duration_ms: 0,
         flushing_duration_ms: 0,
@@ -1510,6 +1520,15 @@ async fn execute_add(
     Ok(summary)
 }
 
+async fn open_add_staging(staging_root: &Path, repo_root: &Path) -> Result<StagingArea> {
+    let staging =
+        StagingArea::open_blocking(staging_root.to_path_buf(), ADD_STAGING_LOCK_WAIT_BUDGET)
+            .await
+            .map_err(CrabError::from)?;
+    reconcile_publication_intents_writer(&staging, repo_root)?;
+    Ok(staging)
+}
+
 fn empty_add_summary(start: Instant) -> AddSummary {
     AddSummary {
         duration_ms: start.elapsed().as_millis() as u64,
@@ -1540,6 +1559,18 @@ fn record_successful_file_result(
     summary.files_staged += 1;
     summary.chunks_staged += result.chunks as u64;
     summary.bytes_processed += result.size;
+    summary.chunking_worker_duration_ms = summary
+        .chunking_worker_duration_ms
+        .saturating_add(result.timings.chunking_duration_ms);
+    summary.remote_lookup_duration_ms = summary
+        .remote_lookup_duration_ms
+        .saturating_add(result.timings.remote_lookup_duration_ms);
+    summary.compression_worker_duration_ms = summary
+        .compression_worker_duration_ms
+        .saturating_add(result.timings.compression_duration_ms);
+    summary.payload_write_duration_ms = summary
+        .payload_write_duration_ms
+        .saturating_add(result.timings.payload_write_duration_ms);
     *bytes_done += result.size;
 
     if let Some(stream) = accounting.jsonl_stream
@@ -1769,6 +1800,7 @@ async fn process_file(
         recipe: result.recipe,
         prepared_xorbs: result.prepared_xorbs,
         index_stat: result.index_stat,
+        timings: result.timings,
         duration_ms: result.duration_ms,
     })
 }
@@ -1900,6 +1932,7 @@ async fn process_duplicate_candidate(
         recipe,
         prepared_xorbs: Vec::new(),
         index_stat: after_hash_stat.filter(|stat| stat.len == size),
+        timings: crab_staging::stream::StreamStageTimings::default(),
         duration_ms: start.elapsed().as_millis() as u64,
     })
 }
@@ -2434,6 +2467,10 @@ fn clear_rolled_back_summary(summary: &mut AddSummary, staged_entries: &mut Vec<
     summary.files_staged = 0;
     summary.chunks_staged = 0;
     summary.bytes_processed = 0;
+    summary.chunking_worker_duration_ms = 0;
+    summary.remote_lookup_duration_ms = 0;
+    summary.compression_worker_duration_ms = 0;
+    summary.payload_write_duration_ms = 0;
     summary.planning_duration_ms = 0;
     summary.flushing_duration_ms = 0;
     summary.indexing_duration_ms = 0;
@@ -3187,12 +3224,51 @@ pub(crate) async fn reconcile_publication_intents(
     staging: &StagingAreaReadOnly,
     repo_root: &Path,
 ) -> Result<()> {
+    for action in
+        publication_recovery_actions(staging.unresolved_publication_intents()?, repo_root)?
+    {
+        match action {
+            PublicationRecoveryAction::Publish(intent_id) => {
+                staging.publish_publication_intent(&intent_id)?;
+            }
+            PublicationRecoveryAction::Rollback(intent_id) => {
+                staging.rollback_publication_intent(&intent_id).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_publication_intents_writer(staging: &StagingArea, repo_root: &Path) -> Result<()> {
+    for action in
+        publication_recovery_actions(staging.unresolved_publication_intents()?, repo_root)?
+    {
+        match action {
+            PublicationRecoveryAction::Publish(intent_id) => {
+                staging.publish_publication_intent(&intent_id)?;
+            }
+            PublicationRecoveryAction::Rollback(intent_id) => {
+                staging.rollback_publication_intent(&intent_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+enum PublicationRecoveryAction {
+    Publish(PublicationIntentId),
+    Rollback(PublicationIntentId),
+}
+
+fn publication_recovery_actions(
+    intents: Vec<crab_staging::UnresolvedPublicationIntent>,
+    repo_root: &Path,
+) -> Result<Vec<PublicationRecoveryAction>> {
     use bstr::ByteSlice;
     use gix_index::{File, decode, entry};
 
-    let intents = staging.unresolved_publication_intents()?;
     if intents.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let index_path =
         crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?.index_path();
@@ -3208,6 +3284,7 @@ pub(crate) async fn reconcile_publication_intents(
         ))
     })?;
 
+    let mut actions = Vec::with_capacity(intents.len());
     for intent in intents {
         let new_matches = intent
             .entries
@@ -3230,11 +3307,9 @@ pub(crate) async fn reconcile_publication_intents(
             })
             .count();
         if new_matches == intent.entries.len() {
-            staging.publish_publication_intent(&intent.intent_id)?;
+            actions.push(PublicationRecoveryAction::Publish(intent.intent_id));
         } else if old_matches == intent.entries.len() {
-            staging
-                .rollback_publication_intent(&intent.intent_id)
-                .await?;
+            actions.push(PublicationRecoveryAction::Rollback(intent.intent_id));
         } else {
             return Err(CrabError::StagingCorrupt(format!(
                 "add publication {} has an ambiguous Git index state ({new_matches}/{} new paths, {old_matches}/{} prior paths); restore one complete index state, then retry",
@@ -3244,7 +3319,7 @@ pub(crate) async fn reconcile_publication_intents(
             )));
         }
     }
-    Ok(())
+    Ok(actions)
 }
 
 #[cfg(test)]
@@ -3964,6 +4039,7 @@ mod tests {
             flushing_duration_ms: 0,
             indexing_duration_ms: 0,
             duration_ms: 0,
+            ..AddSummary::default()
         };
 
         assert!(!should_publish_git_index(&args, &summary, 1));
@@ -3982,6 +4058,7 @@ mod tests {
             flushing_duration_ms: 0,
             indexing_duration_ms: 0,
             duration_ms: 0,
+            ..AddSummary::default()
         };
         let mut entries = vec![staged_entry(PathBuf::from("model.bin"), [7; 32], 1024)];
 
@@ -4103,6 +4180,7 @@ mod tests {
             flushing_duration_ms: 0,
             indexing_duration_ms: 0,
             duration_ms: 0,
+            ..AddSummary::default()
         };
 
         assert!(should_publish_git_index(&args, &summary, 1));
@@ -4983,6 +5061,76 @@ mod tests {
         reopened.close().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_add_waits_then_observes_the_preceding_index_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_root = dir.path().join("repo");
+        std::fs::create_dir(&repo_root).unwrap();
+        if !init_git_repo(&repo_root) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+        let path = repo_root.join("model.bin");
+        let data = b"concurrent add must observe the preceding pointer";
+        std::fs::write(&path, data).unwrap();
+        make_file_mtime_old(&path);
+        let root = repo_root.join(".crab/staging");
+        let holder = StagingArea::open(root.clone()).await.unwrap();
+        let waiter = tokio::spawn({
+            let root = root.clone();
+            let repo_root = repo_root.clone();
+            let path = path.clone();
+            async move {
+                let staging = open_add_staging(&root, &repo_root).await?;
+                let filtered = filter_clean_indexed_candidates(
+                    &repo_root,
+                    vec![(path, data.len() as u64)],
+                    1,
+                    &CancellationToken::new(),
+                )
+                .await;
+                staging.close().await?;
+                filtered
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a concurrent add must queue behind the active staging writer"
+        );
+
+        let pointer = Pointer {
+            file_hash: *blake3::hash(data).as_bytes(),
+            size: data.len() as u64,
+            shard_hint: None,
+        }
+        .serialize();
+        publish_git_index_entries(
+            &[GitIndexEntry {
+                abs_path: path,
+                mode: gix_index::entry::Mode::FILE,
+                sha: write_pointer_blob(&repo_root, &pointer).unwrap(),
+                index_stat: crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(
+                    &repo_root.join("model.bin"),
+                )
+                .unwrap(),
+            }],
+            &repo_root,
+        )
+        .unwrap();
+        drop(holder);
+
+        let (candidates, skipped) = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("queued add should acquire after release")
+            .expect("add-open task should not panic")
+            .expect("queued add should re-evaluate the current index");
+        assert!(candidates.is_empty());
+        assert_eq!(skipped.files, 1);
+        assert_eq!(skipped.bytes, data.len() as u64);
+    }
+
     #[tokio::test]
     async fn committed_recipe_survives_same_path_restage_until_push() {
         let dir = tempfile::tempdir().unwrap();
@@ -5126,6 +5274,7 @@ mod tests {
             flushing_duration_ms: 0,
             indexing_duration_ms: 0,
             duration_ms: 0,
+            ..AddSummary::default()
         };
         let mut staged_entries = vec![staged_entry(file_path, file_hash_raw, data.len() as u64)];
         let cancel = CancellationToken::new();
@@ -5229,7 +5378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publication_recovery_publishes_when_every_pointer_is_in_index() {
+    async fn exclusive_add_open_recovers_publication_when_every_pointer_is_in_index() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -5266,10 +5415,7 @@ mod tests {
         assert!(intent.is_some());
         staging.close().await.unwrap();
 
-        let recovered = StagingAreaReadOnly::open(staging_root).await.unwrap();
-        reconcile_publication_intents(&recovered, &repo)
-            .await
-            .unwrap();
+        let recovered = open_add_staging(&staging_root, &repo).await.unwrap();
 
         assert!(
             recovered
@@ -5420,6 +5566,7 @@ mod tests {
             flushing_duration_ms: 0,
             indexing_duration_ms: 0,
             duration_ms: 0,
+            ..AddSummary::default()
         };
         let mut staged_entries = vec![staged_entry(file_path, file_hash_raw, data.len() as u64)];
         let cancel = CancellationToken::new();
