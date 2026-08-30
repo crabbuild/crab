@@ -941,12 +941,11 @@ async fn auto_hydrate_always_profile(
 }
 
 /// Walk the working tree, detect crab pointer blobs, and ensure every
-/// extension seen has a matching `filter=crab` rule in `.gitattributes`.
+/// pointer path has an effective `filter=crab` rule in `.gitattributes`.
 ///
 /// Idempotent — already-tracked patterns are skipped. Honours the
 /// remote's `.gitattributes` content and only appends rules that are
-/// missing. Files without an extension, or with the same extension as
-/// an already-tracked glob, do not trigger any writes.
+/// missing. Files without an extension do not trigger any writes.
 ///
 /// The walk skips `.git/`, `.crab/`, and symlinks to keep scan cost
 /// proportional to actual working-tree content. I/O errors on
@@ -965,17 +964,32 @@ pub(crate) fn autotrack_pointer_extensions(target: &Path, mode: OutputMode) -> R
     use crate::engine::pointer::is_working_tree_pointer;
 
     let ga_path = target.join(".gitattributes");
+    #[cfg(not(feature = "gix-pathmatch"))]
     let already_tracked = read_tracked_globs(&ga_path)?;
+    #[cfg(feature = "gix-pathmatch")]
+    let classifier = crate::core::attrs::TrackedClassifier::open(target, "crab")?;
+    #[cfg(feature = "gix-pathmatch")]
+    let is_tracked = |path: &Path| {
+        path.strip_prefix(target)
+            .ok()
+            .is_some_and(|rel| classifier.is_tracked(&rel.to_string_lossy()))
+    };
+    #[cfg(not(feature = "gix-pathmatch"))]
+    let is_tracked = |path: &Path| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| already_tracked.contains(&format!("*.{ext}")))
+    };
 
     let mut new_exts: BTreeSet<String> = BTreeSet::new();
     if let Some(files) = git_tracked_files(target) {
         for path in files {
-            record_pointer_extension(&path, &already_tracked, &mut new_exts, &|p| {
+            record_pointer_extension(&path, &mut new_exts, &is_tracked, &|p| {
                 is_working_tree_pointer(p).unwrap_or(false)
             });
         }
     } else {
-        walk_for_pointers(target, target, &already_tracked, &mut new_exts, &|p| {
+        walk_for_pointers(target, target, &is_tracked, &mut new_exts, &|p| {
             is_working_tree_pointer(p).unwrap_or(false)
         })?;
     }
@@ -1156,6 +1170,7 @@ fn parse_nul_paths(root: &Path, bytes: &[u8]) -> Vec<PathBuf> {
 
 /// Read `.gitattributes` and return the set of glob patterns that are
 /// already wired to `filter=crab`. Missing files yield an empty set.
+#[cfg(not(feature = "gix-pathmatch"))]
 fn read_tracked_globs(ga_path: &Path) -> Result<std::collections::HashSet<String>> {
     let content = match std::fs::read_to_string(ga_path) {
         Ok(s) => s,
@@ -1181,7 +1196,7 @@ fn read_tracked_globs(ga_path: &Path) -> Result<std::collections::HashSet<String
 fn walk_for_pointers(
     root: &Path,
     dir: &Path,
-    already_tracked: &std::collections::HashSet<String>,
+    is_tracked: &dyn Fn(&Path) -> bool,
     new_exts: &mut std::collections::BTreeSet<String>,
     is_pointer: &dyn Fn(&Path) -> bool,
 ) -> Result<()> {
@@ -1216,7 +1231,7 @@ fn walk_for_pointers(
         }
 
         if ft.is_dir() {
-            walk_for_pointers(root, &path, already_tracked, new_exts, is_pointer)?;
+            walk_for_pointers(root, &path, is_tracked, new_exts, is_pointer)?;
             continue;
         }
 
@@ -1224,7 +1239,7 @@ fn walk_for_pointers(
             continue;
         }
 
-        record_pointer_extension(&path, already_tracked, new_exts, is_pointer);
+        record_pointer_extension(&path, new_exts, is_tracked, is_pointer);
     }
 
     Ok(())
@@ -1232,17 +1247,16 @@ fn walk_for_pointers(
 
 fn record_pointer_extension(
     path: &Path,
-    already_tracked: &std::collections::HashSet<String>,
     new_exts: &mut std::collections::BTreeSet<String>,
+    is_tracked: &dyn Fn(&Path) -> bool,
     is_pointer: &dyn Fn(&Path) -> bool,
 ) {
+    if is_tracked(path) {
+        return;
+    }
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return;
     };
-    let glob = format!("*.{ext}");
-    if already_tracked.contains(&glob) {
-        return;
-    }
 
     if is_pointer(path) {
         new_exts.insert(format!(".{ext}"));
@@ -1736,6 +1750,44 @@ mod tests {
 
         let ga = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
         assert_eq!(ga.matches("*.bin filter=crab").count(), 1);
+    }
+
+    #[test]
+    fn autotrack_preserves_directory_qualified_pointer_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("models")).unwrap();
+        std::fs::write(
+            root.join(".gitattributes"),
+            "models/*.bin filter=crab diff=crab merge=crab -text\n",
+        )
+        .unwrap();
+        write_pointer(&root.join("models/model.bin"));
+
+        autotrack_pointer_extensions(root, OutputMode::Text).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join(".gitattributes")).unwrap(),
+            "models/*.bin filter=crab diff=crab merge=crab -text\n"
+        );
+    }
+
+    #[test]
+    fn autotrack_covers_pointer_outside_directory_qualified_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::fs::write(
+            root.join(".gitattributes"),
+            "models/*.bin filter=crab diff=crab merge=crab -text\n",
+        )
+        .unwrap();
+        write_pointer(&root.join("other/model.bin"));
+
+        autotrack_pointer_extensions(root, OutputMode::Text).unwrap();
+
+        let attributes = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
+        assert!(attributes.contains("*.bin filter=crab diff=crab merge=crab -text"));
     }
 
     #[test]
