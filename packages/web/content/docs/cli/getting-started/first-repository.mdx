@@ -11,13 +11,6 @@ meta:
 
 A Crab repository is a standard git repository with a cloud storage backend for large files. Crab handles the wiring between git and your bucket in a short setup flow.
 
-<Callout type="warning" title="Use a qualified provider for release deployments">
-  The S3, GCS, and Azure adapters can be configured below, but Amazon S3, GCS,
-  and Azure are currently unqualified for release use. RustFS is
-  development-qualified. Check the retained evidence status in [Provider
-  Qualification](/docs/cli/storage/provider-qualification).
-</Callout>
-
 ## Create the repository
 
 ```bash
