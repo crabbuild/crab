@@ -11,13 +11,6 @@ meta:
 
 Crab extends Git with a separate data path for large files. Git commits small pointer blobs, while Crab stores chunked file content through an object-store adapter.
 
-<Callout type="warning" title="Check provider qualification before deployment">
-  Adapter availability is not a release-support claim. RustFS is currently
-  development-qualified; Amazon S3, Google Cloud Storage, and Azure Blob
-  Storage remain unqualified until the exact release commit has retained
-  real-service evidence. See [Provider Qualification](/docs/cli/storage/provider-qualification).
-</Callout>
-
 <DocsPathDiagram
   id="getting-started-path"
   title="From local file to reproducible checkout"
