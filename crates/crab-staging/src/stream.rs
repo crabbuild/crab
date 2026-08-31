@@ -43,7 +43,7 @@ pub const READ_BUF_SIZE: usize = 1024 * 1024;
 /// typical data batch closer to 64 MiB before touching the staging index.
 pub const STAGE_BATCH_CHUNKS: usize = 1024;
 pub const STAGE_BATCH_TARGET_BYTES: u64 = 64 * 1024 * 1024;
-const DIRECT_XORB_STAGE_BATCH_TARGET_BYTES: u64 = 8 * 1024 * 1024;
+const DIRECT_XORB_STAGE_BATCH_TARGET_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Optional progress counters updated while streaming a file.
 #[derive(Clone, Default)]
@@ -66,6 +66,7 @@ pub struct StreamStageXorbBuilder {
     build: Arc<dyn Fn() -> XorbBuilder + Send + Sync>,
     admission: Arc<Semaphore>,
     materialization: Arc<Semaphore>,
+    promotion: Arc<Semaphore>,
     serialized_payload_pool: SerializedPayloadPool,
     coordination: Option<Arc<PreparedAuthorityCoordination>>,
 }
@@ -86,6 +87,7 @@ impl StreamStageXorbBuilder {
             build: Arc::new(build),
             admission: Arc::new(Semaphore::new(max_in_flight)),
             materialization: Arc::new(Semaphore::new(1)),
+            promotion: Arc::new(Semaphore::new(1)),
             serialized_payload_pool: SerializedPayloadPool::new(1),
             coordination: None,
         }
@@ -185,6 +187,13 @@ impl StreamStageXorbBuilder {
                 CrabError::Internal("stream xorb materialization admission closed".to_owned())
             }),
         }
+    }
+
+    async fn acquire_promotion(&self) -> Result<OwnedSemaphorePermit> {
+        Arc::clone(&self.promotion)
+            .acquire_owned()
+            .await
+            .map_err(|_| CrabError::Internal("stream xorb promotion admission closed".to_owned()))
     }
 
     #[cfg(test)]
@@ -516,6 +525,7 @@ pub async fn stage_file_streaming_as(
 struct StreamStageHooks {
     after_batch_flush: Option<Arc<dyn Fn() + Send + Sync>>,
     before_prepared_xorb_write: Option<PreparedXorbWriteHook>,
+    before_prepared_xorb_promote: Option<PreparedXorbWriteHook>,
 }
 
 #[cfg(test)]
@@ -708,9 +718,8 @@ async fn stage_file_streaming_inner(
             staging,
             &batch_id,
             &mut stage_stats.prepared_xorbs,
-            xorb_builder
-                .as_ref()
-                .and_then(StreamStageXorbBuilder::preparation_id),
+            xorb_builder.as_ref(),
+            &hooks,
         )
         .await
     {
@@ -1506,12 +1515,26 @@ async fn persist_stream_prepared_authority(
     staging: &StagingArea,
     batch_id: &crate::StagingBatchId,
     prepared_xorbs: &mut [StreamStagePreparedXorb],
-    preparation_id: Option<&crate::AddPreparationId>,
+    xorb_builder: Option<&StreamStageXorbBuilder>,
+    hooks: &StreamStageHooks,
 ) -> Result<()> {
-    let preparation_id = preparation_id.ok_or_else(|| {
+    let xorb_builder = xorb_builder.ok_or_else(|| {
         CrabError::Internal("direct prepared authority has no add preparation".to_owned())
     })?;
+    let preparation_id = xorb_builder.preparation_id().ok_or_else(|| {
+        CrabError::Internal("direct prepared authority has no add preparation".to_owned())
+    })?;
+    let _promotion_permit = if prepared_xorbs.is_empty() {
+        None
+    } else {
+        // Concurrent fsync-backed promotion increases tail latency on the same disk.
+        // Keep chunking parallel, then serialize this operation's authority boundary.
+        Some(xorb_builder.acquire_promotion().await?)
+    };
     for prepared in prepared_xorbs.iter_mut() {
+        if let Some(before_promote) = &hooks.before_prepared_xorb_promote {
+            before_promote(&prepared.payload_path)?;
+        }
         let written =
             move_prepared_xorb(staging.root(), &prepared.hash, &prepared.payload_path).await?;
         if written != prepared.bytes {
@@ -1797,11 +1820,19 @@ mod tests {
     }
 
     #[test]
-    fn direct_xorb_staging_uses_smaller_compression_batches() {
+    fn direct_xorb_staging_uses_bounded_remote_batches() {
         assert_eq!(stage_batch_target_bytes(false), STAGE_BATCH_TARGET_BYTES);
         assert_eq!(
             stage_batch_target_bytes(true),
             DIRECT_XORB_STAGE_BATCH_TARGET_BYTES
+        );
+        let lengths = vec![1024 * 1024; 32];
+        assert_eq!(
+            batch_flush_prefix_from_lengths(
+                lengths.iter().copied(),
+                DIRECT_XORB_STAGE_BATCH_TARGET_BYTES,
+            ),
+            (32, DIRECT_XORB_STAGE_BATCH_TARGET_BYTES)
         );
     }
 
@@ -2818,6 +2849,61 @@ mod tests {
                 .unwrap_or(true)
         );
         assert!(!staging_root.join("push-plans/payloads").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prepared_xorb_promotion_is_serialized_per_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.bin");
+        let second_path = dir.path().join("second.bin");
+        write_pattern_file_with_salt(&first_path, 2 * 1024 * 1024, 17);
+        write_pattern_file_with_salt(&second_path, 2 * 1024 * 1024, 41);
+        let staging = StagingArea::open(dir.path().join(".crab/staging"))
+            .await
+            .unwrap();
+        let preparation = staging.create_add_preparation().unwrap();
+        let builders =
+            StreamStageXorbBuilder::new(2, XorbBuilder::new).bind_preparation(preparation.clone());
+        let active = Arc::new(AtomicU64::new(0));
+        let peak = Arc::new(AtomicU64::new(0));
+        let hook_active = Arc::clone(&active);
+        let hook_peak = Arc::clone(&peak);
+        let hooks = StreamStageHooks {
+            before_prepared_xorb_promote: Some(Arc::new(move |_| {
+                let concurrent = hook_active.fetch_add(1, Ordering::SeqCst) + 1;
+                hook_peak.fetch_max(concurrent, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+                hook_active.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })),
+            ..StreamStageHooks::default()
+        };
+        let progress = StreamStageProgress {
+            xorb_builder: Some(builders),
+            ..StreamStageProgress::default()
+        };
+        let cancel = CancellationToken::new();
+        let first = stage_file_streaming_with_hooks(
+            &first_path,
+            dir.path(),
+            &staging,
+            progress.clone(),
+            &cancel,
+            hooks.clone(),
+        );
+        let second = stage_file_streaming_with_hooks(
+            &second_path,
+            dir.path(),
+            &staging,
+            progress,
+            &cancel,
+            hooks,
+        );
+        let (first, second) = tokio::join!(first, second);
+
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

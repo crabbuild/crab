@@ -162,6 +162,9 @@ parallel files and later adds cannot assign the same chunk to different local
 xorbs. Only the claim winner feeds its builder. Other recipe occurrences wait
 for and then lease the winner's placement. The coordination is disk-backed and
 batch-bounded; it does not require a repository-sized in-memory hash map.
+Direct preparation classifies up to 32 MiB per remote-index query. Files still
+chunk and classify concurrently, while prepared-payload promotion is serialized
+within the add preparation to avoid competing durability flushes on one disk.
 
 ```mermaid
 flowchart LR
