@@ -42,10 +42,10 @@
 
 7. `07-gearhash-content-defined-chunking.png`
    - Position: after the content-defined chunking rationale.
-   - Purpose: compare insertion, deletion, and modification against one original file, showing the local rechunking window and the exact point where unchanged chunk identities resume.
+   - Purpose: use three minimal before/after cards to show that insertion, deletion, and modification create a local new chunk while later chunks retain their identities.
 8. `08-continuity-aware-xorb-packing.png`
    - Position: after the xorb packing rationale.
-   - Purpose: contrast maximal scattered reuse with Crab's balance of reuse and contiguous reads, while keeping verified xorb/run/compression facts separate from the conceptual tradeoff.
+   - Purpose: use two aligned assignment tables to show how the same file order can touch four scattered xorbs or two contiguous xorbs.
 
 ## Post 5 — Safe Push Publication
 

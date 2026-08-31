@@ -164,15 +164,15 @@ Technical overview: https://crab.build/blog/git-for-large-files-at-any-scale
 
 **Image 1 — Content-defined boundaries**
 
-![Gearhash content-defined chunking comparing insertion, deletion, and modification against one original file, with local new chunks followed by unchanged reused chunks.](imgs/07-gearhash-content-defined-chunking.png)
+![Three minimal before-and-after cards showing how insertion, deletion, and modification create one local new chunk while later chunks are reused.](imgs/07-gearhash-content-defined-chunking.png)
 
-Alt text: One original segmented file is compared with three local edits. Inserted, deleted, and modified bytes are highlighted in amber; only nearby chunks receive new identities, while later blue chunks C4 through C6 retain their original identities after boundaries resynchronize.
+Alt text: Three aligned cards compare insertion, deletion, and modification. Each edit produces one amber local chunk X, while the later blue chunks C and D keep their identities.
 
 **Image 2 — Deduplication versus continuity**
 
-![Comparison of maximal scattered chunk reuse with Crab's balance of reuse and xorb locality, separating uploaded-byte savings from hydration range-request cost.](imgs/08-continuity-aware-xorb-packing.png)
+![Two aligned assignment tables compare a reuse-first file touching four xorbs with a continuity-aware file touching two xorbs.](imgs/08-continuity-aware-xorb-packing.png)
 
-Alt text: The same ordered eight-chunk file is mapped two ways. Maximizing reuse scatters its terms across four xorbs and requires many range requests; continuity-aware packing uses two long xorb ranges, may repack some bytes, and requires fewer range requests.
+Alt text: Both panels contain file chunks C1 through C6 in the same order. The reuse-first assignment alternates among xorbs A through D, while the continuity-aware assignment groups the first three chunks in A and the next three in B.
 
 ## Post 5 — How a serverless push stays consistent
 
