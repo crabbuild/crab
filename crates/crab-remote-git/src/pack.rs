@@ -722,6 +722,7 @@ impl RemoteGitRepository {
         let sources =
             download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
+        let mut source_inventory_check_ms = 0_u64;
 
         let (repacked, strategy) = if exact_candidate {
             let concat_sources = sources.clone();
@@ -761,9 +762,10 @@ impl RemoteGitRepository {
             .await
             .map_err(|source| Error::DecodeTask { source })?
             .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64;
             tracing::debug!(
                 source_inventory_matches,
-                source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64,
+                source_inventory_check_ms,
                 "checked staged pack indexes against the exact response object set"
             );
             if source_inventory_matches {
@@ -841,9 +843,10 @@ impl RemoteGitRepository {
             inventory_objects,
             selected_objects = object_ids.len(),
             source_download_ms,
+            source_inventory_check_ms,
             response_bytes = pack.size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
-            "remote Git response pack consolidated from staged pack inventory"
+            "remote Git response pack produced from staged pack inventory"
         );
         Ok(Some(pack))
     }

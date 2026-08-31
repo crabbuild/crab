@@ -137,6 +137,11 @@ def verify_telemetry(value: Any, field: str) -> None:
         require_nonnegative_int(value.get(name), f"{field}.{name}")
     if "source_download_ms" in value:
         require_nonnegative_int(value["source_download_ms"], f"{field}.source_download_ms")
+    if "source_inventory_check_ms" in value:
+        require_nonnegative_int(
+            value["source_inventory_check_ms"],
+            f"{field}.source_inventory_check_ms",
+        )
 
 
 def verify_stage(name: str, stage: Any) -> None:

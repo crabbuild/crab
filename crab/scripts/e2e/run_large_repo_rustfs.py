@@ -378,6 +378,7 @@ class LargeRepositoryQualification:
             "visibility_plan_ms": 0,
             "pack_generation_ms": 0,
             "source_download_ms": 0,
+            "source_inventory_check_ms": 0,
             "locator_scan": 0,
             "locator_full_scan": 0,
             "locator_exact_fallback": 0,
@@ -439,6 +440,9 @@ class LargeRepositoryQualification:
                 )
                 telemetry["source_download_ms"] += int(
                     fields.get("source_download_ms", 0)
+                )
+                telemetry["source_inventory_check_ms"] += int(
+                    fields.get("source_inventory_check_ms", 0)
                 )
         return telemetry
 
