@@ -425,7 +425,7 @@ def checks(root: Path) -> list[TextCheck]:
                 '"$CRAB_DIR/Cargo.toml"',
                 '"$WORKSPACE_DIR/crates/crab-auth-server/Cargo.toml"',
                 '"$WORKSPACE_DIR/crates/crab-cache-server/Cargo.toml"',
-                "cargo metadata --format-version 1 --no-deps",
+                "cargo metadata --format-version 1",
                 "restore_on_error",
             ),
             excludes=(),
