@@ -10,8 +10,8 @@ integration surfaces should be recorded here before release.
 ### Open Source Launch
 
 - Established `crabbuild/crab` as the canonical open-source repository and
-  reset the public release line to 1.0.0. The pre-launch 1.1.0 release remains
-  available as an immutable historical artifact.
+  reset the public release line to 1.0.0. Pre-launch development snapshots are
+  recorded below by date only.
 - Shipped the serverless Git remote helper, direct object-storage large-file
   workflow, partial-clone support, protected publication, and safe repository
   maintenance as the open-source launch baseline.
@@ -19,7 +19,7 @@ integration surfaces should be recorded here before release.
   checksums, build-provenance attestations, public installers, self-update
   support, and the `crabbuild/tap/crab` Homebrew formula.
 
-## 1.1.0 - 2026-08-27
+## 2026-08-27
 
 ### Git And Large Files
 
@@ -58,7 +58,7 @@ integration surfaces should be recorded here before release.
 - Added direct-storage Crab LFS onboarding and expanded large-file, GC,
   optimization, and Continuity architecture guidance.
 
-## 1.0.15 - 2026-08-22
+## 2026-08-22
 
 ### Release Automation
 
