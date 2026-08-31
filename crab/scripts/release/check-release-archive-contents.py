@@ -434,8 +434,8 @@ def checks(root: Path) -> list[TextCheck]:
             "public release badge follows the source repository",
             root / "README.md",
             contains=(
-                "https://github.com/crabbuild/crab-oss/releases/latest",
-                "github/v/release/crabbuild/crab-oss",
+                "https://github.com/crabbuild/crab/releases/latest",
+                "github/v/release/crabbuild/crab",
             ),
             excludes=("github/v/release/crabbuild/crab-release",),
         ),
@@ -443,15 +443,15 @@ def checks(root: Path) -> list[TextCheck]:
             "self-updater follows the source repository release API",
             root / "crab" / "src" / "cmd" / "update.rs",
             contains=(
-                "https://api.github.com/repos/crabbuild/crab-oss/releases/latest",
-                "No crab release is available from crabbuild/crab-oss.",
+                "https://api.github.com/repos/crabbuild/crab/releases/latest",
+                "No crab release is available from crabbuild/crab.",
             ),
             excludes=("crabbuild/crab-release",),
         ),
         TextCheck(
             "Homebrew updater follows source repository releases",
             root / "crab" / "scripts" / "release" / "update-homebrew.sh",
-            contains=('RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-oss}"',),
+            contains=('RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab}"',),
             excludes=("crabbuild/crab-release",),
         ),
         TextCheck(
@@ -491,7 +491,7 @@ def checks(root: Path) -> list[TextCheck]:
             "POSIX installer targets release repo and verifies archives",
             root / "packages" / "web" / "public" / "install.sh",
             contains=(
-                'REPO="crabbuild/crab-oss"',
+                'REPO="crabbuild/crab"',
                 "verify_checksum",
                 "verify_tarball_layout",
                 "crab-fuse-mount",
@@ -506,7 +506,7 @@ def checks(root: Path) -> list[TextCheck]:
             "PowerShell installer targets release repo and installs helper exe",
             root / "packages" / "web" / "public" / "install.ps1",
             contains=(
-                '$Repo = "crabbuild/crab-oss"',
+                '$Repo = "crabbuild/crab"',
                 "Verify-Checksum",
                 "Verify-ZipLayout",
                 '"crab-nfs-mount.exe"',

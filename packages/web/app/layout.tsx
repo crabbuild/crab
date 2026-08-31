@@ -84,7 +84,7 @@ const structuredData = {
         width: 400,
         height: 400,
       },
-      sameAs: ["https://github.com/crabbuild/crab-oss"],
+      sameAs: ["https://github.com/crabbuild/crab"],
     },
     {
       "@type": "WebSite",

@@ -35,7 +35,7 @@ integration surfaces should be recorded here before release.
   checksums, packaged-binary smoke tests, and GitHub build-provenance
   attestations.
 - Made the installer, self-updater, release badge, and Homebrew formula consume
-  releases from `crabbuild/crab-oss`.
+  releases from `crabbuild/crab`.
 
 ### Documentation And Website
 

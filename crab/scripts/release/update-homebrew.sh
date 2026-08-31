@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CRAB_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 TAP_REPO="${TAP_REPO:-crabbuild/homebrew-tap}"
-RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab-oss}"
+RELEASE_REPO="${RELEASE_REPO:-crabbuild/crab}"
 FORMULA_NAME="${FORMULA_NAME:-crab}"
 DIST_DIR="${DIST_DIR:-$CRAB_DIR/dist}"
 
@@ -200,7 +200,6 @@ cat > "$FORMULA_PATH" << EOF
 class Crab < Formula
   desc "Serverless git remote helper — repositories in cloud object storage"
   homepage "https://crab.build"
-  version "${VERSION}"
   license "Apache-2.0"
 
   on_macos do

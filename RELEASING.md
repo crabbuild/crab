@@ -53,7 +53,7 @@ git push origin v1.2.3
 ```
 
 Do not create the GitHub release manually. The tag starts the release workflow,
-which publishes to `crabbuild/crab-oss` and updates Homebrew when
+which publishes to `crabbuild/crab` and updates Homebrew when
 `TAP_GITHUB_TOKEN` is configured.
 
 For a failed run, fix the cause without moving or recreating the tag, merge the
@@ -67,8 +67,8 @@ Download the release into a new directory, verify every checksum, and execute
 the platform binary. GitHub provenance can be checked with:
 
 ```bash
-gh release verify v1.2.3 --repo crabbuild/crab-oss
-gh attestation verify crab-linux-x86_64.tar.gz --repo crabbuild/crab-oss
+gh release verify v1.2.3 --repo crabbuild/crab
+gh attestation verify crab-linux-x86_64.tar.gz --repo crabbuild/crab
 ```
 
 Confirm that the release is marked latest and immutable, the public installers
