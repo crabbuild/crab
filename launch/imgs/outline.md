@@ -42,10 +42,10 @@
 
 7. `07-gearhash-content-defined-chunking.png`
    - Position: after the content-defined chunking rationale.
-   - Purpose: show local boundary resynchronization after a small insertion and the verified chunk-size policy.
+   - Purpose: compare insertion, deletion, and modification against one original file, showing the local rechunking window and the exact point where unchanged chunk identities resume.
 8. `08-continuity-aware-xorb-packing.png`
    - Position: after the xorb packing rationale.
-   - Purpose: explain how Crab balances deduplication with efficient range reads using verified thresholds.
+   - Purpose: contrast maximal scattered reuse with Crab's balance of reuse and contiguous reads, while keeping verified xorb/run/compression facts separate from the conceptual tradeoff.
 
 ## Post 5 — Safe Push Publication
 

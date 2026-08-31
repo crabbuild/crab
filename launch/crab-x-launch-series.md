@@ -164,15 +164,15 @@ Technical overview: https://crab.build/blog/git-for-large-files-at-any-scale
 
 **Image 1 — Content-defined boundaries**
 
-![Gearhash content-defined chunking showing a small insertion, locally changed chunks, later boundary resynchronization, a 64 KiB target, and a 128 KiB cap.](imgs/07-gearhash-content-defined-chunking.png)
+![Gearhash content-defined chunking comparing insertion, deletion, and modification against one original file, with local new chunks followed by unchanged reused chunks.](imgs/07-gearhash-content-defined-chunking.png)
 
-Alt text: Two nearly identical segmented data ribbons show a tiny orange insertion disturbing one local area while later content-defined chunk boundaries resynchronize and remain matched.
+Alt text: One original segmented file is compared with three local edits. Inserted, deleted, and modified bytes are highlighted in amber; only nearby chunks receive new identities, while later blue chunks C4 through C6 retain their original identities after boundaries resynchronize.
 
 **Image 2 — Deduplication versus continuity**
 
-![XorbBuilder comparison of scattered reuse and continuity-aware packing using a 64 MiB target xorb, 1 MiB minimum run, and 25 percent dedup threshold.](imgs/08-continuity-aware-xorb-packing.png)
+![Comparison of maximal scattered chunk reuse with Crab's balance of reuse and xorb locality, separating uploaded-byte savings from hydration range-request cost.](imgs/08-continuity-aware-xorb-packing.png)
 
-Alt text: A split technical diagram contrasts a file scattered across many small containers and tangled read paths with the same chunks grouped into three coherent packed objects and a short reconstruction path.
+Alt text: The same ordered eight-chunk file is mapped two ways. Maximizing reuse scatters its terms across four xorbs and requires many range requests; continuity-aware packing uses two long xorb ranges, may repack some bytes, and requires fewer range requests.
 
 ## Post 5 — How a serverless push stays consistent
 
