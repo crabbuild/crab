@@ -188,7 +188,6 @@ impl PackLocationIter {
     }
 
     /// Return object IDs in the index's lexicographic order without reading pack bodies.
-    #[must_use]
     pub fn sorted_object_ids(&self) -> impl Iterator<Item = gix_hash::ObjectId> + '_ {
         (0..self.object_count).map(|index| self.index.oid_at_index(index).to_owned())
     }

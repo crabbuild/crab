@@ -880,7 +880,6 @@ pub fn repack_selected_objects(
 /// whole-pack consolidation when incremental packs contain a small amount of
 /// repeated or extra inventory. Source body integrity remains the caller's
 /// responsibility because this check does not read packed entries.
-#[must_use]
 pub fn source_pack_inventory_matches_object_ids(
     sources: &[RepackSource],
     selected_oids: &[gix_hash::ObjectId],
