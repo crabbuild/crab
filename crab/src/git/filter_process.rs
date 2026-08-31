@@ -835,11 +835,6 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     // starts with a warm fast-path.
     session.save_bloom_to_cache();
 
-    // Flush any hydrated-pointer cache invalidations collected
-    // during this session so the next process doesn't waste a
-    // `matches_stat` call on the same stale entries.
-    session.persist_hydrated_cache_invalidations();
-
     Ok(())
 }
 
@@ -1041,19 +1036,6 @@ fn dispatch_command<R: Read, W: Write>(
             // XET staging lock in a mixed-repository filter session.
             let is_lfs = session.resolve_filter_for(&cmd.pathname)
                 == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
-            // Fast-fast path: if the hydrated-pointer cache already
-            // has a live entry for this pathname, the upcoming clean
-            // will be served from cache without needing staging.
-            // Skip `acquire_writer` entirely so we don't block on the
-            // default flock budget when another crab process
-            // (shell-prompt `git status`, IDE integration, concurrent
-            // `crab add`) holds `.crab/staging`.
-            //
-            // Stat mismatches are caught inside `clean_stream`'s
-            // cache lookup, so a stale entry falls through to the
-            // normal pipeline.
-            let cache_short_circuit = session.has_live_hydrated_entry(&cmd.pathname);
-
             // Lazily acquire a writer handle on the first clean of the
             // session. Subsequent cleans reuse the cached handle
             // without re-flocking. Sessions that only smudge never
@@ -1064,20 +1046,6 @@ fn dispatch_command<R: Read, W: Write>(
                 tracing::debug!(
                     path = %cmd.pathname,
                     "filter clean: LFS route resolved, skipping XET staging"
-                );
-            } else if cache_short_circuit {
-                // Don't mutate the staging-unavailable flag here — if
-                // a prior clean already opened staging successfully,
-                // keep the writer attached so subsequent non-cached
-                // cleans in this session reuse it. If no prior clean
-                // acquired a writer and this one hits the cache, the
-                // session stays in whatever state it was seeded with;
-                // should a later clean on a different pathname miss
-                // the cache, its branch will call `acquire_writer`
-                // and transition the cell then.
-                tracing::debug!(
-                    path = %cmd.pathname,
-                    "filter clean: hydrated-pointer cache hit, skipping staging flock"
                 );
             } else if let Some(h) = handle {
                 match h.block_on(acquire_writer(staging_cell.as_ref())) {

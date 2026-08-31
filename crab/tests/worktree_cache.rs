@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use crab::cache::{HydratedEntry, HydratedPointerCache, hydrated_pointer};
+use crab::cache::{HydratedPointerCache, hydrated_pointer};
+use crab_types::pointer::Pointer;
 
 fn run_git<I, S>(cwd: &Path, args: I) -> Option<Output>
 where
@@ -53,12 +54,16 @@ fn fixture() -> Option<tempfile::TempDir> {
     Some(tmp)
 }
 
-fn entry(hex: &str) -> HydratedEntry {
-    HydratedEntry {
-        mtime_ns: 1,
-        size: 2,
-        pointer_hex: hex.to_owned(),
+fn entry(path: &Path) -> (crab::cache::HydratedEntry, Vec<u8>) {
+    let content = std::fs::read(path).expect("read hydrated content");
+    let pointer = Pointer {
+        file_hash: *blake3::hash(&content).as_bytes(),
+        size: content.len() as u64,
+        shard_hint: None,
     }
+    .serialize();
+    let entry = hydrated_pointer::entry_for_path(path, &pointer).expect("cacheable entry");
+    (entry, pointer)
 }
 
 #[test]
@@ -79,19 +84,20 @@ fn hydrated_cache_path_is_worktree_scoped_for_main_and_linked_worktrees() {
         repo.join(".crab")
             .join("worktrees")
             .join("main")
-            .join("hydrated-pointers.json")
+            .join("hydrated-pointers-v1.sqlite")
     );
     assert_eq!(
         linked_cache,
         repo.join(".crab")
             .join("worktrees")
             .join("linked")
-            .join("hydrated-pointers.json")
+            .join("hydrated-pointers-v1.sqlite")
     );
     assert_ne!(main_cache, linked_cache);
 }
 
 #[test]
+#[cfg(unix)]
 fn same_relative_path_uses_independent_hydrated_cache_per_worktree() {
     let Some(tmp) = fixture() else {
         eprintln!("SKIP: git unavailable or fixture setup failed");
@@ -117,25 +123,31 @@ fn same_relative_path_uses_independent_hydrated_cache_per_worktree() {
     let linked_cache =
         hydrated_pointer::cache_path_for_worktree_root(&linked).expect("linked cache");
 
-    HydratedPointerCache::update_on_disk(&main_cache, [("model.bin".to_owned(), entry("11"))])
+    let (main_entry, main_pointer) = entry(&repo.join("model.bin"));
+    let (linked_entry, linked_pointer) = entry(&linked.join("model.bin"));
+    HydratedPointerCache::update_on_disk(&main_cache, [("model.bin".to_owned(), main_entry)])
         .expect("write main cache");
-    HydratedPointerCache::update_on_disk(&linked_cache, [("model.bin".to_owned(), entry("22"))])
+    HydratedPointerCache::update_on_disk(&linked_cache, [("model.bin".to_owned(), linked_entry)])
         .expect("write linked cache");
 
     let main = HydratedPointerCache::load_sync(&main_cache);
     let linked = HydratedPointerCache::load_sync(&linked_cache);
 
     assert_eq!(
-        main.get("model.bin").map(|e| e.pointer_hex.as_str()),
-        Some("11")
+        main.get("model.bin")
+            .and_then(hydrated_pointer::decode_pointer),
+        Some(main_pointer)
     );
     assert_eq!(
-        linked.get("model.bin").map(|e| e.pointer_hex.as_str()),
-        Some("22")
+        linked
+            .get("model.bin")
+            .and_then(hydrated_pointer::decode_pointer),
+        Some(linked_pointer)
     );
 }
 
 #[test]
+#[cfg(unix)]
 fn legacy_shared_hydrated_cache_is_ignored_and_not_rewritten() {
     let Some(tmp) = fixture() else {
         eprintln!("SKIP: git unavailable or fixture setup failed");
@@ -149,7 +161,8 @@ fn legacy_shared_hydrated_cache_is_ignored_and_not_rewritten() {
     let canonical = hydrated_pointer::cache_path_for_worktree_root(&repo).expect("main cache");
     assert_ne!(legacy, canonical);
 
-    HydratedPointerCache::update_on_disk(&canonical, [("model.bin".to_owned(), entry("33"))])
+    let (entry, pointer) = entry(&repo.join("model.bin"));
+    HydratedPointerCache::update_on_disk(&canonical, [("model.bin".to_owned(), entry)])
         .expect("write canonical cache");
 
     assert_eq!(
@@ -159,7 +172,7 @@ fn legacy_shared_hydrated_cache_is_ignored_and_not_rewritten() {
     assert_eq!(
         HydratedPointerCache::load_sync(&canonical)
             .get("model.bin")
-            .map(|e| e.pointer_hex.as_str()),
-        Some("33")
+            .and_then(hydrated_pointer::decode_pointer),
+        Some(pointer)
     );
 }

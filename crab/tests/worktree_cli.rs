@@ -1954,6 +1954,7 @@ fn worktree_mutating_json_reports_payloads_and_changes_git_state() {
 }
 
 #[test]
+#[cfg(unix)]
 fn worktree_list_json_with_crab_state_reports_state_summaries() {
     let Some(tmp) = fixture() else {
         eprintln!("SKIP: git unavailable or fixture setup failed");
@@ -1962,21 +1963,23 @@ fn worktree_list_json_with_crab_state_reports_state_summaries() {
     let repo = tmp.path().join("repo");
     let linked = tmp.path().join("linked");
     let ctx = crab::git::worktree::WorktreeContext::resolve_from(&linked).expect("linked ctx");
-    let mut cache = crab::cache::HydratedPointerCache::new();
-    cache.insert(
-        "large.bin".to_owned(),
-        crab::cache::HydratedEntry {
-            mtime_ns: 1,
-            size: 5,
-            pointer_hex: "706f696e746572".to_owned(),
-        },
-    );
-    cache
-        .save_sync(
-            &ctx.per_worktree_crab_dir
-                .join(crab::cache::hydrated_pointer::HYDRATED_POINTERS_FILENAME),
-        )
-        .expect("save hydrated cache");
+    let content = b"large";
+    let hydrated_path = linked.join("large.bin");
+    std::fs::write(&hydrated_path, content).expect("write hydrated content");
+    let pointer = crab_types::pointer::Pointer {
+        file_hash: *blake3::hash(content).as_bytes(),
+        size: content.len() as u64,
+        shard_hint: None,
+    }
+    .serialize();
+    let entry = crab::cache::hydrated_pointer::entry_for_path(&hydrated_path, &pointer)
+        .expect("cacheable hydrated content");
+    crab::cache::HydratedPointerCache::update_on_disk(
+        &ctx.per_worktree_crab_dir
+            .join(crab::cache::hydrated_pointer::HYDRATED_POINTERS_FILENAME),
+        [("large.bin".to_owned(), entry)],
+    )
+    .expect("save hydrated cache");
     std::fs::write(
         ctx.per_worktree_crab_dir.join("hydration-policy.toml"),
         b"mode = \"full\"\n",

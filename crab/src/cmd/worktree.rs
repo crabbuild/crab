@@ -1268,7 +1268,7 @@ fn hydrated_pointer_cache_summary(state_dir: &Path) -> CrabHydratedPointerCacheS
         .filter(|meta| meta.is_file())
         .map(|meta| meta.len());
     let entries = if bytes.is_some() {
-        crate::cache::HydratedPointerCache::load_sync(&path).len()
+        crate::cache::HydratedPointerCache::count_on_disk(&path)
     } else {
         0
     };
