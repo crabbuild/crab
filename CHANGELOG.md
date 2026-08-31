@@ -5,6 +5,20 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.0.0 - 2026-08-31
+
+### Open Source Launch
+
+- Established `crabbuild/crab` as the canonical open-source repository and
+  reset the public release line to 1.0.0. The pre-launch 1.1.0 release remains
+  available as an immutable historical artifact.
+- Shipped the serverless Git remote helper, direct object-storage large-file
+  workflow, partial-clone support, protected publication, and safe repository
+  maintenance as the open-source launch baseline.
+- Published native ARM64 and x86_64 archives for macOS, Linux, and Windows with
+  checksums, build-provenance attestations, public installers, self-update
+  support, and the `crabbuild/tap/crab` Homebrew formula.
+
 ## 1.1.0 - 2026-08-27
 
 ### Git And Large Files

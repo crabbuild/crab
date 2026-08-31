@@ -107,7 +107,7 @@ for manifest in "${PRODUCT_MANIFESTS[@]}"; do
         sed -i "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" "$manifest"
     fi
 done
-(cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 --no-deps >/dev/null)
+(cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 >/dev/null)
 trap - EXIT
 rm -r "$backup_dir"
 
