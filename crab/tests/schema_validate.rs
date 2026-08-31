@@ -208,6 +208,8 @@ fn validate_add() {
         &AddSummary {
             files_staged: 3,
             files_skipped: 1,
+            validation_cache_hits: 1,
+            validation_cache_hit_bytes: 1024,
             files_failed: 0,
             chunks_staged: 12,
             bytes_processed: 65536,

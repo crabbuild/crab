@@ -141,8 +141,6 @@ pub fn committed_pointers_for_paths(
 
 /// Refresh Git index stat entries after Crab replaces worktree file contents.
 pub(crate) fn refresh_index_stats(root: &Path, paths: &[PathBuf]) -> Result<usize> {
-    use bstr::ByteSlice;
-
     if paths.is_empty() {
         return Ok(0);
     }
@@ -152,7 +150,62 @@ pub(crate) fn refresh_index_stats(root: &Path, paths: &[PathBuf]) -> Result<usiz
         let metadata = gix_index::fs::Metadata::from_path_no_follow(path).map_err(CrabError::Io)?;
         let stat = gix_index::entry::Stat::from_fs(&metadata)
             .map_err(|error| CrabError::Internal(format!("read worktree file stat: {error}")))?;
-        updates.insert(index_path_bytes(rel), stat);
+        updates.insert(
+            index_path_bytes(rel),
+            IndexStatUpdate {
+                stat,
+                expected_pointer: None,
+            },
+        );
+    }
+
+    write_index_stats(root, &updates)
+}
+
+/// Refresh only paths that still have the exact stat captured by a verified read.
+pub(crate) fn refresh_verified_index_stats(
+    root: &Path,
+    paths: &[(PathBuf, gix_index::entry::Stat, u64, [u8; 32], u64)],
+) -> Result<usize> {
+    let mut updates = HashMap::with_capacity(paths.len());
+    for (path, verified_stat, verified_len, file_hash, size) in paths {
+        let Ok(metadata) = gix_index::fs::Metadata::from_path_no_follow(path) else {
+            continue;
+        };
+        let Ok(current_stat) = gix_index::entry::Stat::from_fs(&metadata) else {
+            continue;
+        };
+        if current_stat != *verified_stat || metadata.len() != *verified_len {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        // Write the captured stat, not a fresh one: a rewrite after this check
+        // then differs from the index instead of being accidentally marked clean.
+        updates.insert(
+            index_path_bytes(rel),
+            IndexStatUpdate {
+                stat: *verified_stat,
+                expected_pointer: Some((*file_hash, *size)),
+            },
+        );
+    }
+
+    write_index_stats(root, &updates)
+}
+
+#[derive(Clone, Copy)]
+struct IndexStatUpdate {
+    stat: gix_index::entry::Stat,
+    expected_pointer: Option<([u8; 32], u64)>,
+}
+
+fn write_index_stats(root: &Path, updates: &HashMap<Vec<u8>, IndexStatUpdate>) -> Result<usize> {
+    use bstr::ByteSlice;
+
+    if updates.is_empty() {
+        return Ok(0);
     }
 
     let index_path = WorktreeContext::resolve_from_path(root)?.index_path();
@@ -169,15 +222,37 @@ pub(crate) fn refresh_index_stats(root: &Path, paths: &[PathBuf]) -> Result<usiz
         gix_index::decode::Options::default(),
     )
     .map_err(|error| CrabError::Internal(format!("read Git index: {error}")))?;
+    let repo = updates
+        .values()
+        .any(|update| update.expected_pointer.is_some())
+        .then(|| {
+            gix::open(root)
+                .map_err(|error| CrabError::Internal(format!("open Git repository: {error}")))
+        })
+        .transpose()?;
     let mut updated = 0usize;
     for (entry, entry_path) in index.entries_mut_with_paths() {
         if entry.stage() != gix_index::entry::Stage::Unconflicted {
             continue;
         }
-        let Some(stat) = updates.get(entry_path.as_bytes()) else {
+        let Some(update) = updates.get(entry_path.as_bytes()) else {
             continue;
         };
-        entry.stat = *stat;
+        if let Some((expected_hash, expected_size)) = update.expected_pointer {
+            let Some(repo) = repo.as_ref() else {
+                continue;
+            };
+            let Ok(blob) = repo.find_blob(entry.id) else {
+                continue;
+            };
+            let Ok(pointer) = Pointer::parse(&blob.data) else {
+                continue;
+            };
+            if pointer.file_hash != expected_hash || pointer.size != expected_size {
+                continue;
+            }
+        }
+        entry.stat = update.stat;
         updated += 1;
     }
     if updated == 0 {
@@ -197,14 +272,14 @@ pub(crate) fn refresh_index_stats(root: &Path, paths: &[PathBuf]) -> Result<usiz
 }
 
 #[cfg(unix)]
-fn index_path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn index_path_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
 
     path.as_os_str().as_bytes().to_vec()
 }
 
 #[cfg(not(unix))]
-fn index_path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn index_path_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().into_owned().into_bytes()
 }
 

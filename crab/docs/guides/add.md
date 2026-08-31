@@ -59,10 +59,21 @@ size, and modification time are checked again before publication. Pointer and
 `.gitattributes` deltas are applied to a freshly reread Git index under its
 lock, so unrelated concurrent index entries are preserved. `--dry-run` performs
 discovery only and does not create staging, object, attribute, or index state.
-When an indexed pointer appears clean by Git's stat cache, Crab hashes the
-working-tree bytes and compares the Blake3 identity before skipping CDC and
-staging. This keeps same-size, same-stat replacements from reusing a stale
-pointer.
+When an indexed pointer appears clean by Git's stat cache, Crab first checks a
+per-worktree v1 validation token written only after Crab verified those bytes.
+The token binds literal path bytes, exact indexed pointer identity and payload,
+mode, full size, and every captured filesystem stat field. A hit skips the
+redundant file read, including when Git conservatively marks the matching stat
+entry as racy. A missing, stale, or corrupt token falls back to a
+descriptor-safe full Blake3 hash before skipping CDC and staging, then refreshes
+the token. A racy entry without an exact token takes the same one-time hash
+instead of needlessly repeating CDC and staging. Cache hits require
+high-resolution Unix change-time semantics; unsupported or coarse stat
+implementations keep using the full hash. On a supported filesystem, same-size
+replacements with restored mtimes still change ctime and cannot reuse a stale
+pointer through the cache. Successful hydration seeds the same proof from the
+verified post-rename descriptor stat, making the first subsequent add a cache
+hit without trusting a later metadata snapshot.
 
 Only files that match patterns listed in `.gitattributes` with `filter=crab`
 are processed. If a file matches the command-line glob but is not tracked by
@@ -160,6 +171,8 @@ Supports `--json` and `--jsonl`.
   "data": {
     "files_staged": 5,
     "files_skipped": 0,
+    "validation_cache_hits": 0,
+    "validation_cache_hit_bytes": 0,
     "files_failed": 0,
     "chunks_staged": 847,
     "bytes_processed": 2469606195,
@@ -184,13 +197,16 @@ Each line is a complete JSON object:
 ```
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.100Z","type":"progress","data":{"operation":"staging","current":3,"total":5,"bytes":1572864000,"total_bytes":2469606195,"rate_bytes_per_sec":45000000.0}}
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.450Z","type":"file_done","data":{"path":"models/weights.bin","bytes":1288490188,"duration_ms":340,"status":"ok"}}
-{"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.500Z","type":"result","data":{"files_staged":5,"files_skipped":0,"files_failed":0,"chunks_staged":847,"bytes_processed":2469606195,"lock_wait_duration_ms":2,"chunking_worker_duration_ms":1800,"remote_lookup_duration_ms":120,"compression_worker_duration_ms":2100,"payload_write_duration_ms":640,"staging_duration_ms":3400,"planning_duration_ms":420,"flushing_duration_ms":25,"indexing_duration_ms":80,"duration_ms":3925}}
+{"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.500Z","type":"result","data":{"files_staged":5,"files_skipped":0,"validation_cache_hits":0,"validation_cache_hit_bytes":0,"files_failed":0,"chunks_staged":847,"bytes_processed":2469606195,"lock_wait_duration_ms":2,"chunking_worker_duration_ms":1800,"remote_lookup_duration_ms":120,"compression_worker_duration_ms":2100,"payload_write_duration_ms":640,"staging_duration_ms":3400,"planning_duration_ms":420,"flushing_duration_ms":25,"indexing_duration_ms":80,"duration_ms":3925}}
 ```
 
 The worker-duration fields are cumulative across parallel file tasks and can
 therefore exceed the command's wall-clock `duration_ms`.
 `lock_wait_duration_ms` covers staging-owner acquisition and publication
 recovery before file work starts.
+`validation_cache_hits` and `validation_cache_hit_bytes` report clean indexed
+files that were accepted from v1 verification tokens without rereading their
+contents.
 
 See [Structured Output](structured-output.md) for envelope details, event types,
 and error handling.

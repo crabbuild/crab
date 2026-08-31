@@ -25,8 +25,9 @@ is the primary way to "check out" large files after a lazy clone or after
 switching branches.
 
 Hydration is selective: you can hydrate specific files by glob pattern, or use
-`--all` to hydrate everything. Files that are already hydrated (full content on
-disk matching the expected size) are skipped automatically.
+`--all` to hydrate everything. Files already replaced with full content are not
+selected again. If a selected pointer is hydrated concurrently, Crab skips it
+only after its size and full BLAKE3 hash match the pointer.
 
 For conceptual background on hydration and lazy checkout, see [Hydrating Files](/docs/cli/daily-workflow/hydrating-files).
 

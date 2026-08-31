@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::cache::add_validation::VerifiedPath;
 use crate::cmd::stream_stage::cleanup_stream_prepared_xorbs;
 use crate::core::error::{self, CrabError, Result};
 use crate::core::output::event_payloads::{FileDonePayload, ProgressPayload};
@@ -69,6 +70,8 @@ pub struct AddArgs {
 pub struct AddSummary {
     pub files_staged: u64,
     pub files_skipped: u64,
+    pub validation_cache_hits: u64,
+    pub validation_cache_hit_bytes: u64,
     pub files_failed: u64,
     pub chunks_staged: u64,
     pub bytes_processed: u64,
@@ -191,6 +194,15 @@ struct ReusableStagedFile {
 struct CleanIndexedSkipSummary {
     files: u64,
     bytes: u64,
+    validation_cache_hits: u64,
+    validation_cache_hit_bytes: u64,
+}
+
+struct CleanIndexPointer {
+    expected_hash: [u8; 32],
+    path_bytes: Vec<u8>,
+    validation_token: Option<[u8; 32]>,
+    verified_stat: crate::cmd::stream_stage::VerifiedIndexStat,
 }
 
 struct AddFileProgressSpec {
@@ -1123,6 +1135,8 @@ async fn execute_add(
     let mut summary = AddSummary {
         files_staged: 0,
         files_skipped: clean_skipped.files,
+        validation_cache_hits: clean_skipped.validation_cache_hits,
+        validation_cache_hit_bytes: clean_skipped.validation_cache_hit_bytes,
         files_failed: 0,
         chunks_staged: 0,
         bytes_processed: 0,
@@ -1467,6 +1481,28 @@ async fn execute_add(
             CrabError::Internal("Git index publication intent was not recorded".to_owned())
         })?;
         publication_staging.publish_publication_intent(&publication_intent)?;
+        let verified_paths = staged_entries
+            .iter()
+            .filter_map(|entry| {
+                entry.index_stat.map(|index_stat| VerifiedPath {
+                    path: entry.abs_path.clone(),
+                    file_hash: entry.file_hash,
+                    size: entry.size,
+                    index_stat,
+                })
+            })
+            .collect::<Vec<_>>();
+        match crate::cache::add_validation::record_verified_paths(&repo_root, &verified_paths) {
+            Ok(validations) => {
+                debug!(validations, "recorded verified add validations");
+            }
+            Err(error) => {
+                debug!(
+                    error = %error,
+                    "failed to persist verified add validations; later add will rehash"
+                );
+            }
+        }
         summary.indexing_duration_ms = indexing_start.elapsed().as_millis() as u64;
     }
 
@@ -1499,6 +1535,13 @@ async fn execute_add(
                         "  {} skipped (already staged and clean)",
                         summary.files_skipped
                     );
+                    if summary.validation_cache_hits > 0 {
+                        println!(
+                            "    {} validation-cache hit(s), {} of file reads avoided",
+                            summary.validation_cache_hits,
+                            format_bytes(summary.validation_cache_hit_bytes)
+                        );
+                    }
                 }
                 if summary.files_failed > 0 {
                     println!("  {} failed", summary.files_failed);
@@ -1832,15 +1875,13 @@ async fn process_duplicate_candidate(
 
     file_progress.set_state(AddFileState::Running);
     let start = Instant::now();
-    let before_hash_stat =
-        crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(abs_path);
     let hash_result = crate::cmd::stream_stage::stream_hash_file(
         abs_path,
         Some(&file_progress.bytes_done),
         cancel,
     )
     .await;
-    let (file_hash, size) = match hash_result {
+    let verified = match hash_result {
         Ok(result) => result,
         Err(err) => {
             file_progress.set_state(AddFileState::Failed);
@@ -1848,24 +1889,8 @@ async fn process_duplicate_candidate(
             return Err(err.into());
         }
     };
-    let after_hash_stat =
-        crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(abs_path);
-
-    if let (Some(before), Some(after)) = (before_hash_stat, after_hash_stat)
-        && before != after
-    {
-        let (second_hash, second_size) =
-            crate::cmd::stream_stage::stream_hash_file(abs_path, None, cancel).await?;
-        file_progress.set_state(AddFileState::Failed);
-        progress.files_done.fetch_add(1, Relaxed);
-        return Err(CrabError::FileChangedDuringStaging {
-            path: abs_path.display().to_string(),
-            first_hash: MerkleHash::from(file_hash).hex(),
-            second_hash: MerkleHash::from(second_hash).hex(),
-            first_size: size,
-            second_size,
-        });
-    }
+    let file_hash = verified.hash;
+    let size = verified.size;
 
     if file_hash != reusable.file_hash || size != reusable.size {
         file_progress.bytes_done.store(0, Relaxed);
@@ -1931,7 +1956,7 @@ async fn process_duplicate_candidate(
         file_hash,
         recipe,
         prepared_xorbs: Vec::new(),
-        index_stat: after_hash_stat.filter(|stat| stat.len == size),
+        index_stat: Some(verified.index_stat),
         timings: crab_staging::stream::StreamStageTimings::default(),
         duration_ms: start.elapsed().as_millis() as u64,
     })
@@ -2611,42 +2636,119 @@ async fn filter_clean_indexed_candidates(
         }
     };
     let honor_filemode = git_honors_filemode(repo_root);
-    let candidates = candidates
-        .into_iter()
-        .map(|(abs_path, size)| {
-            let expected_hash =
-                clean_index_pointer_hash(repo_root, &repo, &index, &abs_path, size, honor_filemode);
-            (abs_path, size, expected_hash)
-        })
-        .collect::<Vec<_>>();
-    let mut checks = futures_util::stream::iter(candidates)
-        .map(|(abs_path, size, expected_hash)| async move {
-            let matches = match expected_hash {
-                Some(expected_hash) => {
-                    worktree_content_matches_pointer(&abs_path, size, expected_hash, cancel).await?
+    let cache_path = crate::cache::add_validation::cache_path_for_context(&ctx);
+    let mut validation_cache =
+        match crate::cache::add_validation::AddValidationCache::open(&cache_path) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                debug!(
+                    path = %cache_path.display(),
+                    error = %error,
+                    "clean-index add validation cache unavailable; hashing candidates"
+                );
+                None
+            }
+        };
+    let mut prepared = Vec::with_capacity(candidates.len());
+    for (abs_path, size) in candidates {
+        let indexed =
+            clean_index_pointer(repo_root, &repo, &index, &abs_path, size, honor_filemode);
+        let cache_hit = match (
+            validation_cache.as_ref(),
+            indexed.as_ref(),
+            indexed
+                .as_ref()
+                .and_then(|indexed| indexed.validation_token.as_ref()),
+        ) {
+            (Some(cache), Some(indexed), Some(token)) => {
+                match cache.contains(&indexed.path_bytes, token) {
+                    Ok(hit) => hit,
+                    Err(error) => {
+                        debug!(
+                            path = %cache_path.display(),
+                            error = %error,
+                            "clean-index add validation cache query failed; hashing candidates"
+                        );
+                        validation_cache = None;
+                        false
+                    }
                 }
-                None => false,
+            }
+            _ => false,
+        };
+        prepared.push((abs_path, size, indexed, cache_hit));
+    }
+    let mut checks = futures_util::stream::iter(prepared)
+        .map(|(abs_path, size, indexed, cache_hit)| async move {
+            let (matches, verified) = if cache_hit {
+                (
+                    crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&abs_path)
+                        == indexed.as_ref().map(|indexed| indexed.verified_stat),
+                    None,
+                )
+            } else {
+                match indexed {
+                    Some(indexed) => {
+                        let verified = worktree_content_matches_pointer(
+                            &abs_path,
+                            size,
+                            indexed.expected_hash,
+                            cancel,
+                        )
+                        .await?;
+                        (
+                            verified.is_some(),
+                            verified.map(|stat| (indexed.expected_hash, stat)),
+                        )
+                    }
+                    None => (false, None),
+                }
             };
-            Ok::<_, CrabError>((abs_path, size, matches))
+            Ok::<_, CrabError>((abs_path, size, matches, cache_hit, verified))
         })
         .buffered(jobs.max(1));
 
     let mut to_process = Vec::new();
     let mut skipped = CleanIndexedSkipSummary::default();
+    let mut newly_verified = Vec::new();
     while let Some(result) = checks.next().await {
-        let (abs_path, size, matches) = result?;
+        let (abs_path, size, matches, cache_hit, verified) = result?;
         if matches {
             skipped.files += 1;
             skipped.bytes += size;
+            if cache_hit {
+                skipped.validation_cache_hits += 1;
+                skipped.validation_cache_hit_bytes += size;
+            } else if let Some((file_hash, index_stat)) = verified {
+                newly_verified.push(VerifiedPath {
+                    path: abs_path.clone(),
+                    file_hash,
+                    size,
+                    index_stat,
+                });
+            }
         } else {
             to_process.push((abs_path, size));
         }
+    }
+
+    if !newly_verified.is_empty()
+        && let Err(error) =
+            crate::cache::add_validation::record_verified_paths(repo_root, &newly_verified)
+    {
+        debug!(
+            path = %cache_path.display(),
+            error = %error,
+            "failed to persist content-verified add validations"
+        );
     }
 
     if skipped.files > 0 {
         debug!(
             files = skipped.files,
             bytes = skipped.bytes,
+            validation_cache_hits = skipped.validation_cache_hits,
+            validation_cache_hit_bytes = skipped.validation_cache_hit_bytes,
             "skipped content-verified indexed files during add"
         );
     }
@@ -2659,20 +2761,22 @@ async fn worktree_content_matches_pointer(
     expected_size: u64,
     expected_hash: [u8; 32],
     cancel: &CancellationToken,
-) -> Result<bool> {
-    let (actual_hash, actual_size) =
-        crate::cmd::stream_stage::stream_hash_file(path, None, cancel).await?;
-    Ok(actual_size == expected_size && actual_hash == expected_hash)
+) -> Result<Option<crate::cmd::stream_stage::VerifiedIndexStat>> {
+    let verified = crate::cmd::stream_stage::stream_hash_file(path, None, cancel).await?;
+    Ok(
+        (verified.size == expected_size && verified.hash == expected_hash)
+            .then_some(verified.index_stat),
+    )
 }
 
-fn clean_index_pointer_hash(
+fn clean_index_pointer(
     repo_root: &Path,
     repo: &gix::Repository,
     index: &gix_index::File,
     abs_path: &Path,
     size: u64,
     honor_filemode: bool,
-) -> Option<[u8; 32]> {
+) -> Option<CleanIndexPointer> {
     use bstr::ByteSlice;
     use gix_index::entry;
 
@@ -2691,14 +2795,12 @@ fn clean_index_pointer_hash(
     }
 
     let stat_options = gix_index::entry::stat::Options::default();
-    if !current_stat.stat.matches(&entry.stat, stat_options)
-        || current_stat.stat.is_racy(index.timestamp(), stat_options)
-    {
+    if !current_stat.stat.matches(&entry.stat, stat_options) {
         return None;
     }
 
-    let pointer = match repo.find_blob(entry.id) {
-        Ok(blob) => Pointer::parse(&blob.data).ok(),
+    let blob = match repo.find_blob(entry.id) {
+        Ok(blob) => Some(blob),
         Err(e) => {
             debug!(
                 path = %rel_path.display(),
@@ -2709,7 +2811,28 @@ fn clean_index_pointer_hash(
             None
         }
     }?;
-    (pointer.size == size).then_some(pointer.file_hash)
+    let pointer = Pointer::parse(&blob.data).ok()?;
+    if pointer.size != size {
+        return None;
+    }
+    let path_bytes = rel_bstr.as_bytes().to_vec();
+    let validation_token = crate::cache::add_validation::stat_is_cacheable(&current_stat.stat)
+        .then(|| {
+            crate::cache::add_validation::validation_token(
+                &path_bytes,
+                entry.id.as_bytes(),
+                &blob.data,
+                entry.mode.bits(),
+                &current_stat.stat,
+                current_stat.len,
+            )
+        });
+    Some(CleanIndexPointer {
+        expected_hash: pointer.file_hash,
+        path_bytes,
+        validation_token,
+        verified_stat: current_stat,
+    })
 }
 
 /// Recursive directory walker that collects `(abs_path, file_size)` pairs.
@@ -4781,6 +4904,285 @@ mod tests {
         assert!(to_process.is_empty());
         assert_eq!(skipped.files, 1);
         assert_eq!(skipped.bytes, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn clean_index_filter_reuses_verified_add_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let payload = b"model payload";
+        std::fs::write(&path, payload).unwrap();
+        make_file_mtime_old(&path);
+
+        write_pointers_to_git_index(
+            &[staged_entry(
+                path.clone(),
+                *blake3::hash(payload).as_bytes(),
+                payload.len() as u64,
+            )],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+        crate::cache::add_validation::record_verified_paths(
+            dir.path(),
+            &[VerifiedPath {
+                path: path.clone(),
+                file_hash: *blake3::hash(payload).as_bytes(),
+                size: payload.len() as u64,
+                index_stat: crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path)
+                    .unwrap(),
+            }],
+        )
+        .unwrap();
+
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(to_process.is_empty());
+        assert_eq!(skipped.files, 1);
+        assert_eq!(skipped.validation_cache_hits, 1);
+        assert_eq!(skipped.validation_cache_hit_bytes, payload.len() as u64);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_validation_rejects_file_changed_after_verified_read() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let original = b"original payload";
+        let replacement = b"replaced payload";
+        assert_eq!(original.len(), replacement.len());
+        std::fs::write(&path, original).unwrap();
+        make_file_mtime_old(&path);
+        let file_hash = *blake3::hash(original).as_bytes();
+        let index_stat =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path).unwrap();
+        write_pointers_to_git_index(
+            &[staged_entry(path.clone(), file_hash, original.len() as u64)],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+
+        std::fs::write(&path, replacement).unwrap();
+        crate::git::worktree::refresh_index_stats(dir.path(), std::slice::from_ref(&path)).unwrap();
+
+        assert_eq!(
+            crate::cache::add_validation::record_verified_paths(
+                dir.path(),
+                &[VerifiedPath {
+                    path,
+                    file_hash,
+                    size: original.len() as u64,
+                    index_stat,
+                }],
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn add_validation_rejects_index_pointer_changed_after_verified_read() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let payload = b"model payload";
+        std::fs::write(&path, payload).unwrap();
+        make_file_mtime_old(&path);
+        let file_hash = *blake3::hash(payload).as_bytes();
+        let index_stat =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path).unwrap();
+        write_pointers_to_git_index(
+            &[staged_entry(path.clone(), file_hash, payload.len() as u64)],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+        let mut other_hash = file_hash;
+        other_hash[0] ^= 0xff;
+        write_pointers_to_git_index(
+            &[staged_entry(path.clone(), other_hash, payload.len() as u64)],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::cache::add_validation::record_verified_paths(
+                dir.path(),
+                &[VerifiedPath {
+                    path,
+                    file_hash,
+                    size: payload.len() as u64,
+                    index_stat,
+                }],
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn clean_index_filter_rehashes_same_size_same_mtime_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let original = b"original payload";
+        let replacement = b"replaced payload";
+        assert_eq!(original.len(), replacement.len());
+        std::fs::write(&path, original).unwrap();
+        make_file_mtime_old(&path);
+        write_pointers_to_git_index(
+            &[staged_entry(
+                path.clone(),
+                *blake3::hash(original).as_bytes(),
+                original.len() as u64,
+            )],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+        crate::cache::add_validation::record_verified_paths(
+            dir.path(),
+            &[VerifiedPath {
+                path: path.clone(),
+                file_hash: *blake3::hash(original).as_bytes(),
+                size: original.len() as u64,
+                index_stat: crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path)
+                    .unwrap(),
+            }],
+        )
+        .unwrap();
+
+        std::fs::write(&path, replacement).unwrap();
+        make_file_mtime_old(&path);
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, replacement.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(to_process.len(), 1);
+        assert_eq!(skipped.files, 0);
+        assert_eq!(skipped.validation_cache_hits, 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn clean_index_filter_hashes_racy_pointer_once_then_uses_validation() {
+        use bstr::ByteSlice;
+
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("model.bin");
+        let payload = b"model payload";
+        std::fs::write(&path, payload).unwrap();
+        make_file_mtime_old(&path);
+        write_pointers_to_git_index(
+            &[staged_entry(
+                path.clone(),
+                *blake3::hash(payload).as_bytes(),
+                payload.len() as u64,
+            )],
+            dir.path(),
+            &crate::cache::ShardHintCache::new(),
+            || {},
+        )
+        .unwrap();
+
+        let future = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() + Duration::from_secs(60),
+        );
+        filetime::set_file_mtime(&path, future).unwrap();
+        assert_eq!(
+            crate::git::worktree::refresh_index_stats(dir.path(), std::slice::from_ref(&path))
+                .unwrap(),
+            1
+        );
+        let context = crate::git::worktree::WorktreeContext::resolve_from_path(dir.path()).unwrap();
+        let index = gix_index::File::at(
+            context.index_path(),
+            gix_hash::Kind::Sha1,
+            true,
+            gix_index::decode::Options::default(),
+        )
+        .unwrap();
+        let entry = index
+            .entry_by_path_and_stage(
+                git_index_path_bstring(Path::new("model.bin")).as_bstr(),
+                gix_index::entry::Stage::Unconflicted,
+            )
+            .unwrap();
+        assert!(
+            entry.stat.is_racy(
+                index.timestamp(),
+                gix_index::entry::stat::Options::default()
+            ),
+            "fixture must exercise Git's racy-stat path"
+        );
+
+        let (_, first) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path.clone(), payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (to_process, second) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.files, 1);
+        assert_eq!(first.validation_cache_hits, 0);
+        assert!(to_process.is_empty());
+        assert_eq!(second.validation_cache_hits, 1);
     }
 
     #[tokio::test]

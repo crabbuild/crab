@@ -167,7 +167,7 @@ The final event is always `type: "result"`. Its `data` field matches what
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.100Z","type":"progress","data":{"operation":"staging","current":3,"total":10,"bytes":15728640,"total_bytes":52428800,"rate_bytes_per_sec":45000000.0}}
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.450Z","type":"file_done","data":{"path":"data/train.parquet","bytes":52428800,"duration_ms":340,"status":"ok"}}
 {"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.460Z","type":"file_done","data":{"path":"data/val.parquet","bytes":10485760,"duration_ms":120,"status":"ok"}}
-{"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.500Z","type":"result","data":{"files_staged":10,"files_skipped":0,"files_failed":0,"chunks_staged":42,"bytes_processed":524288000,"lock_wait_duration_ms":1,"chunking_worker_duration_ms":180,"remote_lookup_duration_ms":20,"compression_worker_duration_ms":150,"payload_write_duration_ms":55,"staging_duration_ms":300,"planning_duration_ms":0,"flushing_duration_ms":20,"indexing_duration_ms":80,"duration_ms":400}}
+{"schema":"add.event","version":"1.0","timestamp":"2026-04-24T18:32:17.500Z","type":"result","data":{"files_staged":10,"files_skipped":0,"validation_cache_hits":0,"validation_cache_hit_bytes":0,"files_failed":0,"chunks_staged":42,"bytes_processed":524288000,"lock_wait_duration_ms":1,"chunking_worker_duration_ms":180,"remote_lookup_duration_ms":20,"compression_worker_duration_ms":150,"payload_write_duration_ms":55,"staging_duration_ms":300,"planning_duration_ms":0,"flushing_duration_ms":20,"indexing_duration_ms":80,"duration_ms":400}}
 ```
 
 ### Rate Limiting

@@ -76,6 +76,16 @@
       "format": "uint64",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "validation_cache_hit_bytes": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "validation_cache_hits": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     }
   },
   "required": [
@@ -93,7 +103,9 @@
     "payload_write_duration_ms",
     "planning_duration_ms",
     "remote_lookup_duration_ms",
-    "staging_duration_ms"
+    "staging_duration_ms",
+    "validation_cache_hit_bytes",
+    "validation_cache_hits"
   ],
   "title": "AddSummary",
   "type": "object"

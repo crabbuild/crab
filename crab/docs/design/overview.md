@@ -591,8 +591,9 @@ crab dehydrate "data/old-experiments/**"
 - **Progress reporting.** Long hydrations show per-file progress bars
   with ETA, bytes downloaded, and dedup savings.
 - **Resumable.** If hydration is interrupted (Ctrl-C, network failure),
-  re-running the same command skips already-hydrated files (detected by
-  comparing file size against the pointer's `size` field).
+  re-running the same command discovers only remaining pointer files. A file
+  hydrated concurrently after discovery is skipped only after full BLAKE3
+  verification.
 - **Include/exclude composability.** Multiple `--include` and `--exclude`
   flags compose like Git-LFS: includes are evaluated first, then excludes
   subtract from the result.
