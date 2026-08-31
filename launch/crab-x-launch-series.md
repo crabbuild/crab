@@ -38,9 +38,9 @@ Docs: https://crab.build/docs/cli
 
 **Image 1 — Launch hero**
 
-![Crab direct-storage architecture showing git, the Crab CLI, git-remote-crab, filter-process, Git history, pointers, xorbs, shards, and object storage with no Crab data server.](imgs/01-crab-direct-storage-architecture.png)
+![Crab direct-storage architecture with aligned Git and large-file lanes leading into the user's object store, where Shards connect directly to the Xorb ranges they locate.](imgs/01-crab-direct-storage-architecture.png)
 
-Alt text: Two coordinated technical lanes carry a compact Git graph and large immutable data blocks into cloud object storage, with no central server between them.
+Alt text: Two aligned lanes run from the developer through Crab's Git integration into the user's object store. The Git lane stores Git packs and Crab pointers. The large-file lane stores Shards beside Xorbs, joined by a direct arrow showing that reconstruction metadata locates chunk ranges in immutable packed data. A footer states that access is direct, with no Crab data server.
 
 **Image 2 — Open architecture**
 

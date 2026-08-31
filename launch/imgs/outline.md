@@ -14,8 +14,8 @@
 
 1. `01-crab-direct-storage-architecture.png`
    - Position: after the opening definition of Crab.
-   - Purpose: show the complete direct-storage path and the absence of a Crab data server.
-   - Evidence represented: the CLI/filter/remote-helper entry points, Git-history lane, large-file lane, object storage, pointers, xorbs, and shards.
+   - Purpose: show two concise, aligned direct-storage lanes and the absence of a Crab data server.
+   - Evidence represented: Git packs and pointers share the Git lane; the large-file lane connects Shards directly to the Xorb ranges they locate inside the user's object store.
 2. `02-crab-open-source-module-map.png`
    - Position: after the open-source architecture overview.
    - Purpose: introduce the executable boundaries and the shared Rust crates that own each major responsibility.
