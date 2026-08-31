@@ -1501,8 +1501,39 @@ checks. The response consolidator therefore retains pack/index/trailer
 integrity checks, skips the redundant source-OID materialization and full
 graph scans, and lets the remote exact-set check remain the final admission
 gate. This removes repository-sized duplicate CPU and memory work without
-weakening the maintenance contract; a current-head RustFS/Kubernetes replay
-still needs to measure the production delta.
+weakening the maintenance contract.
+
+### 2026-08-30 current-head near-complete response qualification
+
+The release binary from `be68dac4` was replayed against the read-only
+Kubernetes repository at revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`
+using local RustFS. Run `codex-be68dac4-k8s-producer100-20260830` completed
+101 pushes (seed plus 100 replay commits), all 21 verifier checks, full and
+incremental clone/fsck checks, filtered and shallow clone checks, source
+immutability, and exact remote-prefix cleanup. The standalone report
+verifier returned `status=ok` with `--allow-smoke`; its correctness fingerprint
+is `04038c34c84aa8d3fda8f4b16be9b59e8230b94c5fd835627d93e1409b9cdad3`.
+
+The full cold clone directly exercised
+`near_complete_pack_consolidation`: two source packs, 1,646,245 staged
+inventory entries versus 1,646,244 selected objects, six source-artifact
+requests, 8,144 ms source staging, 19,792 ms Git whole-pack consolidation,
+30,763 ms total response-pack production, and a 1,239,120,771-byte response.
+The generated pack passed the remote exact-object-set check and the client
+completed a byte-correct full clone and `git fsck --full`. The warm full clone
+hit the immutable generated-pack cache; depth-1/10/100/1,000, blobless, and
+incremental clones also passed their checks. Active physical storage stayed at
+one pack after seeding, two packs after the first replay, and 103 packs before
+the final owner-maintenance checkpoint; the final active pack inventory was
+103 packs / 1,279,007,682 bytes because this smoke's maintenance cadence did
+not yet promote the late replay suffix.
+
+This is the first direct current-head proof of the near-complete branch, but it
+is intentionally smoke evidence rather than the large-team SLO gate. It does
+not prove a 1,000- or 10,000-push growth differential, repeated isolated
+latency, distributed fanout, provider behavior, fault/failover handling,
+retention convergence, or canary/default-on rollout. Those gates remain open;
+the report and logs are retained outside the repository for reproducibility.
 
 Still required before the roadmap is DONE:
 
