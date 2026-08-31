@@ -187,6 +187,12 @@ impl PackLocationIter {
                 .all(|(actual, expected)| actual == expected.as_bytes())
     }
 
+    /// Return object IDs in the index's lexicographic order without reading pack bodies.
+    #[must_use]
+    pub fn sorted_object_ids(&self) -> impl Iterator<Item = gix_hash::ObjectId> + '_ {
+        (0..self.object_count).map(|index| self.index.oid_at_index(index).to_owned())
+    }
+
     fn location(&self, reverse_position: u32) -> Result<PackObjectLocation, PackLocatorError> {
         let index_position = reverse_position_at(&self.reverse, reverse_position, &self.rev_path)?;
         let pack_offset = self.index.pack_offset_at_index(index_position);

@@ -874,6 +874,29 @@ pub fn repack_selected_objects(
     })
 }
 
+/// Check whether source pack indexes contain exactly the requested object set.
+///
+/// This reads only verified index sidecars, so response producers can avoid a
+/// whole-pack consolidation when incremental packs contain a small amount of
+/// repeated or extra inventory. Source body integrity remains the caller's
+/// responsibility because this check does not read packed entries.
+#[must_use]
+pub fn source_pack_inventory_matches_object_ids(
+    sources: &[RepackSource],
+    selected_oids: &[gix_hash::ObjectId],
+) -> Result<bool, RepackError> {
+    let selected = normalize_selected_oids(selected_oids, "selected-pack")?;
+    let mut source_oids = Vec::with_capacity(selected.len());
+    for source in sources {
+        let locations =
+            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
+        source_oids.extend(locations.sorted_object_ids());
+    }
+    source_oids.sort_unstable();
+    source_oids.dedup();
+    Ok(source_oids == selected)
+}
+
 /// Generate the exact self-contained pack for an existing shallow client's negotiation.
 ///
 /// The source packs are one immutable repository inventory. Git evaluates the
@@ -1869,8 +1892,9 @@ mod tests {
             "first test pack should contain a delta entry"
         );
         let second = source_descriptor(root.path().join(format!("second-{second_hash}.pack")))?;
+        let sources = [first, second];
 
-        let concatenated = concatenate_complete_pack_inventory(&[first, second])?;
+        let concatenated = concatenate_complete_pack_inventory(&sources)?;
         let generated =
             concatenated
                 .packs()
@@ -1913,6 +1937,13 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+        assert!(source_pack_inventory_matches_object_ids(
+            &sources, &expected
+        )?);
+        assert!(!source_pack_inventory_matches_object_ids(
+            &sources,
+            &expected[..expected.len() - 1],
+        )?);
         Ok(())
     }
 

@@ -749,17 +749,59 @@ impl RemoteGitRepository {
                 }
             }
         } else {
-            // Whole-pack consolidation can include a small amount of repeated
-            // inventory; the exact-union check below keeps the response bound
-            // to the request before adopting the faster result.
-            let repack_sources = sources.clone();
-            let repacked = tokio::task::spawn_blocking(move || {
-                crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
+            let inventory_check_started = Instant::now();
+            let check_sources = sources.clone();
+            let selected_oids = object_ids.to_vec();
+            let source_inventory_matches = tokio::task::spawn_blocking(move || {
+                crab_git::repack::source_pack_inventory_matches_object_ids(
+                    &check_sources,
+                    &selected_oids,
+                )
             })
             .await
             .map_err(|source| Error::DecodeTask { source })?
             .map_err(|source| Error::ResponsePackConsolidation { source })?;
-            (repacked, "near_complete_pack_consolidation")
+            tracing::debug!(
+                source_inventory_matches,
+                source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64,
+                "checked staged pack indexes against the exact response object set"
+            );
+            if source_inventory_matches {
+                let concat_sources = sources.clone();
+                let concatenated = tokio::task::spawn_blocking(move || {
+                    crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
+                })
+                .await
+                .map_err(|source| Error::DecodeTask { source })?;
+                match concatenated {
+                    Ok(repacked) => (repacked, "complete_pack_concatenation"),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            error_debug = ?error,
+                            "near-complete pack concatenation was not usable; falling back to Git consolidation"
+                        );
+                        let repack_sources = sources.clone();
+                        let repacked = tokio::task::spawn_blocking(move || {
+                            crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
+                        })
+                        .await
+                        .map_err(|source| Error::DecodeTask { source })?
+                        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                        (repacked, "near_complete_pack_consolidation")
+                    }
+                }
+            } else {
+                let selected_oids = object_ids.to_vec();
+                let repack_sources = sources.clone();
+                let repacked = tokio::task::spawn_blocking(move || {
+                    crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
+                })
+                .await
+                .map_err(|source| Error::DecodeTask { source })?
+                .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                (repacked, "selected_object_repack")
+            }
         };
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
