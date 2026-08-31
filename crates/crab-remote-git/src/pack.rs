@@ -1000,6 +1000,9 @@ fn generated_pack_matches_object_ids(
     generated: &crab_git::repack::GeometricRepackedPack,
     object_ids: &[ObjectId],
 ) -> Result<bool> {
+    if generated.object_count != u64::try_from(object_ids.len()).unwrap_or(u64::MAX) {
+        return Ok(false);
+    }
     let locations = crab_git::pack_locator::PackLocationIter::open(
         generated.index_path(),
         generated.reverse_index_path(),
@@ -1008,16 +1011,11 @@ fn generated_pack_matches_object_ids(
     .map_err(|source| Error::ResponsePackConsolidation {
         source: crab_git::repack::RepackError::from(source),
     })?;
-    let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
-    for location in locations {
-        let location = location.map_err(|source| Error::ResponsePackConsolidation {
-            source: crab_git::repack::RepackError::from(source),
-        })?;
-        if !requested.remove(&location.oid) {
-            return Ok(false);
-        }
-    }
-    Ok(requested.is_empty())
+    // Git v2 indexes already keep OIDs sorted; compare against that order
+    // instead of allocating a hash table for every object in a large response.
+    let mut expected = object_ids.to_vec();
+    expected.sort_unstable();
+    Ok(locations.matches_sorted_object_ids(&expected))
 }
 
 async fn adopt_repacked_pack(

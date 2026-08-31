@@ -174,8 +174,13 @@ impl PackLocationIter {
         u64::from(self.object_count)
     }
 
-    pub(crate) fn matches_sorted_object_ids(&self, expected: &[gix_hash::ObjectId]) -> bool {
-        self.object_count as usize == expected.len()
+    /// Compare the pack's sorted index OIDs with an already sorted expected set.
+    ///
+    /// The expected slice must contain unique object IDs in lexicographic order.
+    /// No pack-offset traversal or object-body read is performed.
+    #[must_use]
+    pub fn matches_sorted_object_ids(&self, expected: &[gix_hash::ObjectId]) -> bool {
+        u64::from(self.object_count) == u64::try_from(expected.len()).unwrap_or(u64::MAX)
             && (0..self.object_count)
                 .map(|index| self.index.oid_at_index(index).as_bytes())
                 .zip(expected)
