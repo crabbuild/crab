@@ -164,9 +164,9 @@ Technical overview: https://crab.build/blog/git-for-large-files-at-any-scale
 
 **Image 1 — Content-defined boundaries**
 
-![Three aligned before-and-after cards explicitly showing chunk B becoming X after insertion, deletion, or modification while chunks C and D are reused.](imgs/07-gearhash-content-defined-chunking.png)
+![Three aligned CDC examples showing insertion producing three local chunks, deletion producing one, and modification producing two before later chunks D and E resynchronize.](imgs/07-gearhash-content-defined-chunking.png)
 
-Alt text: Three aligned cards compare insertion, deletion, and modification. Their operation lines read B plus bytes becomes X, B minus bytes becomes X, and edit B becomes X. Every after row is A, X, C, D; C and D retain their identities.
+Alt text: Three equal cards share the original chunks A through E. Insertion produces local chunks I1 through I3 and a longer file; deletion produces R1 and a shorter file; modification produces M1 and M2 at the same total length. In all three examples, later chunks D and E retain their identities after resynchronization. Exact boundaries depend on the edited bytes.
 
 **Image 2 — Deduplication versus continuity**
 

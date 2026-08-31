@@ -42,7 +42,7 @@
 
 7. `07-gearhash-content-defined-chunking.png`
    - Position: after the content-defined chunking rationale.
-   - Purpose: use three minimal before/after cards with explicit `B`-to-`X` operation lines to show that insertion, deletion, and modification change the local chunk while later chunks retain their identities.
+   - Purpose: use three aligned examples with deliberately different local outputs—longer after insertion, shorter after deletion, and re-partitioned after modification—then show each stream resynchronizing at unchanged chunks `D` and `E`.
 8. `08-continuity-aware-xorb-packing.png`
    - Position: after the xorb packing rationale.
    - Purpose: use two aligned assignment tables to show how the same file order can touch four scattered xorbs or two contiguous xorbs.
