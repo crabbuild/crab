@@ -37,6 +37,7 @@ The important ownership boundaries are:
 | Surface | Responsibility |
 | --- | --- |
 | `crab/src/cmd/add.rs` | CLI orchestration, candidate discovery, progress, rollback, pointer publication |
+| `crab/src/cache/add_validation.rs` | Per-worktree v1 proof cache for already-verified indexed content |
 | `crates/crab-staging/src/stream.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, preparation-wide claims, provisional staging adoption |
 | `crates/crab-staging/src/lib.rs` | Segment writes, SQLite rows, flush/promotion, staged-file adoption and retirement |
 | `crates/crab-staging/src/add_push_plan.rs` | Add-time push-plan construction from staged chunk rows |
@@ -246,7 +247,17 @@ Worker durations can exceed wall time because files execute concurrently.
 Independent `crab add` processes queue for up to 30 minutes on the staging
 flock. A later process does not fail merely because an earlier large add is
 still preparing or publishing, and rechecks Git's index after ownership so it
-does not repeat work the preceding process just published.
+does not repeat work the preceding process just published. After verified
+content and its pointer are published, add records a per-worktree token in
+`.crab/worktrees/<identity>/add-validations-v1.sqlite`. The token binds raw Git
+path bytes, pointer OID and bytes, mode, exact filesystem stat, and full u64
+length. An exact token issued after a verified read can resolve Git's racy-stat
+ambiguity. Without one, a racy entry takes one descriptor-safe full-file hash
+instead of repeating CDC and staging, then refreshes the row only after the
+content matches the current indexed pointer. Any other cache or token mismatch
+also falls back to that full hash. Cache hits are disabled when high-resolution
+Unix change-time semantics are unavailable; those platforms retain the
+full-hash behavior.
 For `--skip-git-add`, ordinary `git add` verifies the Git-provided stream
 against bounded pages of the retained recipe while buffering at most one
 expected chunk. An exact match promotes the recipe without CDC, payload reads,
@@ -327,6 +338,10 @@ stat fields. Crab updates those fields after publication so a later
 
 - Git index publication happens only after the chunks referenced by every
   pointer are staged and flushable.
+- An add-validation cache hit is accepted only when the indexed pointer's exact
+  path, pointer, mode, stat, and full size match a token issued after Crab
+  verified the content. A racy entry without a token and every cache failure
+  always fall back to hashing.
 - Rollback retires unpublished staging rows on file errors, cancellation before
   publication, and push-plan preparation errors.
 - Push plans are validated against the exact staged chunk sequence before a
@@ -356,11 +371,12 @@ segment write is removed from `crab add`.
 
 ## Improvement Ideas
 
-1. **Stronger concurrent mutation exclusion.** Clean indexed files are hashed
-   before Crab reuses their pointer, and streamed files compare descriptor and
-   path stat before publication. A malicious writer that changes bytes after a
-   verified read while preserving every observed stat field still requires
-   cooperative file locking or filesystem snapshots to exclude completely.
+1. **Stronger concurrent mutation exclusion.** Cache misses hash clean indexed
+   files before Crab reuses their pointer, cache hits require the exact stat
+   captured by an earlier verified read, and streamed files compare descriptor
+   and path stat before publication. A malicious writer that changes bytes
+   while preserving every observed stat field still requires cooperative file
+   locking or filesystem snapshots to exclude completely.
 2. **Plan progress inside large single files.** The planning phase reports per
    completed file. If one file packs many chunks, an additional per-batch
    callback from `prepare_one_file_plan` would make `push-plan` progress more

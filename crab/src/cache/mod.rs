@@ -24,6 +24,7 @@ use crab_types::storage::StorageProviderKind;
 pub mod chunks {
     pub use crab_vfs::chunk_cache::*;
 }
+pub(crate) mod add_validation;
 pub mod hydrated_pointer;
 pub mod shard_hints {
     pub use crab_cache::shard_hints::*;
