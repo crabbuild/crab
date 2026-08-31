@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crab_types::pointer::Pointer;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use tracing::{debug, warn};
 
 use crate::core::error::{CrabError, Result};
@@ -22,6 +22,8 @@ use crate::core::error::{CrabError, Result};
 /// Filename inside `.crab/` holding the hydrated-pointer cache.
 pub const HYDRATED_POINTERS_FILENAME: &str = "hydrated-pointers-v1.sqlite";
 const SCHEMA_VERSION: i64 = 1;
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const JOURNAL_MODE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Exact stat proof plus the pointer blob for a hydrated working-tree file.
 #[derive(Debug, Clone)]
@@ -348,35 +350,100 @@ fn open_connection(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
     }
-    let connection = Connection::open(path)
+    let mut connection = Connection::open(path)
         .map_err(|error| database_error("open hydrated-pointer cache", error))?;
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(DATABASE_BUSY_TIMEOUT)
         .map_err(|error| database_error("configure hydrated-pointer cache timeout", error))?;
+    ensure_wal_mode(&connection)?;
     connection
-        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        .pragma_update(None, "synchronous", "NORMAL")
         .map_err(|error| database_error("configure hydrated-pointer cache", error))?;
     let version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(|error| database_error("read hydrated-pointer cache version", error))?;
     if version == 0 {
-        connection
+        initialize_schema(&mut connection)?;
+    } else {
+        verify_schema(&connection)?;
+    }
+    Ok(connection)
+}
+
+fn ensure_wal_mode(connection: &Connection) -> Result<()> {
+    let deadline = Instant::now() + DATABASE_BUSY_TIMEOUT;
+    let mut last_mode = None;
+    loop {
+        let result = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .and_then(|mode| {
+                if mode.eq_ignore_ascii_case("wal") {
+                    return Ok(mode);
+                }
+                connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| {
+                    row.get::<_, String>(0)
+                })
+            });
+        match result {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) => last_mode = Some(mode),
+            Err(error) if is_lock_contention(&error) => {}
+            Err(error) => {
+                return Err(database_error(
+                    "configure hydrated-pointer cache journal mode",
+                    error,
+                ));
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let detail = last_mode
+                .map(|mode| format!("SQLite kept journal mode {mode}"))
+                .unwrap_or_else(|| "database remained locked".to_owned());
+            return Err(CrabError::Internal(format!(
+                "configure hydrated-pointer cache journal mode: {detail}"
+            )));
+        }
+
+        // SQLite may bypass the busy handler to break a lock-promotion deadlock.
+        // Retry after the competing initializer has had a chance to release its lock.
+        std::thread::sleep(JOURNAL_MODE_RETRY_DELAY.min(remaining));
+    }
+}
+
+fn initialize_schema(connection: &mut Connection) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| database_error("begin hydrated-pointer cache initialization", error))?;
+    let version = transaction
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(|error| database_error("read hydrated-pointer cache version", error))?;
+    if version == 0 {
+        transaction
             .execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE IF NOT EXISTS hydrated_pointers (
+                "CREATE TABLE hydrated_pointers (
                      path TEXT PRIMARY KEY NOT NULL,
                      stat_token BLOB NOT NULL CHECK(length(stat_token) = 32),
                      size INTEGER NOT NULL CHECK(size >= 0),
                      pointer BLOB NOT NULL
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 1;
-                 COMMIT;",
+                 PRAGMA user_version = 1;",
             )
             .map_err(|error| database_error("initialize hydrated-pointer cache", error))?;
-    } else if version != SCHEMA_VERSION {
-        verify_schema(&connection)?;
+    } else {
+        verify_schema(&transaction)?;
     }
-    Ok(connection)
+    transaction
+        .commit()
+        .map_err(|error| database_error("commit hydrated-pointer cache initialization", error))
+}
+
+fn is_lock_contention(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ffi::ErrorCode::DatabaseBusy | rusqlite::ffi::ErrorCode::DatabaseLocked)
+    )
 }
 
 fn verify_schema(connection: &Connection) -> Result<()> {
@@ -554,22 +621,27 @@ mod tests {
         let file = dir.path().join("content.bin");
         write_file(&file, b"content");
         let entry = entry(&file, b"content").unwrap();
-        let path = std::sync::Arc::new(dir.path().join("cache.sqlite"));
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
-        let mut threads = Vec::new();
-        for index in 0..16 {
-            let path = std::sync::Arc::clone(&path);
-            let barrier = std::sync::Arc::clone(&barrier);
-            let entry = entry.clone();
-            threads.push(std::thread::spawn(move || {
-                barrier.wait();
-                HydratedPointerCache::update_on_disk(&path, [(format!("file-{index}.bin"), entry)])
-            }));
+        for iteration in 0..16 {
+            let path = std::sync::Arc::new(dir.path().join(format!("cache-{iteration}.sqlite")));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let mut threads = Vec::new();
+            for index in 0..16 {
+                let path = std::sync::Arc::clone(&path);
+                let barrier = std::sync::Arc::clone(&barrier);
+                let entry = entry.clone();
+                threads.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    HydratedPointerCache::update_on_disk(
+                        &path,
+                        [(format!("file-{index}.bin"), entry)],
+                    )
+                }));
+            }
+            for thread in threads {
+                thread.join().unwrap().unwrap();
+            }
+            assert_eq!(HydratedPointerCache::load_sync(&path).len(), 16);
         }
-        for thread in threads {
-            thread.join().unwrap().unwrap();
-        }
-        assert_eq!(HydratedPointerCache::load_sync(&path).len(), 16);
     }
 
     #[test]
