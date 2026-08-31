@@ -257,7 +257,10 @@ instead of repeating CDC and staging, then refreshes the row only after the
 content matches the current indexed pointer. Any other cache or token mismatch
 also falls back to that full hash. Cache hits are disabled when high-resolution
 Unix change-time semantics are unavailable; those platforms retain the
-full-hash behavior.
+full-hash behavior. Successful hydrate, staging recovery, and verified sibling
+CoW publication seed the same token from the exact post-rename descriptor stat,
+so the first subsequent add does not reread content. A file or index pointer
+changed before token publication is rejected rather than inheriting the proof.
 For `--skip-git-add`, ordinary `git add` verifies the Git-provided stream
 against bounded pages of the retained recipe while buffering at most one
 expected chunk. An exact match promotes the recipe without CDC, payload reads,

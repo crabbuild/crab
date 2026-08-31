@@ -1,4 +1,4 @@
-//! Per-worktree proof cache for content already verified by `crab add`.
+//! Per-worktree proof cache for worktree content verified against indexed Crab pointers.
 //!
 //! A row is only a shortcut for a descriptor-safe content hash. The token
 //! binds the literal Git path, indexed pointer identity and bytes, file mode,
@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use bstr::ByteSlice;
+use crab_types::pointer::Pointer;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::core::error::{CrabError, Result};
@@ -17,6 +19,14 @@ const SCHEMA_VERSION: i64 = 1;
 
 pub(crate) struct AddValidationCache {
     connection: Connection,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedPath {
+    pub path: PathBuf,
+    pub file_hash: [u8; 32],
+    pub size: u64,
+    pub index_stat: crate::cmd::stream_stage::VerifiedIndexStat,
 }
 
 impl AddValidationCache {
@@ -96,6 +106,75 @@ impl AddValidationCache {
 
 pub(crate) fn cache_path_for_context(context: &crate::git::worktree::WorktreeContext) -> PathBuf {
     context.per_worktree_crab_dir.join(ADD_VALIDATIONS_FILENAME)
+}
+
+pub(crate) fn record_verified_paths(repo_root: &Path, paths: &[VerifiedPath]) -> Result<usize> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let context = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
+    let index = gix_index::File::at(
+        context.index_path(),
+        gix_hash::Kind::Sha1,
+        true,
+        gix_index::decode::Options::default(),
+    )
+    .map_err(|error| {
+        CrabError::Internal(format!(
+            "read Git index while recording add validations: {error}"
+        ))
+    })?;
+    let repo = gix::open(repo_root).map_err(|error| {
+        CrabError::Internal(format!(
+            "open Git repository while recording add validations: {error}"
+        ))
+    })?;
+    let mut rows = Vec::with_capacity(paths.len());
+    for verified in paths {
+        if !stat_is_cacheable(&verified.index_stat.stat)
+            || crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&verified.path)
+                != Some(verified.index_stat)
+        {
+            continue;
+        }
+        let Ok(rel_path) = verified.path.strip_prefix(repo_root) else {
+            continue;
+        };
+        let path_bytes = crate::git::worktree::index_path_bytes(rel_path);
+        let Some(entry) = index.entry_by_path_and_stage(
+            path_bytes.as_slice().as_bstr(),
+            gix_index::entry::Stage::Unconflicted,
+        ) else {
+            continue;
+        };
+        if entry.stat != verified.index_stat.stat {
+            continue;
+        }
+        let Ok(blob) = repo.find_blob(entry.id) else {
+            continue;
+        };
+        let Ok(pointer) = Pointer::parse(&blob.data) else {
+            continue;
+        };
+        if pointer.file_hash != verified.file_hash || pointer.size != verified.size {
+            continue;
+        }
+        rows.push((
+            path_bytes.clone(),
+            validation_token(
+                &path_bytes,
+                entry.id.as_bytes(),
+                &blob.data,
+                entry.mode.bits(),
+                &verified.index_stat.stat,
+                verified.index_stat.len,
+            ),
+        ));
+    }
+
+    let mut cache = AddValidationCache::open(&cache_path_for_context(&context))?;
+    cache.upsert(&rows)?;
+    Ok(rows.len())
 }
 
 pub(crate) fn validation_token(

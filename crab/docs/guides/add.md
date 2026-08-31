@@ -71,7 +71,9 @@ instead of needlessly repeating CDC and staging. Cache hits require
 high-resolution Unix change-time semantics; unsupported or coarse stat
 implementations keep using the full hash. On a supported filesystem, same-size
 replacements with restored mtimes still change ctime and cannot reuse a stale
-pointer through the cache.
+pointer through the cache. Successful hydration seeds the same proof from the
+verified post-rename descriptor stat, making the first subsequent add a cache
+hit without trusting a later metadata snapshot.
 
 Only files that match patterns listed in `.gitattributes` with `filter=crab`
 are processed. If a file matches the command-line glob but is not tracked by

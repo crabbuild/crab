@@ -395,6 +395,14 @@ pub struct VerifiedIndexStat {
     pub len: u64,
 }
 
+/// Whole-file hash and stat captured by one descriptor-safe verified read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifiedFileHash {
+    pub hash: [u8; 32],
+    pub size: u64,
+    pub index_stat: VerifiedIndexStat,
+}
+
 impl VerifiedIndexStat {
     pub fn from_path_no_follow(path: &Path) -> Option<Self> {
         let metadata = gix_index::fs::Metadata::from_path_no_follow(path).ok()?;
@@ -655,15 +663,15 @@ async fn stage_file_streaming_inner(
         );
         cleanup_stream_prepared_xorb_dir(staging.root(), &provisional_merkle, abs_path);
         let _ = staging.rollback_batch(&batch_id);
-        let (second_hash, second_size) = stream_hash_file(abs_path, None, cancel)
+        let second = stream_hash_file(abs_path, None, cancel)
             .await
             .map_err(|e| with_path(abs_path, e))?;
         return Err(CrabError::FileChangedDuringStaging {
             path: abs_path.display().to_string(),
             first_hash: file_merkle.hex(),
-            second_hash: MerkleHash::from(second_hash).hex(),
+            second_hash: MerkleHash::from(second.hash).hex(),
             first_size: stage_stats.size,
-            second_size,
+            second_size: second.size,
         });
     }
 
@@ -848,7 +856,7 @@ pub async fn stream_hash_file(
     path: &Path,
     bytes_done: Option<&Arc<AtomicU64>>,
     cancel: &CancellationToken,
-) -> Result<([u8; 32], u64)> {
+) -> Result<VerifiedFileHash> {
     let descriptor = open_regular_file_no_follow(path).await?;
     let before = VerifiedIndexStat::from_file(&descriptor);
     if VerifiedIndexStat::from_path_no_follow(path) != before {
@@ -885,7 +893,15 @@ pub async fn stream_hash_file(
             second_size: after.map_or(0, |stat| stat.len),
         });
     }
-    Ok((*hasher.finalize().as_bytes(), total))
+    let index_stat = after.ok_or_else(|| CrabError::Configuration {
+        key: path.display().to_string(),
+        origin: "file stat unavailable after descriptor-safe hash".to_owned(),
+    })?;
+    Ok(VerifiedFileHash {
+        hash: *hasher.finalize().as_bytes(),
+        size: total,
+        index_stat,
+    })
 }
 
 #[expect(

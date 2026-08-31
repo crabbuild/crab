@@ -16,8 +16,8 @@ is the primary way to "check out" large files after a lazy clone or after
 switching branches.
 
 Hydration is selective: you can hydrate specific files by glob pattern, or use
-`--all` to hydrate everything. Files that are already hydrated (full content on
-disk matching the expected size) are skipped automatically.
+`--all` to hydrate everything. Files already replaced with full content are not
+selected again.
 
 ## Arguments
 
@@ -42,11 +42,13 @@ disk matching the expected size) are skipped automatically.
    b. Resolves the file index from the shard metadata.
    c. Downloads the required xorb chunks from the remote store (or local cache).
    d. Reconstructs the original file content from chunks.
-   e. Atomically writes the full content, replacing the pointer.
+   e. Verifies the full BLAKE3 hash and atomically replaces the pointer.
+   f. Refreshes Git's stat entry and records the exact verified stat for the
+      first subsequent `crab add`.
 4. Prints a summary of hydrated files, bytes downloaded, and elapsed time.
 
-Files that are already hydrated (file size matches the pointer's declared size
-and the content is not a pointer) are skipped.
+If another process hydrates a selected pointer during the run, Crab skips it
+only after its size and full BLAKE3 hash match the pointer.
 
 ## Examples
 

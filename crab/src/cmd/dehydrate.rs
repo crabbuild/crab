@@ -1893,7 +1893,12 @@ mod tests {
         let ptr = sample_pointer(4096);
         std::fs::write(dir.path().join("ptr.bin"), ptr.serialize()).unwrap();
 
-        let filter = build_filter(&["**/*".to_owned()], &[]).unwrap();
+        let filter = resolve_patterns(&DehydrateArgs {
+            all: true,
+            ..default_args()
+        })
+        .unwrap()
+        .unwrap();
         let tracked = TrackedClassifier::open(dir.path()).unwrap();
         let cancel = CancellationToken::new();
         let mut out = Vec::new();

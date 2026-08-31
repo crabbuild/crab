@@ -40,7 +40,8 @@ use crate::engine::pointer::is_working_tree_pointer;
 use crate::git::progress::{format_rate, is_tty, render_bar};
 use crate::git::smudge::SmudgeSession;
 use crate::git::worktree::{
-    WorktreeContext, normalize_identity_path, parse_worktree_list_porcelain, refresh_index_stats,
+    WorktreeContext, normalize_identity_path, parse_worktree_list_porcelain,
+    refresh_verified_index_stats,
 };
 use crate::git::worktree_hydration::{
     WorktreeHydrationMode, WorktreeHydrationPolicyFile, WorktreeHydrationPolicyStatus,
@@ -191,6 +192,27 @@ pub struct HydrateSummary {
     /// Bytes materialized through verified sibling-worktree CoW clones.
     /// Subset of `bytes_written`.
     pub bytes_cow_cloned: u64,
+    /// Exact post-publication stats for content verified during this run.
+    pub(crate) verified_paths: Vec<crate::cache::add_validation::VerifiedPath>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerifiedWrite {
+    bytes: u64,
+    index_stat: crate::cmd::stream_stage::VerifiedIndexStat,
+}
+
+fn verified_path(
+    path: &Path,
+    pointer: &Pointer,
+    write: VerifiedWrite,
+) -> crate::cache::add_validation::VerifiedPath {
+    crate::cache::add_validation::VerifiedPath {
+        path: path.to_owned(),
+        file_hash: pointer.file_hash,
+        size: write.bytes,
+        index_stat: write.index_stat,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -464,7 +486,7 @@ impl Hydrator for SmudgeSessionHydrator {
 
                 let file_start = Instant::now();
 
-                if is_already_hydrated(path, ptr) {
+                if is_already_hydrated(path, ptr, cancel)? {
                     debug!(path = %path.display(), "already hydrated, skipping");
                     summary.skipped += 1;
                     summary.bytes_skipped += ptr.size;
@@ -483,7 +505,14 @@ impl Hydrator for SmudgeSessionHydrator {
 
                 let pointer_bytes = ptr.serialize();
                 let result = match self.session.smudge_file(&pointer_bytes).await {
-                    Ok(content) => atomic_write(path, &content).map(|()| content.len() as u64),
+                    Ok(content) => {
+                        atomic_write_with_progress(path, &content, None).map(|index_stat| {
+                            VerifiedWrite {
+                                bytes: content.len() as u64,
+                                index_stat,
+                            }
+                        })
+                    }
                     Err(remote_error) => match try_hydrate_from_staging(path, ptr, cancel).await {
                         Ok(Some(bytes)) => Ok(bytes),
                         Ok(None) => Err(remote_error),
@@ -498,17 +527,18 @@ impl Hydrator for SmudgeSessionHydrator {
                     },
                 };
                 match result {
-                    Ok(bytes) => {
+                    Ok(write) => {
                         summary.hydrated += 1;
-                        summary.bytes_written += bytes;
+                        summary.bytes_written += write.bytes;
+                        summary.verified_paths.push(verified_path(path, ptr, write));
                         if let Some(p) = progress {
                             p.files_done.fetch_add(1, Relaxed);
-                            p.bytes_done.fetch_add(bytes, Relaxed);
+                            p.bytes_done.fetch_add(write.bytes, Relaxed);
                             p.send_file_result(HydrateFileResult {
                                 path: path.clone(),
                                 outcome: HydrateFileOutcome::Hydrated,
                                 duration: file_start.elapsed(),
-                                bytes,
+                                bytes: write.bytes,
                             });
                         }
                     }
@@ -1467,7 +1497,7 @@ impl ShardHydrator {
         progress: Option<Arc<HydrateProgress>>,
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: CancellationToken,
-    ) -> Result<u64> {
+    ) -> Result<VerifiedWrite> {
         error::check_cancelled(&cancel)?;
         let parent = dest.parent().unwrap_or(Path::new("."));
         ensure_atomic_reconstruction_space(parent, ptr.size)?;
@@ -1485,10 +1515,7 @@ impl ShardHydrator {
             )
             .await?;
         error::check_cancelled(&cancel)?;
-        preserve_destination_permissions(dest, tmp.as_file())?;
-        tmp.persist(dest)
-            .map_err(|e| error::CrabError::Io(e.error))?;
-        Ok(bytes)
+        persist_verified_temp(tmp, dest, bytes)
     }
 
     async fn reconstruct_to_open_file(
@@ -1951,7 +1978,7 @@ impl ShardHydrator {
         cancel: &CancellationToken,
         progress: Option<&Arc<HydrateProgress>>,
         file_index_lookup: &SharedFileIndexLookup,
-    ) -> Result<HydrateFileResult> {
+    ) -> Result<HydrateOneResult> {
         error::check_cancelled(cancel)?;
 
         if let Some(progress) = progress {
@@ -1963,7 +1990,7 @@ impl ShardHydrator {
         }
 
         let file_start = Instant::now();
-        if is_already_hydrated(path, ptr) {
+        if is_already_hydrated(path, ptr, cancel)? {
             tracing::debug!(path = %path.display(), "already hydrated, skipping");
             let result = HydrateFileResult {
                 path: path.to_owned(),
@@ -1976,7 +2003,10 @@ impl ShardHydrator {
                 progress.bytes_done.fetch_add(ptr.size, Relaxed);
                 progress.send_file_result(result.clone());
             }
-            return Ok(result);
+            return Ok(HydrateOneResult {
+                result,
+                verified_path: None,
+            });
         }
 
         let result = match self
@@ -1985,7 +2015,8 @@ impl ShardHydrator {
         {
             Ok(content) => {
                 let bytes = content.len() as u64;
-                atomic_write_with_progress(path, &content, progress).map(|()| bytes)
+                atomic_write_with_progress(path, &content, progress)
+                    .map(|index_stat| VerifiedWrite { bytes, index_stat })
             }
             Err(e) => {
                 tracing::debug!(
@@ -2007,11 +2038,11 @@ impl ShardHydrator {
         let result = match result {
             Ok(bytes) => Ok(bytes),
             Err(remote_error) => match try_hydrate_from_staging(path, ptr, cancel).await {
-                Ok(Some(bytes)) => {
+                Ok(Some(write)) => {
                     if let Some(progress) = progress {
-                        progress.add_bytes_done(bytes);
+                        progress.add_bytes_done(write.bytes);
                     }
-                    Ok(bytes)
+                    Ok(write)
                 }
                 Ok(None) => Err(remote_error),
                 Err(staging_error) => {
@@ -2025,13 +2056,14 @@ impl ShardHydrator {
             },
         };
 
-        let (outcome, bytes) = match result {
-            Ok(bytes) => (HydrateFileOutcome::Hydrated, bytes),
+        let (outcome, write) = match result {
+            Ok(write) => (HydrateFileOutcome::Hydrated, Some(write)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), err = %e, "reconstruction failed");
-                (HydrateFileOutcome::Failed, 0)
+                (HydrateFileOutcome::Failed, None)
             }
         };
+        let bytes = write.map_or(0, |write| write.bytes);
         let result = HydrateFileResult {
             path: path.to_owned(),
             outcome,
@@ -2042,8 +2074,16 @@ impl ShardHydrator {
             progress.files_done.fetch_add(1, Relaxed);
             progress.send_file_result(result.clone());
         }
-        Ok(result)
+        Ok(HydrateOneResult {
+            result,
+            verified_path: write.map(|write| verified_path(path, ptr, write)),
+        })
     }
+}
+
+struct HydrateOneResult {
+    result: HydrateFileResult,
+    verified_path: Option<crate::cache::add_validation::VerifiedPath>,
 }
 
 impl Hydrator for ShardHydrator {
@@ -2067,14 +2107,17 @@ impl Hydrator for ShardHydrator {
                 // leave download slots idle behind one large straggler.
                 while let Some(result) = results.next().await {
                     let result = result?;
-                    match result.outcome {
+                    match result.result.outcome {
                         HydrateFileOutcome::Hydrated => {
                             summary.hydrated += 1;
-                            summary.bytes_written += result.bytes;
+                            summary.bytes_written += result.result.bytes;
+                            if let Some(verified) = result.verified_path {
+                                summary.verified_paths.push(verified);
+                            }
                         }
                         HydrateFileOutcome::Skipped => {
                             summary.skipped += 1;
-                            summary.bytes_skipped += result.bytes;
+                            summary.bytes_skipped += result.result.bytes;
                         }
                         HydrateFileOutcome::Failed => {
                             summary.failed += 1;
@@ -2363,7 +2406,7 @@ impl Hydrator for StubHydrator {
 
                 let file_start = Instant::now();
 
-                if is_already_hydrated(path, ptr) {
+                if is_already_hydrated(path, ptr, cancel)? {
                     debug!(path = %path.display(), "already hydrated, skipping");
                     summary.skipped += 1;
                     summary.bytes_skipped += ptr.size;
@@ -2418,31 +2461,21 @@ impl Hydrator for StubHydrator {
     }
 }
 
-/// Check whether a file is already hydrated: its size matches the pointer's
-/// declared size and it is not itself a pointer blob.
-///
-/// This is a size-only heuristic — it does **not** re-hash the file. A
-/// file that happens to match the pointer's declared size but contains
-/// different content would be misclassified as hydrated and skipped.
-/// In practice the scenario requires both exact-size and not-a-pointer
-/// content, which is unlikely enough that reading and hashing every
-/// candidate file is not worth the I/O cost on large repos. See
-/// finding CR2-F18.
-///
-/// Callers that need a strict guarantee (e.g., post-corruption recovery)
-/// should re-run hydration with a fresh working tree; a `--force` flag
-/// that bypasses this check is tracked in the backlog.
-fn is_already_hydrated(path: &Path, ptr: &Pointer) -> bool {
+/// Verify a file that became hydrated after pointer discovery.
+fn is_already_hydrated(path: &Path, ptr: &Pointer, cancel: &CancellationToken) -> Result<bool> {
     let Ok(meta) = std::fs::metadata(path) else {
-        return false;
+        return Ok(false);
     };
 
     if meta.len() != ptr.size {
-        return false;
+        return Ok(false);
     }
 
     // If the file parses as a pointer it hasn't been hydrated yet.
-    matches!(is_working_tree_pointer(path), Ok(false))
+    if !matches!(is_working_tree_pointer(path), Ok(false)) {
+        return Ok(false);
+    }
+    Ok(hash_file_blake3_cancellable(path, cancel)? == ptr.file_hash)
 }
 
 /// Write `content` to `dest` atomically via a sibling tempfile and rename.
@@ -2455,14 +2488,14 @@ fn is_already_hydrated(path: &Path, ptr: &Pointer) -> bool {
 /// The final path is only updated by `persist()` (an atomic rename), so
 /// a signal can never leave a half-written file at `dest`.
 fn atomic_write(dest: &Path, content: &[u8]) -> Result<()> {
-    atomic_write_with_progress(dest, content, None)
+    atomic_write_with_progress(dest, content, None).map(|_| ())
 }
 
 fn atomic_write_with_progress(
     dest: &Path,
     content: &[u8],
     progress: Option<&Arc<HydrateProgress>>,
-) -> Result<()> {
+) -> Result<crate::cmd::stream_stage::VerifiedIndexStat> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     for chunk in content.chunks(1024 * 1024) {
@@ -2471,10 +2504,37 @@ fn atomic_write_with_progress(
             p.add_bytes_done(chunk.len() as u64);
         }
     }
+    persist_verified_temp(tmp, dest, content.len() as u64).map(|write| write.index_stat)
+}
+
+fn persist_verified_temp(
+    mut tmp: tempfile::NamedTempFile,
+    dest: &Path,
+    bytes: u64,
+) -> Result<VerifiedWrite> {
     tmp.flush()?;
     preserve_destination_permissions(dest, tmp.as_file())?;
-    tmp.persist(dest).map_err(|e| e.error)?;
-    Ok(())
+    let file = tmp.persist(dest).map_err(|e| e.error)?;
+    let verified_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(&file)
+        .ok_or_else(|| error::CrabError::Internal("stat published hydration file".to_owned()))?;
+    if verified_stat.len != bytes {
+        return Err(error::CrabError::Internal(format!(
+            "verified hydration size mismatch for {}: expected {bytes}, got {}",
+            dest.display(),
+            verified_stat.len
+        )));
+    }
+    if crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(dest) != Some(verified_stat)
+    {
+        return Err(error::CrabError::Internal(format!(
+            "hydrated file changed during atomic publication: {}",
+            dest.display()
+        )));
+    }
+    Ok(VerifiedWrite {
+        bytes,
+        index_stat: verified_stat,
+    })
 }
 
 fn preserve_destination_permissions(dest: &Path, temporary: &std::fs::File) -> Result<()> {
@@ -2499,7 +2559,7 @@ async fn try_hydrate_from_staging(
     dest: &Path,
     ptr: &Pointer,
     cancel: &CancellationToken,
-) -> Result<Option<u64>> {
+) -> Result<Option<VerifiedWrite>> {
     let Some(start) = dest.parent() else {
         return Ok(None);
     };
@@ -2562,11 +2622,9 @@ async fn try_hydrate_from_staging(
             file_hash.hex()
         )));
     }
-    tmp.flush()?;
-    preserve_destination_permissions(dest, tmp.as_file())?;
-    tmp.persist(dest).map_err(|error| error.error)?;
+    let verified = persist_verified_temp(tmp, dest, written)?;
     debug!(path = %dest.display(), bytes = written, "hydrated unpushed pointer from local staging");
-    Ok(Some(written))
+    Ok(Some(verified))
 }
 
 /// Result of attempting to recover a single pointer from a local source.
@@ -2574,7 +2632,7 @@ async fn try_hydrate_from_staging(
 enum RecoverOutcome {
     /// Candidate found and matched the pointer's blake3 hash. Bytes
     /// have already been written to `dest` (atomic rename completed).
-    Recovered { bytes: u64 },
+    Recovered { write: VerifiedWrite },
     /// No candidate file at the resolved path — fall through to remote.
     NoCandidate,
     /// Candidate was found but its content does not match the pointer's
@@ -2601,27 +2659,6 @@ fn resolve_recover_candidate(recover_from: &Path, dest: &Path) -> Option<PathBuf
     } else {
         None
     }
-}
-
-/// Stream-hash the candidate file with blake3 to verify against the
-/// pointer's `file_hash` without loading the whole content twice.
-///
-/// Reads in 1 MiB blocks so memory stays bounded regardless of file
-/// size. The same buffer is reused for the subsequent atomic write,
-/// avoiding a redundant pass over the file when the hash matches.
-fn hash_file_blake3(path: &Path) -> std::io::Result<[u8; 32]> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Try to recover a single pointer from a local source path.
@@ -2653,29 +2690,38 @@ fn try_recover_one(recover_from: &Path, dest: &Path, ptr: &Pointer) -> Result<Re
         return Ok(RecoverOutcome::HashMismatch);
     }
 
-    let actual_hash = hash_file_blake3(&candidate).map_err(error::CrabError::Io)?;
-    if actual_hash != ptr.file_hash {
+    // Copy and hash the exact published bytes in one bounded pass. Hashing the
+    // source first and reopening it for copy leaves a TOCTOU window and doubles
+    // source I/O for large recovery files.
+    use std::io::Read;
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let mut src = std::fs::File::open(&candidate).map_err(error::CrabError::Io)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(error::CrabError::Io)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        let read = src.read(&mut buffer).map_err(error::CrabError::Io)?;
+        if read == 0 {
+            break;
+        }
+        tmp.write_all(&buffer[..read])?;
+        hasher.update(&buffer[..read]);
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| error::CrabError::Internal("recovery size overflow".to_owned()))?;
+    }
+    let actual_hash = *hasher.finalize().as_bytes();
+    if bytes != ptr.size || actual_hash != ptr.file_hash {
         debug!(
             candidate = %candidate.display(),
             expected_hash = %crab_types::pointer::hex_encode(&ptr.file_hash),
             actual_hash = %crab_types::pointer::hex_encode(&actual_hash),
-            "recover-from: candidate hash mismatch"
+            "recover-from: candidate changed or hash mismatched during copy"
         );
         return Ok(RecoverOutcome::HashMismatch);
     }
-
-    // Hash verified. Stream the candidate to a sibling tempfile and
-    // rename atomically. Avoids `std::fs::copy` because it doesn't
-    // give us the tempfile-then-rename ordering, and a crash mid-copy
-    // would leave a half-written `dest`.
-    let parent = dest.parent().unwrap_or(Path::new("."));
-    let mut src = std::fs::File::open(&candidate).map_err(error::CrabError::Io)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(error::CrabError::Io)?;
-    let bytes = std::io::copy(&mut src, tmp.as_file_mut()).map_err(error::CrabError::Io)?;
-    tmp.flush().map_err(error::CrabError::Io)?;
-    preserve_destination_permissions(dest, tmp.as_file())?;
-    tmp.persist(dest)
-        .map_err(|e| error::CrabError::Io(e.error))?;
+    let write = persist_verified_temp(tmp, dest, bytes)?;
 
     debug!(
         candidate = %candidate.display(),
@@ -2683,7 +2729,7 @@ fn try_recover_one(recover_from: &Path, dest: &Path, ptr: &Pointer) -> Result<Re
         bytes,
         "recover-from: hash verified and copied to working tree"
     );
-    Ok(RecoverOutcome::Recovered { bytes })
+    Ok(RecoverOutcome::Recovered { write })
 }
 
 /// Walk the to-hydrate list, attempting `--recover-from` recovery for
@@ -2711,7 +2757,7 @@ fn run_recover_phase(
     for (path, ptr) in to_hydrate {
         error::check_cancelled(cancel)?;
 
-        if is_already_hydrated(&path, &ptr) {
+        if is_already_hydrated(&path, &ptr, cancel)? {
             // Defer to the normal hydrator's skip path so the summary
             // accounting stays in one place.
             residual.push((path, ptr));
@@ -2727,22 +2773,23 @@ fn run_recover_phase(
 
         let file_start = Instant::now();
         match try_recover_one(recover_from, &path, &ptr)? {
-            RecoverOutcome::Recovered { bytes } => {
+            RecoverOutcome::Recovered { write } => {
                 stats.recovered += 1;
-                stats.bytes_recovered += bytes;
+                stats.bytes_recovered += write.bytes;
+                stats.verified_paths.push(verified_path(&path, &ptr, write));
                 if let Some(p) = progress {
                     p.files_done.fetch_add(1, Relaxed);
-                    p.bytes_done.fetch_add(bytes, Relaxed);
+                    p.bytes_done.fetch_add(write.bytes, Relaxed);
                     p.send_file_result(HydrateFileResult {
                         path: path.clone(),
                         outcome: HydrateFileOutcome::Hydrated,
                         duration: file_start.elapsed(),
-                        bytes,
+                        bytes: write.bytes,
                     });
                 }
                 info!(
                     path = %path.display(),
-                    bytes,
+                    bytes = write.bytes,
                     "recovered from local source"
                 );
             }
@@ -2759,6 +2806,7 @@ fn run_recover_phase(
 struct RecoverPhaseStats {
     recovered: u64,
     bytes_recovered: u64,
+    verified_paths: Vec<crate::cache::add_validation::VerifiedPath>,
 }
 
 const MAX_COW_CANDIDATES_PER_POINTER: usize = 8;
@@ -2936,7 +2984,7 @@ fn try_cow_clone_candidate(
     dest: &Path,
     pointer: &Pointer,
     cancel: &CancellationToken,
-) -> Result<Option<u64>> {
+) -> Result<Option<VerifiedWrite>> {
     error::check_cancelled(cancel)?;
     let parent = dest.parent().unwrap_or(Path::new("."));
     let reservation = match tempfile::Builder::new()
@@ -2987,31 +3035,63 @@ fn try_cow_clone_candidate(
         }
     }
 
-    let publish = (|| -> Result<()> {
+    let prepare = (|| -> Result<std::fs::File> {
         let temporary_file = std::fs::OpenOptions::new().write(true).open(&temporary)?;
         preserve_destination_permissions(dest, &temporary_file)?;
-        error::check_cancelled(cancel)?;
-        std::fs::rename(&temporary, dest)?;
-        Ok(())
+        let pre_publish_stat =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(&temporary_file).ok_or_else(
+                || error::CrabError::Internal("stat verified CoW hydration tempfile".to_owned()),
+            )?;
+        if pre_publish_stat.len != pointer.size {
+            return Err(error::CrabError::Internal(format!(
+                "verified CoW hydration size mismatch for {}",
+                dest.display()
+            )));
+        }
+        Ok(temporary_file)
     })();
-    match publish {
-        Ok(()) => Ok(Some(pointer.size)),
+    let temporary_file = match prepare {
+        Ok(temporary_file) => temporary_file,
         Err(error::CrabError::Cancelled) => {
             remove_file_if_present(&temporary);
-            Err(error::CrabError::Cancelled)
+            return Err(error::CrabError::Cancelled);
         }
         Err(error) => {
             remove_file_if_present(&temporary);
             debug!(source = %source.display(), path = %dest.display(), error = %error, "CoW clone publication failed; falling back to hydration");
-            Ok(None)
+            return Ok(None);
         }
+    };
+    if let Err(error) = error::check_cancelled(cancel) {
+        remove_file_if_present(&temporary);
+        return Err(error);
     }
+    if let Err(error) = std::fs::rename(&temporary, dest) {
+        remove_file_if_present(&temporary);
+        debug!(source = %source.display(), path = %dest.display(), error = %error, "CoW clone publication failed; falling back to hydration");
+        return Ok(None);
+    }
+    let index_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(&temporary_file)
+        .ok_or_else(|| {
+            error::CrabError::Internal("stat published CoW hydration file".to_owned())
+        })?;
+    if crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(dest) != Some(index_stat) {
+        return Err(error::CrabError::Internal(format!(
+            "CoW hydrated file changed during publication: {}",
+            dest.display()
+        )));
+    }
+    Ok(Some(VerifiedWrite {
+        bytes: pointer.size,
+        index_stat,
+    }))
 }
 
 #[derive(Debug, Default)]
 struct CowPhaseStats {
     cloned: u64,
     bytes_cloned: u64,
+    verified_paths: Vec<crate::cache::add_validation::VerifiedPath>,
 }
 
 async fn run_cow_phase(
@@ -3025,7 +3105,7 @@ async fn run_cow_phase(
 
     for (path, pointer) in to_hydrate {
         error::check_cancelled(cancel)?;
-        if is_already_hydrated(&path, &pointer) {
+        if is_already_hydrated(&path, &pointer, cancel)? {
             residual.push((path, pointer));
             continue;
         }
@@ -3049,23 +3129,26 @@ async fn run_cow_phase(
             .map_err(|error| {
                 error::CrabError::Internal(format!("CoW hydration worker failed: {error}"))
             })??;
-            let Some(bytes) = outcome else {
+            let Some(write) = outcome else {
                 continue;
             };
 
             stats.cloned += 1;
-            stats.bytes_cloned += bytes;
+            stats.bytes_cloned += write.bytes;
+            stats
+                .verified_paths
+                .push(verified_path(&path, &pointer, write));
             if let Some(progress) = progress {
                 progress.files_done.fetch_add(1, Relaxed);
-                progress.bytes_done.fetch_add(bytes, Relaxed);
+                progress.bytes_done.fetch_add(write.bytes, Relaxed);
                 progress.send_file_result(HydrateFileResult {
                     path: path.clone(),
                     outcome: HydrateFileOutcome::Hydrated,
                     duration: file_start.elapsed(),
-                    bytes,
+                    bytes: write.bytes,
                 });
             }
-            info!(path = %path.display(), bytes, "hydrated through sibling-worktree CoW clone");
+            info!(path = %path.display(), bytes = write.bytes, "hydrated through sibling-worktree CoW clone");
             cloned = true;
             break;
         }
@@ -3387,10 +3470,12 @@ pub async fn run_hydrate_in(
     summary.bytes_written += recover_stats.bytes_recovered;
     summary.recovered = recover_stats.recovered;
     summary.bytes_recovered = recover_stats.bytes_recovered;
+    summary.verified_paths.extend(recover_stats.verified_paths);
     summary.hydrated += cow_stats.cloned;
     summary.bytes_written += cow_stats.bytes_cloned;
     summary.cow_cloned = cow_stats.cloned;
     summary.bytes_cow_cloned = cow_stats.bytes_cloned;
+    summary.verified_paths.extend(cow_stats.verified_paths);
     let elapsed = start.elapsed();
 
     if let Some(pending) = pending_hydration.as_ref()
@@ -3446,7 +3531,7 @@ pub async fn run_hydrate_in(
                 }
             }
         }
-        refresh_hydrated_index_entries(root, &selected_to_hydrate);
+        refresh_hydrated_index_entries(root, &summary.verified_paths);
     }
 
     // In non-manifest JSONL mode, emit retroactive file_done events.
@@ -3576,19 +3661,40 @@ pub async fn run_hydrate_in(
     Ok(())
 }
 
-fn refresh_hydrated_index_entries(root: &Path, entries: &[(PathBuf, Pointer)]) {
-    let paths = entries
+fn refresh_hydrated_index_entries(
+    root: &Path,
+    verified_paths: &[crate::cache::add_validation::VerifiedPath],
+) {
+    let paths = verified_paths
         .iter()
-        .filter_map(|(path, _)| {
-            (!is_working_tree_pointer(path).unwrap_or(true)).then_some(path.clone())
+        .map(|verified| {
+            (
+                verified.path.clone(),
+                verified.index_stat.stat,
+                verified.index_stat.len,
+                verified.file_hash,
+                verified.size,
+            )
         })
         .collect::<Vec<_>>();
-    if let Err(e) = refresh_index_stats(root, &paths) {
+    if let Err(e) = refresh_verified_index_stats(root, &paths) {
         debug!(
             files = paths.len(),
             error = %e,
             "failed to refresh hydrated file index stat metadata"
         );
+        return;
+    }
+    match crate::cache::add_validation::record_verified_paths(root, verified_paths) {
+        Ok(validations) => {
+            debug!(validations, "recorded verified hydrate validations");
+        }
+        Err(error) => {
+            debug!(
+                error = %error,
+                "failed to persist verified hydrate validations; later add will rehash"
+            );
+        }
     }
 }
 
@@ -4797,7 +4903,7 @@ mod tests {
         assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
 
         assert_eq!(
-            refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
+            crate::git::worktree::refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
             1
         );
 
@@ -4822,7 +4928,7 @@ mod tests {
         std::fs::write(repo.join("model.bin"), "POINTER\n").unwrap();
         assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
         assert_eq!(
-            refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
+            crate::git::worktree::refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
             1
         );
         assert_eq!(git_stdout(&repo, &["status", "--porcelain=v1"]), "");
@@ -4871,8 +4977,11 @@ mod tests {
         std::fs::write(repo.join("model.bin"), "hydrated model bytes\n").unwrap();
         std::fs::write(repo.join("adapter.bin"), "hydrated adapter bytes\n").unwrap();
         assert_eq!(
-            refresh_index_stats(&repo, &[repo.join("model.bin"), repo.join("adapter.bin")],)
-                .unwrap(),
+            crate::git::worktree::refresh_index_stats(
+                &repo,
+                &[repo.join("model.bin"), repo.join("adapter.bin")],
+            )
+            .unwrap(),
             2
         );
 
@@ -4895,6 +5004,198 @@ mod tests {
                 gix_index::entry::Stat::from_fs(&metadata).unwrap()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrate_proof_seeds_first_add_validation() {
+        use bstr::ByteSlice;
+
+        let _git_env = ScopedGitDir::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--initial-branch=main"]);
+
+        let content = b"verified hydrated bytes";
+        let pointer = Pointer {
+            file_hash: *blake3::hash(content).as_bytes(),
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let path = repo.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        run_git(&repo, &["add", "model.bin"]);
+        let index_stat = atomic_write_with_progress(&path, content, None).unwrap();
+        if !crate::cache::add_validation::stat_is_cacheable(&index_stat.stat) {
+            eprintln!("SKIP: filesystem change-time precision cannot support validation cache");
+            return;
+        }
+        let verified = crate::cache::add_validation::VerifiedPath {
+            path: path.clone(),
+            file_hash: pointer.file_hash,
+            size: pointer.size,
+            index_stat,
+        };
+
+        refresh_hydrated_index_entries(&repo, std::slice::from_ref(&verified));
+
+        let context = WorktreeContext::resolve_from_path(&repo).unwrap();
+        let index = gix_index::File::at(
+            context.index_path(),
+            gix_hash::Kind::Sha1,
+            true,
+            gix_index::decode::Options::default(),
+        )
+        .unwrap();
+        let entry = index
+            .entry_by_path_and_stage(
+                b"model.bin".as_bstr(),
+                gix_index::entry::Stage::Unconflicted,
+            )
+            .unwrap();
+        let git_repo = gix::open(&repo).unwrap();
+        let blob = git_repo.find_blob(entry.id).unwrap();
+        let token = crate::cache::add_validation::validation_token(
+            b"model.bin",
+            entry.id.as_bytes(),
+            &blob.data,
+            entry.mode.bits(),
+            &index_stat.stat,
+            index_stat.len,
+        );
+        let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
+        let cache = crate::cache::add_validation::AddValidationCache::open(&cache_path).unwrap();
+
+        assert!(cache.contains(b"model.bin", &token).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrate_proof_rejects_content_changed_before_index_refresh() {
+        use bstr::ByteSlice;
+
+        let _git_env = ScopedGitDir::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--initial-branch=main"]);
+
+        let content = b"verified hydrated bytes";
+        let replacement = b"modified hydrated bytes";
+        assert_eq!(content.len(), replacement.len());
+        let pointer = Pointer {
+            file_hash: *blake3::hash(content).as_bytes(),
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let path = repo.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        run_git(&repo, &["add", "model.bin"]);
+        let index_stat = atomic_write_with_progress(&path, content, None).unwrap();
+        let verified = crate::cache::add_validation::VerifiedPath {
+            path: path.clone(),
+            file_hash: pointer.file_hash,
+            size: pointer.size,
+            index_stat,
+        };
+        std::fs::write(&path, replacement).unwrap();
+
+        refresh_hydrated_index_entries(&repo, std::slice::from_ref(&verified));
+
+        let context = WorktreeContext::resolve_from_path(&repo).unwrap();
+        let index = gix_index::File::at(
+            context.index_path(),
+            gix_hash::Kind::Sha1,
+            true,
+            gix_index::decode::Options::default(),
+        )
+        .unwrap();
+        let entry = index
+            .entry_by_path_and_stage(
+                b"model.bin".as_bstr(),
+                gix_index::entry::Stage::Unconflicted,
+            )
+            .unwrap();
+        let current =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path).unwrap();
+        assert_ne!(entry.stat, current.stat);
+        let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
+        let connection = rusqlite::Connection::open(cache_path).unwrap();
+        let rows: u64 = connection
+            .query_row("SELECT COUNT(*) FROM add_validations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrate_proof_rejects_pointer_changed_before_index_refresh() {
+        use bstr::ByteSlice;
+
+        let _git_env = ScopedGitDir::acquire();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "--initial-branch=main"]);
+
+        let content = b"verified hydrated bytes";
+        let pointer = pointer_for_content(content);
+        let path = repo.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        run_git(&repo, &["add", "model.bin"]);
+        let index_stat = atomic_write_with_progress(&path, content, None).unwrap();
+        let verified = crate::cache::add_validation::VerifiedPath {
+            path: path.clone(),
+            file_hash: pointer.file_hash,
+            size: pointer.size,
+            index_stat,
+        };
+
+        let mut other_hash = pointer.file_hash;
+        other_hash[0] ^= 0xff;
+        let other_pointer = Pointer {
+            file_hash: other_hash,
+            size: pointer.size,
+            shard_hint: None,
+        };
+        let pointer_file = repo.join("other.pointer");
+        std::fs::write(&pointer_file, other_pointer.serialize()).unwrap();
+        let oid = git_stdout(&repo, &["hash-object", "-w", "other.pointer"])
+            .trim()
+            .to_owned();
+        let cache_info = format!("100644,{oid},model.bin");
+        run_git(&repo, &["update-index", "--cacheinfo", &cache_info]);
+        assert_eq!(
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&path),
+            Some(index_stat)
+        );
+
+        refresh_hydrated_index_entries(&repo, std::slice::from_ref(&verified));
+
+        let context = WorktreeContext::resolve_from_path(&repo).unwrap();
+        let index = gix_index::File::at(
+            context.index_path(),
+            gix_hash::Kind::Sha1,
+            true,
+            gix_index::decode::Options::default(),
+        )
+        .unwrap();
+        let entry = index
+            .entry_by_path_and_stage(
+                b"model.bin".as_bstr(),
+                gix_index::entry::Stage::Unconflicted,
+            )
+            .unwrap();
+        assert_eq!(entry.id.to_hex().to_string(), oid);
+        assert_ne!(entry.stat, index_stat.stat);
+
+        let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
+        let connection = rusqlite::Connection::open(cache_path).unwrap();
+        let rows: u64 = connection
+            .query_row("SELECT COUNT(*) FROM add_validations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     fn run_git_without_crab_filter(cwd: &Path, args: &[&str]) {
@@ -5050,7 +5351,7 @@ mod tests {
             .await
             .expect("staging fallback");
 
-        assert_eq!(restored, Some(pointer.size));
+        assert_eq!(restored.map(|write| write.bytes), Some(pointer.size));
         assert_eq!(std::fs::read(path).expect("read restored file"), content);
     }
 
@@ -5991,6 +6292,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recover_from_hashes_the_exact_published_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let dest = dir.path().join("dest.bin");
+        let content = b"verified recovery content".repeat(4096);
+        let pointer = pointer_for_content(&content);
+        std::fs::write(&source, &content).unwrap();
+        std::fs::write(&dest, pointer.serialize()).unwrap();
+
+        let RecoverOutcome::Recovered { write } =
+            try_recover_one(&source, &dest, &pointer).unwrap()
+        else {
+            panic!("matching recovery source must be published");
+        };
+
+        assert_eq!(write.bytes, pointer.size);
+        assert_eq!(
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&dest),
+            Some(write.index_stat)
+        );
+        assert_eq!(std::fs::read(dest).unwrap(), content);
+    }
+
+    #[test]
+    fn recover_from_mismatch_leaves_pointer_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let dest = dir.path().join("dest.bin");
+        let expected = b"expected recovery bytes";
+        let pointer = pointer_for_content(expected);
+        let pointer_bytes = pointer.serialize();
+        let mut incorrect = expected.to_vec();
+        incorrect[0] ^= 0xff;
+        std::fs::write(&source, incorrect).unwrap();
+        std::fs::write(&dest, &pointer_bytes).unwrap();
+
+        assert!(matches!(
+            try_recover_one(&source, &dest, &pointer).unwrap(),
+            RecoverOutcome::HashMismatch
+        ));
+        assert_eq!(std::fs::read(dest).unwrap(), pointer_bytes);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cow_clone_candidate_verifies_content_preserves_mode_and_is_independent() {
@@ -6276,8 +6621,10 @@ mod tests {
         let ptr = sample_pointer(4096);
         std::fs::write(dir.path().join("model.bin"), ptr.serialize()).unwrap();
 
-        let filter = build_filter(&["**/*".to_owned()], &[]).unwrap();
+        let filter = build_all_filter().unwrap();
         let tracked = TrackedClassifier::open(dir.path()).unwrap();
+        assert!(filter.matches("model.bin"));
+        assert!(tracked.is_tracked(Path::new("model.bin")));
         let cancel = CancellationToken::new();
         let mut out = Vec::new();
         walk_and_parse_pointers(dir.path(), dir.path(), &tracked, &filter, &cancel, &mut out)
@@ -6493,8 +6840,8 @@ mod tests {
     async fn hydrate_batch_skips_already_hydrated_files() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Pointer declares size = 4096.
-        let ptr = sample_pointer(4096);
+        let hydrated = vec![0xAB; 4096];
+        let ptr = pointer_for_content(&hydrated);
 
         // File A: still a pointer on disk — should be hydrated.
         let path_a = dir.path().join("a.bin");
@@ -6503,7 +6850,7 @@ mod tests {
         // File B: already hydrated — non-pointer content whose size
         // matches ptr.size. The hydrator should skip it.
         let path_b = dir.path().join("b.bin");
-        std::fs::write(&path_b, vec![0xAB; 4096]).unwrap();
+        std::fs::write(&path_b, hydrated).unwrap();
 
         let items = vec![(path_a.clone(), ptr.clone()), (path_b.clone(), ptr.clone())];
         let cancel = CancellationToken::new();
@@ -6524,16 +6871,20 @@ mod tests {
         let ptr = sample_pointer(4096);
         let path = dir.path().join("ptr.bin");
         std::fs::write(&path, ptr.serialize()).unwrap();
-        assert!(!is_already_hydrated(&path, &ptr));
+        assert!(!is_already_hydrated(&path, &ptr, &CancellationToken::new()).unwrap());
     }
 
     #[test]
-    fn is_already_hydrated_returns_true_for_matching_size_non_pointer() {
+    fn is_already_hydrated_requires_matching_hash() {
         let dir = tempfile::tempdir().unwrap();
-        let ptr = sample_pointer(512);
+        let content = vec![0xCD; 512];
+        let ptr = pointer_for_content(&content);
         let path = dir.path().join("data.bin");
-        std::fs::write(&path, vec![0xCD; 512]).unwrap();
-        assert!(is_already_hydrated(&path, &ptr));
+        std::fs::write(&path, &content).unwrap();
+        assert!(is_already_hydrated(&path, &ptr, &CancellationToken::new()).unwrap());
+
+        std::fs::write(&path, vec![0xCE; 512]).unwrap();
+        assert!(!is_already_hydrated(&path, &ptr, &CancellationToken::new()).unwrap());
     }
 
     #[test]
@@ -6542,16 +6893,20 @@ mod tests {
         let ptr = sample_pointer(4096);
         let path = dir.path().join("data.bin");
         std::fs::write(&path, vec![0xCD; 9999]).unwrap();
-        assert!(!is_already_hydrated(&path, &ptr));
+        assert!(!is_already_hydrated(&path, &ptr, &CancellationToken::new()).unwrap());
     }
 
     #[test]
     fn is_already_hydrated_returns_false_for_missing_file() {
         let ptr = sample_pointer(4096);
-        assert!(!is_already_hydrated(
-            Path::new("/nonexistent/file.bin"),
-            &ptr
-        ));
+        assert!(
+            !is_already_hydrated(
+                Path::new("/nonexistent/file.bin"),
+                &ptr,
+                &CancellationToken::new()
+            )
+            .unwrap()
+        );
     }
 
     // --- format_bytes and format_elapsed tests ---
@@ -6690,15 +7045,16 @@ mod tests {
     #[tokio::test]
     async fn hydrate_summary_tracks_bytes_skipped() {
         let dir = tempfile::tempdir().unwrap();
-        let ptr = sample_pointer(4096);
+        let content = vec![0xAB; 4096];
+        let ptr = pointer_for_content(&content);
 
         // File A: still a pointer — will be hydrated.
         let path_a = dir.path().join("a.bin");
         std::fs::write(&path_a, ptr.serialize()).unwrap();
 
-        // File B: already hydrated (non-pointer, size matches).
+        // File B: already hydrated with the exact pointer content.
         let path_b = dir.path().join("b.bin");
-        std::fs::write(&path_b, vec![0xAB; 4096]).unwrap();
+        std::fs::write(&path_b, content).unwrap();
 
         let items = vec![(path_a, ptr.clone()), (path_b, ptr.clone())];
         let cancel = CancellationToken::new();
@@ -6942,13 +7298,14 @@ mod tests {
     #[tokio::test]
     async fn hydrate_file_result_channel_sends_per_file_results() {
         let dir = tempfile::tempdir().unwrap();
-        let ptr = sample_pointer(4096);
+        let content = vec![0xAB; 4096];
+        let ptr = pointer_for_content(&content);
 
         let path_a = dir.path().join("a.bin");
         let path_b = dir.path().join("b.bin");
         std::fs::write(&path_a, ptr.serialize()).unwrap();
-        // b.bin is already hydrated (non-pointer, matching size).
-        std::fs::write(&path_b, vec![0xAB; 4096]).unwrap();
+        // b.bin is already hydrated with the exact pointer content.
+        std::fs::write(&path_b, content).unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HydrateFileResult>();
         let total_bytes = ptr.size * 2;

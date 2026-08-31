@@ -3191,16 +3191,16 @@ mod tests {
     }
 
     #[test]
-    fn glob_matches_exact() {
+    fn glob_matches_exact_root_path() {
         let matcher = glob_matches_factory("README.md");
         assert!(matcher("README.md"));
-        assert!(matcher("docs/README.md"));
+        assert!(!matcher("docs/README.md"));
         assert!(!matcher("README.txt"));
     }
 
     #[test]
     fn path_matcher_applies_include_and_exclude() {
-        let matcher = PathMatcher::new(Some("*.bin"), Some("skip.bin"));
+        let matcher = PathMatcher::new(Some("*.bin"), Some("data/skip.bin"));
 
         assert!(matcher.matches("data/keep.bin"));
         assert!(!matcher.matches("data/skip.bin"));
