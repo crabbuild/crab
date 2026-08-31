@@ -271,6 +271,26 @@ fn write_index_stats(root: &Path, updates: &HashMap<Vec<u8>, IndexStatUpdate>) -
     Ok(updated)
 }
 
+/// Keep freshly published filter output outside Git's racy-stat window.
+///
+/// Git re-cleans a file when its mtime can alias the index write time. Aging
+/// the tempfile before publication preserves change detection through ctime
+/// and the remaining stat fields while avoiding a redundant full-file clean.
+pub(crate) fn age_filter_output_mtime(file: &std::fs::File) {
+    let Some(modified) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(2))
+    else {
+        return;
+    };
+    if let Err(error) = filetime::set_file_handle_times(
+        file,
+        None,
+        Some(filetime::FileTime::from_system_time(modified)),
+    ) {
+        tracing::debug!(error = %error, "could not age filter output mtime; Git may re-clean once");
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn index_path_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
@@ -374,5 +394,16 @@ mod tests {
             mapped.per_worktree_crab_dir,
             main.join(".crab/worktrees/linked-id")
         );
+    }
+
+    #[test]
+    fn filter_output_mtime_is_older_than_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(directory.path().join("output")).unwrap();
+        let before = std::time::SystemTime::now();
+
+        age_filter_output_mtime(&file);
+
+        assert!(file.metadata().unwrap().modified().unwrap() < before);
     }
 }

@@ -153,8 +153,11 @@ directory:
 .crab/worktrees/<linked-worktree-id>/
 ```
 
-Each worktree has its own hydrated-pointer cache and hydration policy. A
-linked worktree never treats another worktree's cache as authoritative state.
+Each worktree has its own `hydrated-pointers-v1.sqlite` cache and hydration
+policy. Cache rows use the exact no-follow stat captured from a verified
+published file descriptor. WAL transactions preserve unrelated rows from
+concurrent hydrators and update only changed paths. A linked worktree never
+treats another worktree's cache as authoritative state.
 
 ## Copy-on-Write Hydration
 
@@ -172,14 +175,21 @@ fall through to the normal chunk/Xorb hydration path. This optimization does
 not change Crab's CDC, chunk deduplication, Xorb storage, push, or remote
 reconstruction format.
 
+The cache is never used to bypass clean-filter input verification. Git permits
+the pathname supplied to a clean filter to name a worktree file whose bytes
+differ from the filter's standard input. Crab therefore hashes the supplied
+bytes whenever Git invokes the filter; exact Git index-stat refresh after
+hydrate prevents unchanged files from invoking it during ordinary status and
+diff operations.
+
 After a CoW clone, worktrees are independent: editing one file does not alter
 the sibling file. Both files initially share physical extents only where the
 filesystem supports that behavior. This is distinct from writable VFS overlay
 CoW, which keeps changes in a mount overlay instead of publishing a normal
 working-tree file.
 
-The legacy shared `.crab/hydrated-pointers.json` cache is not read, migrated,
-or rewritten.
+Legacy JSON hydrated-pointer caches, including the shared
+`.crab/hydrated-pointers.json` path, are not read, migrated, or rewritten.
 
 ## JSON Listing
 

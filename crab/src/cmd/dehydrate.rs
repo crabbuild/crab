@@ -1135,6 +1135,7 @@ fn atomic_write(dest: &Path, content: &[u8]) -> Result<()> {
     tmp.write_all(content)?;
     tmp.flush()?;
     preserve_destination_permissions(dest, tmp.as_file())?;
+    crate::git::worktree::age_filter_output_mtime(tmp.as_file());
     tmp.persist(dest).map_err(|e| e.error)?;
     Ok(())
 }
@@ -1826,6 +1827,7 @@ mod tests {
             hydrated_pointer::cache_path_for_worktree_root(&linked).expect("linked cache");
         assert_ne!(main_cache_path, linked_cache_path);
 
+        std::fs::write(root.join("clean.bin"), &clean_content).unwrap();
         let main_entry = hydrated_pointer::entry_for_path(&root.join("clean.bin"), &clean_pointer)
             .expect("main cache entry");
         HydratedPointerCache::update_on_disk(
@@ -2069,6 +2071,17 @@ mod tests {
         let content = b"new content";
         atomic_write(&dest, content).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
+
+    #[test]
+    fn atomic_write_avoids_git_racy_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("output.bin");
+        let before = std::time::SystemTime::now();
+
+        atomic_write(&dest, b"pointer").unwrap();
+
+        assert!(std::fs::metadata(dest).unwrap().modified().unwrap() < before);
     }
 
     #[cfg(unix)]

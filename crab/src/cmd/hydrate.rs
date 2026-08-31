@@ -2514,6 +2514,7 @@ fn persist_verified_temp(
 ) -> Result<VerifiedWrite> {
     tmp.flush()?;
     preserve_destination_permissions(dest, tmp.as_file())?;
+    crate::git::worktree::age_filter_output_mtime(tmp.as_file());
     let file = tmp.persist(dest).map_err(|e| e.error)?;
     let verified_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(&file)
         .ok_or_else(|| error::CrabError::Internal("stat published hydration file".to_owned()))?;
@@ -3038,6 +3039,7 @@ fn try_cow_clone_candidate(
     let prepare = (|| -> Result<std::fs::File> {
         let temporary_file = std::fs::OpenOptions::new().write(true).open(&temporary)?;
         preserve_destination_permissions(dest, &temporary_file)?;
+        crate::git::worktree::age_filter_output_mtime(&temporary_file);
         let pre_publish_stat =
             crate::cmd::stream_stage::VerifiedIndexStat::from_file(&temporary_file).ok_or_else(
                 || error::CrabError::Internal("stat verified CoW hydration tempfile".to_owned()),
@@ -3484,31 +3486,32 @@ pub async fn run_hydrate_in(
         mark_pending_worktree_hydration_applied(root, &pending.policy)?;
     }
 
-    // Populate the per-worktree hydrated-pointer cache so the clean filter
-    // can short-circuit `git status` / `git diff` / `git pull` on
-    // these files. Each entry records the post-hydrate stat
-    // fingerprint and the pointer bytes the content reconstructs
-    // back into. Best-effort: a write failure here degrades to the
-    // pre-cache behavior (slow CDC-based clean) and must never
-    // break the hydrate command.
+    // Publish only descriptor-safe proofs captured by successful atomic
+    // writes. Sibling worktrees use this cache to locate CoW candidates;
+    // they still hash each candidate before publication. Best-effort: an
+    // unavailable cache only disables that local optimization.
     if summary.hydrated > 0 {
-        let updates: Vec<(String, crate::cache::HydratedEntry)> = selected_to_hydrate
+        let pointers = selected_to_hydrate
             .iter()
-            .filter_map(|(path, ptr)| {
-                // Skip files that didn't end up hydrated (errors or
-                // files that were still pointers). `is_working_tree_pointer`
-                // returns false for reconstructed content.
-                if is_working_tree_pointer(path).unwrap_or(true) {
+            .map(|(path, pointer)| (path.as_path(), pointer))
+            .collect::<HashMap<_, _>>();
+        let updates = summary
+            .verified_paths
+            .iter()
+            .filter_map(|verified| {
+                let pointer = pointers.get(verified.path.as_path())?;
+                if pointer.file_hash != verified.file_hash || pointer.size != verified.size {
                     return None;
                 }
-                let rel = path.strip_prefix(root).unwrap_or(path);
+                let rel = verified.path.strip_prefix(root).unwrap_or(&verified.path);
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
-                let pointer_bytes = ptr.serialize();
-                crate::cache::hydrated_pointer::entry_for_path(path, &pointer_bytes)
-                    .ok()
-                    .map(|e| (rel_str, e))
+                crate::cache::hydrated_pointer::entry_for_verified_stat(
+                    verified.index_stat,
+                    &pointer.serialize(),
+                )
+                .map(|entry| (rel_str, entry))
             })
-            .collect();
+            .collect::<Vec<_>>();
         if !updates.is_empty() {
             match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
                 Ok(cache_path) => {
@@ -4870,9 +4873,13 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
 
         let clean_script = tmp.path().join("clean.sh");
+        let clean_calls = tmp.path().join("clean-calls");
         std::fs::write(
             &clean_script,
-            "#!/bin/sh\ncat >/dev/null\nprintf 'POINTER\\n'\n",
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\ncat >/dev/null\nprintf 'POINTER\\n'\n",
+                clean_calls.display()
+            ),
         )
         .unwrap();
         let mut perms = std::fs::metadata(&clean_script).unwrap().permissions();
@@ -4898,9 +4905,10 @@ mod tests {
         run_git(&repo, &["add", ".gitattributes", "model.bin"]);
         run_git(&repo, &["commit", "-m", "init"]);
 
-        std::fs::write(repo.join("model.bin"), "hydrated bytes\n").unwrap();
+        atomic_write_with_progress(&repo.join("model.bin"), b"hydrated bytes\n", None).unwrap();
         assert_eq!(git_stdout(&repo, &["diff", "--name-only"]), "");
         assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
+        std::fs::remove_file(&clean_calls).unwrap();
 
         assert_eq!(
             crate::git::worktree::refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
@@ -4924,14 +4932,17 @@ mod tests {
         let expected_stat = gix_index::entry::Stat::from_fs(&metadata).unwrap();
         assert_eq!(entry.stat, expected_stat);
         assert_eq!(git_stdout(&repo, &["status", "--porcelain=v1"]), "");
+        assert!(!clean_calls.exists());
 
-        std::fs::write(repo.join("model.bin"), "POINTER\n").unwrap();
+        atomic_write_with_progress(&repo.join("model.bin"), b"POINTER\n", None).unwrap();
         assert!(git_stdout(&repo, &["status", "--porcelain=v1"]).contains(" M model.bin"));
+        let _ = std::fs::remove_file(&clean_calls);
         assert_eq!(
             crate::git::worktree::refresh_index_stats(&repo, &[repo.join("model.bin")]).unwrap(),
             1
         );
         assert_eq!(git_stdout(&repo, &["status", "--porcelain=v1"]), "");
+        assert!(!clean_calls.exists());
     }
 
     #[cfg(unix)]
@@ -5499,14 +5510,20 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<HydrateSummary>> + Send + 'a>> {
             Box::pin(async move {
                 error::check_cancelled(cancel)?;
-                for (path, _) in items {
-                    atomic_write(path, &self.content)?;
+                let mut summary = HydrateSummary::default();
+                for (path, pointer) in items {
+                    let index_stat = atomic_write_with_progress(path, &self.content, None)?;
+                    let write = VerifiedWrite {
+                        bytes: self.content.len() as u64,
+                        index_stat,
+                    };
+                    summary
+                        .verified_paths
+                        .push(verified_path(path, pointer, write));
                 }
-                Ok(HydrateSummary {
-                    hydrated: items.len() as u64,
-                    bytes_written: self.content.len() as u64 * items.len() as u64,
-                    ..HydrateSummary::default()
-                })
+                summary.hydrated = items.len() as u64;
+                summary.bytes_written = self.content.len() as u64 * items.len() as u64;
+                Ok(summary)
             })
         }
     }

@@ -1949,6 +1949,19 @@ class AddCommitPushSmoke:
             timeout=self.args.push_timeout,
         )
         self.head_key(f"{repo_prefix}/manifest")
+        fsck_record = self.run_crab(
+            repo,
+            ["fsck", "--json"],
+            name=f"{case_name} full store fsck",
+        )
+        fsck_data = json.loads(self.read_stdout(fsck_record))["data"]
+        self.check(
+            f"{case_name}-publishes-complete-acceleration-metadata",
+            fsck_data["passed"]
+            and fsck_data["errors"] == 0
+            and fsck_data["repair_failures"] == 0,
+            fsck_data,
+        )
 
         after_push_record = self.run_crab(
             repo,

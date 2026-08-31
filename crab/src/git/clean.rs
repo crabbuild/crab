@@ -1326,18 +1326,6 @@ pub struct CleanSession {
     /// in the session. Resolves `filter=lfs` vs `filter=crab` per file
     /// path with git's "last match wins" semantics.
     filter_attr_cache: Option<crate::git::filter_attr_cache::FilterAttrCache>,
-    /// Per-worktree cache of `path → (mtime, size, pointer_bytes)` populated
-    /// by `crab hydrate`. A cache hit lets the clean filter short-circuit
-    /// CDC + staging for hydrated files — critical for `git status` /
-    /// `git diff` / `git pull` not to either grind through multi-GiB
-    /// content on every invocation or fail with `CRAB-E0081` when a
-    /// concurrent crab process holds `.crab/staging`.
-    hydrated_cache: Option<crate::cache::HydratedPointerCache>,
-    /// Paths observed to have stale hydrated-cache entries during this
-    /// session (stat mismatch). Flushed to disk at session teardown via
-    /// [`persist_hydrated_cache_invalidations`](Self::persist_hydrated_cache_invalidations)
-    /// so the next session doesn't re-do the lookup only to fall through.
-    hydrated_cache_invalidations: Vec<String>,
     /// When `Some`, the backing staging area is unavailable for writes
     /// and the crab-native clean path must fail instead of producing
     /// a pointer that points at chunks we never staged. `None` means
@@ -1380,8 +1368,6 @@ impl CleanSession {
             lfs_attrs: std::sync::OnceLock::new(),
             filter_attr_cache: None,
             shard_hints: ShardHintCache::new(),
-            hydrated_cache: None,
-            hydrated_cache_invalidations: Vec::new(),
             staging_unavailable: None,
         }
     }
@@ -1424,8 +1410,6 @@ impl CleanSession {
             lfs_attrs: std::sync::OnceLock::new(),
             filter_attr_cache: None,
             shard_hints: ShardHintCache::new(),
-            hydrated_cache: None,
-            hydrated_cache_invalidations: Vec::new(),
             staging_unavailable: None,
         }
     }
@@ -1471,29 +1455,6 @@ impl CleanSession {
     /// Install the remote file-index checker used by the clean fast path.
     pub fn set_file_index_checker(&mut self, checker: Box<dyn FileIndexChecker>) {
         self.file_index_checker = checker;
-    }
-
-    /// Peek the hydrated-pointer cache for `pathname` without touching
-    /// staging. Returns `true` when the pathname has a live (stat
-    /// matches on-disk file) cache entry with decodable pointer bytes,
-    /// meaning the upcoming clean will be served from cache — so callers
-    /// can skip acquiring the staging flock entirely.
-    ///
-    /// Non-mutating: if the entry turns out to be stale during the
-    /// actual clean call, the normal invalidation path handles it.
-    #[must_use]
-    pub fn has_live_hydrated_entry(&self, pathname: &str) -> bool {
-        let Some(cache) = self.hydrated_cache.as_ref() else {
-            return false;
-        };
-        let Some(entry) = cache.get(pathname) else {
-            return false;
-        };
-        let Some(root) = self.repo_root.as_ref() else {
-            return false;
-        };
-        crate::cache::hydrated_pointer::matches_stat(&root.join(pathname), entry)
-            && crate::cache::hydrated_pointer::decode_pointer(entry).is_some()
     }
 
     /// If the session knows staging isn't backing writes, return the
@@ -1664,30 +1625,6 @@ impl CleanSession {
         // `FilterAttrCache` instead, so the lazy init keeps `crab init`
         // fast on large working trees.
 
-        // Load the hydrated-pointer cache so we can short-circuit
-        // clean on already-hydrated files. Missing / corrupt caches
-        // degrade to an empty map (no short-circuit) rather than
-        // failing the session.
-        match crate::cache::hydrated_pointer::cache_path_for_worktree_root(&root) {
-            Ok(cache_path) => {
-                let hydrated = crate::cache::HydratedPointerCache::load_sync(&cache_path);
-                tracing::debug!(
-                    path = %cache_path.display(),
-                    entries = hydrated.len(),
-                    "loaded hydrated-pointer cache for clean session"
-                );
-                self.hydrated_cache = Some(hydrated);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    root = %root.display(),
-                    error = %e,
-                    "hydrated-pointer cache unavailable for clean session"
-                );
-                self.hydrated_cache = Some(crate::cache::HydratedPointerCache::new());
-            }
-        }
-
         self.repo_root = Some(root);
     }
 
@@ -1727,148 +1664,6 @@ impl CleanSession {
     #[must_use]
     pub fn should_skip_lfs_download_errors(&self) -> bool {
         self.lfs_skip_download_errors
-    }
-
-    /// Flush pending hydrated-cache invalidations to disk. Called at
-    /// session teardown by the filter-process loop so stale entries
-    /// don't linger across invocations. Non-fatal on failure — the
-    /// cache is purely advisory.
-    pub fn persist_hydrated_cache_invalidations(&mut self) {
-        let paths = std::mem::take(&mut self.hydrated_cache_invalidations);
-        if paths.is_empty() {
-            return;
-        }
-        let Some(root) = self.repo_root.as_ref() else {
-            return;
-        };
-        match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
-            Ok(cache_path) => {
-                if let Err(e) =
-                    crate::cache::HydratedPointerCache::invalidate_on_disk(&cache_path, paths)
-                {
-                    tracing::debug!(
-                        path = %cache_path.display(),
-                        error = %e,
-                        "failed to flush hydrated-pointer cache invalidations"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    root = %root.display(),
-                    error = %e,
-                    "hydrated-pointer cache unavailable for invalidation flush"
-                );
-            }
-        }
-    }
-
-    /// Consult the hydrated-pointer cache for `pathname`. When the
-    /// stat fingerprint still matches, returns the cached pointer
-    /// bytes verbatim so the filter can skip CDC, hashing, and
-    /// staging entirely. A stale entry is queued for invalidation
-    /// and the caller falls back to the normal pipeline.
-    ///
-    /// Returns `None` when the cache is missing, the entry is absent,
-    /// the fingerprint no longer matches, or the pointer bytes are
-    /// corrupt — any of which mean the normal clean path must run.
-    fn try_hydrated_cache_hit(&mut self, pathname: &str) -> Option<Vec<u8>> {
-        let cache = self.hydrated_cache.as_ref()?;
-        let entry = cache.get(pathname)?;
-        let root = self.repo_root.as_ref()?;
-        let full_path = root.join(pathname);
-
-        if !crate::cache::hydrated_pointer::matches_stat(&full_path, entry) {
-            // Fingerprint no longer matches — the user (or a tool)
-            // touched the file after hydrate. Drop the entry so we
-            // don't re-check on every clean in this session, and fall
-            // through to the real pipeline.
-            tracing::debug!(
-                path = %pathname,
-                "hydrated-pointer cache: stat mismatch, invalidating entry"
-            );
-            self.hydrated_cache_invalidations.push(pathname.to_owned());
-            if let Some(cache) = self.hydrated_cache.as_mut() {
-                cache.remove(pathname);
-            }
-            return None;
-        }
-
-        let Some(bytes) = crate::cache::hydrated_pointer::decode_pointer(entry) else {
-            tracing::debug!(
-                path = %pathname,
-                "hydrated-pointer cache: corrupt pointer bytes, invalidating entry"
-            );
-            self.hydrated_cache_invalidations.push(pathname.to_owned());
-            if let Some(cache) = self.hydrated_cache.as_mut() {
-                cache.remove(pathname);
-            }
-            return None;
-        };
-        tracing::debug!(
-            path = %pathname,
-            size = entry.size,
-            "hydrated-pointer cache hit: returning cached pointer without CDC"
-        );
-        Some(bytes)
-    }
-
-    /// Refresh the hydrated-pointer cache entry for `pathname` with
-    /// the current file stat and `pointer_bytes`. Non-fatal on error —
-    /// the cache is advisory and degrades to the slow path when
-    /// absent. No-op when we don't know the repo root or the file is
-    /// missing on disk.
-    ///
-    /// Called after a successful clean so subsequent invocations
-    /// (e.g. the next `git status` in a shell prompt) short-circuit
-    /// without re-running CDC over the same bytes. Also populated by
-    /// `crab hydrate`, but clean-side updates cover the
-    /// clone-then-hydrate-elsewhere path and keep the cache self-healing.
-    fn remember_hydrated_pointer(&mut self, pathname: &str, pointer_bytes: &[u8]) {
-        let Some(root) = self.repo_root.as_ref() else {
-            return;
-        };
-        let full_path = root.join(pathname);
-        let entry = match crate::cache::hydrated_pointer::entry_for_path(&full_path, pointer_bytes)
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(
-                    path = %pathname,
-                    error = %e,
-                    "hydrated-pointer cache: stat failed, not recording entry"
-                );
-                return;
-            }
-        };
-
-        match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
-            Ok(cache_path) => {
-                if let Err(e) = crate::cache::HydratedPointerCache::update_on_disk(
-                    &cache_path,
-                    [(pathname.to_owned(), entry.clone())],
-                ) {
-                    tracing::debug!(
-                        path = %cache_path.display(),
-                        error = %e,
-                        "hydrated-pointer cache: failed to persist entry"
-                    );
-                    return;
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    root = %root.display(),
-                    error = %e,
-                    "hydrated-pointer cache: unavailable for persist"
-                );
-                return;
-            }
-        }
-
-        if let Some(cache) = self.hydrated_cache.as_mut() {
-            cache.insert(pathname.to_owned(), entry);
-        }
     }
 
     /// Check whether a file is LFS-tracked via `filter=lfs` in `.gitattributes`.
@@ -2121,7 +1916,6 @@ impl CleanSession {
         // pointer verbatim, no staging needed. Works with zero
         // network traffic and regardless of bloom state.
         if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
             return Ok(pointer_bytes);
         }
 
@@ -2129,7 +1923,6 @@ impl CleanSession {
         // pointer whose chunks already exist remotely — no staging
         // needed, so this works even when `.crab/staging` is locked.
         if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
             return Ok(pointer_bytes);
         }
 
@@ -2147,7 +1940,6 @@ impl CleanSession {
                 .publish_recipe(Path::new(pathname), &recipe)?;
             let pointer = self.build_pointer(file_hash, file_size, None);
             let pointer_bytes = pointer.serialize();
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
             return Ok(pointer_bytes);
         }
         let mut provisional = ProvisionalChunkStager::new(pathname);
@@ -2159,7 +1951,6 @@ impl CleanSession {
 
         let pointer = self.build_pointer(file_hash, file_size, None);
         let pointer_bytes = pointer.serialize();
-        self.remember_hydrated_pointer(pathname, &pointer_bytes);
         Ok(pointer_bytes)
     }
 
@@ -2182,24 +1973,6 @@ impl CleanSession {
         pathname: &str,
         reader: &mut crate::git::filter_process::PktLineReader<R>,
     ) -> Result<Vec<u8>> {
-        // Fast-fast path: the file was hydrated in a previous session
-        // and its stat fingerprint still matches. Emit the cached
-        // pointer verbatim without reading any content from the
-        // stream — no CDC, no hashing, no staging lock. Makes
-        // `git status` / `git diff` / `git pull` instant on hydrated
-        // files, even when another crab process holds the staging
-        // lock.
-        //
-        // We must still drain the reader to honor the filter-process
-        // protocol (git expects us to consume the content pkt-lines
-        // up to and including flush).
-        if let Some(bytes) = self.try_hydrated_cache_hit(pathname) {
-            while reader.read_packet()?.is_some() {
-                // discard — we already know the answer
-            }
-            return Ok(bytes);
-        }
-
         // Resolve the filter handler for this path from .gitattributes.
         // This runs BEFORE blob classification so explicit user rules
         // always take precedence over pointer format detection.
@@ -2407,7 +2180,6 @@ impl CleanSession {
             // zero network traffic and no staging lock needed.
             if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
                 discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 return Ok(pointer_bytes);
             }
 
@@ -2418,7 +2190,6 @@ impl CleanSession {
             // hydrated-file workflow depends on this.
             if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
                 discard_provisional_stager(&mut provisional_stager, &mut self.chunk_stager)?;
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 return Ok(pointer_bytes);
             }
 
@@ -2436,7 +2207,6 @@ impl CleanSession {
                     .publish_recipe(Path::new(pathname), &recipe)?;
                 let pointer = self.build_pointer(file_hash, file_size, None);
                 let pointer_bytes = pointer.serialize();
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 return Ok(pointer_bytes);
             }
             if provisional_stager.is_none() {
@@ -2454,7 +2224,6 @@ impl CleanSession {
 
             let pointer = self.build_pointer(file_hash, file_size, None);
             let pointer_bytes = pointer.serialize();
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
             Ok(pointer_bytes)
         })();
 
@@ -2564,7 +2333,6 @@ impl CleanSession {
                 self.chunk_stager
                     .publish_recipe(Path::new(pathname), &prepared)?;
                 let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 tracing::info!(
                     path = %pathname,
                     size = file_size,
@@ -2581,12 +2349,10 @@ impl CleanSession {
 
             if let Some(pointer_bytes) = self.try_index_pointer_match(pathname, &file_hash) {
                 discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 return Ok(pointer_bytes);
             }
             if let Some(pointer_bytes) = self.try_fast_path(file_size, &file_hash)? {
                 discard_provisional_stager(&mut changed.provisional, &mut self.chunk_stager)?;
-                self.remember_hydrated_pointer(pathname, &pointer_bytes);
                 return Ok(pointer_bytes);
             }
 
@@ -2615,7 +2381,6 @@ impl CleanSession {
             self.chunk_stager
                 .publish_recipe(Path::new(pathname), &recipe)?;
             let pointer_bytes = self.build_pointer(file_hash, file_size, None).serialize();
-            self.remember_hydrated_pointer(pathname, &pointer_bytes);
             tracing::info!(
                 path = %pathname,
                 size = file_size,
@@ -3720,13 +3485,9 @@ mod tests {
         assert_eq!(pointer.size, content.len() as u64);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn hydrated_cache_short_circuits_clean_when_staging_locked() {
-        // Regression guard for the hydrated-file UX bug: once a file
-        // has been hydrated and its pointer recorded in the cache,
-        // subsequent clean-filter invocations (git status, git diff,
-        // git pull) must return the cached pointer without touching
-        // staging — even when staging is locked by another process.
+    fn clean_uses_supplied_content_when_path_cache_differs() {
         use crate::cache::{HydratedPointerCache, hydrated_pointer};
 
         let Some(dir) = git_repo_tempdir() else {
@@ -3734,124 +3495,31 @@ mod tests {
             return;
         };
         let root = dir.path();
-        let rel = "big.zip";
-        let full = root.join(rel);
-        std::fs::write(&full, b"hydrated file content that matches the pointer").unwrap();
+        let relative = "content.bin";
+        let hydrated = b"hydrated bytes";
+        let supplied = b"different bytes";
+        let full_path = root.join(relative);
+        std::fs::write(&full_path, hydrated).unwrap();
+        let hydrated_pointer = Pointer {
+            file_hash: *blake3::hash(hydrated).as_bytes(),
+            size: hydrated.len() as u64,
+            shard_hint: None,
+        }
+        .serialize();
+        let entry = hydrated_pointer::entry_for_path(&full_path, &hydrated_pointer).unwrap();
+        let cache_path = hydrated_pointer::cache_path_for_worktree_root(root).unwrap();
+        HydratedPointerCache::update_on_disk(&cache_path, [(relative.to_owned(), entry)]).unwrap();
 
-        // Seed a cached pointer entry for this file.
-        let fake_pointer = b"\
-version crab/1\nfile-hash 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n\
-size 45\n";
-        let entry = hydrated_pointer::entry_for_path(&full, fake_pointer).unwrap();
-        let cache_path = hydrated_pointer::cache_path_for_worktree_root(root).expect("cache path");
-        HydratedPointerCache::update_on_disk(&cache_path, [(rel.to_owned(), entry)]).unwrap();
-
-        let ctx = AppContext::default();
-        let mut session = CleanSession::new(ctx);
+        let mut session = CleanSession::new(AppContext::default());
         session.set_repo_root(root.to_path_buf());
-        // Simulate "another process holds the staging lock". Without
-        // the short-circuit this would immediately return
-        // StagingLocked.
-        session.set_staging_locked(Some(99999));
+        let cleaned = session.clean_file(relative, supplied.to_vec()).unwrap();
+        let pointer = Pointer::parse(&cleaned).unwrap();
 
-        let bytes = session
-            .clean_file(
-                rel,
-                b"hydrated file content that matches the pointer".to_vec(),
-            )
-            .expect("clean must succeed from cached pointer even with staging locked");
-        assert_eq!(bytes, fake_pointer);
+        assert_eq!(pointer.file_hash, *blake3::hash(supplied).as_bytes());
     }
 
     #[test]
-    fn hydrated_cache_corrupt_pointer_does_not_skip_staging_acquire() {
-        use crate::cache::{HydratedPointerCache, hydrated_pointer};
-
-        let Some(dir) = git_repo_tempdir() else {
-            eprintln!("SKIP: git unavailable or fixture setup failed");
-            return;
-        };
-        let root = dir.path();
-        let rel = "corrupt-cache.bin";
-        let full = root.join(rel);
-        let content = b"hydrated file content with corrupt cached pointer";
-        std::fs::write(&full, content).unwrap();
-
-        let mut entry = hydrated_pointer::entry_for_path(
-            &full,
-            b"version crab/1\nfile-hash 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\nsize 48\n",
-        )
-        .unwrap();
-        entry.pointer_hex = "not hex".to_owned();
-        let cache_path = hydrated_pointer::cache_path_for_worktree_root(root).expect("cache path");
-        HydratedPointerCache::update_on_disk(&cache_path, [(rel.to_owned(), entry)]).unwrap();
-
-        let ctx = AppContext::default();
-        let mut session = CleanSession::new(ctx);
-        session.set_repo_root(root.to_path_buf());
-        assert!(
-            !session.has_live_hydrated_entry(rel),
-            "dispatch must acquire staging when the live cache entry cannot decode"
-        );
-
-        session.set_staging_locked(Some(99999));
-        let err = session.clean_file(rel, content.to_vec()).unwrap_err();
-        assert!(matches!(
-            err,
-            CrabError::StagingLocked {
-                holder_pid: Some(99999)
-            }
-        ));
-
-        session.persist_hydrated_cache_invalidations();
-        let reloaded = HydratedPointerCache::load_sync(&cache_path);
-        assert!(
-            reloaded.get(rel).is_none(),
-            "corrupt live entry should be invalidated after the failed slow-path attempt"
-        );
-    }
-
-    #[test]
-    fn hydrated_cache_falls_through_when_file_modified_after_hydrate() {
-        // A hydrated-then-touched file has a stat-mismatched cache
-        // entry. The clean filter must drop the entry and run the
-        // normal pipeline, not hand back a stale pointer.
-        use crate::cache::{HydratedPointerCache, hydrated_pointer};
-
-        let Some(dir) = git_repo_tempdir() else {
-            eprintln!("SKIP: git unavailable or fixture setup failed");
-            return;
-        };
-        let root = dir.path();
-        let rel = "file.bin";
-        let full = root.join(rel);
-        std::fs::write(&full, b"original hydrated content").unwrap();
-
-        let fake_pointer = b"version crab/1\nfile-hash abc\nsize 25\n";
-        let entry = hydrated_pointer::entry_for_path(&full, fake_pointer).unwrap();
-        let cache_path = hydrated_pointer::cache_path_for_worktree_root(root).expect("cache path");
-        HydratedPointerCache::update_on_disk(&cache_path, [(rel.to_owned(), entry)]).unwrap();
-
-        // Modify the file so the stat fingerprint no longer matches.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(&full, b"modified content has a different size").unwrap();
-
-        let ctx = AppContext::default();
-        let mut session = CleanSession::new(ctx);
-        session.set_repo_root(root.to_path_buf());
-
-        // Clean must go through the crab path (not return the cached
-        // pointer verbatim). The exact output isn't the point — it's
-        // that it's *not* `fake_pointer`.
-        let bytes = session
-            .clean_file(rel, b"modified content has a different size".to_vec())
-            .unwrap();
-        assert_ne!(bytes, fake_pointer);
-    }
-
-    #[test]
-    fn set_repo_root_uses_linked_worktree_attributes_and_hydrated_cache() {
-        use crate::cache::{HydratedPointerCache, hydrated_pointer};
+    fn set_repo_root_uses_linked_worktree_attributes() {
         use crate::git::filter_attr_cache::FilterKind;
         use std::process::Command;
 
@@ -3916,23 +3584,13 @@ size 45\n";
         )
         .unwrap();
 
-        let rel = "model.bin";
-        let hydrated = b"linked worktree hydrated bytes";
-        let full_path = linked.join(rel);
-        std::fs::write(&full_path, hydrated).unwrap();
-        let pointer = b"version crab/1\nfile-hash abc\nsize 28\n";
-        let entry = hydrated_pointer::entry_for_path(&full_path, pointer).unwrap();
-        let cache_path =
-            hydrated_pointer::cache_path_for_worktree_root(&linked).expect("cache path");
-        HydratedPointerCache::update_on_disk(&cache_path, [(rel.to_owned(), entry)]).unwrap();
-
         let ctx = AppContext::default();
         let mut session = CleanSession::new(ctx);
         session.set_repo_root(linked);
-        session.set_staging_locked(Some(12345));
-
-        assert_eq!(session.resolve_filter_for(rel), Some(FilterKind::Lfs));
-        assert_eq!(session.clean_file(rel, hydrated.to_vec()).unwrap(), pointer);
+        assert_eq!(
+            session.resolve_filter_for("model.bin"),
+            Some(FilterKind::Lfs)
+        );
     }
 
     #[test]
