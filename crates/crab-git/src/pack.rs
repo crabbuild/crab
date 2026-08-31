@@ -265,6 +265,24 @@ pub fn install_pack_file_from_path(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
+    install_pack_file_from_path_with_identity(
+        pack_dir,
+        pack_tmp_path,
+        canonical_name,
+        max_input_size,
+        fsck_objects,
+        None,
+    )
+}
+
+pub(crate) fn install_pack_file_from_path_with_identity(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+    verified_identity: Option<VerifiedPackIdentity>,
+) -> Result<InstalledPack> {
     let size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
         .len();
@@ -280,6 +298,17 @@ pub fn install_pack_file_from_path(
             name: canonical_name.to_owned(),
         });
     }
+    if let Some(identity) = verified_identity {
+        let computed_content_hash = blake3::Hash::from_bytes(identity.content_hash)
+            .to_hex()
+            .to_string();
+        if !computed_content_hash.eq_ignore_ascii_case(canonical_name) {
+            return Err(PackError::ContentHashMismatch {
+                expected: canonical_name.to_owned(),
+                computed: computed_content_hash,
+            });
+        }
+    }
 
     let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
     let final_idx = pack_dir.join(format!("pack-{canonical_name}.idx"));
@@ -294,7 +323,10 @@ pub fn install_pack_file_from_path(
         }
         crate::pack_locator::PackLocationIter::open(&final_idx, &final_rev, installed_size)?;
         return Ok(InstalledPack {
-            git_sha1: verify_pack_file_sha1(pack_tmp_path)?,
+            git_sha1: verified_identity.map_or_else(
+                || verify_pack_file_sha1(pack_tmp_path),
+                |identity| Ok(to_hex(&identity.git_sha1)),
+            )?,
             pack_path: final_pack,
             idx_path: final_idx,
             rev_path: final_rev,
@@ -304,7 +336,10 @@ pub fn install_pack_file_from_path(
     std::fs::create_dir_all(pack_dir)
         .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
 
-    let git_sha1 = verify_pack_file_sha1(pack_tmp_path)?;
+    let git_sha1 = verified_identity.map_or_else(
+        || verify_pack_file_sha1(pack_tmp_path),
+        |identity| Ok(to_hex(&identity.git_sha1)),
+    )?;
     let pack_tmp = copy_pack_to_install_temp(pack_dir, pack_tmp_path)?;
     let pack_tmp_path = pack_tmp.into_temp_path();
     install_pack_file_blocking(

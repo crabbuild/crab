@@ -2485,6 +2485,13 @@ checks, 101 pushes, and the same fingerprint; it is correctness/regression
 evidence, not a speedup claim because shared-host source and pack timings were
 noisier than `98082cf0`.
 
+The complete-inventory response path now computes the Crab Blake3 identity in
+the same pass that joins the pack and carries the resulting Git SHA-1/Blake3
+identity through `git index-pack --fsck-objects` and structural pack
+verification. It no longer performs separate full output hash/trailer scans
+before and after installation; the Git index checksum and object-fsck gates
+remain, while durable maintenance continues to use full validation.
+
 The earlier broad proof was run with the roadmap target directory:
 
 - `cargo test -p crab --lib --locked -- --test-threads=1`: 3,695 passed,

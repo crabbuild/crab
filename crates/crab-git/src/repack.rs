@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::pack::{
-    PackError, VerifiedPackIdentity, install_pack_file_from_path,
+    PackError, VerifiedPackIdentity, install_pack_file_from_path_with_identity,
     install_pack_files_from_paths_with_identity, verify_and_hash_pack_file,
 };
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
@@ -522,7 +522,7 @@ fn consolidate_pack_suffix_with_options(
         ConsolidationValidation::Full => GeneratedPackValidation::Full,
         ConsolidationValidation::Response => GeneratedPackValidation::Structural,
     };
-    let generated = verified_generated_pack(pack_path, generated_validation, None)?;
+    let generated = verified_generated_pack(pack_path, generated_validation, None, None)?;
     if matches!(validation, ConsolidationValidation::Full) {
         let mut generated_locations = PackLocationIter::open(
             generated.index_path(),
@@ -641,16 +641,18 @@ pub fn concatenate_complete_pack_inventory(
             pack_id: "complete-pack-concatenation".to_owned(),
             reason: "concatenated pack object count exceeds Git's pack limit".to_owned(),
         })?;
+    let mut pack_header = [0_u8; 12];
+    pack_header[..4].copy_from_slice(b"PACK");
+    pack_header[4..8].copy_from_slice(&2_u32.to_be_bytes());
+    pack_header[8..].copy_from_slice(&total_objects_u32.to_be_bytes());
     output
-        .write_all(b"PACK")
-        .and_then(|_| output.write_all(&2_u32.to_be_bytes()))
-        .and_then(|_| output.write_all(&total_objects_u32.to_be_bytes()))
+        .write_all(&pack_header)
         .map_err(|source| io_error("write concatenated pack header", source))?;
 
     let mut pack_sha1 = Sha1::new();
-    pack_sha1.update(b"PACK");
-    pack_sha1.update(2_u32.to_be_bytes());
-    pack_sha1.update(total_objects_u32.to_be_bytes());
+    pack_sha1.update(pack_header);
+    let mut content_hasher = blake3::Hasher::new();
+    content_hasher.update(&pack_header);
     let mut buffer = vec![0_u8; 1024 * 1024];
     for source in sources {
         let mut input = File::open(&source.path)
@@ -677,20 +679,35 @@ pub fn concatenate_complete_pack_inventory(
                 .write_all(&buffer[..read_len])
                 .map_err(|source| io_error("write concatenated pack body", source))?;
             pack_sha1.update(&buffer[..read_len]);
+            content_hasher.update(&buffer[..read_len]);
             remaining -= read_len as u64;
         }
     }
     let checksum: [u8; 20] = pack_sha1.finalize().into();
+    content_hasher.update(&checksum);
     output
         .write_all(&checksum)
         .and_then(|_| output.flush())
         .map_err(|source| io_error("finish concatenated pack", source))?;
     drop(output);
 
-    let (pack_hash, pack_size) = hash_file(&output_path)?;
+    let pack_hash = *content_hasher.finalize().as_bytes();
+    let pack_size = std::fs::metadata(&output_path)
+        .map_err(|source| io_error(format!("stat {}", output_path.display()), source))?
+        .len();
     let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
-    let installed =
-        install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
+    let identity = VerifiedPackIdentity {
+        git_sha1: checksum,
+        content_hash: pack_hash,
+    };
+    let installed = install_pack_file_from_path_with_identity(
+        &pack_dir,
+        &output_path,
+        &canonical_id,
+        pack_size,
+        true,
+        Some(identity),
+    )?;
     // `index-pack --fsck-objects` above already validates every copied object
     // while creating the response index. A second `verify-pack -v` traversal
     // only repeats repository-sized work on the latency-sensitive response
@@ -699,6 +716,7 @@ pub fn concatenate_complete_pack_inventory(
         installed.pack_path,
         GeneratedPackValidation::Structural,
         None,
+        Some(identity),
     )?;
     if generated.object_count != total_objects {
         return Err(RepackError::SourceIntegrity {
@@ -1106,13 +1124,14 @@ fn pack_selected_objects(
             pack_id: "selected-pack".to_owned(),
             reason: "selected-object packing produced no pack".to_owned(),
         })?;
-    verified_generated_pack(pack_path, validation, Some(selected))
+    verified_generated_pack(pack_path, validation, Some(selected), None)
 }
 
 fn verified_generated_pack(
     pack_path: PathBuf,
     validation: GeneratedPackValidation,
     expected_object_ids: Option<&[gix_hash::ObjectId]>,
+    verified_identity: Option<VerifiedPackIdentity>,
 ) -> Result<GeometricRepackedPack, RepackError> {
     let index_path = pack_path.with_extension("idx");
     let reverse_index_path = pack_path.with_extension("rev");
@@ -1131,13 +1150,25 @@ fn verified_generated_pack(
     let locations = PackLocationIter::open(&index_path, &reverse_index_path, pack_size)?;
     let object_count = locations.object_count();
     let git_sha1 = locations.pack_checksum().to_string();
-    let (trailer, pack_hash, hashed_size) = verify_and_hash_pack_file(&pack_path)?;
-    if trailer != git_sha1 {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: pack_path.display().to_string(),
-            reason: "generated pack index checksum does not match its pack trailer".to_owned(),
-        });
-    }
+    let (pack_hash, hashed_size) = if let Some(identity) = verified_identity {
+        if identity.git_sha1.as_ref() != locations.pack_checksum().as_bytes() {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: pack_path.display().to_string(),
+                reason: "verified generated pack identity does not match its index checksum"
+                    .to_owned(),
+            });
+        }
+        (identity.content_hash, pack_size)
+    } else {
+        let (trailer, pack_hash, hashed_size) = verify_and_hash_pack_file(&pack_path)?;
+        if trailer != git_sha1 {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: pack_path.display().to_string(),
+                reason: "generated pack index checksum does not match its pack trailer".to_owned(),
+            });
+        }
+        (pack_hash, hashed_size)
+    };
     if matches!(validation, GeneratedPackValidation::Full) {
         run_git(
             Command::new("git")
