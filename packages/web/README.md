@@ -353,5 +353,5 @@ Add its slug to `components/docs/docs-sidebar-icons.tsx`. The loader attaches ic
 - [Crab repository overview](../README.md)
 - [Crab CLI documentation](https://crab.build/docs/cli/getting-started)
 - [Crab website](https://crab.build)
-- [Crab GitHub repository](https://github.com/crabbuild/crab-oss)
+- [Crab GitHub repository](https://github.com/crabbuild/crab)
 - [Apache-2.0 license](../LICENSE)

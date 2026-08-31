@@ -7,9 +7,9 @@
 <p align="center">Serverless Git for large files.</p>
 
 <p align="center">
-  <a href="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml"><img src="https://github.com/crabbuild/crab-oss/actions/workflows/rust.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/crabbuild/crab-oss/releases/latest"><img src="https://img.shields.io/github/v/release/crabbuild/crab-oss?display_name=tag" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/crabbuild/crab-oss" alt="Apache 2.0 license"></a>
+  <a href="https://github.com/crabbuild/crab/actions/workflows/rust.yml"><img src="https://github.com/crabbuild/crab/actions/workflows/rust.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/crabbuild/crab/releases/latest"><img src="https://img.shields.io/github/v/release/crabbuild/crab?display_name=tag" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/crabbuild/crab" alt="Apache 2.0 license"></a>
 </p>
 
 <p align="center">
@@ -137,8 +137,8 @@ Never commit cloud credentials or place secret values in `crab.toml`. Read the [
 Clone the workspace and use its supported installer:
 
 ```bash
-git clone https://github.com/crabbuild/crab-oss.git
-cd crab-oss/crab
+git clone https://github.com/crabbuild/crab.git
+cd crab/crab
 make install
 ```
 
