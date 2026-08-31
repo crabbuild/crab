@@ -2609,13 +2609,8 @@ async fn try_fetch_exact_shallow_closure(
         return Ok(None);
     };
     let authorization_digest = visibility.authorization_digest_for_refs([entry.ref_name.as_str()]);
-    let request_digest = shallow_fetch_request_digest(tip, depth, &selection.shallow);
-    let cache_key = repository.generated_pack_cache_key(
-        authorization_digest,
-        request_digest,
-        &selection.object_ids,
-        false,
-    );
+    let cache_key =
+        repository.generated_pack_cache_key(authorization_digest, &selection.object_ids, false);
     let pack = repository
         .generate_pack_cached(&selection.object_ids, cache_key, cancel)
         .await
@@ -2652,21 +2647,6 @@ async fn try_fetch_exact_shallow_closure(
         "remote-helper fetch used generation-bound shallow closure"
     );
     Ok(Some(vec![installed.pack_path]))
-}
-
-fn shallow_fetch_request_digest(
-    tip: gix_hash::ObjectId,
-    depth: u32,
-    shallow: &[gix_hash::ObjectId],
-) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new();
-    hash.update(b"crab.remote-helper.shallow-fetch.v1\0");
-    hash.update(tip.as_bytes());
-    hash.update(&depth.to_be_bytes());
-    for oid in shallow {
-        hash.update(oid.as_bytes());
-    }
-    *hash.finalize().as_bytes()
 }
 
 async fn fetch_promisor_objects(

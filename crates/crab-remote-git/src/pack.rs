@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crab_git::pack::VerifiedPackIdentity;
 use crab_metadata::git_object_locator::GitPackInventoryEntry;
 use flate2::{Compression, write::ZlibEncoder};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
@@ -25,7 +26,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // the total selection and each coalesced range bounds transient range memory.
 const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-pub const GENERATED_PACK_CACHE_VERSION: u32 = 1;
+pub const GENERATED_PACK_CACHE_VERSION: u32 = 3;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // Generated response packs can require a large catalog lookup plus pack
@@ -40,6 +41,105 @@ const GENERATED_PACK_TAKEOVER_JITTER_MAX: Duration = Duration::from_secs(30);
 const COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS: usize = 100_000;
 const SELECTED_PACK_REPACK_MIN_OBJECTS: usize = 100_000;
 const SOURCE_PACK_DOWNLOAD_CONCURRENCY: usize = 4;
+
+pub(crate) struct PackStreamVerifier {
+    git_sha1: Sha1,
+    content_hash: blake3::Hasher,
+    trailer: Vec<u8>,
+    header: [u8; 12],
+    header_len: usize,
+}
+
+impl Default for PackStreamVerifier {
+    fn default() -> Self {
+        Self {
+            git_sha1: Sha1::new(),
+            content_hash: blake3::Hasher::new(),
+            trailer: Vec::new(),
+            header: [0; 12],
+            header_len: 0,
+        }
+    }
+}
+
+impl PackStreamVerifier {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        if self.header_len < self.header.len() {
+            let remaining = self.header.len() - self.header_len;
+            let copied = remaining.min(bytes.len());
+            let end = self.header_len + copied;
+            self.header[self.header_len..end].copy_from_slice(&bytes[..copied]);
+            self.header_len = end;
+        }
+        self.content_hash.update(bytes);
+
+        let hash_len = self
+            .trailer
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(20);
+        if hash_len == 0 {
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+        if hash_len <= self.trailer.len() {
+            self.git_sha1.update(&self.trailer[..hash_len]);
+            self.trailer.drain(..hash_len);
+            self.trailer.extend_from_slice(bytes);
+            return;
+        }
+
+        self.git_sha1.update(&self.trailer);
+        let bytes_to_hash = hash_len - self.trailer.len();
+        self.git_sha1.update(&bytes[..bytes_to_hash]);
+        self.trailer.clear();
+        self.trailer.extend_from_slice(&bytes[bytes_to_hash..]);
+    }
+
+    pub(crate) fn finish(self) -> Result<VerifiedPackIdentity> {
+        self.finish_with_expected_object_count(None)
+    }
+
+    pub(crate) fn finish_with_expected_object_count(
+        self,
+        expected_object_count: Option<u32>,
+    ) -> Result<VerifiedPackIdentity> {
+        let version = u32::from_be_bytes([
+            self.header[4],
+            self.header[5],
+            self.header[6],
+            self.header[7],
+        ]);
+        let object_count = u32::from_be_bytes([
+            self.header[8],
+            self.header[9],
+            self.header[10],
+            self.header[11],
+        ]);
+        if self.header_len != self.header.len()
+            || &self.header[..4] != b"PACK"
+            || !matches!(version, 2 | 3)
+            || expected_object_count.is_some_and(|expected| object_count != expected)
+            || self.trailer.len() != 20
+        {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        let mut trailer = [0_u8; 20];
+        trailer.copy_from_slice(&self.trailer);
+        let git_sha1: [u8; 20] = self.git_sha1.finalize().into();
+        if git_sha1 != trailer {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        Ok(VerifiedPackIdentity {
+            git_sha1,
+            content_hash: *self.content_hash.finalize().as_bytes(),
+        })
+    }
+}
 
 /// Immutable key for one authorization- and generation-bound response pack.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,6 +239,16 @@ pub trait GeneratedPackLeaseProvider: Send + Sync {
     ) -> futures_util::future::BoxFuture<
         'a,
         std::result::Result<GeneratedPackLeaseAttempt, GeneratedPackLeaseError>,
+    >;
+
+    /// Acquire bounded capacity before downloading one published pack artifact.
+    fn acquire_read<'a>(
+        &'a self,
+        cancellation: &'a CancellationToken,
+        max_wait: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<Box<dyn GeneratedPackLease>, GeneratedPackLeaseError>,
     >;
 }
 
@@ -248,46 +358,6 @@ impl GeneratedPack {
             .collect()
     }
 
-    fn verify_checksum(&self) -> Result<()> {
-        let mut file = std::fs::File::open(self.file.path()).map_err(io_error)?;
-        if self.size < 20 {
-            return Err(Error::Metadata(
-                crab_metadata::error::MetadataError::CorruptObject {
-                    path: self.file.path().display().to_string(),
-                    reason: "generated pack is shorter than its checksum".to_owned(),
-                },
-            ));
-        }
-        let mut body = Read::by_ref(&mut file).take(self.size - 20);
-        let mut hash = Sha1::new();
-        let mut content_hash = blake3::Hasher::new();
-        let mut chunk = [0u8; 64 * 1024];
-        loop {
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            hash.update(&chunk[..read]);
-            content_hash.update(&chunk[..read]);
-        }
-        let mut trailer = [0u8; 20];
-        file.read_exact(&mut trailer).map_err(io_error)?;
-        content_hash.update(&trailer);
-        let actual: [u8; 20] = hash.finalize().into();
-        if actual != trailer
-            || actual != self.checksum
-            || content_hash.finalize().as_bytes() != &self.content_hash
-        {
-            return Err(Error::Metadata(
-                crab_metadata::error::MetadataError::CorruptObject {
-                    path: self.file.path().display().to_string(),
-                    reason: "generated pack checksum verification failed".to_owned(),
-                },
-            ));
-        }
-        Ok(())
-    }
-
     /// Stream the pack through protocol-v2 sideband channel 1.
     pub async fn write_sideband<W: AsyncWrite + Unpin>(
         &self,
@@ -315,13 +385,15 @@ impl GeneratedPack {
 }
 
 impl RemoteGitRepository {
-    /// Bind canonical request semantics and object selection to this pinned
-    /// repository and authorization state.
+    /// Bind an exact object selection to this pinned repository and authorization state.
+    ///
+    /// Request policy is intentionally excluded after planning: shallow boundaries and
+    /// filters travel separately on the wire, while a self-contained pack is determined
+    /// by its authorized object set and thin-pack mode.
     #[must_use]
     pub fn generated_pack_cache_key(
         &self,
         authorization_digest: [u8; 32],
-        request_digest: [u8; 32],
         object_ids: &[ObjectId],
         thin_pack: bool,
     ) -> GeneratedPackCacheKey {
@@ -329,7 +401,6 @@ impl RemoteGitRepository {
             &self.state.identity,
             &self.state.git_validation_digest,
             authorization_digest,
-            request_digest,
             object_ids,
             thin_pack,
         )
@@ -377,6 +448,7 @@ impl RemoteGitRepository {
         wants: &[ObjectId],
         common_haves: &[ObjectId],
         shallow: &[ObjectId],
+        included_tags: &[crab_git::repack::ShallowFetchTag],
         cancellation: &CancellationToken,
     ) -> Result<GeneratedPack> {
         let operation = self
@@ -387,10 +459,11 @@ impl RemoteGitRepository {
             let inventory_bytes = inventory
                 .iter()
                 .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
-            if inventory_bytes > operation.max_fetched_bytes() {
+            let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
+            if source_artifact_bytes > operation.max_fetched_bytes() {
                 return Err(Error::LimitExceeded {
                     limit: "native shallow source bytes",
-                    actual: inventory_bytes,
+                    actual: source_artifact_bytes,
                     maximum: operation.max_fetched_bytes(),
                 });
             }
@@ -407,6 +480,7 @@ impl RemoteGitRepository {
             let wants = wants.to_vec();
             let common_haves = common_haves.to_vec();
             let shallow = shallow.to_vec();
+            let included_tags = included_tags.to_vec();
             let maximum_objects =
                 usize::try_from(operation.max_logical_objects()).unwrap_or(usize::MAX);
             let repacked = tokio::task::spawn_blocking(move || {
@@ -415,6 +489,7 @@ impl RemoteGitRepository {
                     &wants,
                     &common_haves,
                     &shallow,
+                    &included_tags,
                     maximum_objects,
                 )
             })
@@ -620,17 +695,21 @@ impl RemoteGitRepository {
         let inventory_objects = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-        let inventory_bytes = inventory
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
-        if !Self::complete_pack_consolidation_candidate(
+        let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
+        let exact_candidate = Self::complete_pack_consolidation_candidate(
             inventory.len(),
             inventory_objects,
             object_ids.len(),
-        ) {
+        );
+        let near_candidate = Self::near_complete_pack_consolidation_candidate(
+            inventory.len(),
+            inventory_objects,
+            object_ids.len(),
+        );
+        if !exact_candidate && !near_candidate {
             return Ok(None);
         }
-        if inventory_bytes > operation.max_fetched_bytes() {
+        if source_artifact_bytes > operation.max_fetched_bytes() {
             return Ok(None);
         }
 
@@ -643,58 +722,116 @@ impl RemoteGitRepository {
         let sources =
             download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
+        let mut source_inventory_check_ms = 0_u64;
 
-        let concat_sources = sources.clone();
-        let concatenated = tokio::task::spawn_blocking(move || {
-            crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
-        })
-        .await
-        .map_err(|source| Error::DecodeTask { source })?;
-        let (repacked, strategy) = match concatenated {
-            Ok(repacked) => (repacked, "complete_pack_concatenation"),
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    error_debug = ?error,
-                    "complete pack concatenation was not usable; falling back to Git consolidation"
-                );
-                let repack_sources = sources;
+        let (repacked, strategy) = if exact_candidate {
+            let concat_sources = sources.clone();
+            let concatenated = tokio::task::spawn_blocking(move || {
+                crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?;
+            match concatenated {
+                Ok(repacked) => (repacked, "complete_pack_concatenation"),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        error_debug = ?error,
+                        "complete pack concatenation was not usable; falling back to Git consolidation"
+                    );
+                    let repack_sources = sources.clone();
+                    let repacked = tokio::task::spawn_blocking(move || {
+                        crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
+                    })
+                    .await
+                    .map_err(|source| Error::DecodeTask { source })?
+                    .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                    (repacked, "complete_pack_consolidation")
+                }
+            }
+        } else {
+            let inventory_check_started = Instant::now();
+            let check_sources = sources.clone();
+            let selected_oids = object_ids.to_vec();
+            let source_inventory_matches = tokio::task::spawn_blocking(move || {
+                crab_git::repack::source_pack_inventory_matches_object_ids(
+                    &check_sources,
+                    &selected_oids,
+                )
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64;
+            tracing::debug!(
+                source_inventory_matches,
+                source_inventory_check_ms,
+                "checked staged pack indexes against the exact response object set"
+            );
+            if source_inventory_matches {
+                let concat_sources = sources.clone();
+                let concatenated = tokio::task::spawn_blocking(move || {
+                    crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
+                })
+                .await
+                .map_err(|source| Error::DecodeTask { source })?;
+                match concatenated {
+                    Ok(repacked) => (repacked, "complete_pack_concatenation"),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            error_debug = ?error,
+                            "near-complete pack concatenation was not usable; falling back to Git consolidation"
+                        );
+                        let repack_sources = sources.clone();
+                        let repacked = tokio::task::spawn_blocking(move || {
+                            crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
+                        })
+                        .await
+                        .map_err(|source| Error::DecodeTask { source })?
+                        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+                        (repacked, "near_complete_pack_consolidation")
+                    }
+                }
+            } else {
+                let selected_oids = object_ids.to_vec();
+                let repack_sources = sources.clone();
                 let repacked = tokio::task::spawn_blocking(move || {
-                    crab_git::repack::consolidate_pack_suffix(&repack_sources)
+                    crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
                 })
                 .await
                 .map_err(|source| Error::DecodeTask { source })?
                 .map_err(|source| Error::ResponsePackConsolidation { source })?;
-                (repacked, "complete_pack_consolidation")
+                (repacked, "selected_object_repack")
             }
         };
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
         })?;
-        let locations = crab_git::pack_locator::PackLocationIter::open(
-            generated.index_path(),
-            generated.reverse_index_path(),
-            generated.pack_size,
-        )
-        .map_err(|source| Error::ResponsePackConsolidation {
-            source: crab_git::repack::RepackError::from(source),
-        })?;
-        let mut requested = object_ids.iter().copied().collect::<HashSet<_>>();
-        for location in locations {
-            let location = location.map_err(|source| Error::ResponsePackConsolidation {
-                source: crab_git::repack::RepackError::from(source),
-            })?;
-            if !requested.remove(&location.oid) {
-                return Err(Error::Corrupt {
-                    stage: crate::CorruptionStage::Inventory,
-                });
-            }
-        }
-        if !requested.is_empty() {
+        let matches_selection = generated_pack_matches_object_ids(generated, object_ids)?;
+        let (repacked, strategy) = if matches_selection {
+            (repacked, strategy)
+        } else if near_candidate {
+            tracing::debug!(
+                inventory_objects,
+                selected_objects = object_ids.len(),
+                "near-complete pack consolidation contained a different object set; reusing staged sources for exact selected repack"
+            );
+            drop(repacked);
+            let repack_sources = sources.clone();
+            let selected_oids = object_ids.to_vec();
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            (repacked, "selected_object_repack")
+        } else {
             return Err(Error::Corrupt {
                 stage: crate::CorruptionStage::Inventory,
             });
-        }
+        };
         let pack = adopt_repacked_pack(operation, repacked, cancellation).await?;
         drop(workspace);
         tracing::info!(
@@ -703,10 +840,13 @@ impl RemoteGitRepository {
             strategy,
             source_pack_count,
             object_count = pack.object_count,
+            inventory_objects,
+            selected_objects = object_ids.len(),
             source_download_ms,
+            source_inventory_check_ms,
             response_bytes = pack.size,
             pack_generation_ms = started.elapsed().as_millis() as u64,
-            "remote Git response pack consolidated from complete pack inventory"
+            "remote Git response pack produced from staged pack inventory"
         );
         Ok(Some(pack))
     }
@@ -729,11 +869,12 @@ impl RemoteGitRepository {
         let inventory_bytes = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+        let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
         if !Self::selected_pack_repack_candidate(
             inventory_objects,
             object_ids.len(),
             SELECTED_PACK_REPACK_MIN_OBJECTS,
-        ) || inventory_bytes > operation.max_fetched_bytes()
+        ) || source_artifact_bytes > operation.max_fetched_bytes()
         {
             return Ok(None);
         }
@@ -779,6 +920,20 @@ impl RemoteGitRepository {
         pack_count > 1
             && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
             && inventory_objects == selected_objects as u64
+    }
+
+    fn near_complete_pack_consolidation_candidate(
+        pack_count: usize,
+        inventory_objects: u64,
+        selected_objects: usize,
+    ) -> bool {
+        // Incremental packs can repeat OIDs already present in older packs.
+        let selected_objects = u64::try_from(selected_objects).unwrap_or(u64::MAX);
+        let extra_objects = inventory_objects.saturating_sub(selected_objects);
+        pack_count > 1
+            && selected_objects >= COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64
+            && extra_objects > 0
+            && extra_objects <= selected_objects / 100
     }
 
     fn selected_pack_repack_candidate(
@@ -849,8 +1004,14 @@ impl RemoteGitRepository {
                 invariant: "generated pack cache key does not match object selection",
             });
         }
-        if let Some(pack) =
-            load_cached_pack(self, cache_key.hex(), Some(object_ids.len()), cancellation).await?
+        if let Some(pack) = load_cached_pack_retrying_transient(
+            self,
+            cache_key.hex(),
+            Some(object_ids.len()),
+            true,
+            cancellation,
+        )
+        .await?
         {
             record_generated_pack_cache(self, crate::CacheOutcome::Hit, 1);
             return Ok(pack);
@@ -878,6 +1039,28 @@ impl RemoteGitRepository {
             .await?;
         Ok(generated.as_ref().clone())
     }
+}
+
+fn generated_pack_matches_object_ids(
+    generated: &crab_git::repack::GeometricRepackedPack,
+    object_ids: &[ObjectId],
+) -> Result<bool> {
+    if generated.object_count != u64::try_from(object_ids.len()).unwrap_or(u64::MAX) {
+        return Ok(false);
+    }
+    let locations = crab_git::pack_locator::PackLocationIter::open(
+        generated.index_path(),
+        generated.reverse_index_path(),
+        generated.pack_size,
+    )
+    .map_err(|source| Error::ResponsePackConsolidation {
+        source: crab_git::repack::RepackError::from(source),
+    })?;
+    // Git v2 indexes already keep OIDs sorted; compare against that order
+    // instead of allocating a hash table for every object in a large response.
+    let mut expected = object_ids.to_vec();
+    expected.sort_unstable();
+    Ok(locations.matches_sorted_object_ids(&expected))
 }
 
 async fn adopt_repacked_pack(
@@ -920,7 +1103,9 @@ async fn adopt_repacked_pack(
         })?,
     };
     drop(repacked);
-    pack.verify_checksum()?;
+    // `verified_generated_pack` already validated these bytes and computed both
+    // digests before ownership transfer. Rehashing here would scan the response
+    // pack a second time before it can be published or streamed.
     Ok(pack)
 }
 
@@ -936,9 +1121,30 @@ async fn download_repack_sources(
         cancellation,
         SOURCE_PACK_DOWNLOAD_CONCURRENCY,
         |pack, path| async move {
-            operation
-                .download_pack_to_path(pack.pack_id, pack.pack_size, &path)
-                .await
+            let index_maximum =
+                crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                })?;
+            let reverse_maximum =
+                crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                })?;
+            let index_path = path.with_extension("idx");
+            let reverse_index_path = path.with_extension("rev");
+            // The body and its immutable sidecars are independent objects.
+            // Keep the pack-level fanout bounded by the surrounding stream,
+            // while overlapping their latency under the runtime origin
+            // semaphore.
+            let (verified_identity, (), ()) = tokio::try_join!(
+                operation.download_pack_to_path(pack.pack_id, pack.pack_size, &path),
+                operation.download_pack_index_to_path(pack.pack_id, index_maximum, &index_path,),
+                operation.download_pack_reverse_index_to_path(
+                    pack.pack_id,
+                    reverse_maximum,
+                    &reverse_index_path,
+                ),
+            )?;
+            Ok(Some(verified_identity))
         },
     )
     .await
@@ -953,25 +1159,32 @@ async fn download_repack_sources_with<F, Fut>(
 ) -> Result<Vec<crab_git::repack::RepackSource>>
 where
     F: Fn(GitPackInventoryEntry, PathBuf) -> Fut + Sync,
-    Fut: Future<Output = Result<()>> + Send,
+    Fut: Future<Output = Result<Option<crab_git::pack::VerifiedPackIdentity>>> + Send,
 {
     let concurrency = inventory.len().min(max_concurrency.max(1)).max(1);
     let mut sources = stream::iter(inventory.into_iter().enumerate().map(|(index, pack)| {
         let path = download_dir.join(format!("pack-{index}-{}.pack", pack.pack_id));
+        let index_path = path.with_extension("idx");
+        let reverse_index_path = path.with_extension("rev");
         let download = &download;
         async move {
             if cancellation.is_cancelled() {
                 return Err(Error::Cancelled);
             }
             std::fs::File::create(&path).map_err(io_error)?;
-            download(pack, path.clone()).await?;
+            std::fs::File::create(&index_path).map_err(io_error)?;
+            std::fs::File::create(&reverse_index_path).map_err(io_error)?;
+            let verified_identity = download(pack, path.clone()).await?;
             Ok::<_, Error>((
                 index,
                 crab_git::repack::RepackSource {
                     canonical_id: pack.pack_id.to_string(),
                     path,
+                    index_path,
+                    reverse_index_path,
                     size: pack.pack_size,
                     object_count: pack.object_count,
+                    verified_identity,
                 },
             ))
         }
@@ -983,21 +1196,39 @@ where
     Ok(sources.into_iter().map(|(_, source)| source).collect())
 }
 
+fn repack_source_artifact_bytes(inventory: &[GitPackInventoryEntry]) -> Result<u64> {
+    inventory.iter().try_fold(0_u64, |total, pack| {
+        let index_size =
+            crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })?;
+        let reverse_index_size =
+            crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })?;
+        total
+            .checked_add(pack.pack_size)
+            .and_then(|value| value.checked_add(index_size))
+            .and_then(|value| value.checked_add(reverse_index_size))
+            .ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::Inventory,
+            })
+    })
+}
+
 fn generated_pack_cache_key(
     identity: &crate::RepositoryIdentity,
     git_validation_digest: &str,
     authorization_digest: [u8; 32],
-    request_digest: [u8; 32],
     object_ids: &[ObjectId],
     thin_pack: bool,
 ) -> GeneratedPackCacheKey {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"crab.generated-pack.request\0");
+    hash.update(b"crab.generated-pack.selection.v1\0");
     hash.update(&GENERATED_PACK_CACHE_VERSION.to_be_bytes());
     identity.hash_cache_identity(&mut hash);
     hash.update(git_validation_digest.as_bytes());
     hash.update(&authorization_digest);
-    hash.update(&request_digest);
     hash.update(&[u8::from(thin_pack)]);
     let selection_digest = selected_object_digest(object_ids);
     hash.update(&selection_digest);
@@ -1066,10 +1297,11 @@ async fn produce_cached_pack(
     let wait_seed = generated_pack_wait_seed(cache_key.hex());
     let mut lease_retry_at = None;
     loop {
-        if let Some(pack) = load_cached_pack(
+        if let Some(pack) = load_cached_pack_retrying_transient(
             repository,
             cache_key.hex(),
             Some(object_ids.len()),
+            true,
             cancellation,
         )
         .await?
@@ -1196,14 +1428,15 @@ async fn produce_cached_pack_under_lease(
     object_ids: &[ObjectId],
     cache_key: GeneratedPackCacheKey,
     allow_dense_selected_assembly: bool,
-    mut lock: Box<dyn GeneratedPackLease>,
+    lock: Box<dyn GeneratedPackLease>,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
     let producer = async {
-        if let Some(pack) = load_cached_pack(
+        if let Some(pack) = load_cached_pack_retrying_transient(
             repository,
             cache_key.hex(),
             Some(object_ids.len()),
+            false,
             cancellation,
         )
         .await?
@@ -1228,29 +1461,7 @@ async fn produce_cached_pack_under_lease(
         .await?;
         Ok(generated)
     };
-    tokio::pin!(producer);
-    let mut renewal = tokio::time::interval(GENERATED_PACK_LEASE_RENEWAL);
-    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    renewal.tick().await;
-    let result = loop {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => break Err(Error::Cancelled),
-            result = &mut producer => break result,
-            _ = renewal.tick() => {
-                if let Err(source) = lock.renew().await {
-                    break Err(Error::GeneratedPackLease { source });
-                }
-            }
-        }
-    };
-    if lock.release().await.is_err() {
-        tracing::warn!(
-            telemetry_event = "generated_pack_lease_release",
-            "generated response-pack lease release failed"
-        );
-    }
-    result
+    run_with_generated_pack_lease(lock, cancellation, producer, std::convert::identity).await
 }
 
 async fn produce_cached_pack_without_lease(
@@ -1260,10 +1471,11 @@ async fn produce_cached_pack_without_lease(
     allow_dense_selected_assembly: bool,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
-    if let Some(pack) = load_cached_pack(
+    if let Some(pack) = load_cached_pack_retrying_transient(
         repository,
         cache_key.hex(),
         Some(object_ids.len()),
+        false,
         cancellation,
     )
     .await?
@@ -1293,9 +1505,10 @@ async fn produce_request_cached_pack<E, Fut>(
 where
     Fut: Future<Output = std::result::Result<GeneratedPack, E>>,
 {
-    if let Some(pack) = load_cached_pack(repository, cache_key.hex(), None, cancellation)
-        .await
-        .map_err(GeneratedPackRequestCacheError::Cache)?
+    if let Some(pack) =
+        load_cached_pack_retrying_transient(repository, cache_key.hex(), None, true, cancellation)
+            .await
+            .map_err(GeneratedPackRequestCacheError::Cache)?
     {
         record_generated_pack_cache(repository, crate::CacheOutcome::Hit, 1);
         return Ok(pack);
@@ -1328,9 +1541,15 @@ where
     let mut lease_retry_at = None;
     let mut producer = Some(producer);
     loop {
-        if let Some(pack) = load_cached_pack(repository, cache_key.hex(), None, cancellation)
-            .await
-            .map_err(GeneratedPackRequestCacheError::Cache)?
+        if let Some(pack) = load_cached_pack_retrying_transient(
+            repository,
+            cache_key.hex(),
+            None,
+            true,
+            cancellation,
+        )
+        .await
+        .map_err(GeneratedPackRequestCacheError::Cache)?
         {
             record_generated_pack_cache(repository, crate::CacheOutcome::Hit, 1);
             return Ok(pack);
@@ -1417,16 +1636,22 @@ async fn produce_request_cached_pack_under_lease<E, Fut>(
     repository: &RemoteGitRepository,
     cache_key: GeneratedPackRequestCacheKey,
     producer: Fut,
-    mut lock: Box<dyn GeneratedPackLease>,
+    lock: Box<dyn GeneratedPackLease>,
     cancellation: &CancellationToken,
 ) -> std::result::Result<GeneratedPack, GeneratedPackRequestCacheError<E>>
 where
     Fut: Future<Output = std::result::Result<GeneratedPack, E>>,
 {
     let work = async {
-        if let Some(pack) = load_cached_pack(repository, cache_key.hex(), None, cancellation)
-            .await
-            .map_err(GeneratedPackRequestCacheError::Cache)?
+        if let Some(pack) = load_cached_pack_retrying_transient(
+            repository,
+            cache_key.hex(),
+            None,
+            false,
+            cancellation,
+        )
+        .await
+        .map_err(GeneratedPackRequestCacheError::Cache)?
         {
             return Ok(pack);
         }
@@ -1445,6 +1670,25 @@ where
         .map_err(GeneratedPackRequestCacheError::Cache)?;
         Ok(generated)
     };
+    run_with_generated_pack_lease(
+        lock,
+        cancellation,
+        work,
+        GeneratedPackRequestCacheError::Cache,
+    )
+    .await
+}
+
+async fn run_with_generated_pack_lease<T, E, Fut, Map>(
+    mut lease: Box<dyn GeneratedPackLease>,
+    cancellation: &CancellationToken,
+    work: Fut,
+    map_error: Map,
+) -> std::result::Result<T, E>
+where
+    Fut: Future<Output = std::result::Result<T, E>>,
+    Map: Fn(Error) -> E,
+{
     tokio::pin!(work);
     let mut renewal = tokio::time::interval(GENERATED_PACK_LEASE_RENEWAL);
     renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1452,26 +1696,29 @@ where
     let result = loop {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => {
-                break Err(GeneratedPackRequestCacheError::Cache(Error::Cancelled));
-            }
+            () = cancellation.cancelled() => break Err(map_error(Error::Cancelled)),
             result = &mut work => break result,
             _ = renewal.tick() => {
-                if let Err(source) = lock.renew().await {
-                    break Err(GeneratedPackRequestCacheError::Cache(
-                        Error::GeneratedPackLease { source },
-                    ));
+                if let Err(source) = lease.renew().await {
+                    break Err(map_error(Error::GeneratedPackLease { source }));
                 }
             }
         }
     };
-    if lock.release().await.is_err() {
-        tracing::warn!(
-            telemetry_event = "generated_pack_lease_release",
-            "generated response-pack lease release failed"
-        );
+    let release = lease.release().await;
+    match (result, release) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(source)) => Err(map_error(Error::GeneratedPackLease { source })),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(source)) => {
+            tracing::warn!(
+                telemetry_event = "generated_pack_lease_release",
+                error = %source,
+                "generated response-pack lease release failed after operation error"
+            );
+            Err(error)
+        }
     }
-    result
 }
 
 fn record_generated_pack_cache(
@@ -1499,10 +1746,69 @@ fn record_generated_pack_cache(
     );
 }
 
+async fn load_cached_pack_retrying_transient(
+    repository: &RemoteGitRepository,
+    request_hash: String,
+    expected_objects: Option<usize>,
+    acquire_read_admission: bool,
+    cancellation: &CancellationToken,
+) -> Result<Option<GeneratedPack>> {
+    let deadline =
+        tokio::time::Instant::now() + repository.state.options.operation_limits().max_duration;
+    let wait_seed = generated_pack_wait_seed(request_hash.clone());
+    let mut attempt = 0_usize;
+    loop {
+        match load_cached_pack(
+            repository,
+            request_hash.clone(),
+            expected_objects,
+            acquire_read_admission,
+            cancellation,
+        )
+        .await
+        {
+            Ok(pack) => return Ok(pack),
+            Err(error) if generated_pack_cache_read_retryable(&error) => {
+                let delay = generated_pack_cache_poll(attempt, wait_seed);
+                tracing::debug!(
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %error,
+                    "generated response-pack cache read will retry"
+                );
+                attempt = attempt.saturating_add(1);
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(Error::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => {
+                        return Err(Error::Timeout { operation: "upload-pack" });
+                    }
+                    () = tokio::time::sleep(delay) => {}
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn generated_pack_cache_read_retryable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Storage(source)
+            if matches!(
+                crab_storage::retry_class(source),
+                crab_storage::RetryClass::Transient
+                    | crab_storage::RetryClass::Throttled { .. }
+                    | crab_storage::RetryClass::InspectErrno
+            )
+    )
+}
+
 async fn load_cached_pack(
     repository: &RemoteGitRepository,
     request_hash: String,
     expected_objects: Option<usize>,
+    acquire_read_admission: bool,
     cancellation: &CancellationToken,
 ) -> Result<Option<GeneratedPack>> {
     let descriptor_path = repository
@@ -1558,41 +1864,133 @@ async fn load_cached_pack(
         .state
         .layout
         .generated_pack_artifact_path(&descriptor.content_hash);
-    let file = NamedTempFile::new().map_err(io_error)?;
-    let downloaded = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(Error::Cancelled),
-        result = repository
-            .state
-            .store
-            .download_to_path_bounded(&artifact_path, file.path(), descriptor.size) => result?,
+    // Waiters release session admission while production is in flight. Reacquire
+    // it only after immutable publication so a fanout miss cannot deadlock the
+    // producer and a fanout hit cannot herd unbounded downloads into storage.
+    let read_admission = if acquire_read_admission {
+        match repository.generated_pack_lease_provider.as_ref() {
+            Some(provider) => Some(
+                provider
+                    .acquire_read(
+                        cancellation,
+                        repository.state.options.operation_limits().max_duration,
+                    )
+                    .await
+                    .map_err(|source| Error::GeneratedPackLease { source })?,
+            ),
+            None => None,
+        }
+    } else {
+        None
     };
-    if downloaded != descriptor.size {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    let path = file.path().to_owned();
-    let token = cancellation.clone();
-    tokio::task::spawn_blocking(move || {
-        inspect_cached_pack(
-            &path,
+    let load = async {
+        let file = NamedTempFile::new().map_err(io_error)?;
+        download_cached_pack_to_path(
+            repository,
+            &artifact_path,
+            file.path(),
             descriptor.size,
             descriptor.object_count,
             checksum,
             content_hash,
-            &token,
+            cancellation,
         )
-    })
-    .await
-    .map_err(|source| Error::DecodeTask { source })??;
-    Ok(Some(GeneratedPack {
-        file: Arc::new(file),
-        size: descriptor.size,
-        checksum,
-        content_hash,
-        object_count: descriptor.object_count,
-    }))
+        .await?;
+        Ok(GeneratedPack {
+            file: Arc::new(file),
+            size: descriptor.size,
+            checksum,
+            content_hash,
+            object_count: descriptor.object_count,
+        })
+    };
+    let result = match read_admission {
+        Some(admission) => {
+            run_with_generated_pack_lease(admission, cancellation, load, std::convert::identity)
+                .await
+        }
+        None => load.await,
+    };
+    result.map(Some)
+}
+
+async fn download_cached_pack_to_path(
+    repository: &RemoteGitRepository,
+    artifact_path: &object_store::path::Path,
+    destination: &Path,
+    expected_size: u64,
+    expected_objects: u32,
+    expected_checksum: [u8; 20],
+    expected_content_hash: [u8; 32],
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    // Cache artifacts are immutable and descriptor-bound; verify while writing
+    // so a cache hit does not perform a second repository-sized disk traversal.
+    if expected_size < 32 {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let origin_permit = repository.state.runtime.origin_permit(cancellation).await?;
+    let (metadata, range, mut stream) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        result = repository.state.store.get_stream(artifact_path, None) => result?,
+    };
+    if metadata.size > expected_size {
+        return Err(crab_storage::StorageError::CorruptObject {
+            path: artifact_path.to_string(),
+            reason: format!(
+                "object advertises {} bytes, bounded download allows {expected_size} bytes",
+                metadata.size
+            ),
+        }
+        .into());
+    }
+    if metadata.size != expected_size || range != (0..expected_size) {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let mut file = tokio::fs::File::create(destination)
+        .await
+        .map_err(io_error)?;
+    let mut verifier = PackStreamVerifier::default();
+    let mut written = 0_u64;
+    while let Some(chunk) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        chunk = stream.next() => chunk,
+    } {
+        let chunk = chunk?;
+        let next = written
+            .checked_add(chunk.len() as u64)
+            .ok_or(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            })?;
+        if next > expected_size {
+            return Err(Error::Corrupt {
+                stage: crate::CorruptionStage::PackEntry,
+            });
+        }
+        verifier.update(&chunk);
+        file.write_all(&chunk).await.map_err(io_error)?;
+        written = next;
+    }
+    file.flush().await.map_err(io_error)?;
+    drop(origin_permit);
+    if written != expected_size {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    let identity = verifier.finish_with_expected_object_count(Some(expected_objects))?;
+    if identity.git_sha1 != expected_checksum || identity.content_hash != expected_content_hash {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
+    Ok(())
 }
 
 fn generated_pack_descriptor_matches_request(
@@ -1670,10 +2068,11 @@ async fn publish_cached_pack(
     {
         Ok(()) => Ok(()),
         Err(crab_storage::StorageError::StateConflict { .. }) => {
-            match load_cached_pack(
+            match load_cached_pack_retrying_transient(
                 repository,
                 request_hash,
                 Some(selection_object_count),
+                false,
                 cancellation,
             )
             .await?
@@ -1719,62 +2118,6 @@ fn decode_generated_pack_descriptor(bytes: &[u8]) -> Result<GeneratedPackDescrip
     })
 }
 
-fn inspect_cached_pack(
-    path: &std::path::Path,
-    expected_size: u64,
-    expected_objects: u32,
-    expected_checksum: [u8; 20],
-    expected_content_hash: [u8; 32],
-    cancellation: &CancellationToken,
-) -> Result<()> {
-    let mut file = std::fs::File::open(path).map_err(io_error)?;
-    if file.metadata().map_err(io_error)?.len() != expected_size {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    let mut header = [0u8; 12];
-    file.read_exact(&mut header).map_err(io_error)?;
-    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
-    let object_count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
-    if &header[..4] != b"PACK" || !matches!(version, 2 | 3) || object_count != expected_objects {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut sha1 = Sha1::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut chunk = [0u8; 1024 * 1024];
-    {
-        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            sha1.update(&chunk[..read]);
-            blake3.update(&chunk[..read]);
-        }
-    }
-    let mut trailer = [0u8; 20];
-    file.read_exact(&mut trailer).map_err(io_error)?;
-    blake3.update(&trailer);
-    let actual_sha1: [u8; 20] = sha1.finalize().into();
-    if actual_sha1 != trailer
-        || trailer != expected_checksum
-        || blake3.finalize().as_bytes() != &expected_content_hash
-    {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    Ok(())
-}
-
 fn decode_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
     if value.len() != N.saturating_mul(2) {
         return None;
@@ -1815,20 +2158,18 @@ async fn try_reuse_single_pack(
 
     let started = Instant::now();
     let file = NamedTempFile::new().map_err(io_error)?;
-    operation
+    let path = file.path().to_owned();
+    let verified_identity = operation
         .download_pack_to_path(inventory.pack_id, inventory.pack_size, file.path())
         .await?;
-    let path = file.path().to_owned();
+    if verified_identity.git_sha1 != expected_checksum {
+        return Err(Error::Corrupt {
+            stage: crate::CorruptionStage::PackEntry,
+        });
+    }
     let token = cancellation.clone();
-    let (checksum, content_hash) = tokio::task::spawn_blocking(move || {
-        inspect_reused_pack(
-            &path,
-            inventory.pack_id,
-            inventory.pack_size,
-            inventory.object_count,
-            expected_checksum,
-            &token,
-        )
+    tokio::task::spawn_blocking(move || {
+        inspect_reused_pack(&path, inventory.pack_size, inventory.object_count, &token)
     })
     .await
     .map_err(|source| Error::DecodeTask { source })??;
@@ -1856,20 +2197,21 @@ async fn try_reuse_single_pack(
     Ok(Some(GeneratedPack {
         file: Arc::new(file),
         size: inventory.pack_size,
-        checksum,
-        content_hash,
+        checksum: verified_identity.git_sha1,
+        content_hash: verified_identity.content_hash,
         object_count,
     }))
 }
 
 fn inspect_reused_pack(
     path: &std::path::Path,
-    pack_id: crab_xet::hash::MerkleHash,
     expected_size: u64,
     expected_objects: u64,
-    expected_checksum: [u8; 20],
     cancellation: &CancellationToken,
-) -> Result<([u8; 20], [u8; 32])> {
+) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     if expected_size < 32 {
         return Err(Error::Corrupt {
             stage: crate::CorruptionStage::PackEntry,
@@ -1893,43 +2235,7 @@ fn inspect_reused_pack(
             stage: crate::CorruptionStage::PackEntry,
         });
     }
-
-    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let mut sha1 = Sha1::new();
-    let mut blake3 = blake3::Hasher::new();
-    let mut chunk = [0u8; 1024 * 1024];
-    {
-        let mut body = Read::by_ref(&mut file).take(expected_size - 20);
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let read = body.read(&mut chunk).map_err(io_error)?;
-            if read == 0 {
-                break;
-            }
-            sha1.update(&chunk[..read]);
-            blake3.update(&chunk[..read]);
-        }
-    }
-    let mut trailer = [0u8; 20];
-    file.read_exact(&mut trailer).map_err(io_error)?;
-    blake3.update(&trailer);
-    let actual_sha1: [u8; 20] = sha1.finalize().into();
-    let actual_blake3 = *blake3.finalize().as_bytes();
-    if actual_sha1 != trailer
-        || trailer != expected_checksum
-        || actual_blake3
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            != pack_id.to_string()
-    {
-        return Err(Error::Corrupt {
-            stage: crate::CorruptionStage::PackEntry,
-        });
-    }
-    Ok((trailer, actual_blake3))
+    Ok(())
 }
 
 async fn generate_pack_with_operation(
@@ -2400,14 +2706,7 @@ mod tests {
             .expect("moved repository identity");
         let objects = [ObjectId::from([1; 20])];
         let key = |identity, validation_digest| {
-            generated_pack_cache_key(
-                identity,
-                validation_digest,
-                [2; 32],
-                [3; 32],
-                &objects,
-                false,
-            )
+            generated_pack_cache_key(identity, validation_digest, [2; 32], &objects, false)
         };
 
         let base = key(&identity, "validation-a");
@@ -2437,12 +2736,12 @@ mod tests {
         let identity =
             crate::RepositoryIdentity::new("memory", "org/repo", 1).expect("repository identity");
         let objects = [ObjectId::from([1; 20])];
-        let current =
-            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], &objects, false);
+        let current = generated_pack_cache_key(&identity, "validation", [2; 32], &objects, false);
 
         let selection_digest = selected_object_digest(&objects);
         let mut previous_hash = blake3::Hasher::new();
-        previous_hash.update(b"crab.generated-pack.request.v1\0");
+        previous_hash.update(b"crab.generated-pack.request\0");
+        previous_hash.update(&GENERATED_PACK_CACHE_VERSION.to_be_bytes());
         identity.hash_cache_identity(&mut previous_hash);
         previous_hash.update(b"validation");
         previous_hash.update(&[2; 32]);
@@ -2487,7 +2786,7 @@ mod tests {
         let first = ObjectId::from([1; 20]);
         let second = ObjectId::from([2; 20]);
         let key = |objects: &[ObjectId]| {
-            generated_pack_cache_key(&identity, "validation", [2; 32], [3; 32], objects, false)
+            generated_pack_cache_key(&identity, "validation", [2; 32], objects, false)
         };
 
         assert_eq!(key(&[first, second]), key(&[second, first]));
@@ -2515,6 +2814,22 @@ mod tests {
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64 + 1,
             COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS,
         ));
+    }
+
+    #[test]
+    fn near_complete_pack_consolidation_allows_small_duplicate_slack() {
+        assert!(
+            RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 101_000, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 102_001, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(2, 99_999, 100_000,)
+        );
+        assert!(
+            !RemoteGitRepository::near_complete_pack_consolidation_candidate(1, 101_000, 100_000,)
+        );
     }
 
     #[test]
@@ -2565,8 +2880,14 @@ mod tests {
                         tokio::fs::write(&path, pack.pack_id.as_bytes())
                             .await
                             .map_err(io_error)?;
+                        tokio::fs::write(path.with_extension("idx"), b"index")
+                            .await
+                            .map_err(io_error)?;
+                        tokio::fs::write(path.with_extension("rev"), b"reverse")
+                            .await
+                            .map_err(io_error)?;
                         active.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(None)
                     }
                 }
             },
@@ -2583,6 +2904,12 @@ mod tests {
             (1..=8).collect::<Vec<_>>()
         );
         assert!(sources.iter().all(|source| source.path.is_file()));
+        assert!(sources.iter().all(|source| source.index_path.is_file()));
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.reverse_index_path.is_file())
+        );
     }
 
     fn packed_entry(oid: u8, base_oid: Option<u8>) -> crate::reader::RemoteGitPackedEntry {

@@ -211,8 +211,11 @@ that fits and reports `geometric_repack_bounded`; if even two source packs do
 not fit, it reports `geometric_repack_deferred` and retries on the next
 eligibility interval. Explicit `crab repack` remains the unbounded operator
 path, while automatic owner work cannot monopolize one repository's
-maintenance lease. The bounded selector has unit coverage; sustained
-10,000-push owner convergence and interruption evidence remain open.
+maintenance lease. The owner batch is now capped at 128 source packs, 2 GiB,
+384 source-artifact requests, and ten minutes; the request budget counts the
+pack, index, and reverse-index read required for every source pack. The
+bounded selector has unit coverage; sustained 10,000-push owner convergence
+and interruption evidence remain open.
 
 The background owner now adds an incremental pack-tier accumulation gate. A
 single undersized pack is retained while lower-tier siblings accumulate; once
@@ -1260,6 +1263,370 @@ remaining roadmap gates below: independent Kubernetes repeatability, valid
 response-pack SLOs, provider/fault/failover/canary evidence, and the final
 catalog/readiness handoff proof.
 
+### 2026-08-30 producer-path qualification update
+
+PR #120 exercises the native shallow producer and generated-pack fanout against
+the Kubernetes repository on RustFS. The meaningful 100-commit replay completed
+all pushes, and repository maintenance reduced the remote pack inventory from
+92 packs to 2 before clone qualification. The final stale-client request is a
+dense native-Git shallow negotiation: native Git independently selects the same
+closure, so replacing it with the earlier bounded 4,717-object response would
+omit a reachable merge parent and is not a valid optimization.
+
+The measured producer resolved shallow visibility from the pinned commit graph
+in 10 ms without opening the locator database. One producer served 99
+coalesced callers, selected 1,613,477 objects from 1,263,637,043 source bytes,
+downloaded the two source packs in 19,035 ms, and generated a 1,215,020,086-byte
+response in 133,907 ms. Artifact publication and delivery setup completed by
+159,985 ms, so multipart upload was not the long pole. The same run also proved
+that depth-1, depth-10, depth-100, and depth-1,000 requests remain Git-correct;
+the depth-1,000 selection reused the full-content artifact in 12.8 s instead of
+running another roughly 100 s producer.
+
+The fanout exposed four distinct consumer-side failures, all fixed in PR #120:
+
+- generated-pack artifact reads now use bounded product-owned admission, while
+  transient throttling retries preserve the immutable descriptor/cache hit;
+- producer lease renewal remains correctness-critical, but reader renewal and
+  release failures are advisory because read admission is only a performance
+  boundary;
+- session and artifact admission use the supported two-hour transfer lifetime,
+  replacing the five-minute queue timeout that rejected healthy large-pack
+  waves;
+- one canonical lease runner owns cancellation, renewal, and holder-checked
+  release, preventing divergent producer and reader cleanup paths.
+
+The exact-current consumer rerun deliberately started the 96 clients that had
+not already succeeded as ordinary Git processes on one 32 GiB qualification
+host. All 96 hit the immutable cache artifact, completed their Crab/RustFS
+streams before the two-hour deadline, and exited zero. Maximum admission wait
+was 5,372,007 ms and maximum queue-plus-stream latency was 6,018,321 ms; no
+request logged a timeout, throttling failure, remote error, fatal error, or
+renewal warning. Across all 100 clients, refs matched the expected Kubernetes
+tip, the original shallow boundary remained present, and `git fsck --full`
+passed 100/100 in 1,279 s.
+
+Full client wall time is not accepted as a product SLO: 96 concurrent local
+`git index-pack` processes drove the host into swap and saturated the shared
+workspace disk while resolving reused deltas. A stack sample placed Git in
+`threaded_second_pass -> unpack_data -> pread`, after the Crab stream had closed
+and released admission. Once all remote streams were complete, a reversible
+qualification-only scheduler bounded combined indexing and connectivity work
+to 16; every fetch then finalized successfully. The report
+`codex-9153e762-targeted-stale100-20260830` separates server latency from this
+one-host client tail, records exact-prefix cleanup of all 1,141 RustFS objects,
+and does not present the 7,300 s harness duration as a 100-workstation SLO.
+
+The next producer optimization is a measured pack-shape experiment, not a
+larger multipart part size. Benchmark delta depth/reuse candidates against all
+four outcomes: producer CPU, response bytes, client `index-pack` wall time, and
+peak client memory. Accept a new shape only when every selected object and
+shallow boundary matches native Git, the cached artifact remains immutable and
+self-contained, and aggregate developer completion improves without violating
+the response-size SLO. Phase 6 must run that matrix on distributed clients (or
+separate protocol-drain fanout from a bounded set of full Git clients), then
+repeat on S3, GCS, and Azure with cache-service, throttling, failover, retention,
+and canary evidence.
+
+A follow-up producer microqualification replayed the exact 1,613,477-object
+selection against the read-only Kubernetes object database. Native
+`pack-objects` generated an equivalent 1.1 GiB response shape in 9.47 s, while
+the subsequent redundant `verify-pack -v` traversal took another 30.51 s.
+Commit `175b08db` in PR #120 reserves that deep second traversal for durable
+maintenance packs. Commit `4d2b956d` additionally carries the already verified
+pack digests through response adoption, removing a second full response-pack
+hash scan. The transient shallow response still verifies the
+pack SHA-1, Blake3 storage identity, index and reverse-index checksums, and
+exact selected object set; it also computes SHA-1 and Blake3 in one streaming
+read instead of reading the entire response twice. Durable maintenance output
+continues to use the deep object traversal.
+A current-head RustFS qualification, `codex-7419fe11-k8s-producer100-single-20260830`,
+now exercises the same path against Kubernetes revision
+`e72c2715ade37738aa5c029e8de5285cbe1c9441`. It completed 101 pushes, all 21
+declared smoke checks, full/filtered/shallow/incremental clone correctness,
+source immutability, and exact-prefix cleanup; the standalone verifier passes
+with `--allow-smoke` and reports fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+current `7419fe11` release binary has SHA-256
+`d15744440a7cfdb7d8b4cd5b1f1a02a63933695637733bb1334b2ebc202f4cfb`.
+
+At checkpoint 100, the active inventory remained two packs (1,279,007,682
+bytes of physical pack data; 103 historical immutable packs remained in the
+store for retention/GC). The cold full response selected 1,646,244 objects,
+downloaded two committed packs plus sidecars in 12,688 ms, and generated a
+1,244,255,615-byte response in 36,036 ms; the prior diagnostic generated a
+similar response in 68,062 ms. The depth-100 response selected 966,820 objects
+and took 54,677 ms to generate 747,286,081 bytes, making it the next measured
+pack-shape/producer target. Warm full-clone generation was a cache hit with
+1,986 ms of server operation time, while its 1.24-GB transfer still dominated
+the client wall time. Owner convergence at checkpoint 100 took 175,786 ms and
+peaked at 1,590,673,408 bytes of child RSS, so maintenance remains a separate
+large-repository bottleneck.
+
+This is valid current-head single-client smoke evidence, not a team SLO: it
+does not include the verifier's 100-client fanout, provider matrix, injected
+faults, or sustained rollout window.
+
+A follow-up current-head smoke, `codex-98082cf0-k8s-producer100-single-20260830`,
+then exercised the OID-index-order exact-set optimization against the same
+Kubernetes revision. It again passed 21/21 checks and the same 101-push
+correctness/cleanup matrix; the verifier accepts it with `--allow-smoke` and
+the fingerprint remains
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+release binary SHA-256 is
+`99e1c7e28a379fd4bb388ac9d14700afc328da59afee92a3b9e7eb99e1691d28`.
+
+The cold full response generated 1,244,255,615 bytes in 29,820 ms after
+11,746 ms of source download, compared with 36,036 ms in the preceding smoke
+and 68,062 ms in the older diagnostic. Depth-100 generated 747,220,954 bytes
+in 53,201 ms after 14,450 ms of source download. Active inventory again stayed
+at two packs at checkpoint 100; exact-prefix cleanup removed 1,111 objects.
+The run remains single-client smoke evidence, so it does not close distributed
+fanout, provider, fault, retention, or rollout gates.
+
+The follow-up experiment `codex-75079ea7-k8s-producer100-selected-shallow-20260830`
+tested direct packed-entry assembly for the unfiltered initial depth-100
+selection. It passed the same 21/21 correctness checks, source immutability,
+and exact-prefix cleanup, with fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+experiment is rejected for this workload: the 966,820-object response needed
+146,960 storage requests, fetched 4,545,656,957 bytes, inflated
+6,132,610,903 bytes, and took 202,447 ms to generate a 951,601,381-byte pack.
+The preceding selected-object repack generated a smaller 747,220,954-byte
+response in 53,201 ms with seven storage requests. Direct assembly remains
+reserved for catalog-exact dense filters; initial shallow responses retain the
+lower-request selected-repack path until a local-source or better-batched
+implementation proves an improvement across producer CPU, response bytes,
+range reads, and client indexing.
+
+The producer patch removes the source-side index bottleneck rather than
+changing pack shape blindly. Large producers now download the committed pack
+body together with its `.idx` and `.rev` sidecars, validate both sidecars
+against the pack trailer, object count, offsets, CRC table, and checksums, then
+hard-link the verified artifacts into the temporary Git object database when
+the filesystems permit it. Cross-device staging falls back to bounded copies.
+The shallow path no longer materializes and walks an OID vector from every
+source pack when Git's native reachability walk is the only consumer. The ACL
+view publisher now emits the same sidecars, closing the sibling producer gap.
+Focused Crab, crab-git, crab-remote-git, and auth-view tests pass for this
+contract. The `codex-4b6b4344-k8s-producer100-single-20260830` diagnostic
+exercised the sidecar path through 101 replay pushes and the full clone/fetch
+matrix: checkpoint-100 held 103 physical packs, the cold full response used
+6 storage requests with 10.7 s source download and 68.1 s pack generation,
+and the depth-100 response used 811.6 MiB with 73.3 s generation. The report
+is not a passing qualification because the read-only Kubernetes source path
+was absent during the final source-immutability check; all earlier replay,
+integrity, parity, and exact-prefix cleanup checks completed, and the remote
+prefix was deleted. The current-binary RustFS rerun below confirms the
+sidecar path end to end and complete committed sidecars on the source
+repository.
+
+The same run also exposed a separate qualification-host limit: 100 concurrent
+full Git clients exhausted local memory/swap while their post-stream
+`index-pack` work drained. The remote streams had already completed, so this
+is not evidence of a Crab admission or producer deadlock; distributed-client
+fanout remains the required team-SLO gate.
+
+The current-head rerun `codex-1156510c-k8s-producer100-rerun-20260830` was built
+from commit `1156510c` after the response-validation change and passed the
+standalone verifier with `--allow-smoke`. It completed 101 pushes and all
+21/21 declared checks, retained the same correctness fingerprint, passed the
+full/filtered/shallow/incremental clone matrix, and removed its local
+worktrees and exact remote prefix. The release binary SHA-256 was
+`9e9bf8498565e03dfabf706395b5c9e50c3da4e2ba5e596009d418f32302358f`.
+
+The run confirms the sidecar fanout remains bounded at six storage requests
+for a cold full response and seven for depth-100. The full response selected
+1,646,244 objects and generated the same 1,244,255,615-byte pack; source
+staging was 32,581 ms and total response-pack production was 60,445 ms. The
+depth-100 response selected 966,820 objects and generated 747,326,253 bytes
+with 11,716 ms of source staging and 56,594 ms of total production. Blobless
+selection generated 211,439,461 bytes in 22,683 ms using 3,135 storage
+requests, and depth-1,000 reused the full-content artifact with one storage
+request and no new pack generation.
+
+Commit `feff61f6` overlaps each selected/complete-repack source pack's body,
+index, and reverse-index downloads under the existing four-pack group bound;
+`1156510c` removes the duplicate `git verify-pack -v` traversal after
+`git index-pack --fsck-objects` on the complete response path. The latest
+full-clone log used `selected_object_repack`, so the latter branch was not
+exercised by that profile. The source-download and pack-generation timings
+were noisier than `98082cf0` on this shared host, so this run is correctness
+and regression evidence, not an accepted end-to-end speedup claim. Repeated
+isolated runs, distributed clients, and provider/fault matrices remain
+required before changing the response-pack SLO.
+
+### 2026-08-30 near-complete response-pack consolidation follow-up
+
+The producer had one remaining dense-inventory gap: incremental push packs can
+repeat OIDs already present in older packs, so the sum of manifest
+`object_count` values can be slightly larger than the exact full response
+selection. The strict complete-inventory gate then chose selected-object
+repacking even though Git could consolidate the whole staged inventory and
+deduplicate the overlap.
+
+The follow-up keeps the exact complete-inventory path unchanged and adds a
+near-complete gate only when a multi-pack selection has at least 100,000
+objects and the inventory count has no more than 1% extra entries. It stages
+the committed pack bodies and sidecars once, runs Git's whole-pack
+`--stdin-packs` consolidation, and compares the generated index union with the
+requested OID set before adoption. A near-complete mismatch falls back to the
+exact selected-object repack using the already staged source files, so the
+heuristic cannot broaden the response or double the object-store download.
+Depth-100 and other sparse selections remain below the gate.
+
+A qualification-only pack-shape experiment on the read-only Kubernetes
+object database used 1,795,042 source objects plus 100 synthetic incremental
+commits. Whole-pack consolidation with the duplicate-safe inventory path
+completed in 24.5 s and produced 1,330,704,913 bytes; selected `pack-objects`
+with two threads took 60.5 s for the same full object set. A partial 966,821
+object selection showed the opposite trade-off—33.7 s with two threads versus
+132.2 s with one—so the shared response thread cap remains unchanged. These
+local measurements are direction-setting evidence, not a product latency SLO;
+the current-binary RustFS/Kubernetes rerun and distributed client matrix still
+need to exercise the new near-complete branch.
+
+The current cache-read follow-up also moves generated-pack verification into
+the object-store-to-temp-file stream. It checks the bounded size, pack header
+and object count, Git SHA-1 trailer, and Crab Blake3 identity before exposing a
+cache hit, so a warm response no longer performs a second full local pack
+scan. A manual current-binary warm full clone against the same RustFS snapshot
+reported a cache hit, matched the Kubernetes tip, and passed `git fsck --full`;
+it is an isolated cache correctness smoke rather than an accepted speedup or
+distributed-client SLO.
+
+The response producer now uses a response-specific whole-pack consolidator.
+Durable `crab repack` keeps the full source and generated `verify-pack` scans
+and exact inventory-union comparison. A generated response already has an
+exact requested-OID comparison at the remote boundary, while its immutable
+source packs have publication-time object validation and streamed identity
+checks. The response consolidator therefore retains pack/index/trailer
+integrity checks, skips the redundant source-OID materialization and full
+graph scans, and lets the remote exact-set check remain the final admission
+gate. This removes repository-sized duplicate CPU and memory work without
+weakening the maintenance contract.
+
+### 2026-08-30 current-head near-complete response qualification
+
+The release binary from `be68dac4` was replayed against the read-only
+Kubernetes repository at revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`
+using local RustFS. Run `codex-be68dac4-k8s-producer100-20260830` completed
+101 pushes (seed plus 100 replay commits), all 21 verifier checks, full and
+incremental clone/fsck checks, filtered and shallow clone checks, source
+immutability, and exact remote-prefix cleanup. The standalone report
+verifier returned `status=ok` with `--allow-smoke`; its correctness fingerprint
+is `04038c34c84aa8d3fda8f4b16be9b59e8230b94c5fd835627d93e1409b9cdad3`.
+
+The full cold clone directly exercised
+`near_complete_pack_consolidation`: two source packs, 1,646,245 staged
+inventory entries versus 1,646,244 selected objects, six source-artifact
+requests, 8,144 ms source staging, 19,792 ms Git whole-pack consolidation,
+30,763 ms total response-pack production, and a 1,239,120,771-byte response.
+The generated pack passed the remote exact-object-set check and the client
+completed a byte-correct full clone and `git fsck --full`. The warm full clone
+hit the immutable generated-pack cache; depth-1/10/100/1,000, blobless, and
+incremental clones also passed their checks. The active manifest inventory was
+one pack after seeding and two packs at the 1/10/100 replay checkpoints. The
+corresponding object-store listing at checkpoint 100 contained 103 physical
+pack objects / 1,279,007,682 bytes: two active packs plus 101 superseded
+immutable packs retained for grace-period GC. This distinction is intentional;
+the smoke does not claim that retained history has already converged.
+
+This is the first direct current-head proof of the near-complete branch, but it
+is intentionally smoke evidence rather than the large-team SLO gate. It does
+not prove a 1,000- or 10,000-push growth differential, repeated isolated
+latency, distributed fanout, provider behavior, fault/failover handling,
+retention convergence, or canary/default-on rollout. Those gates remain open;
+the report and logs are retained outside the repository for reproducibility.
+
+### 2026-08-30 current-head exact-set and pack-identity qualification
+
+The exact release binary at `16c0f9f0` was replayed against the same read-only
+Kubernetes revision in RustFS as `codex-16c0f9f0-k8s-producer100-20260830`.
+The binary provenance was embedded `git_sha=16c0f9f0` with SHA-256
+`8c528f1aad477e412c9cd468f0e0334bdf8022f846419ebd55d22cce55641fbb`. The
+run completed 101 pushes (seed plus 100 first-parent commits), all 21/21
+declared checks, full/filtered/depth-1/10/100/1,000 and blobless clone
+correctness, incremental fetch, full fsck, 1,000-object byte sampling, source
+immutability, and exact-prefix cleanup. The standalone verifier returned
+`status=ok` with `--allow-smoke`; the correctness fingerprint was
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`.
+
+The cold full response used `near_complete_pack_consolidation`: two source
+packs, 1,646,245 staged inventory entries, 1,646,244 selected objects, 6
+source-artifact requests, 9,879 ms source staging, 40,002 ms pack generation,
+and a 1,239,132,065-byte response. The depth-100 selected-object response used
+7 source-artifact requests, 17,837 ms source staging, 56,498 ms pack
+generation, and returned 747,287,676 bytes. These measurements are single-
+client smoke data, not team SLO proof. The exact current-head run did not
+select the complete-pack concatenation branch; the real-pack regression and
+focused `crab-git` suite exercise that handoff and its verified identity.
+
+The separate 1,000-replay scale run `codex-pack-index-k8s-producer100-20260830`
+also passed all 1,001 pushes, 23 report checks, fsck, clone matrix, byte
+sampling, source immutability, and cleanup with the same correctness
+fingerprint. Its release binary predates `f8b5a481` and `16c0f9f0`, so it is
+retained as scale/capacity evidence rather than current-head performance proof.
+At checkpoint 1,000 its store contained 1,004 immutable physical pack objects
+and 1,653,694,827 bytes of physical pack data. The final visibility-owner
+maintenance pass consolidated 902 source packs to 2 active packs and took
+486,857 ms overall; superseded immutable packs remained available for the
+grace-period GC contract. This is a confirmed large-repository maintenance
+bottleneck and an open optimization gate, not a reason to weaken pack
+integrity, publication, or retention checks.
+
+### 2026-08-30 bounded-owner convergence qualification
+
+The first exact-current-head 1,000-replay attempt,
+`codex-fbc34693-k8s-producer100-20260830`, exposed a qualification-harness
+limit rather than a Crab data failure. The owner correctly completed four
+bounded 128-pack repack batches, reducing the active inventory from 902 to 521,
+but the harness's fixed 16-pass guard stopped before the remaining maintenance
+wave. All 1,001 pushes, the checks completed before the guard, and remote
+cleanup passed. The fixed guard was not a valid assumption once automatic
+repacking became deliberately resumable.
+
+`crab/scripts/e2e/run_large_repo_rustfs.py` now expands a finite pass budget
+from the observed active/geometric pack count. The base allowance covers the
+catalog, visibility, graph, and shallow actions; four additional samples per
+observed pack leave room for bounded repack waves without allowing a stuck owner
+to loop forever. This changes qualification convergence protection only; it
+does not alter the production owner budget or its one-action-per-cycle policy.
+
+The repaired current-head run,
+`codex-fbc34693-bounded-owner-k8s-producer100-20260830`, used Kubernetes
+revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`, isolated RustFS, and the
+release binary with embedded `git_sha=fbc34693` and SHA-256
+`106c4380058dcdf7069587f18a95a52012d810359345fd27a43bbf6cd3d7a37e`. The
+standalone verifier returned `status=ok`, `profile=full`, and
+`replay_count=1000`; all 1,001 pushes, 23/23 checks, advertised refs, full and
+incremental clone tips, full and incremental fsck, the deterministic 1,000-
+object sample, source immutability, and exact-prefix cleanup passed. The
+correctness fingerprint remained
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`.
+
+- The generation owner converged in 31 passes and reduced 902 active packs to
+  2. Seven bounded batches processed 128 source packs each, followed by one
+  normal 12-pack geometric repack for the final 13-to-2 transition. The owner
+  stage took 595,118 ms, read 441,190,818 maintenance bytes, wrote 74,014,354
+  bytes, and peaked at 1,010,794,496 bytes of child RSS. The object-store
+  snapshot retained 1,011 immutable physical pack objects / 1,697,452,704
+  bytes, so active-pack convergence is distinct from grace-period retention.
+- Cold and warm full clones completed in 192,967/81,467 ms; blobless and
+  depth-1/10/100/1,000 clones completed in 28,642/19,381/23,106/120,651/
+  76,763 ms. Full and depth-100 response generation used 6/7 source-artifact
+  requests and produced 1,202,067,600/730,841,112 response bytes. All clone
+  shapes and the incremental fetch matrix passed Git integrity checks.
+- Pushes had a 2,005 ms median, 5,879 ms p95, and 13,511 ms p99 after the
+  initial import. This is single-client capacity evidence; it is not a team
+  SLO, and the owner total remains an optimization target even though each
+  individual automatic repack is now bounded and resumable.
+
+This run closes the qualification-guard gap and supplies current-head
+correctness evidence for the bounded owner transition. It does not close
+repeated convergence, interruption/resume, memory, 10,000-push differential,
+distributed team load, provider/fault/failover, retention/GC, or rollout gates.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
@@ -1283,6 +1650,11 @@ Still required before the roadmap is DONE:
   the dense selected/complete repack path and pass correctness, but their
   differential and sustained SLO evidence is still required;
 - the complete Phase 5 interruption and 10,000-push maintenance matrix;
+- a maintenance design and repeatable evidence that bounds one owner's
+  geometric consolidation work across a large historical pack set. The
+  current-head run proves seven 128-pack batches and a final 12-pack repack,
+  but the 595,118 ms owner stage, interruption/resume behavior, repeated-run
+  behavior, and memory differential remain open;
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.
@@ -2161,13 +2533,103 @@ environment dumps, or credentials.
 |---|---|---|---|---|---|
 | 0 | POST-LAZY SINGLE-RUN PASS; DIFFERENTIAL/REPEATABILITY PENDING | PR #75 | `lazy-cbe848f4-1000-20260825` (prefix cleaned); pre-lazy baseline `local-k8s-final-04655f3b-1000-20260825` | `7ff92545` / binary `git_sha=7ff92545` | The current full profile passed 1,001 pushes and all 22 checks with exact refs/fsck/sample/source/cleanup evidence. The standalone baseline comparison is invalid because push and clone medians drifted by roughly 41% on the shared host; repeatability, differential, fault, provider, concurrency, and rollout evidence remain open |
 | 1 | IMPLEMENTED; POST-LAZY NORMAL-PATH PROOF PASS; SLO PENDING | PR #75, follow-up PR #87 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; [released-shape workflow](https://github.com/crabbuild/crab-oss/actions/runs/32917566230) | `7ff92545`; `01d588ea`; `cbe848f4`; `c57ee1f4`; `f2a941ce` | Normal read/helper paths remain lazy, and the exact current release smoke passes the large-batch path. Owner repair intentionally may materialize the catalog; full-profile repeatability and SLO evidence remain open |
-| 2 | IMPLEMENTED; CURRENT DENSE-READ EVIDENCE; SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9` | The current 100-replay run ends with 2 active packs, and its dense blob:none clone selects 1,102,159 objects in 24,911 ms with 3,152 storage requests after reusing one locator plan across batches. Large current catalogs avoid pack-count-by-batch lookup amplification, and pack sidecar intake/publication fallback are bounded; exact batches also deduplicate repeated OIDs and pack-index metadata misses share bounded source-size reads. Response-pack egress, fanout, retention, and provider SLOs remain open |
+| 2 | IMPLEMENTED; CURRENT DENSE/FANOUT CORRECTNESS PASS; SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `b8c51985-locator-ref-tip-only-concurrent-20260828`; `codex-0f1757e9-k8s-team-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; smoke `codex-7419fe11-k8s-producer100-single-20260830`; current smoke `codex-98082cf0-k8s-producer100-single-20260830`; rerun `codex-1156510c-k8s-producer100-rerun-20260830`; exact head `codex-16c0f9f0-k8s-producer100-20260830`; scale `codex-pack-index-k8s-producer100-20260830`; current bounded owner `codex-fbc34693-bounded-owner-k8s-producer100-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `8fb0ca86`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11`; `98082cf0`; `feff61f6`; `1156510c`; `f8b5a481`; `16c0f9f0`; `10b9a5ba` | The current-head smoke and repaired 1,000-replay run pass exact refs/boundaries/fsck/sample/source/cleanup with the same fingerprint. The bounded owner run converged 902 active packs to 2 in seven 128-pack batches plus a final 12-pack repack; source-artifact reads remain bounded at 6/7 requests for full/depth-100. The index-order exact-set path and joined-pack identity handoff remain covered. Single-client producer/maintenance evidence is stronger, but distributed-client pack shape, provider, retention, interruption, and sustained response-pack SLOs remain open |
 | 3 | IMPLEMENTED; HIDDEN-TIER REPACK FIXED; REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `crabbuild-f2a941ce-k8s-20260827-smoke`; `e01fdf56-k8s-1000-20260828`; `codex-0f1757e9-k8s-team-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `b9859f28`; `a55c89b3`; `4a8fc34e`; `14f30438`; `f2a941ce`; `88deb4e0`; `e01fdf56`; `b8c51985`; `d9a7eea6`; `0f1757e9`; `de493ab0` | Renewal proof remains valid, but the exact 1,000-replay diagnostic found 92 active packs at checkpoint 100 because a stable tiny tail hid higher-tier collisions. The selector now scans every lower tier and focused regressions pass; exact live proof that checkpoint pack counts remain logarithmic plus the 10,000-push latency, memory, interruption, and scan differential budgets remain open |
-| 4 | CORRECTNESS REGRESSION FIXED; EXACT REQUALIFICATION/SLO PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0` | The earlier 100-replay final wave was a no-op and is withdrawn as incremental proof. The exact 1,000-replay run proved all broad reads but failed all 100 stale shallow clients on one omitted merge parent. Native Git contract proof and the centralized traversal fallback fix pass focused/full affected suites; schema 1.3 now rejects no-op fanout evidence. Exact live proof, the 10,000-push shallow differential, response-pack SLO, provider range behavior, and rollout evidence remain open |
-| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The e01 run completed cleanup but retained 1,003 immutable pack objects for recovery history; stale membership cleanup now uses bounded scan read-ahead, while pack-sidecar intake, repack publication, and recovery restore are bounded. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
-| 6 | PARTIAL; SEED FANOUT PASS, MEANINGFUL INCREMENTAL REQUALIFICATION PENDING | PR #75, follow-up PR #87, PR #96 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0` | Descriptor-first waiting has exact 100/100 cold seed-clone proof with one producer and no 503/lease/early-EOF failure. The old 100-replay final fetch was a no-op; schema 1.3 now requires intervening commits. The full diagnostic exposed and the code fixes a stale-shallow closure omission, but exact 100-client requalification, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout gates remain pending |
+| 4 | CORRECTNESS PASS; DIFFERENTIAL/SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; smoke `codex-7419fe11-k8s-producer100-single-20260830`; current smoke `codex-98082cf0-k8s-producer100-single-20260830`; rerun `codex-1156510c-k8s-producer100-rerun-20260830`; exact head `codex-16c0f9f0-k8s-producer100-20260830`; current bounded owner `codex-fbc34693-bounded-owner-k8s-producer100-20260830` | `7ff92545`; `cbe848f4`; `c57ee1f4`; `f2a941ce`; `e01fdf56`; `b8c51985`; `1de8e528`; `8d5e2787`; `8b08b528`; `587f4ee9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11`; `98082cf0`; `feff61f6`; `1156510c`; `f8b5a481`; `16c0f9f0`; `10b9a5ba` | The exact-head smoke and repaired 1,000-replay run pass the full correctness matrix and the same fingerprint. The current bounded run uses the pinned graph/closure path and converges active packs through bounded repack waves; full differential response-pack, distributed client, provider, maintenance, and rollout SLO evidence remains open |
+| 5 | IMPLEMENTED; CURRENT EVIDENCE; OPERATIONAL GAPS PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; scale `codex-pack-index-k8s-producer100-20260830`; current bounded owner `codex-fbc34693-bounded-owner-k8s-producer100-20260830` | `7ff92545`; `c57ee1f4`; `ad2554fa`; `e01fdf56`; `72340d13`; `1de8e528`; `d9a7eea6`; `9002e55b`; `10b9a5ba` | Current-manifest GC roots retain pending catalog handoffs, and repo-local `repair_required` no longer conflates incomplete bucket-wide discovery with repair. The current bounded run proves seven 128-pack batches plus a final 12-pack repack converge 902 active packs to 2 while retaining immutable physical history. `9002e55b` caps each automatic owner repack batch at 128 source packs / 2 GiB / 384 artifact reads / 10 minutes and fixes three-artifact request accounting; `10b9a5ba` repairs the harness guard for resumable convergence. Grace-aware retention, interruption, receipt/registry completeness, 10,000-push, scan differential, repeated convergence, and full GC matrix remain pending; bucket-wide destructive GC stays disabled |
+| 6 | PARTIAL; MEANINGFUL 100-CLIENT STALE FANOUT PASS; DISTRIBUTED SLO PENDING | PR #75, follow-up PR #87, PR #96, PR #120 | `lazy-cbe848f4-1000-20260825`; `e01fdf56-k8s-1000-20260828`; `codex-5f053721-k8s-fanout100-20260829`; failed diagnostic `codex-c0047e95-k8s-full1000-20260829`; `codex-9153e762-targeted-stale100-20260830`; diagnostic `codex-4b6b4344-k8s-producer100-single-20260830`; smoke `codex-7419fe11-k8s-producer100-single-20260830`; current smoke `codex-98082cf0-k8s-producer100-single-20260830`; rerun `codex-1156510c-k8s-producer100-rerun-20260830` | `7ff92545`; `c57ee1f4`; `f2a941ce`; `d9c93263`; `88deb4e0`; `e01fdf56`; `b8c51985`; `72340d13`; `1de8e528`; `8b08b528`; `4232bdc3`; `587f4ee9`; `0f1757e9`; `5f053721`; `de493ab0`; `249dd6ed`; `01344889`; `4b6b4344`; `175b08db`; `4d2b956d`; `7419fe11`; `98082cf0`; `feff61f6`; `1156510c` | The meaningful stale fanout proves one producer, 99 coalesced callers, bounded artifact reads, 100/100 refs/boundaries/fsck, and exact-prefix cleanup. The latest rerun adds 101-push single-client correctness and same-fingerprint evidence with full/depth-100 bounded source fanout, but the one-host index tail, distributed clients, cache-service fanout, injected fault/provider matrices, owner failover, retention, canary, and sustained rollout remain pending |
 
 ### Current branch verification evidence
+
+PR #120's latest producer follow-ups are `175b08db` (structural response
+validation), `4d2b956d` (single-pass response-pack handoff), `7419fe11`
+(current-head qualification evidence), `98082cf0` (index-order exact-set
+validation), `ab27dc91` (direct index OID traversal), `feff61f6` (bounded
+parallel source-artifact reads), `1156510c` (response-only structural
+validation after Git fsck), `f8b5a481` (compact exact-set validation), and
+`16c0f9f0` (joined-pack identity handoff), `9002e55b` (bounded owner
+repack batches), and `10b9a5ba` (adaptive owner convergence qualification).
+The latest release build is `crab 1.1.0`, embedded `git_sha=fbc34693`,
+SHA-256 `106c4380058dcdf7069587f18a95a52012d810359345fd27a43bbf6cd3d7a37e`.
+
+The current-head RustFS smoke is `codex-7419fe11-k8s-producer100-single-20260830`
+against Kubernetes revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`.
+It passed 21/21 declared checks, 101 replay pushes, full/filtered/shallow/
+incremental correctness, source immutability, and exact-prefix cleanup; the
+standalone verifier accepts it with `--allow-smoke` and reports fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. The
+report is intentionally single-client smoke evidence; the full verifier
+rejects it without `--allow-smoke` because no team-load section was recorded.
+
+The follow-up current-head run is `codex-98082cf0-k8s-producer100-single-20260830`
+against the same source revision. It passed 21/21 checks and the verifier
+fingerprint remained identical. Cold full producer generation was 29,820 ms
+for 1,244,255,615 response bytes after 11,746 ms of source download; depth-100
+was 53,201 ms for 747,220,954 response bytes after 14,450 ms of source
+download. The exact-prefix cleanup check deleted 1,111 objects. This remains
+single-client smoke evidence, not full team-load proof.
+
+The final branch refinement in `ab27dc91` changes only the implementation of
+that exact-set comparison: it reads OIDs directly from the validated Git v2
+index instead of constructing transient index entries. The focused regression,
+strict `crab-git` clippy, and release build pass; no new end-to-end timing claim
+is attributed to this refinement beyond the qualified `98082cf0` run.
+
+The current branch also passes the focused `crab-git` repack suite (12 tests)
+and strict all-target clippy after `1156510c`. The response-only structural
+validation change relies on the existing `git index-pack --fsck-objects` object
+body check and leaves `repack_repository_geometric` on full validation. The
+fresh rerun `codex-1156510c-k8s-producer100-rerun-20260830` passed 21/21
+checks, 101 pushes, and the same fingerprint; it is correctness/regression
+evidence, not a speedup claim because shared-host source and pack timings were
+noisier than `98082cf0`.
+
+The complete-inventory response path now computes the Crab Blake3 identity in
+the same pass that joins the pack and carries the resulting Git SHA-1/Blake3
+identity through `git index-pack --fsck-objects` and structural pack
+verification. It no longer performs separate full output hash/trailer scans
+before and after installation; the Git index checksum and object-fsck gates
+remain, while durable maintenance continues to use full validation.
+
+The exact-head release smoke `codex-16c0f9f0-k8s-producer100-20260830` passed
+21/21 declared checks and 101 pushes against Kubernetes revision
+`e72c2715ade37738aa5c029e8de5285cbe1c9441`. It passed full/filtered/shallow/
+incremental correctness, fsck, 1,000-object byte sampling, source immutability,
+and exact-prefix cleanup; the standalone verifier returned `status=ok` with
+`--allow-smoke` and fingerprint
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`. Its cold
+full response used 6 source requests, 9,879 ms source staging, 40,002 ms pack
+generation, and 1,239,132,065 response bytes; depth-100 used 7 requests,
+17,837 ms staging, 56,498 ms generation, and 747,287,676 response bytes. This
+is single-client smoke evidence, not a team SLO. The complete-pack
+concatenation branch was not selected by that run; the real-pack regression and
+focused `crab-git` tests cover the joined-pack identity handoff.
+
+The separate `codex-pack-index-k8s-producer100-20260830` scale run passed
+1,001 pushes and 23 checks with the same fingerprint, but its binary predates
+`f8b5a481` and `16c0f9f0`, so it is scale/capacity evidence only. At checkpoint
+1,000 it held 1,004 immutable physical pack objects / 1,653,694,827 bytes; the
+final owner maintenance pass consolidated 902 source packs to 2 active packs
+in 486,857 ms. Superseded immutable packs remained for grace-period GC. This
+confirms the next producer/maintenance opportunity: large historical-pack
+consolidation needs chunked or resumable work with explicit lease and memory
+budgets; integrity and retention validation must remain intact.
+
+The follow-up `9002e55b` makes the maintenance boundary match the actual
+source-read shape. It caps one generation-owner suffix at 128 packs / 2 GiB /
+384 pack, index, and reverse-index reads / ten minutes, and fixes the previous
+two-artifact request accounting. Focused repack tests cover both the three-read
+budget and a 902-pack inventory selecting only one bounded batch. No current-
+head 1,000-push run has yet exercised the new cap; the next qualification must
+show repeated owner generations, pack-shape convergence, interruption recovery,
+and push latency while the cap is active. `10b9a5ba` repairs the harness guard
+that rejected this resumable shape after 16 samples. The repaired run
+`codex-fbc34693-bounded-owner-k8s-producer100-20260830` passed the full
+1,000-replay verifier with 23/23 checks: 31 owner passes reduced 902 active
+packs to 2 through seven 128-pack batches and one final 12-pack repack, while
+the physical store retained 1,011 immutable packs for grace-period retention.
+This is current-head correctness/capacity evidence; the 595,118 ms owner stage,
+repeatability, interruption, memory, and team-load SLO gates remain open.
 
 The earlier broad proof was run with the roadmap target directory:
 

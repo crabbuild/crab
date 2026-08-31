@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use crate::pack::{PackError, install_pack_file_from_path, verify_pack_file_sha1};
+use crate::pack::{
+    PackError, VerifiedPackIdentity, install_pack_file_from_path_with_identity,
+    install_pack_files_from_paths_with_identity, verify_and_hash_pack_file,
+};
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 use sha1::{Digest, Sha1};
 
 const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
 const MAX_VERIFY_PACKS_PER_COMMAND: usize = 512;
+const RESPONSE_PACK_THREADS: usize = 2;
 
 /// A downloaded canonical pack selected by a pinned repository manifest.
 #[derive(Debug, Clone)]
@@ -21,10 +25,28 @@ pub struct RepackSource {
     pub canonical_id: String,
     /// Local path containing the complete pack body.
     pub path: PathBuf,
+    /// Local path containing the committed Git pack index.
+    pub index_path: PathBuf,
+    /// Local path containing the committed Git reverse index.
+    pub reverse_index_path: PathBuf,
     /// Size committed by the source manifest.
     pub size: u64,
     /// Object count committed by the source manifest.
     pub object_count: u64,
+    /// Identity verified while the source pack was streamed, when available.
+    ///
+    /// This lets the response producer avoid hashing the same immutable pack
+    /// body again while installing its already-verified sidecars.
+    pub verified_identity: Option<VerifiedPackIdentity>,
+}
+
+/// One authorized annotated tag considered for shallow fetch inclusion.
+#[derive(Debug, Clone, Copy)]
+pub struct ShallowFetchTag {
+    /// Annotated tag object referenced by the visible tag ref.
+    pub target: gix_hash::ObjectId,
+    /// Final object referenced by the annotated tag chain.
+    pub peeled: gix_hash::ObjectId,
 }
 
 /// A verified pack produced by geometric consolidation.
@@ -130,6 +152,12 @@ pub enum RepackError {
     SelectedObjectSet { pack_id: String, reason: String },
 }
 
+#[derive(Clone, Copy)]
+enum GeneratedPackValidation {
+    Structural,
+    Full,
+}
+
 /// Return the number of smallest packs that must be rolled up for geometry.
 ///
 /// Counts are interpreted by object count, matching `git repack
@@ -217,28 +245,11 @@ pub fn repack_repository_geometric(
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    for source in sources {
-        validate_source(source)?;
-        let installed = install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-        let locations =
-            PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-        if locations.object_count() != source.object_count {
-            return Err(RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!(
-                    "index has {} objects but manifest records {}",
-                    locations.object_count(),
-                    source.object_count
-                ),
-            });
-        }
-    }
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
     pin_refs_and_fsck(&source_git, refs, "validate source repository")?;
     run_git(
         Command::new("git")
@@ -364,7 +375,23 @@ pub fn consolidate_pack_suffix(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    consolidate_pack_suffix_with_concurrency(sources, concurrency)
+    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Full)
+}
+
+/// Consolidate immutable source packs for a generated response pack.
+///
+/// Source packs must already have passed the publication-time object check,
+/// and callers must compare the generated pack with their exact response
+/// selection. This path retains pack/index integrity validation while avoiding
+/// a second full object-graph scan that the response exact-set check supersedes.
+pub fn consolidate_pack_suffix_for_response(
+    sources: &[RepackSource],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Response)
 }
 
 /// Consolidate selected packs with bounded local index parallelism.
@@ -375,6 +402,20 @@ pub fn consolidate_pack_suffix(
 pub fn consolidate_pack_suffix_with_concurrency(
     sources: &[RepackSource],
     index_concurrency: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    consolidate_pack_suffix_with_options(sources, index_concurrency, ConsolidationValidation::Full)
+}
+
+#[derive(Clone, Copy)]
+enum ConsolidationValidation {
+    Full,
+    Response,
+}
+
+fn consolidate_pack_suffix_with_options(
+    sources: &[RepackSource],
+    index_concurrency: usize,
+    validation: ConsolidationValidation,
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
@@ -397,34 +438,37 @@ pub fn consolidate_pack_suffix_with_concurrency(
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
     let install_started = Instant::now();
+    let collect_source_oids = matches!(validation, ConsolidationValidation::Full);
     let (mut source_oids, source_indexes) =
-        install_source_packs(&pack_dir, sources, index_concurrency)?;
+        install_source_packs(&pack_dir, sources, index_concurrency, collect_source_oids)?;
     tracing::debug!(
         source_pack_count = sources.len(),
         index_concurrency = index_concurrency.max(1).min(sources.len()),
         elapsed_ms = install_started.elapsed().as_millis() as u64,
         "installed source packs for consolidation"
     );
-    // Selected suffixes may reference stable packs outside this operation;
-    // validate each selected pack's own body and index without requiring a
-    // complete repository graph.
-    let verify_started = Instant::now();
-    for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
-        let mut verify = Command::new("git");
-        verify
-            .arg("verify-pack")
-            .arg("--")
-            .args(index_batch)
-            .stdout(Stdio::null());
-        run_git(&mut verify, "verify consolidated source packs")?;
+    if collect_source_oids {
+        // Selected suffixes may reference stable packs outside this operation;
+        // validate each selected pack's own body and index without requiring a
+        // complete repository graph.
+        let verify_started = Instant::now();
+        for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
+            let mut verify = Command::new("git");
+            verify
+                .arg("verify-pack")
+                .arg("--")
+                .args(index_batch)
+                .stdout(Stdio::null());
+            run_git(&mut verify, "verify consolidated source packs")?;
+        }
+        tracing::debug!(
+            source_pack_count = source_indexes.len(),
+            elapsed_ms = verify_started.elapsed().as_millis() as u64,
+            "verified consolidated source packs"
+        );
+        source_oids.sort_unstable();
+        source_oids.dedup();
     }
-    tracing::debug!(
-        source_pack_count = source_indexes.len(),
-        elapsed_ms = verify_started.elapsed().as_millis() as u64,
-        "verified consolidated source packs"
-    );
-    source_oids.sort_unstable();
-    source_oids.dedup();
 
     let pack_list = workspace.path().join("selected-packs.txt");
     let mut input = File::create(&pack_list)
@@ -474,32 +518,39 @@ pub fn consolidate_pack_suffix_with_concurrency(
             pack_id: "geometric-repack".to_owned(),
             reason: "selected-pack consolidation produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path)?;
-    let mut generated_locations = PackLocationIter::open(
-        generated.index_path(),
-        generated.reverse_index_path(),
-        generated.pack_size,
-    )?;
-    let mut generated_oids = Vec::<[u8; 20]>::new();
-    for location in &mut generated_locations {
-        let location = location?;
-        let oid = location
-            .oid
-            .as_bytes()
-            .try_into()
-            .map_err(|_| RepackError::SourceIntegrity {
+    let generated_validation = match validation {
+        ConsolidationValidation::Full => GeneratedPackValidation::Full,
+        ConsolidationValidation::Response => GeneratedPackValidation::Structural,
+    };
+    let generated = verified_generated_pack(pack_path, generated_validation, None, None)?;
+    if matches!(validation, ConsolidationValidation::Full) {
+        let mut generated_locations = PackLocationIter::open(
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )?;
+        let mut generated_oids = Vec::<[u8; 20]>::new();
+        for location in &mut generated_locations {
+            let location = location?;
+            let oid =
+                location
+                    .oid
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| RepackError::SourceIntegrity {
+                        pack_id: generated.pack_id.clone(),
+                        reason: "consolidated pack contains a non-SHA1 object".to_owned(),
+                    })?;
+            generated_oids.push(oid);
+        }
+        generated_oids.sort_unstable();
+        generated_oids.dedup();
+        if generated_oids != source_oids {
+            return Err(RepackError::SourceIntegrity {
                 pack_id: generated.pack_id.clone(),
-                reason: "consolidated pack contains a non-SHA1 object".to_owned(),
-            })?;
-        generated_oids.push(oid);
-    }
-    generated_oids.sort_unstable();
-    generated_oids.dedup();
-    if generated_oids != source_oids {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: generated.pack_id.clone(),
-            reason: "consolidated pack does not preserve the selected object set".to_owned(),
-        });
+                reason: "consolidated pack does not preserve the selected object set".to_owned(),
+            });
+        }
     }
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
@@ -540,7 +591,6 @@ pub fn concatenate_complete_pack_inventory(
             });
         }
         validate_source(source)?;
-        verify_pack_file_sha1(&source.path)?;
         let mut input = File::open(&source.path)
             .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
         let mut header = [0_u8; 12];
@@ -591,16 +641,18 @@ pub fn concatenate_complete_pack_inventory(
             pack_id: "complete-pack-concatenation".to_owned(),
             reason: "concatenated pack object count exceeds Git's pack limit".to_owned(),
         })?;
+    let mut pack_header = [0_u8; 12];
+    pack_header[..4].copy_from_slice(b"PACK");
+    pack_header[4..8].copy_from_slice(&2_u32.to_be_bytes());
+    pack_header[8..].copy_from_slice(&total_objects_u32.to_be_bytes());
     output
-        .write_all(b"PACK")
-        .and_then(|_| output.write_all(&2_u32.to_be_bytes()))
-        .and_then(|_| output.write_all(&total_objects_u32.to_be_bytes()))
+        .write_all(&pack_header)
         .map_err(|source| io_error("write concatenated pack header", source))?;
 
     let mut pack_sha1 = Sha1::new();
-    pack_sha1.update(b"PACK");
-    pack_sha1.update(2_u32.to_be_bytes());
-    pack_sha1.update(total_objects_u32.to_be_bytes());
+    pack_sha1.update(pack_header);
+    let mut content_hasher = blake3::Hasher::new();
+    content_hasher.update(&pack_header);
     let mut buffer = vec![0_u8; 1024 * 1024];
     for source in sources {
         let mut input = File::open(&source.path)
@@ -627,21 +679,45 @@ pub fn concatenate_complete_pack_inventory(
                 .write_all(&buffer[..read_len])
                 .map_err(|source| io_error("write concatenated pack body", source))?;
             pack_sha1.update(&buffer[..read_len]);
+            content_hasher.update(&buffer[..read_len]);
             remaining -= read_len as u64;
         }
     }
     let checksum: [u8; 20] = pack_sha1.finalize().into();
+    content_hasher.update(&checksum);
     output
         .write_all(&checksum)
         .and_then(|_| output.flush())
         .map_err(|source| io_error("finish concatenated pack", source))?;
     drop(output);
 
-    let (pack_hash, pack_size) = hash_file(&output_path)?;
+    let pack_hash = *content_hasher.finalize().as_bytes();
+    let pack_size = std::fs::metadata(&output_path)
+        .map_err(|source| io_error(format!("stat {}", output_path.display()), source))?
+        .len();
     let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
-    let installed =
-        install_pack_file_from_path(&pack_dir, &output_path, &canonical_id, pack_size, true)?;
-    let generated = verified_generated_pack(installed.pack_path)?;
+    let identity = VerifiedPackIdentity {
+        git_sha1: checksum,
+        content_hash: pack_hash,
+    };
+    let installed = install_pack_file_from_path_with_identity(
+        &pack_dir,
+        &output_path,
+        &canonical_id,
+        pack_size,
+        true,
+        Some(identity),
+    )?;
+    // `index-pack --fsck-objects` above already validates every copied object
+    // while creating the response index. A second `verify-pack -v` traversal
+    // only repeats repository-sized work on the latency-sensitive response
+    // path; durable maintenance continues to use full validation below.
+    let generated = verified_generated_pack(
+        installed.pack_path,
+        GeneratedPackValidation::Structural,
+        None,
+        Some(identity),
+    )?;
     if generated.object_count != total_objects {
         return Err(RepackError::SourceIntegrity {
             pack_id: generated.pack_id,
@@ -666,7 +742,11 @@ fn install_source_packs(
     pack_dir: &Path,
     sources: &[RepackSource],
     index_concurrency: usize,
+    collect_oids: bool,
 ) -> Result<(Vec<[u8; 20]>, Vec<PathBuf>), RepackError> {
+    if sources.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let batch_size = index_concurrency.max(1).min(sources.len());
     let mut source_oids = Vec::new();
     let mut source_indexes = Vec::with_capacity(sources.len());
@@ -674,7 +754,9 @@ fn install_source_packs(
         let results = std::thread::scope(|scope| {
             let handles = batch
                 .iter()
-                .map(|source| scope.spawn(move || install_source_pack(pack_dir, source)))
+                .map(|source| {
+                    scope.spawn(move || install_source_pack(pack_dir, source, collect_oids))
+                })
                 .collect::<Vec<_>>();
             handles
                 .into_iter()
@@ -702,40 +784,37 @@ fn install_source_packs(
 fn install_source_pack(
     pack_dir: &Path,
     source: &RepackSource,
+    collect_oids: bool,
 ) -> Result<InstalledSourcePack, RepackError> {
-    validate_source(source)?;
-    let installed = install_pack_file_from_path(
+    let installed = install_pack_files_from_paths_with_identity(
         pack_dir,
         &source.path,
+        &source.index_path,
+        &source.reverse_index_path,
         &source.canonical_id,
         source.size,
-        false,
+        source.object_count,
+        source.verified_identity,
     )?;
-    let mut locations =
-        PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
-    if locations.object_count() != source.object_count {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: source.canonical_id.clone(),
-            reason: format!(
-                "index has {} objects but manifest records {}",
-                locations.object_count(),
-                source.object_count
-            ),
-        });
-    }
-    let mut oids = Vec::new();
-    for location in &mut locations {
-        let location = location?;
-        let oid = location
-            .oid
-            .as_bytes()
-            .try_into()
-            .map_err(|_| RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: "selected pack contains a non-SHA1 object".to_owned(),
-            })?;
-        oids.push(oid);
-    }
+    let oids =
+        if collect_oids {
+            let mut locations =
+                PackLocationIter::open(&installed.idx_path, &installed.rev_path, source.size)?;
+            let mut oids = Vec::new();
+            for location in &mut locations {
+                let location = location?;
+                let oid = location.oid.as_bytes().try_into().map_err(|_| {
+                    RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "selected pack contains a non-SHA1 object".to_owned(),
+                    }
+                })?;
+                oids.push(oid);
+            }
+            oids
+        } else {
+            Vec::new()
+        };
     Ok(InstalledSourcePack {
         index_path: installed.idx_path,
         oids,
@@ -764,16 +843,11 @@ pub fn repack_selected_objects(
     let source_git = workspace.path().join("source.git");
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
-    for source in sources {
-        validate_source(source)?;
-        install_pack_file_from_path(
-            &pack_dir,
-            &source.path,
-            &source.canonical_id,
-            source.size,
-            false,
-        )?;
-    }
+    let concurrency = std::thread::available_parallelism()
+        .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
+            parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
+        });
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
 
     let object_list = workspace.path().join("selected-objects.txt");
     let mut input = File::create(&object_list)
@@ -789,6 +863,10 @@ pub fn repack_selected_objects(
         &object_list,
         &selected,
         "pack-crab-selected",
+        // Committed source packs were object-validated at publication. The
+        // response still checks pack/index identity and the exact object set;
+        // the receiving Git client validates object bodies with index-pack.
+        GeneratedPackValidation::Structural,
     )?;
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
@@ -796,17 +874,43 @@ pub fn repack_selected_objects(
     })
 }
 
+/// Check whether source pack indexes contain exactly the requested object set.
+///
+/// This reads only verified index sidecars, so response producers can avoid a
+/// whole-pack consolidation when incremental packs contain a small amount of
+/// repeated or extra inventory. Source body integrity remains the caller's
+/// responsibility because this check does not read packed entries.
+pub fn source_pack_inventory_matches_object_ids(
+    sources: &[RepackSource],
+    selected_oids: &[gix_hash::ObjectId],
+) -> Result<bool, RepackError> {
+    let selected = normalize_selected_oids(selected_oids, "selected-pack")?;
+    let mut source_oids = Vec::with_capacity(selected.len());
+    for source in sources {
+        let locations =
+            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
+        source_oids.extend(locations.sorted_object_ids());
+    }
+    source_oids.sort_unstable();
+    source_oids.dedup();
+    Ok(source_oids == selected)
+}
+
 /// Generate the exact self-contained pack for an existing shallow client's negotiation.
 ///
 /// The source packs are one immutable repository inventory. Git evaluates the
 /// requested wants and common haves with the client's shallow boundaries
 /// installed, then the generated index is compared with that exact revision
-/// selection so reused deltas cannot add an unauthorized object.
+/// selection so reused deltas cannot add an unauthorized object. Source packs
+/// must have passed object validation before entering the committed inventory;
+/// the generated transfer pack revalidates its pack, index, reverse-index, and
+/// exact object-set checksums without inflating every object a second time.
 pub fn repack_shallow_fetch(
     sources: &[RepackSource],
     wants: &[gix_hash::ObjectId],
     common_haves: &[gix_hash::ObjectId],
     shallow: &[gix_hash::ObjectId],
+    included_tags: &[ShallowFetchTag],
     maximum_objects: usize,
 ) -> Result<GeometricRepackedRepository, RepackError> {
     if sources.is_empty() || wants.is_empty() || common_haves.is_empty() || shallow.is_empty() {
@@ -826,7 +930,7 @@ pub fn repack_shallow_fetch(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    let _ = install_source_packs(&pack_dir, sources, concurrency)?;
+    let _ = install_source_packs(&pack_dir, sources, concurrency, false)?;
 
     let shallow_path = source_git.join("shallow");
     let mut shallow_file = File::create(&shallow_path)
@@ -864,17 +968,86 @@ pub fn repack_shallow_fetch(
         "enumerate shallow fetch objects",
     )?;
     let selected = read_selected_oids(&object_list, maximum_objects, "shallow-fetch")?;
+    let selected = include_reachable_tag_objects(
+        &source_git,
+        &object_list,
+        selected,
+        included_tags,
+        maximum_objects,
+    )?;
     let generated = pack_selected_objects(
         &source_git,
         &pack_dir,
         &object_list,
         &selected,
         "pack-crab-shallow",
+        GeneratedPackValidation::Structural,
     )?;
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
         packs: vec![generated],
     })
+}
+
+fn include_reachable_tag_objects(
+    source_git: &Path,
+    object_list: &Path,
+    mut selected: Vec<gix_hash::ObjectId>,
+    included_tags: &[ShallowFetchTag],
+    maximum_objects: usize,
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let selected_set = selected.iter().copied().collect::<BTreeSet<_>>();
+    let included_tags = included_tags
+        .iter()
+        .filter(|tag| tag.target != tag.peeled && selected_set.contains(&tag.peeled))
+        .collect::<Vec<_>>();
+    if included_tags.is_empty() {
+        return Ok(selected);
+    }
+
+    let workspace = object_list
+        .parent()
+        .ok_or_else(|| RepackError::SelectedObjectSet {
+            pack_id: "shallow-fetch".to_owned(),
+            reason: "shallow fetch object list has no parent directory".to_owned(),
+        })?;
+    let revisions_path = workspace.join("shallow-fetch-tag-revisions.txt");
+    let mut revisions = File::create(&revisions_path)
+        .map_err(|source| io_error(format!("create {}", revisions_path.display()), source))?;
+    for tag in included_tags {
+        writeln!(revisions, "{}\n^{}", tag.target, tag.peeled)
+            .map_err(|source| io_error(format!("write {}", revisions_path.display()), source))?;
+    }
+    drop(revisions);
+
+    let tag_objects_path = workspace.join("shallow-fetch-tag-objects.txt");
+    let revision_input = File::open(&revisions_path)
+        .map_err(|source| io_error(format!("open {}", revisions_path.display()), source))?;
+    let object_output = File::create(&tag_objects_path)
+        .map_err(|source| io_error(format!("create {}", tag_objects_path.display()), source))?;
+    run_git(
+        Command::new("git")
+            .arg(format!("--git-dir={}", source_git.display()))
+            .args(["rev-list", "--stdin", "--objects", "--no-object-names"])
+            .stdin(Stdio::from(revision_input))
+            .stdout(Stdio::from(object_output)),
+        "enumerate shallow fetch tag objects",
+    )?;
+    let remaining = maximum_objects.saturating_sub(selected.len());
+    let tag_objects = read_selected_oids(&tag_objects_path, remaining, "shallow-fetch-tags")?;
+    let mut selected_set = selected_set;
+    let mut object_list = std::fs::OpenOptions::new()
+        .append(true)
+        .open(object_list)
+        .map_err(|source| io_error("open shallow fetch object list for tags", source))?;
+    for oid in tag_objects {
+        if selected_set.insert(oid) {
+            writeln!(object_list, "{oid}")
+                .map_err(|source| io_error("append shallow fetch tag object", source))?;
+            selected.push(oid);
+        }
+    }
+    normalize_selected_oids(&selected, "shallow-fetch")
 }
 
 fn normalize_selected_oids(
@@ -935,6 +1108,7 @@ fn pack_selected_objects(
     object_list: &Path,
     selected: &[gix_hash::ObjectId],
     output_name: &str,
+    validation: GeneratedPackValidation,
 ) -> Result<GeometricRepackedPack, RepackError> {
     let stdin = File::open(object_list)
         .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
@@ -947,6 +1121,9 @@ fn pack_selected_objects(
             .arg("--reuse-delta")
             .arg("--reuse-object")
             .arg("--delta-base-offset")
+            // Git's automatic thread count multiplies delta-window memory;
+            // cap each shared response producer without changing maintenance geometry.
+            .arg(format!("--threads={RESPONSE_PACK_THREADS}"))
             .arg("--depth=64")
             .arg(&output_prefix)
             .stdin(Stdio::from(stdin))
@@ -969,46 +1146,15 @@ fn pack_selected_objects(
             pack_id: "selected-pack".to_owned(),
             reason: "selected-object packing produced no pack".to_owned(),
         })?;
-    let generated = verified_generated_pack(pack_path)?;
-    let mut generated_locations = PackLocationIter::open(
-        &generated.index_path,
-        &generated.reverse_index_path,
-        generated.pack_size,
-    )?;
-    let mut generated_oids = Vec::<[u8; 20]>::new();
-    for location in &mut generated_locations {
-        let location = location?;
-        let oid =
-            location
-                .oid
-                .as_bytes()
-                .try_into()
-                .map_err(|_| RepackError::SelectedObjectSet {
-                    pack_id: generated.pack_id.clone(),
-                    reason: "generated pack contains a non-SHA1 object".to_owned(),
-                })?;
-        generated_oids.push(oid);
-    }
-    generated_oids.sort_unstable();
-    let selected_matches = generated_oids.len() == selected.len()
-        && generated_oids
-            .iter()
-            .zip(selected)
-            .all(|(generated, selected)| selected.as_bytes() == generated);
-    if !selected_matches {
-        return Err(RepackError::SelectedObjectSet {
-            pack_id: generated.pack_id,
-            reason: format!(
-                "generated {} objects for {} requested objects",
-                generated_oids.len(),
-                selected.len()
-            ),
-        });
-    }
-    Ok(generated)
+    verified_generated_pack(pack_path, validation, Some(selected), None)
 }
 
-fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, RepackError> {
+fn verified_generated_pack(
+    pack_path: PathBuf,
+    validation: GeneratedPackValidation,
+    expected_object_ids: Option<&[gix_hash::ObjectId]>,
+    verified_identity: Option<VerifiedPackIdentity>,
+) -> Result<GeometricRepackedPack, RepackError> {
     let index_path = pack_path.with_extension("idx");
     let reverse_index_path = pack_path.with_extension("rev");
     if !reverse_index_path.is_file() {
@@ -1026,15 +1172,35 @@ fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, 
     let locations = PackLocationIter::open(&index_path, &reverse_index_path, pack_size)?;
     let object_count = locations.object_count();
     let git_sha1 = locations.pack_checksum().to_string();
-    run_git(
-        Command::new("git")
-            .arg("verify-pack")
-            .arg("-v")
-            .arg(&index_path)
-            .stdout(Stdio::null()),
-        "verify consolidated Git pack",
-    )?;
-    let (pack_hash, hashed_size) = hash_file(&pack_path)?;
+    let (pack_hash, hashed_size) = if let Some(identity) = verified_identity {
+        if identity.git_sha1.as_ref() != locations.pack_checksum().as_bytes() {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: pack_path.display().to_string(),
+                reason: "verified generated pack identity does not match its index checksum"
+                    .to_owned(),
+            });
+        }
+        (identity.content_hash, pack_size)
+    } else {
+        let (trailer, pack_hash, hashed_size) = verify_and_hash_pack_file(&pack_path)?;
+        if trailer != git_sha1 {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: pack_path.display().to_string(),
+                reason: "generated pack index checksum does not match its pack trailer".to_owned(),
+            });
+        }
+        (pack_hash, hashed_size)
+    };
+    if matches!(validation, GeneratedPackValidation::Full) {
+        run_git(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(&index_path)
+                .stdout(Stdio::null()),
+            "verify consolidated Git pack",
+        )?;
+    }
     if hashed_size != pack_size {
         return Err(RepackError::SourceIntegrity {
             pack_id: pack_path.display().to_string(),
@@ -1043,11 +1209,27 @@ fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, 
     }
     let (index_hash, index_size) = hash_file(&index_path)?;
     let (reverse_index_hash, reverse_index_size) = hash_file(&reverse_index_path)?;
+    let pack_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
+    if let Some(expected_object_ids) = expected_object_ids {
+        // Git v2 indexes store OIDs in lexicographic order. PackLocationIter::open
+        // has already validated the index and reverse-index as one pair, so this
+        // avoids allocating and sorting every generated OID a second time.
+        if !locations.matches_sorted_object_ids(expected_object_ids) {
+            return Err(RepackError::SelectedObjectSet {
+                pack_id,
+                reason: format!(
+                    "generated {} objects for {} requested objects",
+                    locations.object_count(),
+                    expected_object_ids.len()
+                ),
+            });
+        }
+    }
     Ok(GeometricRepackedPack {
         pack_path,
         index_path,
         reverse_index_path,
-        pack_id: blake3::Hash::from_bytes(pack_hash).to_hex().to_string(),
+        pack_id,
         pack_hash,
         pack_size,
         index_hash,
@@ -1061,7 +1243,13 @@ fn verified_generated_pack(pack_path: PathBuf) -> Result<GeometricRepackedPack, 
 }
 
 fn validate_source(source: &RepackSource) -> Result<(), RepackError> {
-    let (hash, size) = hash_file(&source.path)?;
+    let size = std::fs::metadata(&source.path)
+        .map_err(|error| io_error(format!("metadata {}", source.path.display()), error))?
+        .len();
+    let hash = match source.verified_identity {
+        Some(identity) => identity.content_hash,
+        None => verify_and_hash_pack_file(&source.path)?.1,
+    };
     if size != source.size {
         return Err(RepackError::SourceIntegrity {
             pack_id: source.canonical_id.clone(),
@@ -1277,8 +1465,11 @@ mod tests {
         let source = RepackSource {
             canonical_id: "source".to_owned(),
             path: PathBuf::new(),
+            index_path: PathBuf::new(),
+            reverse_index_path: PathBuf::new(),
             size: 0,
             object_count: 0,
+            verified_identity: None,
         };
 
         let error = repack_selected_objects(&[source], &[oid, oid]).unwrap_err();
@@ -1378,6 +1569,40 @@ mod tests {
             "resolve side commit",
         )?;
         run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "tag",
+                "--annotate",
+                "--message=included tag",
+                "included-tag",
+                &side_commit,
+            ]),
+            "create included shallow-fetch tag",
+        )?;
+        let included_tag = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "included-tag^{tag}"]),
+            "resolve included tag object",
+        )?;
+        run_git(
+            Command::new("git").arg("-C").arg(&repository).args([
+                "tag",
+                "--annotate",
+                "--message=excluded tag",
+                "excluded-tag",
+                &shallow_parent,
+            ]),
+            "create excluded shallow-fetch tag",
+        )?;
+        let excluded_tag = git_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "excluded-tag^{tag}"]),
+            "resolve excluded tag object",
+        )?;
+        run_git(
             Command::new("git")
                 .arg("-C")
                 .arg(&repository)
@@ -1423,6 +1648,16 @@ mod tests {
             &[oid(&want)?],
             &[oid(&shallow_tip)?],
             &[oid(&shallow_tip)?],
+            &[
+                ShallowFetchTag {
+                    target: oid(&included_tag)?,
+                    peeled: oid(&side_commit)?,
+                },
+                ShallowFetchTag {
+                    target: oid(&excluded_tag)?,
+                    peeled: oid(&shallow_parent)?,
+                },
+            ],
             100,
         )?;
         let pack = generated
@@ -1441,7 +1676,9 @@ mod tests {
 
         assert!(objects.contains(&oid(&want)?));
         assert!(objects.contains(&oid(&side_commit)?));
+        assert!(objects.contains(&oid(&included_tag)?));
         assert!(!objects.contains(&oid(&shallow_parent)?));
+        assert!(!objects.contains(&oid(&excluded_tag)?));
         Ok(())
     }
 
@@ -1501,6 +1738,12 @@ mod tests {
         let selected = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
         assert_eq!(selected.packs().len(), 1);
         assert!(selected.packs()[0].object_count <= sources.iter().map(|s| s.object_count).sum());
+        let response = consolidate_pack_suffix_for_response(&sources)?;
+        assert_eq!(response.packs().len(), 1);
+        assert_eq!(
+            response.packs()[0].object_count,
+            selected.packs()[0].object_count
+        );
 
         let selected_oids = git_output(
             Command::new("git")
@@ -1648,8 +1891,9 @@ mod tests {
             "first test pack should contain a delta entry"
         );
         let second = source_descriptor(root.path().join(format!("second-{second_hash}.pack")))?;
+        let sources = [first, second];
 
-        let concatenated = concatenate_complete_pack_inventory(&[first, second])?;
+        let concatenated = concatenate_complete_pack_inventory(&sources)?;
         let generated =
             concatenated
                 .packs()
@@ -1692,6 +1936,13 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+        assert!(source_pack_inventory_matches_object_ids(
+            &sources, &expected
+        )?);
+        assert!(!source_pack_inventory_matches_object_ids(
+            &sources,
+            &expected[..expected.len() - 1],
+        )?);
         Ok(())
     }
 
@@ -1787,23 +2038,38 @@ mod tests {
                 )
             })?;
         let target = destination.join(format!("{name}.pack"));
-        std::fs::copy(source, &target).map_err(|error| io_error("copy test pack", error))?;
+        let target_index = target.with_extension("idx");
+        let target_reverse_index = target.with_extension("rev");
+        std::fs::copy(&source, &target).map_err(|error| io_error("copy test pack", error))?;
+        std::fs::copy(source.with_extension("idx"), &target_index)
+            .map_err(|error| io_error("copy test pack index", error))?;
+        let source_reverse_index = source.with_extension("rev");
+        if source_reverse_index.is_file() {
+            std::fs::copy(source_reverse_index, &target_reverse_index)
+                .map_err(|error| io_error("copy test pack reverse index", error))?;
+        } else {
+            write_pack_reverse_index(&target_index, &target_reverse_index)?;
+        }
         Ok(target)
     }
 
     fn source_descriptor(path: PathBuf) -> Result<RepackSource, RepackError> {
         let (hash, size) = hash_file(&path)?;
-        let installed =
-            tempfile::tempdir().map_err(|error| io_error("create index root", error))?;
         let canonical_id = blake3::Hash::from_bytes(hash).to_hex().to_string();
-        let pack =
-            install_pack_file_from_path(installed.path(), &path, &canonical_id, size, false)?;
-        let locations = PackLocationIter::open(&pack.idx_path, &pack.rev_path, size)?;
+        let index_path = path.with_extension("idx");
+        let reverse_index_path = path.with_extension("rev");
+        if !reverse_index_path.is_file() {
+            write_pack_reverse_index(&index_path, &reverse_index_path)?;
+        }
+        let locations = PackLocationIter::open(&index_path, &reverse_index_path, size)?;
         Ok(RepackSource {
             canonical_id,
             path,
+            index_path,
+            reverse_index_path,
             size,
             object_count: locations.object_count(),
+            verified_identity: None,
         })
     }
 

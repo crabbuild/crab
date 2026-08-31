@@ -34,26 +34,29 @@ const MAX_PACKS_PER_OPERATION: u64 = 1_000_000;
 const MAX_REPACK_DOWNLOAD_CONCURRENCY: usize = 16;
 // The owner rolls up a bounded suffix so repeated cycles make progress
 // without allowing one repository to monopolize maintenance or disk I/O.
-const GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS: usize = 4_096;
-const GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS: u64 = 8_192;
-const GENERATION_OWNER_REPACK_MAX_ELAPSED: Duration = Duration::from_secs(30 * 60);
+// A batch is restartable after a lease interruption and accounts for all
+// three immutable source artifacts per pack.
+const GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS: usize = 128;
+const GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS: u64 = 384;
+const GENERATION_OWNER_REPACK_MAX_ELAPSED: Duration = Duration::from_mins(10);
+const SOURCE_ARTIFACT_REQUESTS_PER_PACK: u64 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RepackBudget {
-    max_source_packs: usize,
-    max_source_bytes: u64,
-    max_source_requests: u64,
-    max_elapsed: Duration,
+    source_pack_limit: usize,
+    source_byte_limit: u64,
+    source_request_limit: u64,
+    elapsed_limit: Duration,
 }
 
 impl RepackBudget {
     pub(crate) const fn generation_owner() -> Self {
         Self {
-            max_source_packs: GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS,
-            max_source_bytes: GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES,
-            max_source_requests: GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS,
-            max_elapsed: GENERATION_OWNER_REPACK_MAX_ELAPSED,
+            source_pack_limit: GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS,
+            source_byte_limit: GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES,
+            source_request_limit: GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS,
+            elapsed_limit: GENERATION_OWNER_REPACK_MAX_ELAPSED,
         }
     }
 }
@@ -378,8 +381,16 @@ async fn run_repack_locked(
     let shallow_closure = read_current_shallow_closure(store, router, &manifest).await?;
 
     std::fs::create_dir_all(&config.workspace_root).map_err(CrabError::Io)?;
+    let sidecar_bytes = selected_pack_sidecar_bytes(&selected_packs)?;
+    // Hard-link staging is normally zero-copy, but a cross-device workspace
+    // can require a second local copy of every downloaded artifact.
     let required_space = bytes_read
         .checked_mul(2)
+        .and_then(|bytes| {
+            sidecar_bytes
+                .checked_mul(2)
+                .and_then(|sidecars| bytes.checked_add(sidecars))
+        })
         .and_then(|bytes| bytes.checked_add(REPACK_DISK_RESERVE))
         .ok_or_else(|| CrabError::Internal("repack workspace size overflow".to_owned()))?;
     let available = crate::workflow::cache::available_disk_space(&config.workspace_root)
@@ -425,8 +436,12 @@ async fn run_repack_locked(
             .map(|pack| crab_git::repack::RepackSource {
                 canonical_id: pack.pack_id.clone(),
                 path: download_dir_for_pack.join(format!("pack-{}.pack", pack.pack_id)),
+                index_path: download_dir_for_pack.join(format!("pack-{}.idx", pack.pack_id)),
+                reverse_index_path: download_dir_for_pack
+                    .join(format!("pack-{}.rev", pack.pack_id)),
                 size: pack.size,
                 object_count: pack.object_count,
+                verified_identity: None,
             })
             .collect::<Vec<_>>();
         crab_git::repack::consolidate_pack_suffix_with_concurrency(&sources, download_concurrency)
@@ -698,32 +713,33 @@ fn select_repack_packs(
             bounded: false,
         }));
     };
-    if budget.max_source_packs < 2 {
+    if budget.source_pack_limit < 2 {
         return Ok(Err(RepackDeferral {
             resource: "source_packs",
             actual: 2,
-            maximum: budget.max_source_packs as u64,
+            maximum: budget.source_pack_limit as u64,
         }));
     }
     let request_limited_packs =
-        usize::try_from(budget.max_source_requests / 2).unwrap_or(usize::MAX);
+        usize::try_from(budget.source_request_limit / SOURCE_ARTIFACT_REQUESTS_PER_PACK)
+            .unwrap_or(usize::MAX);
     if request_limited_packs < 2 {
         return Ok(Err(RepackDeferral {
             resource: "source_storage_requests",
-            actual: 4,
-            maximum: budget.max_source_requests,
+            actual: SOURCE_ARTIFACT_REQUESTS_PER_PACK.saturating_mul(2),
+            maximum: budget.source_request_limit,
         }));
     }
     let max_count = geometric_count
-        .min(budget.max_source_packs)
+        .min(budget.source_pack_limit)
         .min(request_limited_packs);
     let minimum_count = geometric_count.min(2);
     let minimum_bytes = selected_pack_bytes(packs, minimum_count)?;
-    if minimum_bytes > budget.max_source_bytes {
+    if minimum_bytes > budget.source_byte_limit {
         return Ok(Err(RepackDeferral {
             resource: "source_bytes",
             actual: minimum_bytes,
-            maximum: budget.max_source_bytes,
+            maximum: budget.source_byte_limit,
         }));
     }
 
@@ -736,7 +752,7 @@ fn select_repack_packs(
         let next_bytes = bytes.checked_add(pack.size).ok_or_else(|| {
             CrabError::Internal("selected repack source byte total overflow".to_owned())
         })?;
-        if next_bytes > budget.max_source_bytes {
+        if next_bytes > budget.source_byte_limit {
             break;
         }
         count += 1;
@@ -746,7 +762,7 @@ fn select_repack_packs(
         return Ok(Err(RepackDeferral {
             resource: "source_bytes",
             actual: minimum_bytes,
-            maximum: budget.max_source_bytes,
+            maximum: budget.source_byte_limit,
         }));
     }
     Ok(Ok(RepackSelection {
@@ -773,10 +789,10 @@ fn elapsed_budget_deferral(
     elapsed: Duration,
 ) -> Option<RepackDeferral> {
     let budget = budget?;
-    (elapsed >= budget.max_elapsed).then(|| RepackDeferral {
+    (elapsed >= budget.elapsed_limit).then(|| RepackDeferral {
         resource: "elapsed_ms",
         actual: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-        maximum: u64::try_from(budget.max_elapsed.as_millis()).unwrap_or(u64::MAX),
+        maximum: u64::try_from(budget.elapsed_limit.as_millis()).unwrap_or(u64::MAX),
     })
 }
 
@@ -920,15 +936,15 @@ async fn download_source_packs(
         let store = store.clone();
         let cancel = cancel.clone();
         let pack_path = repo_pack_path(router.repo_prefix(), &pack.pack_id);
+        let index_path = repo_pack_index_path(router.repo_prefix(), &pack.pack_id);
+        let reverse_index_path = repo_pack_reverse_index_path(router.repo_prefix(), &pack.pack_id);
         let local_pack = pack_dir.join(format!("pack-{}.pack", pack.pack_id));
+        let local_index = pack_dir.join(format!("pack-{}.idx", pack.pack_id));
+        let local_reverse_index = pack_dir.join(format!("pack-{}.rev", pack.pack_id));
         async move {
             if cancel.is_cancelled() {
                 return Err(CrabError::Cancelled);
             }
-            // The committed manifest supplies the exact body bound; disk
-            // admission above limits aggregate temporary space. The pack
-            // index is a derived object and the repack worker rebuilds it
-            // while installing the body, avoiding a second validation path.
             let pack_size = tokio::select! {
                 result = store.download_to_path_bounded(&pack_path, &local_pack, pack.size) => result?,
                 () = cancel.cancelled() => return Err(CrabError::Cancelled),
@@ -937,6 +953,36 @@ async fn download_source_packs(
                 return Err(CrabError::CorruptObject {
                     path: pack_path.as_ref().to_owned(),
                     reason: format!("pack has {pack_size} bytes, manifest records {}", pack.size),
+                });
+            }
+            let index_maximum = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: index_path.as_ref().to_owned(),
+                    reason: "pack index size bound overflowed".to_owned(),
+                })?;
+            tokio::select! {
+                result = store.download_to_path_bounded(&index_path, &local_index, index_maximum) => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
+            let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: reverse_index_path.as_ref().to_owned(),
+                    reason: "pack reverse-index size bound overflowed".to_owned(),
+                })?;
+            let reverse_size = tokio::select! {
+                result = store.download_to_path_bounded(
+                    &reverse_index_path,
+                    &local_reverse_index,
+                    reverse_maximum,
+                ) => result?,
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            };
+            if reverse_size != reverse_maximum {
+                return Err(CrabError::CorruptObject {
+                    path: reverse_index_path.as_ref().to_owned(),
+                    reason: format!(
+                        "reverse index has {reverse_size} bytes, expected {reverse_maximum}"
+                    ),
                 });
             }
             Ok(())
@@ -950,6 +996,25 @@ async fn download_source_packs(
         result?;
     }
     Ok(())
+}
+
+fn selected_pack_sidecar_bytes(packs: &[PackManifestEntry]) -> Result<u64> {
+    packs.iter().try_fold(0_u64, |total, pack| {
+        let index_size = crab_git::pack_locator::max_pack_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("pack-{}/idx", pack.pack_id),
+                reason: "pack index size bound overflowed".to_owned(),
+            })?;
+        let reverse_index_size = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
+            .ok_or_else(|| CrabError::CorruptObject {
+                path: format!("pack-{}/rev", pack.pack_id),
+                reason: "pack reverse-index size bound overflowed".to_owned(),
+            })?;
+        total
+            .checked_add(index_size)
+            .and_then(|value| value.checked_add(reverse_index_size))
+            .ok_or_else(|| CrabError::Internal("repack sidecar byte total overflow".to_owned()))
+    })
 }
 
 fn validate_pack_inventory(router: &StoreLayout, packs: &[PackManifestEntry]) -> Result<()> {
@@ -1208,10 +1273,10 @@ mod tests {
             budget_pack(10, 7),
         ];
         let budget = RepackBudget {
-            max_source_packs: 2,
-            max_source_bytes: 20,
-            max_source_requests: 4,
-            max_elapsed: Duration::from_secs(60),
+            source_pack_limit: 2,
+            source_byte_limit: 20,
+            source_request_limit: 6,
+            elapsed_limit: Duration::from_secs(60),
         };
 
         let selection = select_repack_packs(&packs, 4, Some(&budget), Duration::ZERO)
@@ -1223,6 +1288,49 @@ mod tests {
     }
 
     #[test]
+    fn bounded_repack_selection_counts_pack_sidecar_requests() {
+        let packs = vec![budget_pack(10, 10), budget_pack(10, 9)];
+        let budget = RepackBudget {
+            source_pack_limit: 4,
+            source_byte_limit: 100,
+            source_request_limit: 5,
+            elapsed_limit: Duration::from_secs(60),
+        };
+
+        let deferral = select_repack_packs(&packs, 2, Some(&budget), Duration::ZERO)
+            .expect("selection calculation")
+            .expect_err("selection should require pack, index, and reverse-index requests");
+        assert_eq!(deferral.resource, "source_storage_requests");
+        assert_eq!(deferral.actual, 6);
+        assert_eq!(deferral.maximum, 5);
+    }
+
+    #[test]
+    fn generation_owner_budget_bounds_large_consolidation_batches() {
+        let packs = (0..902)
+            .map(|index| budget_pack(1_024 * 1_024, 1_000 + index))
+            .collect::<Vec<_>>();
+        let geometric_count = generation_owner_repack_count(&packs);
+
+        let selection = select_repack_packs(
+            &packs,
+            geometric_count,
+            Some(&RepackBudget::generation_owner()),
+            Duration::ZERO,
+        )
+        .expect("selection calculation")
+        .expect("large consolidation should make bounded progress");
+
+        assert_eq!(geometric_count, 901);
+        assert_eq!(selection.count, GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS);
+        assert_eq!(
+            selection.bytes,
+            (GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS as u64) * 1_024 * 1_024
+        );
+        assert!(selection.bounded);
+    }
+
+    #[test]
     fn bounded_repack_selection_defers_when_two_packs_do_not_fit() {
         let packs = vec![
             budget_pack(100, 100),
@@ -1230,10 +1338,10 @@ mod tests {
             budget_pack(10, 9),
         ];
         let budget = RepackBudget {
-            max_source_packs: 4,
-            max_source_bytes: 19,
-            max_source_requests: 8,
-            max_elapsed: Duration::from_secs(60),
+            source_pack_limit: 4,
+            source_byte_limit: 19,
+            source_request_limit: 8,
+            elapsed_limit: Duration::from_secs(60),
         };
 
         let deferral = select_repack_packs(&packs, 2, Some(&budget), Duration::ZERO)
@@ -1248,10 +1356,10 @@ mod tests {
     fn bounded_repack_selection_defers_after_deadline() {
         let packs = vec![budget_pack(10, 10), budget_pack(10, 9)];
         let budget = RepackBudget {
-            max_source_packs: 4,
-            max_source_bytes: 100,
-            max_source_requests: 8,
-            max_elapsed: Duration::from_secs(1),
+            source_pack_limit: 4,
+            source_byte_limit: 100,
+            source_request_limit: 8,
+            elapsed_limit: Duration::from_secs(1),
         };
 
         let deferral = select_repack_packs(&packs, 2, Some(&budget), Duration::from_secs(1))
@@ -1358,7 +1466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repack_source_download_requires_only_the_committed_pack_body() -> Result<()> {
+    async fn repack_source_download_requires_committed_pack_artifacts() -> Result<()> {
         let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(backend);
         let router = StoreLayout::new(store.clone(), "org/repack-download".to_owned());
@@ -1388,6 +1496,18 @@ mod tests {
                 Bytes::from(std::fs::read(&pack.pack_path)?),
             )
             .await?;
+        store
+            .put(
+                &router.pack_index_path(&pack_id),
+                Bytes::from(std::fs::read(&pack.index_path)?),
+            )
+            .await?;
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&reverse_index)?),
+            )
+            .await?;
         let download_dir = source.path().join("downloads");
         std::fs::create_dir_all(&download_dir)?;
 
@@ -1404,6 +1524,14 @@ mod tests {
         assert_eq!(
             std::fs::read(download_dir.join(format!("pack-{pack_id}.pack")))?,
             std::fs::read(pack.pack_path)?,
+        );
+        assert_eq!(
+            std::fs::read(download_dir.join(format!("pack-{pack_id}.idx")))?,
+            std::fs::read(pack.index_path)?,
+        );
+        assert_eq!(
+            std::fs::read(download_dir.join(format!("pack-{pack_id}.rev")))?,
+            std::fs::read(reverse_index)?,
         );
         Ok(())
     }
@@ -1756,6 +1884,12 @@ mod tests {
             .put(
                 &router.pack_index_path(&pack_id),
                 Bytes::from(std::fs::read(&pack.index_path)?),
+            )
+            .await?;
+        store
+            .put(
+                &router.pack_reverse_index_path(&pack_id),
+                Bytes::from(std::fs::read(&reverse_index_path)?),
             )
             .await?;
         Ok(PackManifestEntry {

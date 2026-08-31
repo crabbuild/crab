@@ -11,6 +11,19 @@ use sha1::{Digest, Sha1};
 /// SHA-1 trailer length in Git pack files.
 pub const PACK_SHA1_LEN: usize = 20;
 
+/// Checksums computed while a complete immutable pack is streamed.
+///
+/// A caller may carry this identity into a later local install to avoid
+/// reading the same pack body again. The source bytes must remain private and
+/// unchanged between verification and install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedPackIdentity {
+    /// Git's SHA-1 over the pack header and entries, excluding the trailer.
+    pub git_sha1: [u8; PACK_SHA1_LEN],
+    /// Crab's Blake3 content identity over the complete pack, including trailer.
+    pub content_hash: [u8; 32],
+}
+
 /// Result alias for Git pack validation.
 pub type Result<T> = std::result::Result<T, PackError>;
 
@@ -79,6 +92,33 @@ pub enum PackError {
     ReverseIndex {
         #[from]
         source: crate::pack_locator::PackLocatorError,
+    },
+
+    /// A pack sidecar exceeded the bound implied by its object count.
+    #[error("git pack sidecar {path} is too large: {size} bytes exceeds limit {limit}")]
+    SidecarTooLarge {
+        /// Sidecar path that exceeded its bound.
+        path: PathBuf,
+        /// Observed sidecar size.
+        size: u64,
+        /// Maximum permitted sidecar size.
+        limit: u64,
+    },
+
+    /// The object-count-derived sidecar bound could not be represented.
+    #[error("git pack sidecar size bound overflowed for {path}")]
+    SidecarSizeOverflow {
+        /// Sidecar path whose bound overflowed.
+        path: PathBuf,
+    },
+
+    /// The pack content did not match its canonical storage identifier.
+    #[error("git pack content hash mismatch: expected {expected}, computed {computed}")]
+    ContentHashMismatch {
+        /// Canonical content identifier supplied by the caller.
+        expected: String,
+        /// Content identifier computed from the pack bytes.
+        computed: String,
     },
 
     /// Git could not return validated object kinds for a local object database.
@@ -225,6 +265,24 @@ pub fn install_pack_file_from_path(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
+    install_pack_file_from_path_with_identity(
+        pack_dir,
+        pack_tmp_path,
+        canonical_name,
+        max_input_size,
+        fsck_objects,
+        None,
+    )
+}
+
+pub(crate) fn install_pack_file_from_path_with_identity(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+    verified_identity: Option<VerifiedPackIdentity>,
+) -> Result<InstalledPack> {
     let size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
         .len();
@@ -240,6 +298,17 @@ pub fn install_pack_file_from_path(
             name: canonical_name.to_owned(),
         });
     }
+    if let Some(identity) = verified_identity {
+        let computed_content_hash = blake3::Hash::from_bytes(identity.content_hash)
+            .to_hex()
+            .to_string();
+        if !computed_content_hash.eq_ignore_ascii_case(canonical_name) {
+            return Err(PackError::ContentHashMismatch {
+                expected: canonical_name.to_owned(),
+                computed: computed_content_hash,
+            });
+        }
+    }
 
     let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
     let final_idx = pack_dir.join(format!("pack-{canonical_name}.idx"));
@@ -254,7 +323,10 @@ pub fn install_pack_file_from_path(
         }
         crate::pack_locator::PackLocationIter::open(&final_idx, &final_rev, installed_size)?;
         return Ok(InstalledPack {
-            git_sha1: verify_pack_file_sha1(pack_tmp_path)?,
+            git_sha1: verified_identity.map_or_else(
+                || verify_pack_file_sha1(pack_tmp_path),
+                |identity| Ok(to_hex(&identity.git_sha1)),
+            )?,
             pack_path: final_pack,
             idx_path: final_idx,
             rev_path: final_rev,
@@ -264,7 +336,10 @@ pub fn install_pack_file_from_path(
     std::fs::create_dir_all(pack_dir)
         .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
 
-    let git_sha1 = verify_pack_file_sha1(pack_tmp_path)?;
+    let git_sha1 = verified_identity.map_or_else(
+        || verify_pack_file_sha1(pack_tmp_path),
+        |identity| Ok(to_hex(&identity.git_sha1)),
+    )?;
     let pack_tmp = copy_pack_to_install_temp(pack_dir, pack_tmp_path)?;
     let pack_tmp_path = pack_tmp.into_temp_path();
     install_pack_file_blocking(
@@ -276,6 +351,239 @@ pub fn install_pack_file_from_path(
         &final_rev,
         fsck_objects,
     )
+}
+
+/// Install a pack together with its already-verified Git index sidecars.
+///
+/// The pack body is content-hash and trailer validated once. The supplied
+/// index and reverse-index are checked against the pack before immutable
+/// hard-link-or-copy staging and atomic per-file installation. This avoids
+/// re-running `git index-pack` when a committed Crab inventory already
+/// contains both sidecars.
+///
+/// # Errors
+///
+/// Returns [`PackError::SidecarTooLarge`] when either sidecar exceeds the
+/// object-count-derived bound, [`PackError::SidecarSizeOverflow`] when that
+/// bound cannot be represented, or a validation error when the sidecars do not
+/// describe the supplied pack.
+pub fn install_pack_files_from_paths(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+) -> Result<InstalledPack> {
+    install_pack_files_from_paths_with_identity(
+        pack_dir,
+        pack_tmp_path,
+        index_tmp_path,
+        reverse_index_tmp_path,
+        canonical_name,
+        max_input_size,
+        expected_object_count,
+        None,
+    )
+}
+
+pub(crate) fn install_pack_files_from_paths_with_identity(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+    verified_identity: Option<VerifiedPackIdentity>,
+) -> Result<InstalledPack> {
+    let pack_size = std::fs::metadata(pack_tmp_path)
+        .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
+        .len();
+    if max_input_size > 0 && pack_size > max_input_size {
+        return Err(PackError::PackTooLarge {
+            size: pack_size,
+            limit: max_input_size,
+        });
+    }
+    if !valid_canonical_pack_name(canonical_name) {
+        return Err(PackError::InvalidCanonicalName {
+            name: canonical_name.to_owned(),
+        });
+    }
+
+    let (git_sha1, content_hash, verified_size) = match verified_identity {
+        Some(identity) => (to_hex(&identity.git_sha1), identity.content_hash, pack_size),
+        None => verify_and_hash_pack_file(pack_tmp_path)?,
+    };
+    if verified_size != pack_size {
+        return Err(PackError::InvalidPackFile {
+            path: pack_tmp_path.to_owned(),
+            reason: "pack changed while its size was being verified".to_owned(),
+        });
+    }
+    let computed_content_hash = blake3::Hash::from_bytes(content_hash).to_hex().to_string();
+    if !computed_content_hash.eq_ignore_ascii_case(canonical_name) {
+        return Err(PackError::ContentHashMismatch {
+            expected: canonical_name.to_owned(),
+            computed: computed_content_hash,
+        });
+    }
+
+    let index_limit =
+        crate::pack_locator::max_pack_index_size(expected_object_count).ok_or_else(|| {
+            PackError::SidecarSizeOverflow {
+                path: index_tmp_path.to_owned(),
+            }
+        })?;
+    let index_size = std::fs::metadata(index_tmp_path)
+        .map_err(|source| io_error(format!("metadata {}", index_tmp_path.display()), source))?
+        .len();
+    if index_size > index_limit {
+        return Err(PackError::SidecarTooLarge {
+            path: index_tmp_path.to_owned(),
+            size: index_size,
+            limit: index_limit,
+        });
+    }
+    let reverse_limit = crate::pack_locator::pack_reverse_index_size(expected_object_count)
+        .ok_or_else(|| PackError::SidecarSizeOverflow {
+            path: reverse_index_tmp_path.to_owned(),
+        })?;
+    let reverse_index_size = std::fs::metadata(reverse_index_tmp_path)
+        .map_err(|source| {
+            io_error(
+                format!("metadata {}", reverse_index_tmp_path.display()),
+                source,
+            )
+        })?
+        .len();
+    if reverse_index_size > reverse_limit {
+        return Err(PackError::SidecarTooLarge {
+            path: reverse_index_tmp_path.to_owned(),
+            size: reverse_index_size,
+            limit: reverse_limit,
+        });
+    }
+
+    let locations = crate::pack_locator::PackLocationIter::open(
+        index_tmp_path,
+        reverse_index_tmp_path,
+        pack_size,
+    )?;
+    if locations.object_count() != expected_object_count {
+        return Err(PackError::InvalidPackFile {
+            path: index_tmp_path.to_owned(),
+            reason: format!(
+                "index has {} objects but caller expects {expected_object_count}",
+                locations.object_count()
+            ),
+        });
+    }
+    let indexed_sha1 = locations.pack_checksum().to_string();
+    if indexed_sha1 != git_sha1 {
+        return Err(PackError::PackHashMismatch {
+            trailer: git_sha1,
+            index: indexed_sha1,
+        });
+    }
+
+    std::fs::create_dir_all(pack_dir)
+        .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
+    let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
+    let final_idx = pack_dir.join(format!("pack-{canonical_name}.idx"));
+    let final_rev = pack_dir.join(format!("pack-{canonical_name}.rev"));
+    if final_pack.exists() || final_idx.exists() || final_rev.exists() {
+        return Err(PackError::InvalidPackFile {
+            path: final_pack,
+            reason: "pack installation destination already exists".to_owned(),
+        });
+    }
+
+    let staged_pack = stage_source_artifact(pack_dir, pack_tmp_path, ".pack")?;
+    let staged_idx = stage_source_artifact(pack_dir, index_tmp_path, ".idx")?;
+    let staged_rev = stage_source_artifact(pack_dir, reverse_index_tmp_path, ".rev")?;
+    let staged_pack_path: &Path = staged_pack.as_ref();
+    let staged_idx_path: &Path = staged_idx.as_ref();
+    let staged_rev_path: &Path = staged_rev.as_ref();
+    if let Err(source) = std::fs::rename(staged_idx_path, &final_idx) {
+        return Err(io_error(
+            format!("rename {}", staged_idx_path.display()),
+            source,
+        ));
+    }
+    if let Err(source) = std::fs::rename(staged_rev_path, &final_rev) {
+        let _ = std::fs::remove_file(&final_idx);
+        return Err(io_error(
+            format!("rename {}", staged_rev_path.display()),
+            source,
+        ));
+    }
+    if let Err(source) = std::fs::rename(staged_pack_path, &final_pack) {
+        let _ = std::fs::remove_file(&final_idx);
+        let _ = std::fs::remove_file(&final_rev);
+        return Err(io_error(
+            format!("rename {}", staged_pack_path.display()),
+            source,
+        ));
+    }
+
+    Ok(InstalledPack {
+        git_sha1,
+        pack_path: final_pack,
+        idx_path: final_idx,
+        rev_path: final_rev,
+    })
+}
+
+fn stage_source_artifact(
+    pack_dir: &Path,
+    source: &Path,
+    suffix: &str,
+) -> Result<tempfile::TempPath> {
+    let staged = tempfile::Builder::new()
+        .prefix(".crab-pack-source-")
+        .suffix(suffix)
+        .tempfile_in(pack_dir)
+        .map_err(|source_error| {
+            io_error(
+                format!("create source artifact tempfile in {}", pack_dir.display()),
+                source_error,
+            )
+        })?;
+    let staged_path = staged.into_temp_path();
+    std::fs::remove_file(&staged_path).map_err(|source_error| {
+        io_error(
+            format!("prepare source artifact tempfile {}", staged_path.display()),
+            source_error,
+        )
+    })?;
+    match std::fs::hard_link(source, &staged_path) {
+        Ok(()) => {}
+        Err(source_error)
+            if matches!(
+                source_error.kind(),
+                std::io::ErrorKind::CrossesDevices
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            std::fs::copy(source, &staged_path).map_err(|copy_error| {
+                io_error(
+                    format!("copy source artifact {}", source.display()),
+                    copy_error,
+                )
+            })?;
+        }
+        Err(source_error) => {
+            return Err(io_error(
+                format!("stage source artifact {}", source.display()),
+                source_error,
+            ));
+        }
+    }
+    Ok(staged_path)
 }
 
 fn copy_pack_to_install_temp(pack_dir: &Path, source: &Path) -> Result<tempfile::NamedTempFile> {
@@ -441,6 +749,19 @@ fn install_pack_file_blocking(
 }
 
 pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
+    verify_pack_file(path, false).map(|(git_sha1, _, _)| git_sha1)
+}
+
+pub(crate) fn verify_and_hash_pack_file(path: &Path) -> Result<(String, [u8; 32], u64)> {
+    let (git_sha1, content_hash, size) = verify_pack_file(path, true)?;
+    let content_hash = content_hash.ok_or_else(|| PackError::InvalidPackFile {
+        path: path.to_owned(),
+        reason: "pack content hash was not computed".to_owned(),
+    })?;
+    Ok((git_sha1, content_hash, size))
+}
+
+fn verify_pack_file(path: &Path, hash_content: bool) -> Result<(String, Option<[u8; 32]>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
 
     const HEADER_LEN: u64 = 12;
@@ -472,20 +793,27 @@ pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
         .map_err(|source| io_error(format!("seek {}", path.display()), source))?;
 
     let mut remaining = len - SHA1_LEN_U64;
-    let mut hasher = Sha1::new();
+    let mut pack_hasher = Sha1::new();
+    let mut content_hasher = hash_content.then(blake3::Hasher::new);
     let mut buf = [0u8; 1024 * 1024];
     while remaining > 0 {
         let read_len = remaining.min(buf.len() as u64) as usize;
         file.read_exact(&mut buf[..read_len])
             .map_err(|source| io_error(format!("read {}", path.display()), source))?;
-        hasher.update(&buf[..read_len]);
+        pack_hasher.update(&buf[..read_len]);
+        if let Some(content_hasher) = &mut content_hasher {
+            content_hasher.update(&buf[..read_len]);
+        }
         remaining -= read_len as u64;
     }
 
     let mut expected = [0u8; PACK_SHA1_LEN];
     file.read_exact(&mut expected)
         .map_err(|source| io_error(format!("read {}", path.display()), source))?;
-    let computed = hasher.finalize();
+    if let Some(content_hasher) = &mut content_hasher {
+        content_hasher.update(&expected);
+    }
+    let computed = pack_hasher.finalize();
 
     if computed.as_slice() != expected {
         return Err(PackError::Sha1Mismatch {
@@ -494,7 +822,11 @@ pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
         });
     }
 
-    Ok(to_hex(&expected))
+    Ok((
+        to_hex(&expected),
+        content_hasher.map(|hasher| *hasher.finalize().as_bytes()),
+        len,
+    ))
 }
 
 fn parse_idx_pack_hash(idx_path: &Path) -> Result<String> {
@@ -818,6 +1150,109 @@ mod tests {
         assert_eq!(
             verify_pack_index_file(&idx_path).expect("valid pack index"),
             pack_hash
+        );
+    }
+
+    #[test]
+    fn file_verification_computes_git_and_storage_hashes_in_one_pass() {
+        let (_dir, idx_path, pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let bytes = std::fs::read(&pack_path).expect("read fixture pack");
+        let expected = (
+            pack_hash,
+            *blake3::hash(&bytes).as_bytes(),
+            bytes.len() as u64,
+        );
+
+        assert_eq!(
+            verify_and_hash_pack_file(&pack_path).expect("verify and hash pack"),
+            expected
+        );
+    }
+
+    #[test]
+    fn indexed_pack_install_reuses_verified_sidecars() {
+        let (dir, idx_path, _pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let reverse_path = idx_path.with_extension("rev");
+        crate::pack_locator::write_pack_reverse_index(&idx_path, &reverse_path)
+            .expect("write fixture reverse index");
+        let pack_size = std::fs::metadata(&pack_path)
+            .expect("fixture pack metadata")
+            .len();
+        let locations =
+            crate::pack_locator::PackLocationIter::open(&idx_path, &reverse_path, pack_size)
+                .expect("open fixture indexes");
+        let object_count = locations.object_count();
+        let canonical_id = blake3::hash(&std::fs::read(&pack_path).expect("read fixture pack"))
+            .to_hex()
+            .to_string();
+        let destination = dir.path().join("installed");
+
+        let installed = install_pack_files_from_paths(
+            &destination,
+            &pack_path,
+            &idx_path,
+            &reverse_path,
+            &canonical_id,
+            pack_size,
+            object_count,
+        )
+        .expect("install indexed pack");
+
+        assert_eq!(
+            std::fs::read(&installed.idx_path).expect("read installed index"),
+            std::fs::read(&idx_path).expect("read source index")
+        );
+        assert_eq!(
+            std::fs::read(&installed.rev_path).expect("read installed reverse index"),
+            std::fs::read(&reverse_path).expect("read source reverse index")
+        );
+        assert_eq!(
+            std::fs::read(&installed.pack_path).expect("read installed pack"),
+            std::fs::read(&pack_path).expect("read source pack")
+        );
+    }
+
+    #[test]
+    fn indexed_pack_install_accepts_streamed_identity() {
+        let (dir, idx_path, pack_hash) = pack_index_fixture();
+        let pack_path = idx_path.with_extension("pack");
+        let reverse_path = idx_path.with_extension("rev");
+        crate::pack_locator::write_pack_reverse_index(&idx_path, &reverse_path)
+            .expect("write fixture reverse index");
+        let bytes = std::fs::read(&pack_path).expect("read fixture pack");
+        let pack_size = bytes.len() as u64;
+        let locations =
+            crate::pack_locator::PackLocationIter::open(&idx_path, &reverse_path, pack_size)
+                .expect("open fixture indexes");
+        let git_sha1: [u8; PACK_SHA1_LEN] = locations
+            .pack_checksum()
+            .as_bytes()
+            .try_into()
+            .expect("fixture pack checksum is SHA-1");
+        let identity = VerifiedPackIdentity {
+            git_sha1,
+            content_hash: *blake3::hash(&bytes).as_bytes(),
+        };
+        let destination = dir.path().join("installed-with-identity");
+
+        let installed = install_pack_files_from_paths_with_identity(
+            &destination,
+            &pack_path,
+            &idx_path,
+            &reverse_path,
+            &blake3::hash(&bytes).to_hex(),
+            pack_size,
+            locations.object_count(),
+            Some(identity),
+        )
+        .expect("install indexed pack with streamed identity");
+
+        assert_eq!(installed.git_sha1, pack_hash);
+        assert_eq!(
+            std::fs::read(&installed.pack_path).expect("read installed pack"),
+            bytes
         );
     }
 

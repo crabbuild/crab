@@ -79,6 +79,7 @@ struct CountingStore {
     pack_gets: AtomicUsize,
     generated_pack_descriptor_gets: AtomicUsize,
     generated_pack_descriptor_puts: AtomicUsize,
+    throttled_generated_pack_descriptor_gets: AtomicUsize,
     block_next_pack_get: AtomicBool,
     block_pack_offset: AtomicU64,
     pack_get_entered: Semaphore,
@@ -95,6 +96,7 @@ impl CountingStore {
             pack_gets: AtomicUsize::new(0),
             generated_pack_descriptor_gets: AtomicUsize::new(0),
             generated_pack_descriptor_puts: AtomicUsize::new(0),
+            throttled_generated_pack_descriptor_gets: AtomicUsize::new(0),
             block_next_pack_get: AtomicBool::new(false),
             block_pack_offset: AtomicU64::new(u64::MAX),
             pack_get_entered: Semaphore::new(0),
@@ -129,6 +131,11 @@ impl CountingStore {
 
     fn generated_pack_descriptor_gets(&self) -> usize {
         self.generated_pack_descriptor_gets.load(Ordering::SeqCst)
+    }
+
+    fn throttle_generated_pack_descriptor_gets(&self, attempts: usize) {
+        self.throttled_generated_pack_descriptor_gets
+            .store(attempts, Ordering::SeqCst);
     }
 
     fn block_next_pack_get(&self) {
@@ -198,6 +205,20 @@ impl ObjectStore for CountingStore {
         if location.as_ref().contains("/generated-packs/v1/requests/") {
             self.generated_pack_descriptor_gets
                 .fetch_add(1, Ordering::SeqCst);
+            if self
+                .throttled_generated_pack_descriptor_gets
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "remote-git-counting-store",
+                    source: Box::new(std::io::Error::other(
+                        "injected generated-pack descriptor throttling",
+                    )),
+                });
+            }
         }
         if !options.head && location.as_ref().ends_with(".pack") {
             self.pack_gets.fetch_add(1, Ordering::SeqCst);
@@ -736,6 +757,8 @@ async fn publish_with_runtime_and_summary(
     let fixture = PackFixture::new(delta_kind);
     let pack_bytes = Bytes::from(fs::read(&fixture.pack).expect("read fixture pack"));
     let index_bytes = Bytes::from(fs::read(&fixture.index).expect("read fixture index"));
+    let reverse_index_bytes =
+        Bytes::from(fs::read(&fixture.reverse).expect("read fixture reverse index"));
     let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str())
         .expect("raw BLAKE3 pack identity");
     let pack_size = pack_bytes.len() as u64;
@@ -751,6 +774,13 @@ async fn publish_with_runtime_and_summary(
         .put(&layout.pack_index_path(&pack_id), index_bytes.into())
         .await
         .expect("upload index");
+    inner
+        .put(
+            &layout.pack_reverse_index_path(&pack_id),
+            reverse_index_bytes.into(),
+        )
+        .await
+        .expect("upload reverse index");
 
     let locations = PackLocationIter::open(&fixture.index, &fixture.reverse, pack_size)
         .expect("open fixture locations")
@@ -1381,6 +1411,7 @@ async fn shallow_fetch_pack_uses_pinned_inventory_and_exact_boundary() {
             &[want],
             &[fixture.root_commit],
             &[fixture.root_commit],
+            &[],
             &CancellationToken::new(),
         )
         .await
@@ -1507,7 +1538,7 @@ async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([3; 32], [4; 32], &object_ids, false);
+        .generated_pack_cache_key([3; 32], &object_ids, false);
 
     let cold = fixture
         .repository
@@ -1547,7 +1578,7 @@ async fn generated_pack_cache_rejects_corrupt_artifact_bytes() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [8; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1603,7 +1634,7 @@ async fn generated_pack_cache_rejects_an_oversized_artifact() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [10; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1658,7 +1689,7 @@ async fn generated_pack_cache_rejects_corrupt_request_descriptor() {
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([7; 32], [9; 32], &object_ids, false);
+        .generated_pack_cache_key([7; 32], &object_ids, false);
     fixture
         .repository
         .generate_pack_cached(&object_ids, key, &CancellationToken::new())
@@ -1710,7 +1741,7 @@ async fn generated_pack_cache_coalesces_runtimes_and_survives_waiter_cancellatio
     object_ids.pop().expect("fixture has objects");
     let key = fixture
         .repository
-        .generated_pack_cache_key([5; 32], [6; 32], &object_ids, false);
+        .generated_pack_cache_key([5; 32], &object_ids, false);
     let cancelled = CancellationToken::new();
     let first_objects = object_ids.clone();
     let first_cancellation = cancelled.clone();
@@ -1788,6 +1819,7 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
     let first_producer_repository = first_repository.clone();
     let first_started = Arc::clone(&producer_started);
     let first_release = Arc::clone(&release_producer);
+    let warm_repository = first_repository.clone();
     let first = tokio::spawn(async move {
         first_repository
             .generate_pack_request_cached(
@@ -1845,6 +1877,22 @@ async fn request_bound_generated_pack_cache_plans_once_across_runtimes() {
         fs::read(first_pack.path()).expect("read first pack"),
         fs::read(second_pack.path()).expect("read second pack")
     );
+    // Exhaust the storage helper's retry budget once. The generated-pack wait
+    // boundary must keep retrying instead of failing the whole fanout request.
+    fixture.backend.throttle_generated_pack_descriptor_gets(6);
+    let warm_pack = warm_repository
+        .generate_pack_request_cached(
+            key,
+            async {
+                Err::<crab_remote_git::GeneratedPack, _>("warm cache hit polled its producer")
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("warm request receives cached pack");
+    assert_eq!(warm_pack.object_count(), first_pack.object_count());
+    assert_eq!(lease_provider.read_admissions.load(Ordering::SeqCst), 2);
+    assert_eq!(lease_provider.read_releases.load(Ordering::SeqCst), 2);
     fixture.runtime.shutdown().await;
     second_runtime.shutdown().await;
 }
@@ -1854,6 +1902,8 @@ struct TestGeneratedPackLeaseProvider {
     lease: Arc<Mutex<()>>,
     held_attempts: AtomicUsize,
     held_notify: Notify,
+    read_admissions: AtomicUsize,
+    read_releases: Arc<AtomicUsize>,
 }
 
 impl TestGeneratedPackLeaseProvider {
@@ -1899,6 +1949,44 @@ impl GeneratedPackLeaseProvider for TestGeneratedPackLeaseProvider {
             })
         })
     }
+
+    fn acquire_read<'a>(
+        &'a self,
+        _cancellation: &'a CancellationToken,
+        _max_wait: Duration,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        std::result::Result<Box<dyn GeneratedPackLease>, GeneratedPackLeaseError>,
+    > {
+        Box::pin(async {
+            self.read_admissions.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(TestGeneratedPackReadPermit {
+                releases: Arc::clone(&self.read_releases),
+            }) as Box<dyn GeneratedPackLease>)
+        })
+    }
+}
+
+struct TestGeneratedPackReadPermit {
+    releases: Arc<AtomicUsize>,
+}
+
+impl GeneratedPackLease for TestGeneratedPackReadPermit {
+    fn renew(
+        &mut self,
+    ) -> futures_util::future::BoxFuture<'_, std::result::Result<(), GeneratedPackLeaseError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn release(
+        self: Box<Self>,
+    ) -> futures_util::future::BoxFuture<'static, std::result::Result<(), GeneratedPackLeaseError>>
+    {
+        Box::pin(async move {
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
 }
 
 impl GeneratedPackLease for TestGeneratedPackLease {
@@ -1920,21 +2008,20 @@ impl GeneratedPackLease for TestGeneratedPackLease {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn generated_pack_cache_key_binds_authorization_request_policy_and_selection() {
+async fn generated_pack_cache_key_binds_authorization_selection_and_pack_mode() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let first = fixture.target;
     let second = fixture.root_commit;
-    let key = |authorization, request, objects: &[gix_hash::ObjectId], thin_pack| {
+    let key = |authorization, objects: &[gix_hash::ObjectId], thin_pack| {
         fixture
             .repository
-            .generated_pack_cache_key(authorization, request, objects, thin_pack)
+            .generated_pack_cache_key(authorization, objects, thin_pack)
     };
 
-    let base = key([1; 32], [2; 32], &[first], false);
-    assert_ne!(base, key([9; 32], [2; 32], &[first], false));
-    assert_ne!(base, key([1; 32], [9; 32], &[first], false));
-    assert_ne!(base, key([1; 32], [2; 32], &[first], true));
-    assert_ne!(base, key([1; 32], [2; 32], &[first, second], false));
+    let base = key([1; 32], &[first], false);
+    assert_ne!(base, key([9; 32], &[first], false));
+    assert_ne!(base, key([1; 32], &[first], true));
+    assert_ne!(base, key([1; 32], &[first, second], false));
     let error = fixture
         .repository
         .generate_pack_cached(&[second], base, &CancellationToken::new())

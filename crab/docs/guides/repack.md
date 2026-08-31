@@ -33,12 +33,14 @@ replacing the segmented pack inventory selected by the unified manifest.
    progression. The background owner instead sorts by verified compressed
    bytes and promotes a lower tier only after it has accumulated enough data;
    this keeps the largest stable pack out of routine maintenance.
-3. Downloads only that suffix and its canonical indexes to a bounded temporary
-   Git workspace after a free-space preflight. Stable large packs are neither
-   read nor rewritten.
-4. Verifies each selected pack/index pair, enumerates their exact OID union,
-   and asks `git pack-objects` to produce one replacement pack. Crab verifies
-   that the replacement contains exactly that union before publication.
+3. Downloads only that suffix and its committed `.pack`/`.idx`/`.rev`
+   artifacts to a bounded temporary Git workspace after a free-space
+   preflight. Stable large packs are neither read nor rewritten, and committed
+   indexes are reused instead of being rebuilt with `git index-pack`.
+4. Verifies each selected pack/index/reverse-index tuple, enumerates their
+   exact OID union, and asks `git pack-objects` to produce one replacement
+   pack. Crab verifies that the replacement contains exactly that union before
+   publication.
 5. Uploads immutable pack/index/reverse-index files only for newly generated
    packs, repairs missing metadata sidecars, and compacts the pack-index
    segment.
@@ -111,7 +113,7 @@ The following settings in `.crab/local.toml` affect repack behavior:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `repack_auto_threshold` | `50` | Pack count that triggers an advisory warning |
-| `download_concurrency` | `8` (capped at 16) | Maximum concurrent `.pack`/`.idx` downloads |
+| `download_concurrency` | `8` (capped at 16) | Maximum concurrent `.pack`/`.idx`/`.rev` downloads |
 
 ## Prerequisites
 

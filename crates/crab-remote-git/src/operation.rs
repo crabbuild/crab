@@ -436,21 +436,6 @@ impl OperationContext {
             .collect()
     }
 
-    /// Prove which candidate commits are reachable from any pinned graph root.
-    pub fn commits_reachable_from(
-        &self,
-        candidates: &[gix_hash::ObjectId],
-        roots: &[gix_hash::ObjectId],
-    ) -> Result<Option<Vec<bool>>> {
-        check_cancelled(&self.cancellation)?;
-        let Some(graph) = self.state.commit_graph.as_ref() else {
-            return Ok(None);
-        };
-        graph
-            .reachable_from_roots(candidates, roots, &self.cancellation)
-            .map(Some)
-    }
-
     /// Resolve dense catalog ordinals to OIDs in the operation's pinned catalog.
     pub async fn catalog_object_ids_by_ordinal(
         &self,
@@ -584,12 +569,48 @@ impl OperationContext {
         pack_id: crab_xet::hash::MerkleHash,
         expected_size: u64,
         destination: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<crab_git::pack::VerifiedPackIdentity> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         reader
             .download_pack_to_path(
                 pack_id,
                 expected_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
+    }
+
+    pub(crate) async fn download_pack_index_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_index_to_path(
+                pack_id,
+                maximum_size,
+                destination,
+                &self.budget,
+                &self.cancellation,
+            )
+            .await
+    }
+
+    pub(crate) async fn download_pack_reverse_index_to_path(
+        &self,
+        pack_id: crab_xet::hash::MerkleHash,
+        maximum_size: u64,
+        destination: &std::path::Path,
+    ) -> Result<()> {
+        let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
+        reader
+            .download_pack_reverse_index_to_path(
+                pack_id,
+                maximum_size,
                 destination,
                 &self.budget,
                 &self.cancellation,

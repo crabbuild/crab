@@ -174,6 +174,24 @@ impl PackLocationIter {
         u64::from(self.object_count)
     }
 
+    /// Compare the pack's sorted index OIDs with an already sorted expected set.
+    ///
+    /// The expected slice must contain unique object IDs in lexicographic order.
+    /// No pack-offset traversal or object-body read is performed.
+    #[must_use]
+    pub fn matches_sorted_object_ids(&self, expected: &[gix_hash::ObjectId]) -> bool {
+        u64::from(self.object_count) == u64::try_from(expected.len()).unwrap_or(u64::MAX)
+            && (0..self.object_count)
+                .map(|index| self.index.oid_at_index(index).as_bytes())
+                .zip(expected)
+                .all(|(actual, expected)| actual == expected.as_bytes())
+    }
+
+    /// Return object IDs in the index's lexicographic order without reading pack bodies.
+    pub fn sorted_object_ids(&self) -> impl Iterator<Item = gix_hash::ObjectId> + '_ {
+        (0..self.object_count).map(|index| self.index.oid_at_index(index).to_owned())
+    }
+
     fn location(&self, reverse_position: u32) -> Result<PackObjectLocation, PackLocatorError> {
         let index_position = reverse_position_at(&self.reverse, reverse_position, &self.rev_path)?;
         let pack_offset = self.index.pack_offset_at_index(index_position);
@@ -841,6 +859,22 @@ mod tests {
         );
         let last = locations.last().expect("last location");
         assert_eq!(last.pack_offset + last.entry_len, fixture.pack_len() - 20);
+    }
+
+    #[test]
+    fn sorted_index_oids_match_without_reordering_pack_locations() {
+        let fixture = PackFixture::new();
+        let mut locations = PackLocationIter::open(&fixture.idx, &fixture.rev, fixture.pack_len())
+            .expect("open locations");
+        let mut expected = locations
+            .by_ref()
+            .map(|location| location.expect("stream location").oid)
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+
+        assert!(locations.matches_sorted_object_ids(&expected));
+        expected.swap(0, 1);
+        assert!(!locations.matches_sorted_object_ids(&expected));
     }
 
     #[test]
