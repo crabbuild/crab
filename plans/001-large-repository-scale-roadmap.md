@@ -1575,6 +1575,58 @@ grace-period GC contract. This is a confirmed large-repository maintenance
 bottleneck and an open optimization gate, not a reason to weaken pack
 integrity, publication, or retention checks.
 
+### 2026-08-30 bounded-owner convergence qualification
+
+The first exact-current-head 1,000-replay attempt,
+`codex-fbc34693-k8s-producer100-20260830`, exposed a qualification-harness
+limit rather than a Crab data failure. The owner correctly completed four
+bounded 128-pack repack batches, reducing the active inventory from 902 to 521,
+but the harness's fixed 16-pass guard stopped before the remaining maintenance
+wave. All 1,001 pushes, the checks completed before the guard, and remote
+cleanup passed. The fixed guard was not a valid assumption once automatic
+repacking became deliberately resumable.
+
+`crab/scripts/e2e/run_large_repo_rustfs.py` now expands a finite pass budget
+from the observed active/geometric pack count. The base allowance covers the
+catalog, visibility, graph, and shallow actions; four additional samples per
+observed pack leave room for bounded repack waves without allowing a stuck owner
+to loop forever. This changes qualification convergence protection only; it
+does not alter the production owner budget or its one-action-per-cycle policy.
+
+The repaired current-head run,
+`codex-fbc34693-bounded-owner-k8s-producer100-20260830`, used Kubernetes
+revision `e72c2715ade37738aa5c029e8de5285cbe1c9441`, isolated RustFS, and the
+release binary with embedded `git_sha=fbc34693` and SHA-256
+`106c4380058dcdf7069587f18a95a52012d810359345fd27a43bbf6cd3d7a37e`. The
+standalone verifier returned `status=ok`, `profile=full`, and
+`replay_count=1000`; all 1,001 pushes, 23/23 checks, advertised refs, full and
+incremental clone tips, full and incremental fsck, the deterministic 1,000-
+object sample, source immutability, and exact-prefix cleanup passed. The
+correctness fingerprint remained
+`92ee489e064a9f4a8b70a1e3abf49b334f5dc35742cd3866271604cc5d5d92ec`.
+
+- The generation owner converged in 31 passes and reduced 902 active packs to
+  2. Seven bounded batches processed 128 source packs each, followed by one
+  normal 12-pack geometric repack for the final 13-to-2 transition. The owner
+  stage took 595,118 ms, read 441,190,818 maintenance bytes, wrote 74,014,354
+  bytes, and peaked at 1,010,794,496 bytes of child RSS. The object-store
+  snapshot retained 1,011 immutable physical pack objects / 1,697,452,704
+  bytes, so active-pack convergence is distinct from grace-period retention.
+- Cold and warm full clones completed in 192,967/81,467 ms; blobless and
+  depth-1/10/100/1,000 clones completed in 28,642/19,381/23,106/120,651/
+  76,763 ms. Full and depth-100 response generation used 6/7 source-artifact
+  requests and produced 1,202,067,600/730,841,112 response bytes. All clone
+  shapes and the incremental fetch matrix passed Git integrity checks.
+- Pushes had a 2,005 ms median, 5,879 ms p95, and 13,511 ms p99 after the
+  initial import. This is single-client capacity evidence; it is not a team
+  SLO, and the owner total remains an optimization target even though each
+  individual automatic repack is now bounded and resumable.
+
+This run closes the qualification-guard gap and supplies current-head
+correctness evidence for the bounded owner transition. It does not close
+repeated convergence, interruption/resume, memory, 10,000-push differential,
+distributed team load, provider/fault/failover, retention/GC, or rollout gates.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
@@ -1600,9 +1652,9 @@ Still required before the roadmap is DONE:
 - the complete Phase 5 interruption and 10,000-push maintenance matrix;
 - a maintenance design and repeatable evidence that bounds one owner's
   geometric consolidation work across a large historical pack set. The
-  1,000-replay evidence above shows a 902-to-2 consolidation taking 486,857 ms;
-  chunked/resumable work, lease interruption, and repeated-run behavior remain
-  open;
+  current-head run proves seven 128-pack batches and a final 12-pack repack,
+  but the 595,118 ms owner stage, interruption/resume behavior, repeated-run
+  behavior, and memory differential remain open;
 - concurrent fetch/push, cache-server fanout, throttling, and owner-failover
   scenarios from Phase 6;
 - supported-provider compatibility, sustained canary, and default-on rollout.

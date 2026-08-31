@@ -44,8 +44,11 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_REPLAY_COUNT = 1_000
 DEFAULT_SAMPLE_SIZE = 1_000
 # A repack can make catalog, visibility, graph, and shallow proofs stale in
-# sequence; keep a finite guard while allowing one complete maintenance wave.
-MAX_GENERATION_OWNER_PASSES = 16
+# sequence. Bounded repacks add one maintenance wave per selected pack batch,
+# so four samples per observed pack leave room for each catalog/visibility step
+# while the guard remains finite.
+BASE_GENERATION_OWNER_PASSES = 16
+GENERATION_OWNER_PASSES_PER_PACK = 4
 REMOTE_ROOT = "e2e-large-repository"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 OID_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1006,7 +1009,10 @@ class LargeRepositoryQualification:
         owner_runs: list[dict[str, Any]] = []
         owner_snapshots: list[dict[str, Any]] = []
         actions: list[str] = []
-        for attempt in range(1, MAX_GENERATION_OWNER_PASSES + 1):
+        max_passes = BASE_GENERATION_OWNER_PASSES
+        attempt = 0
+        while attempt < max_passes:
+            attempt += 1
             owner = self.run_crab(
                 self.replay_repo,
                 ["metadb", "owner", "--once", "--jsonl"],
@@ -1023,6 +1029,18 @@ class LargeRepositoryQualification:
             if not isinstance(data, dict):
                 raise QualificationError("generation owner snapshot data is not an object")
             owner_snapshots.append(data)
+            for field in ("active_packs", "geometric_repack_packs"):
+                value = data.get(field)
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                ):
+                    max_passes = max(
+                        max_passes,
+                        BASE_GENERATION_OWNER_PASSES
+                        + GENERATION_OWNER_PASSES_PER_PACK * value,
+                    )
             action = str(data.get("action", ""))
             actions.append(action)
             if action == "none":
@@ -1030,7 +1048,7 @@ class LargeRepositoryQualification:
         else:
             raise QualificationError(
                 "generation owner did not converge after "
-                f"{MAX_GENERATION_OWNER_PASSES} passes: {actions}"
+                f"{max_passes} passes: {actions}"
             )
         locator_sweeps: list[dict[str, Any]] = []
         for index, snapshot in enumerate(owner_snapshots):
