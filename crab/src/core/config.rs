@@ -5265,6 +5265,7 @@ cache_gc_grace = 2
         assert_eq!(meta.file_index.compaction_threshold, 4);
         assert_eq!(meta.file_index.wal_flush_size, 4 * 1024 * 1024);
         assert_eq!(meta.file_index.bloom_bits_per_key, 10);
+        assert_eq!(meta.chunk_index.wal_flush_size, 64 * 1024 * 1024);
         assert_eq!(meta.cache_gc_grace, 3);
         assert_eq!(meta.in_memory_ceiling_bytes, 1024 * 1024 * 1024);
     }

@@ -282,7 +282,6 @@ const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
 const GLOBAL_CHUNK_LOOKUP_BUDGET: Duration = Duration::from_secs(120);
 const BASE_SHARD_LOOKUP_LIMIT: usize = 4_096;
 const CANDIDATE_METADATA_BATCH_SIZE: usize = 2_048;
-const CANDIDATE_METADATA_FLUSH_BATCHES: usize = 8;
 const STAGING_VERIFY_CONCURRENCY: usize = 4;
 const REMOTE_XORB_PROOF_MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const REMOTE_XORB_PROOF_PAYLOAD_CONCURRENCY: usize = 16;
@@ -15468,9 +15467,6 @@ impl PushPipeline {
         aggregate.bytes_written += receipt.bytes_written;
         aggregate.elapsed += receipt.elapsed;
         *batch_count += 1;
-        if (*batch_count).is_multiple_of(CANDIDATE_METADATA_FLUSH_BATCHES) {
-            guard.flush_memtables().await?;
-        }
         Ok(())
     }
 
@@ -15582,8 +15578,9 @@ impl PushPipeline {
             .collect::<Vec<_>>();
 
         // These indexes are pre-visibility, rebuildable acceleration data. Keep each
-        // SlateDB WriteBatch bounded so metadata memory stays independent of
-        // total push size. Partial batch success remains safe and repairable.
+        // transaction bounded; SlateDB freezes memtables at the configured L0 size
+        // and applies backpressure to bound the full publication. The one explicit
+        // flush below is the durability and secondary-reader visibility barrier.
         let mut aggregate = crate::metadata::metadb::PushWriteReceipt::default();
         let mut batch_count = 0usize;
         for batch in receipt_tombstones.chunks(CANDIDATE_METADATA_BATCH_SIZE) {

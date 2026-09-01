@@ -132,7 +132,7 @@ bloom_bits_per_key = 10
 
 [metadb.chunk_index]
 compaction_threshold = 4
-wal_flush_size = 4194304          # 4 MiB
+wal_flush_size = 67108864         # 64 MiB
 bloom_bits_per_key = 10
 in_memory_ceiling_bytes = 1073741824  # 1 GiB
 cache_gc_grace = 3

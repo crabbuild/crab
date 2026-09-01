@@ -55,7 +55,7 @@ const DEFAULT_CACHE_GC_GRACE: u64 = 3;
 /// before a compaction is scheduled).
 const DEFAULT_COMPACTION_THRESHOLD: u32 = 4;
 
-/// Default L0 SST target per instance (4 MiB).
+/// Default L0 SST target for the per-repository file index (4 MiB).
 ///
 /// The shipped configuration key is named `wal_flush_size`; SlateDB 0.14
 /// exposes this boundary as `l0_sst_size_bytes`.
@@ -219,7 +219,10 @@ impl Default for MetaDbConfig {
             in_memory_ceiling_bytes: DEFAULT_IN_MEMORY_CEILING_BYTES,
             cache_gc_grace: DEFAULT_CACHE_GC_GRACE,
             file_index: MetaDbEngineConfig::default(),
-            chunk_index: MetaDbEngineConfig::default(),
+            chunk_index: MetaDbEngineConfig {
+                wal_flush_size: crab_metadata::remote_index::DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES,
+                ..MetaDbEngineConfig::default()
+            },
             read_only: false,
         }
     }
@@ -1165,7 +1168,18 @@ mod tests {
         assert_eq!(cfg.file_index.compaction_threshold, 4);
         assert_eq!(cfg.file_index.wal_flush_size, 4 * 1024 * 1024);
         assert_eq!(cfg.file_index.bloom_bits_per_key, 10);
-        assert_eq!(cfg.chunk_index, cfg.file_index);
+        assert_eq!(
+            cfg.chunk_index.wal_flush_size,
+            crab_metadata::remote_index::DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES
+        );
+        assert_eq!(
+            cfg.chunk_index.compaction_threshold,
+            cfg.file_index.compaction_threshold
+        );
+        assert_eq!(
+            cfg.chunk_index.bloom_bits_per_key,
+            cfg.file_index.bloom_bits_per_key
+        );
         assert_eq!(cfg.chunk_index_path, ".crab/chunk_index_db/");
     }
 
