@@ -2429,29 +2429,10 @@ pub fn run_unmount(path: &Path) -> Result<()> {
     });
 
     if let Some(entry) = entry {
-        let pid = entry.pid;
-
-        if is_pid_alive(pid) {
-            // Process is running — send SIGTERM and wait.
-            info!(pid, mountpoint = %mountpoint.display(), "sending SIGTERM to mount process");
-            terminate_and_force_unmount(pid, &mountpoint)?;
-        } else {
-            // Stale entry — PID is not running. Clean up.
-            info!(pid, mountpoint = %mountpoint.display(), "stale mount entry detected (PID not running)");
-            force_unmount_cli(&mountpoint).ok();
-            println!("Cleaned up stale mount at {}.", mountpoint.display());
-        }
-
-        // Remove the entry from the registry.
-        if let Some(ref rp) = registry_path
-            && let Err(e) = crate::vfs::mounts_registry::remove_entry(rp, &mountpoint_str)
-        {
-            warn!(error = %e, "failed to remove entry from mounts registry");
-        }
-
-        // Also clean up the legacy PID file if present.
-        let crab_dir = find_crab_dir(&mountpoint);
-        clean_pid_file(&crab_dir);
+        let registry_path = registry_path.as_deref().ok_or_else(|| {
+            CrabError::Internal("mount registry path disappeared during unmount".into())
+        })?;
+        unmount_registry_entry(registry_path, &entry)?;
     } else {
         // Not found in registry — fall back to legacy PID file or direct force-unmount.
         let crab_dir = find_crab_dir(&mountpoint);
@@ -2464,6 +2445,7 @@ pub fn run_unmount(path: &Path) -> Result<()> {
         } else {
             warn!(mountpoint = %mountpoint.display(), "no registry entry or PID file found, attempting force-unmount");
             force_unmount_cli(&mountpoint)?;
+            ensure_nfs_unmounted(&mountpoint)?;
         }
     }
 
@@ -2493,9 +2475,8 @@ pub async fn try_mount_control_unmount(path: &Path) -> Result<bool> {
                 };
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                 while tokio::time::Instant::now() < deadline {
-                    if !is_pid_alive(pid)
-                        || !crate::vfs::nfs_mount::is_mounted(&shutdown.mountpoint)
-                    {
+                    let mounted = crate::vfs::nfs_mount::is_mounted(&shutdown.mountpoint);
+                    if nfs_shutdown_complete(is_pid_alive(pid), mounted, &shutdown.mountpoint)? {
                         crate::vfs::mounts_registry::remove_entry(
                             &registry_path,
                             &shutdown.mountpoint_str,
@@ -2524,6 +2505,20 @@ pub async fn try_mount_control_unmount(path: &Path) -> Result<bool> {
             Ok(true)
         }
     }
+}
+
+#[cfg(feature = "nfs")]
+fn nfs_shutdown_complete(pid_alive: bool, mounted: bool, mountpoint: &Path) -> Result<bool> {
+    if !mounted {
+        return Ok(true);
+    }
+    if !pid_alive {
+        return Err(CrabError::Internal(format!(
+            "NFS helper exited but {} remains mounted",
+            mountpoint.display()
+        )));
+    }
+    Ok(false)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2625,13 +2620,30 @@ fn unmount_registry_entry(
         terminate_and_force_unmount(pid, mountpoint)?;
     } else {
         info!(pid, mountpoint = %entry.mountpoint, "stale mount entry (PID not running)");
-        force_unmount_cli(mountpoint).ok();
+        unmount_stale_registry_mount(entry, mountpoint)?;
         println!("Cleaned up stale mount at {}.", entry.mountpoint);
     }
 
     clean_pid_file(&find_crab_dir(mountpoint));
     crate::vfs::mounts_registry::remove_entry(registry_path, &entry.mountpoint)?;
     Ok(true)
+}
+
+fn unmount_stale_registry_mount(
+    entry: &crate::vfs::mounts_registry::MountEntry,
+    mountpoint: &Path,
+) -> Result<()> {
+    #[cfg(feature = "nfs")]
+    if entry.backend.as_deref() == Some("nfs") {
+        return force_nfs_unmount_if_mounted(mountpoint);
+    }
+    #[cfg(not(feature = "nfs"))]
+    let _ = entry;
+
+    // FUSE registry entries can outlive a session after its kernel mount is
+    // already gone, so retain their best-effort stale cleanup behavior.
+    force_unmount_cli(mountpoint).ok();
+    Ok(())
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2701,7 +2713,7 @@ fn terminate_and_force_unmount(pid: u32, mountpoint: &Path) -> Result<()> {
         // ESRCH means process doesn't exist — already dead.
         if err.raw_os_error() == Some(libc::ESRCH) {
             info!(pid, "process already exited");
-            return Ok(());
+            return force_nfs_unmount_if_mounted(mountpoint);
         }
         return Err(CrabError::Io(err));
     }
@@ -2712,8 +2724,9 @@ fn terminate_and_force_unmount(pid: u32, mountpoint: &Path) -> Result<()> {
         // SAFETY: kill(pid, 0) checks if process exists without sending a signal.
         let alive = unsafe { libc::kill(pid as i32, 0) };
         if alive != 0 {
-            // Process exited cleanly.
-            return Ok(());
+            // The helper can exit after a failed native unmount. Verify the
+            // kernel mount before removing its registry entry.
+            return force_nfs_unmount_if_mounted(mountpoint);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -2723,7 +2736,8 @@ fn terminate_and_force_unmount(pid: u32, mountpoint: &Path) -> Result<()> {
         pid,
         "process did not exit within 10s after SIGTERM, force-unmounting"
     );
-    force_unmount_cli(mountpoint)
+    force_unmount_cli(mountpoint)?;
+    ensure_nfs_unmounted(mountpoint)
 }
 
 #[cfg(not(unix))]
@@ -2731,6 +2745,7 @@ fn terminate_and_force_unmount(pid: u32, mountpoint: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         force_unmount_cli(mountpoint)?;
+        ensure_nfs_unmounted(mountpoint)?;
         if wait_for_pid_exit(pid, std::time::Duration::from_secs(10)) {
             return Ok(());
         }
@@ -2823,6 +2838,30 @@ fn force_unmount_cli(mountpoint: &Path) -> Result<()> {
             "force-unmount not supported on this platform".into(),
         ))
     }
+}
+
+fn force_nfs_unmount_if_mounted(mountpoint: &Path) -> Result<()> {
+    #[cfg(feature = "nfs")]
+    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+        force_unmount_cli(mountpoint)?;
+        ensure_nfs_unmounted(mountpoint)?;
+    }
+    #[cfg(not(feature = "nfs"))]
+    let _ = mountpoint;
+    Ok(())
+}
+
+fn ensure_nfs_unmounted(mountpoint: &Path) -> Result<()> {
+    #[cfg(feature = "nfs")]
+    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+        return Err(CrabError::Internal(format!(
+            "force-unmount command completed but {} remains mounted",
+            mountpoint.display()
+        )));
+    }
+    #[cfg(not(feature = "nfs"))]
+    let _ = mountpoint;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -6373,6 +6412,16 @@ mod unmount_tests {
     fn is_pid_alive_returns_true_for_current_process() {
         let my_pid = std::process::id();
         assert!(is_pid_alive(my_pid));
+    }
+
+    #[test]
+    #[cfg(feature = "nfs")]
+    fn nfs_shutdown_requires_kernel_mount_to_disappear() {
+        let mountpoint = Path::new("/mnt/crab");
+
+        assert!(nfs_shutdown_complete(true, false, mountpoint).unwrap());
+        assert!(!nfs_shutdown_complete(true, true, mountpoint).unwrap());
+        assert!(nfs_shutdown_complete(false, true, mountpoint).is_err());
     }
 
     #[test]

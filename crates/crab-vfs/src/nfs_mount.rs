@@ -315,18 +315,20 @@ pub async fn run_until_cancelled(
     if let Some(handle) = control_handle {
         handle.abort();
     }
-    // Flush overlay state while the server is still available. macOS needs a
-    // forced unmount because its client sends a Mount v1 teardown RPC that
-    // this NFSv3 server does not implement.
+    // Flush overlay state and unmount while the local NFS server can still
+    // answer the kernel client. Forced macOS unmounts require root even when
+    // the user owns the mount, so they are reserved for stale CLI cleanup.
     let write_journal_drain_start = Instant::now();
     let write_journal_drain_result = session.write_journal.sync_all(&session.engine);
     let write_journal_drain_ms = duration_millis(write_journal_drain_start.elapsed());
     let native_unmount_start = Instant::now();
     let mut native_unmount_attempted = false;
-    if is_mounted(&session.mountpoint) {
+    let native_unmount_result = if is_mounted(&session.mountpoint) {
         native_unmount_attempted = true;
-        unmount_native_nfs(&session.mountpoint);
-    }
+        unmount_native_nfs(&session.mountpoint)
+    } else {
+        Ok(())
+    };
     let native_unmount_ms = duration_millis(native_unmount_start.elapsed());
     session.server_handle.abort();
     let stats = session.runtime_snapshot();
@@ -368,18 +370,18 @@ pub async fn run_until_cancelled(
         hydration_read_window_misses = stats.hydration.read_window_cache_misses,
         "draining NFS mount runtime state"
     );
-    let shutdown_ms = duration_millis(shutdown_start.elapsed());
+    write_journal_drain_result?;
+    native_unmount_result?;
+    if let Some(error) = server_error {
+        return Err(error);
+    }
     info!(
-        nfs_shutdown_ms = shutdown_ms,
+        nfs_shutdown_ms = duration_millis(shutdown_start.elapsed()),
         nfs_native_unmount_attempted = native_unmount_attempted,
         nfs_native_unmount_ms = native_unmount_ms,
         nfs_write_journal_drain_ms = write_journal_drain_ms,
         "NFS mount shutdown complete"
     );
-    write_journal_drain_result?;
-    if let Some(error) = server_error {
-        return Err(error);
-    }
     Ok(())
 }
 
@@ -845,45 +847,53 @@ fn running_as_root() -> bool {
     unsafe { libc::getuid() == 0 }
 }
 
-fn unmount_native_nfs(mountpoint: &Path) {
+fn unmount_native_nfs(mountpoint: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
-    {
-        let status = if running_as_root() {
-            Command::new("umount").arg(mountpoint).status()
+    let output = {
+        if running_as_root() {
+            Command::new("umount").arg(mountpoint).output()
         } else {
             Command::new("sudo")
                 .args(["-n", "umount"])
                 .arg(mountpoint)
-                .status()
-        };
-        if let Err(error) = status {
-            warn!(mountpoint = %mountpoint.display(), error = %error, "NFS unmount command failed");
+                .output()
         }
-    }
+    };
 
     #[cfg(target_os = "macos")]
-    {
-        if let Err(error) = Command::new("umount").arg("-f").arg(mountpoint).status() {
-            warn!(mountpoint = %mountpoint.display(), error = %error, "NFS unmount command failed");
-        }
-    }
+    let output = Command::new("umount").arg(mountpoint).output();
 
     #[cfg(windows)]
+    let output = {
+        let target = windows_mount_target(mountpoint)?;
+        let umount_exe = windows_system_command("umount.exe")?;
+        Command::new(umount_exe).arg(target).output()
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    return Err(CrabError::Internal(
+        "NFS unmount is not supported on this platform".into(),
+    ));
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
-        let Ok(target) = windows_mount_target(mountpoint) else {
-            warn!(mountpoint = %mountpoint.display(), "invalid Windows NFS mount target");
-            return;
-        };
-        let umount_exe = match windows_system_command("umount.exe") {
-            Ok(command) => command,
-            Err(error) => {
-                warn!(mountpoint = %target, error = %error, "NFS unmount command unavailable");
-                return;
-            }
-        };
-        if let Err(error) = Command::new(umount_exe).arg(&target).status() {
-            warn!(mountpoint = %target, error = %error, "NFS unmount command failed");
+        let output = output.map_err(CrabError::Io)?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(CrabError::Internal(format!(
+                "NFS unmount failed for {} with {}: stdout={stdout} stderr={stderr}",
+                mountpoint.display(),
+                output.status
+            )));
         }
+        if is_mounted(mountpoint) {
+            return Err(CrabError::Internal(format!(
+                "NFS unmount command succeeded but {} remains mounted",
+                mountpoint.display()
+            )));
+        }
+        Ok(())
     }
 }
 

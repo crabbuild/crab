@@ -191,7 +191,11 @@ impl OdbReader {
             ))
         };
         let odb = gix_odb::at(&objects_dir).map_err(&open_odb_error)?;
-        let odb = odb.into_arc().map_err(open_odb_error)?;
+        let mut odb = odb.into_arc().map_err(open_odb_error)?;
+        // Partial-clone reads fetch missing blobs into new packs. The gix slot
+        // map is fixed at open, so use the git fallback instead of refreshing
+        // until an unbounded sequence of promisor packs exhausts that map.
+        odb.refresh_never();
 
         std::fs::create_dir_all(blob_cache_dir)?;
 
@@ -3607,10 +3611,14 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git init failed");
 
-        // git hash-object -w --stdin
+        let oid_hex = write_git_blob(&git_dir, content);
+        (dir, git_dir, oid_hex)
+    }
+
+    fn write_git_blob(git_dir: &Path, content: &[u8]) -> String {
         let output = std::process::Command::new("git")
             .args(["hash-object", "-w", "--stdin"])
-            .env("GIT_DIR", &git_dir)
+            .env("GIT_DIR", git_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -3621,9 +3629,7 @@ mod tests {
             })
             .unwrap();
         assert!(output.status.success(), "git hash-object failed");
-
-        let oid_hex = String::from_utf8(output.stdout).unwrap().trim().to_owned();
-        (dir, git_dir, oid_hex)
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
     #[test]
@@ -3672,6 +3678,46 @@ mod tests {
         let second = reader.read_blob(&oid_hex).unwrap();
         assert_eq!(&second[..], content);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn odb_reader_promisor_fallback_ignores_new_pack_slot_pressure() {
+        let (_dir, git_dir, initial_oid) = create_git_repo_with_blob(b"initial");
+        let cache_dir = _dir.path().join("blob_cache");
+        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
+
+        assert_eq!(&reader.read_blob(&initial_oid).unwrap()[..], b"initial");
+
+        let pack_prefix = git_dir.join("objects/pack/pack");
+        let mut last = None;
+        for index in 0..33 {
+            let content = format!("promisor blob {index}");
+            let oid = write_git_blob(&git_dir, content.as_bytes());
+            let mut child = std::process::Command::new("git")
+                .arg("pack-objects")
+                .arg(&pack_prefix)
+                .env("GIT_DIR", &git_dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            writeln!(child.stdin.take().unwrap(), "{oid}").unwrap();
+            assert!(child.wait().unwrap().success(), "git pack-objects failed");
+            last = Some((oid, content));
+        }
+        assert!(
+            std::process::Command::new("git")
+                .arg("prune-packed")
+                .env("GIT_DIR", &git_dir)
+                .status()
+                .unwrap()
+                .success(),
+            "git prune-packed failed"
+        );
+
+        let (oid, content) = last.unwrap();
+        assert_eq!(&reader.read_blob(&oid).unwrap()[..], content.as_bytes());
     }
 
     #[test]

@@ -3145,6 +3145,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn nfs_getattr_reports_pointer_size_without_hydration() {
+        let pointer = crab_types::pointer::Pointer {
+            file_hash: [9; 32],
+            size: 32 * 1024 * 1024,
+            shard_hint: Some([4; 32]),
+        };
+        let fixture = nfs_read_fixture(vec![
+            base_dir("models"),
+            BaseNode {
+                path: "models/model.bin".to_owned(),
+                node_type: NodeType::File,
+                mode: 0o100644,
+                object_oid: Some("pointer-blob-oid".to_owned()),
+                pointer: Some(pointer.clone()),
+                size: pointer.size,
+            },
+        ]);
+        let root = FileHandleU64::new(ROOT_ID);
+        let models = <CrabNfsFs as NfsReadFileSystem>::lookup(
+            &fixture.fs,
+            &root,
+            &filename3::from(b"models".as_slice()),
+        )
+        .await
+        .unwrap();
+        let model = <CrabNfsFs as NfsReadFileSystem>::lookup(
+            &fixture.fs,
+            &models,
+            &filename3::from(b"model.bin".as_slice()),
+        )
+        .await
+        .unwrap();
+
+        let attr = <CrabNfsFs as NfsReadFileSystem>::getattr(&fixture.fs, &model)
+            .await
+            .unwrap();
+
+        assert_eq!(attr.size, pointer.size);
+        assert_eq!(
+            fixture
+                .engine
+                .hydration_read_stats_snapshot()
+                .read_range_requests,
+            0
+        );
+        assert_eq!(fixture.fs.protocol_stats.snapshot().read_rpcs, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn nfs_readdirplus_reports_synthetic_gitfile_without_prefetch() {
         let fixture = nfs_read_fixture(Vec::new());
         let root = FileHandleU64::new(ROOT_ID);

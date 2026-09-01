@@ -22,6 +22,8 @@ NEW_MIB="${CRAB_MOUNT_MACOS_NEW_MIB:-40}"
 CONCURRENT_WRITERS="${CRAB_MOUNT_MACOS_CONCURRENT_WRITERS:-4}"
 CONCURRENT_MIB="${CRAB_MOUNT_MACOS_CONCURRENT_MIB:-16}"
 DIRECTORY_ENTRIES="${CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES:-0}"
+FS_OPERATION_TIMEOUT_SECS="${CRAB_MOUNT_MACOS_FS_OPERATION_TIMEOUT_SECS:-120}"
+CLEANUP_TIMEOUT_SECS="${CRAB_MOUNT_MACOS_CLEANUP_TIMEOUT_SECS:-10}"
 RUSTFS_IMAGE="${CRAB_MOUNT_MACOS_RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc}"
 BUCKET="${CRAB_MOUNT_MACOS_BUCKET:-crab}"
 REGION="${AWS_REGION:-us-east-1}"
@@ -58,15 +60,34 @@ with_cache_env() {
         "$@"
 }
 
+run_with_timeout() {
+    local timeout_secs="$1"
+    shift
+    python3 -c '
+import subprocess
+import sys
+
+try:
+    result = subprocess.run(sys.argv[2:], timeout=int(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    print(f"command timed out after {sys.argv[1]}s: {sys.argv[2]}", file=sys.stderr)
+    raise SystemExit(124)
+raise SystemExit(result.returncode)
+' "$timeout_secs" "$@"
+}
+
 cleanup_mount() {
     local mountpoint="$1"
     [[ -d "$mountpoint" ]] || return 0
     if [[ -x "$BIN_DIR/crab" ]]; then
-        with_test_env "$BIN_DIR/crab" unmount --mountpoint "$mountpoint" \
+        with_test_env run_with_timeout "$CLEANUP_TIMEOUT_SECS" \
+            "$BIN_DIR/crab" unmount --mountpoint "$mountpoint" \
             >"$RUN_ROOT/logs/cleanup-$(basename "$mountpoint").log" 2>&1 || true
     fi
-    diskutil unmount force "$mountpoint" >/dev/null 2>&1 || true
-    umount -f "$mountpoint" >/dev/null 2>&1 || true
+    run_with_timeout "$CLEANUP_TIMEOUT_SECS" diskutil unmount force "$mountpoint" \
+        >/dev/null 2>&1 || true
+    run_with_timeout "$CLEANUP_TIMEOUT_SECS" umount -f "$mountpoint" \
+        >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -80,7 +101,7 @@ cleanup() {
 trap cleanup EXIT
 
 hash_file() {
-    shasum -a 256 "$1" | awk '{print $1}'
+    run_with_timeout "$FS_OPERATION_TIMEOUT_SECS" shasum -a 256 "$1" | awk '{print $1}'
 }
 
 wait_for_path() {
@@ -90,6 +111,19 @@ wait_for_path() {
         sleep 1
     done
     return 1
+}
+
+capture_nfs_diagnostics() {
+    local label="$1"
+    local mountpoint="$2"
+    [[ "$BACKEND" == "nfs" ]] || return 0
+    mount >"$RUN_ROOT/logs/$label-mounts.txt" 2>&1 || true
+    nfsstat -m >"$RUN_ROOT/logs/$label-nfsstat-mounts.txt" 2>&1 || true
+    nfsstat -c >"$RUN_ROOT/logs/$label-nfsstat-client.txt" 2>&1 || true
+    with_test_env run_with_timeout "$CLEANUP_TIMEOUT_SECS" \
+        "$BIN_DIR/crab" mount status --mountpoint "$mountpoint" --json --verbose \
+        >"$RUN_ROOT/logs/$label-mount-status.json" \
+        2>"$RUN_ROOT/logs/$label-mount-status.err" || true
 }
 
 now_ms() {
@@ -148,6 +182,8 @@ ensure_macfuse_ready() {
 [[ "$CONCURRENT_WRITERS" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be an integer"
 [[ "$CONCURRENT_MIB" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_CONCURRENT_MIB must be an integer"
 [[ "$DIRECTORY_ENTRIES" =~ ^[0-9]+$ ]] || die "CRAB_MOUNT_MACOS_DIRECTORY_ENTRIES must be an integer"
+[[ "$FS_OPERATION_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || die "CRAB_MOUNT_MACOS_FS_OPERATION_TIMEOUT_SECS must be a positive integer"
+[[ "$CLEANUP_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || die "CRAB_MOUNT_MACOS_CLEANUP_TIMEOUT_SECS must be a positive integer"
 ((SEED_MIB >= 32)) || die "CRAB_MOUNT_MACOS_SEED_MIB must be at least 32"
 ((NEW_MIB >= 8)) || die "CRAB_MOUNT_MACOS_NEW_MIB must be at least 8"
 ((CONCURRENT_WRITERS >= 2)) || die "CRAB_MOUNT_MACOS_CONCURRENT_WRITERS must be at least 2"
@@ -180,9 +216,7 @@ if [[ "${CRAB_MOUNT_MACOS_SKIP_INSTALL:-0}" != "1" ]]; then
         CARGO_PROFILE_RELEASE_LTO=false \
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
             CARGO_PROFILE_RELEASE_DEBUG=0 \
-            PREFIX="$BIN_DIR" \
-            CARGO_BIN="$BIN_DIR" \
-            make install
+            make PREFIX="$BIN_DIR" CARGO_BIN="$BIN_DIR" install
     ) >"$RUN_ROOT/logs/make-install.log" 2>&1
 fi
 
@@ -369,7 +403,12 @@ with_test_env "$BIN_DIR/crab" mount --repo "$REMOTE_URL" --mountpoint "$RO" --re
 wait_for_path "$RO/models/model.bin"
 record_duration_since ro_mount_ready_ms "$phase_start_ms"
 phase_start_ms="$(now_ms)"
-hash_file "$RO/models/model.bin" > "$RUN_ROOT/ro-model.sha256"
+capture_nfs_diagnostics ro-before-read "$RO"
+if ! hash_file "$RO/models/model.bin" > "$RUN_ROOT/ro-model.sha256"; then
+    capture_nfs_diagnostics ro-read-timeout "$RO"
+    die "mounted file hash did not complete within ${FS_OPERATION_TIMEOUT_SECS}s"
+fi
+capture_nfs_diagnostics ro-after-read "$RO"
 cmp "$RUN_ROOT/seed-model.sha256" "$RUN_ROOT/ro-model.sha256"
 
 if ((DIRECTORY_ENTRIES > 0)); then
@@ -386,11 +425,19 @@ if len(names) != expected:
     raise SystemExit(f"expected {expected} directory entries, found {len(names)}")
 if names[0] != "file-00000.txt" or names[-1] != f"file-{expected - 1:05}.txt":
     raise SystemExit(f"directory bounds mismatch: {names[0]} {names[-1]}")
-if (directory / names[0]).read_text() != "entry 0\n":
-    raise SystemExit("first directory entry content mismatch")
-if (directory / names[-1]).read_text() != f"entry {expected - 1}\n":
-    raise SystemExit("last directory entry content mismatch")
-pathlib.Path(sys.argv[3]).write_text(json.dumps({"count": len(names), "first": names[0], "last": names[-1]}, indent=2) + "\n")
+sample_indices = sorted(set(range(min(40, expected))) | {expected // 2, expected - 1})
+for index in sample_indices:
+    path = directory / names[index]
+    if not path.is_file():
+        raise SystemExit(f"directory entry is not a regular file: {names[index]}")
+    if path.read_text() != f"entry {index}\n":
+        raise SystemExit(f"directory entry content mismatch: {names[index]}")
+pathlib.Path(sys.argv[3]).write_text(json.dumps({
+    "count": len(names),
+    "first": names[0],
+    "last": names[-1],
+    "metadata_samples": len(sample_indices),
+}, indent=2) + "\n")
 PY
 fi
 
