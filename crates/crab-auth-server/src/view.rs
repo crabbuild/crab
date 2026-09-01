@@ -508,45 +508,36 @@ async fn publish_filtered_view(
         uploaded_crab.shard_hashes.clone(),
     )
     .await?;
-    create_manifest(store, &router, &manifest).await?;
-    let file_index_digest = match commit_view_metadb(
+    // A view is not readable until every pointer can resolve through its
+    // generation-bound file and chunk indexes.
+    let committed_file_index_digest = commit_view_metadb(
         store,
         &router,
         &uploaded_crab,
         &manifest,
         gc_registry_generation,
     )
+    .await?;
+    create_manifest(store, &router, &manifest).await?;
+    let file_index_digest = match crab_metadata::git_visibility::ensure_catalog_bound(
+        store, &router, &manifest,
+    )
     .await
     {
-        Ok(digest) => {
-            let catalog_ready =
-                crab_metadata::git_visibility::ensure_catalog_bound(store, &router, &manifest)
-                    .await;
-            match catalog_ready {
-                Ok(true) => Some(digest),
-                Ok(false) if !visibility_publication.is_published() => Some(digest),
-                Ok(false) => {
-                    tracing::warn!(
-                        generation = manifest.generation,
-                        "ACL view catalog visibility requires repair"
-                    );
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        generation = manifest.generation,
-                        "ACL view catalog visibility publication failed"
-                    );
-                    None
-                }
-            }
+        Ok(true) => Some(committed_file_index_digest),
+        Ok(false) if !visibility_publication.is_published() => Some(committed_file_index_digest),
+        Ok(false) => {
+            tracing::warn!(
+                generation = manifest.generation,
+                "ACL view catalog visibility requires repair"
+            );
+            None
         }
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 generation = manifest.generation,
-                "ACL view committed; metadata acceleration requires repair"
+                "ACL view catalog visibility publication failed"
             );
             None
         }

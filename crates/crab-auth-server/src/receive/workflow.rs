@@ -325,6 +325,16 @@ async fn commit_receive_inner(
         committed_shards,
     )
     .await?;
+    // Hydration metadata belongs to the candidate generation. Publish it
+    // before refs so a successful receive can never expose an unreadable file.
+    let committed_file_index_digest = commit_service_metadata(
+        ctx.store(),
+        ctx.router(),
+        &plan,
+        &manifest,
+        gc_registry_generation,
+    )
+    .await?;
     let active_active_commit = commit_receive_manifest(
         ctx.store(),
         ctx.router(),
@@ -339,47 +349,27 @@ async fn commit_receive_inner(
         },
     )
     .await?;
-    let file_index_digest = match commit_service_metadata(
+    let file_index_digest = match crab_metadata::git_visibility::ensure_catalog_bound(
         ctx.store(),
         ctx.router(),
-        &plan,
         &manifest,
-        gc_registry_generation,
     )
     .await
     {
-        Ok(digest) => {
-            let catalog_ready = crab_metadata::git_visibility::ensure_catalog_bound(
-                ctx.store(),
-                ctx.router(),
-                &manifest,
-            )
-            .await;
-            match catalog_ready {
-                Ok(true) => Some(digest),
-                Ok(false) if !visibility_publication.is_published() => Some(digest),
-                Ok(false) => {
-                    tracing::warn!(
-                        generation = manifest.generation,
-                        "protected push committed; catalog visibility requires repair"
-                    );
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        generation = manifest.generation,
-                        "protected push committed; catalog visibility publication failed"
-                    );
-                    None
-                }
-            }
+        Ok(true) => Some(committed_file_index_digest),
+        Ok(false) if !visibility_publication.is_published() => Some(committed_file_index_digest),
+        Ok(false) => {
+            tracing::warn!(
+                generation = manifest.generation,
+                "protected push committed; catalog visibility requires repair"
+            );
+            None
         }
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 generation = manifest.generation,
-                "protected push committed; metadata acceleration requires repair"
+                "protected push committed; catalog visibility publication failed"
             );
             None
         }

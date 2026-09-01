@@ -90,6 +90,26 @@ pub async fn check_shard_file_bloom(
     }
 }
 
+/// Check whether a shard may contain any file hash in a caller-owned set.
+pub async fn check_shard_file_bloom_any(
+    store: &Store,
+    shard_path: &Path,
+    file_hashes: &std::collections::HashSet<MerkleHash>,
+) -> Result<BloomCheck> {
+    let bloom = match load_bloom_if_any(store, shard_path).await? {
+        Some(bloom) => bloom,
+        None => return Ok(BloomCheck::NoBloom),
+    };
+    if file_hashes
+        .iter()
+        .any(|file_hash| bloom.maybe_contains_file(file_hash))
+    {
+        Ok(BloomCheck::PossiblyPresent)
+    } else {
+        Ok(BloomCheck::DefinitelyAbsent)
+    }
+}
+
 /// Check a shard's bloom against a set of chunk hashes.
 ///
 /// Returns [`BloomCheck::DefinitelyAbsent`] only when none of the chunk
@@ -245,6 +265,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, BloomCheck::DefinitelyAbsent);
+    }
+
+    #[tokio::test]
+    async fn file_bloom_set_downloads_only_when_any_hash_may_match() {
+        let store = memory_store();
+        let path = Path::from("shards/test-file-set");
+        let present = hash_from_seed(7);
+        store
+            .put(&path, make_bloom_shard(&[present], &[]))
+            .await
+            .unwrap();
+
+        let absent = std::collections::HashSet::from([hash_from_seed(8), hash_from_seed(9)]);
+        assert_eq!(
+            check_shard_file_bloom_any(&store, &path, &absent)
+                .await
+                .unwrap(),
+            BloomCheck::DefinitelyAbsent
+        );
+        let mixed = std::collections::HashSet::from([hash_from_seed(8), present]);
+        assert_eq!(
+            check_shard_file_bloom_any(&store, &path, &mixed)
+                .await
+                .unwrap(),
+            BloomCheck::PossiblyPresent
+        );
     }
 
     #[tokio::test]

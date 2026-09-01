@@ -154,6 +154,7 @@ impl From<crab_xet::error::XetError> for CacheError {
             crab_xet::error::XetError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
+            crab_xet::error::XetError::ShardReplayIo { source, .. } => Self::Io(source),
             crab_xet::error::XetError::ChunkNotFound { hash } => Self::ChunkNotFound { hash },
             source @ (crab_xet::error::XetError::Decompress { .. }
             | crab_xet::error::XetError::Compress { .. }

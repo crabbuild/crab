@@ -15319,9 +15319,7 @@ impl PushPipeline {
         if !needs_write {
             return Ok(());
         }
-        let anchor = self
-            .candidate_metadata_anchor(manifest, &shard_hashes)
-            .await?;
+        let anchor = self.candidate_metadata_anchor(manifest).await?;
         self.promote_metadb_to_candidate_writer().await?;
         self.commit_metadb_and_warm_cache(&file_index_plan, &shard_hashes, anchor)
             .await
@@ -15330,7 +15328,6 @@ impl PushPipeline {
     async fn candidate_metadata_anchor(
         &self,
         manifest: &Manifest,
-        shard_hashes: &[MerkleHash],
     ) -> Result<CommittedManifestAnchor> {
         if self.config.active_active_replication.is_some() {
             return committed_manifest_anchor(manifest)?.ok_or_else(|| {
@@ -15358,47 +15355,50 @@ impl PushPipeline {
             });
         }
 
-        // Ordinary refs become visible through the journal. Pin rows to the
-        // deterministic next-compaction inventory, including prior active
-        // transactions, rather than to the uncommitted append-only manifest.
-        let generation = snapshot
-            .manifest
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| CrabError::Internal("manifest generation overflow".to_owned()))?;
-        let mut shards = snapshot.journal.shards.into_iter().collect::<BTreeSet<_>>();
-        shards.extend(shard_hashes.iter().map(MerkleHash::hex));
-        let shards = shards.into_iter().collect::<Vec<_>>();
-        let mut packs = snapshot
-            .journal
-            .packs
-            .into_iter()
-            .map(|pack| (pack.pack_id.clone(), pack))
-            .collect::<BTreeMap<_, _>>();
-        packs.extend(
-            self.uploaded_packs
-                .lock()
-                .await
-                .iter()
-                .map(|uploaded| (uploaded.entry.pack_id.clone(), uploaded.entry.clone())),
-        );
-        let packs = packs.into_values().collect::<Vec<_>>();
-        let (shard_index_hash, _, _) =
-            crab_metadata::manifests::compact_shard_index(generation, &shards)?;
-        let (pack_index_hash, _, _) =
-            crab_metadata::manifests::compact_pack_index(generation, &packs)?;
+        // Journal visibility is established by source-shard membership, not
+        // by predicting the next compaction inventory. An unrelated ref may
+        // commit between this read and our active marker, changing that future
+        // inventory. Pinning rows to the stable base generation keeps them
+        // below the projected generation; readers then require the exact shard
+        // to be present in their current materialized journal snapshot.
+        if snapshot.manifest.generation == 0 {
+            return Err(CrabError::CorruptObject {
+                path: self.router.manifest_path().to_string(),
+                reason: "journal publication requires a committed base generation".to_owned(),
+            });
+        }
+        let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
+            let (hash, _, _) =
+                crab_metadata::manifests::compact_shard_index(snapshot.manifest.generation, &[])?;
+            MerkleHash::from_hex(&hash).map_err(|error| {
+                CrabError::Internal(format!("empty base shard-index hash invalid: {error}"))
+            })?
+        } else {
+            MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(|error| {
+                CrabError::CorruptObject {
+                    path: self.router.manifest_path().to_string(),
+                    reason: format!("invalid base shard-index hash: {error}"),
+                }
+            })?
+        };
+        let pack_index_hash = if snapshot.manifest.pack_index_hash.is_empty() {
+            let (hash, _, _) =
+                crab_metadata::manifests::compact_pack_index(snapshot.manifest.generation, &[])?;
+            MerkleHash::from_hex(&hash).map_err(|error| {
+                CrabError::Internal(format!("empty base pack-index hash invalid: {error}"))
+            })?
+        } else {
+            MerkleHash::from_hex(&snapshot.manifest.pack_index_hash).map_err(|error| {
+                CrabError::CorruptObject {
+                    path: self.router.manifest_path().to_string(),
+                    reason: format!("invalid base pack-index hash: {error}"),
+                }
+            })?
+        };
         Ok(CommittedManifestAnchor {
-            generation,
-            shard_index_hash: MerkleHash::from_hex(&shard_index_hash).map_err(|error| {
-                CrabError::Internal(format!(
-                    "projected candidate shard-index hash invalid: {error}"
-                ))
-            })?,
-            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).map_err(|error| {
-                CrabError::Internal(format!(
-                    "projected candidate pack-index hash invalid: {error}"
-                ))
-            })?,
+            generation: snapshot.manifest.generation,
+            shard_index_hash,
+            pack_index_hash,
         })
     }
 
@@ -31999,15 +31999,14 @@ mod tests {
     // --- Candidate MetaDb publication ---
 
     #[tokio::test]
-    async fn candidate_metadata_anchor_includes_active_journal_shards() {
+    async fn candidate_metadata_anchor_stays_on_committed_base_generation() {
         let (store, router) = test_store_router("candidate-anchor-journal");
-        crate::metadata::manifest::create_manifest(
-            &store,
-            &router,
-            &Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .unwrap();
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.generation = 1;
+        base.seal_git_validation();
+        crate::metadata::manifest::create_manifest(&store, &router, &base)
+            .await
+            .unwrap();
         let prior_shard = MerkleHash::from([71_u64, 0, 0, 0]);
         let new_shard = MerkleHash::from([72_u64, 0, 0, 0]);
         let ref_name = "refs/heads/main";
@@ -32050,18 +32049,17 @@ mod tests {
             None,
         );
         let mut candidate = Manifest::default_for_repo(ref_name);
-        candidate.generation = 1;
+        candidate.generation = 2;
         let anchor = pipeline
-            .candidate_metadata_anchor(&candidate, &[new_shard])
+            .candidate_metadata_anchor(&candidate)
             .await
             .unwrap();
-        let mut shards = vec![prior_shard.hex(), new_shard.hex()];
-        shards.sort_unstable();
-        let (expected_shard_index, _, _) =
-            crate::metadata::manifest::compact_shard_index(1, &shards).unwrap();
 
         assert_eq!(anchor.generation, 1);
-        assert_eq!(anchor.shard_index_hash.hex(), expected_shard_index);
+        let (empty_shard_index, _, _) =
+            crate::metadata::manifest::compact_shard_index(1, &[]).unwrap();
+        assert_eq!(anchor.shard_index_hash.hex(), empty_shard_index);
+        assert_ne!(prior_shard, new_shard);
     }
 
     #[tokio::test(flavor = "multi_thread")]

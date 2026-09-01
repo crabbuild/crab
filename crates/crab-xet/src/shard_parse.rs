@@ -22,6 +22,7 @@ use std::io::Read;
 
 use bytes::Bytes;
 use tracing::warn;
+use xet_core_structures::CoreError;
 use xet_core_structures::metadata_shard::MDBShardFileHeader;
 use xet_core_structures::metadata_shard::file_structs::FileDataSequenceEntry;
 use xet_core_structures::metadata_shard::streaming_shard::{
@@ -40,6 +41,113 @@ pub struct ExtractedFileRecipe {
 
 /// File recipes and chunk-index entries extracted from one metadata shard.
 pub type ExtractedFileAndChunkEntries = (Vec<ExtractedFileRecipe>, Vec<(MerkleHash, XorbRef)>);
+
+/// One reconstruction range from a shard file entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtractedFileTerm {
+    pub xorb_hash: MerkleHash,
+    pub unpacked_segment_bytes: u32,
+    pub chunk_index_start: u32,
+    pub chunk_index_end: u32,
+}
+
+fn map_parse_error(section: &'static str, error: CoreError) -> XetError {
+    XetError::CorruptObject {
+        path: section.to_owned(),
+        reason: error.to_string(),
+    }
+}
+
+/// Visit every file entry without retaining terms from other files.
+///
+/// The reader is consumed through both shard sections so malformed trailing
+/// xorb metadata still fails the replay. Callback storage is caller-owned and
+/// may spill each file's terms directly to disk.
+pub fn visit_file_entries_from_reader<R, F>(reader: &mut R, mut visit: F) -> Result<u64>
+where
+    R: Read,
+    F: FnMut(MerkleHash, &mut dyn Iterator<Item = ExtractedFileTerm>) -> std::io::Result<()>,
+{
+    MDBShardFileHeader::deserialize(reader)
+        .map_err(|error| map_parse_error("shard header", error))?;
+    let mut count = 0_u64;
+    let mut callback_error = None;
+    let parsed = process_shard_file_info_section(reader, |file_view| {
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| CoreError::InvalidShard("file entry count overflow".to_owned()))?;
+        let mut terms = (0..file_view.num_entries()).map(|index| {
+            let term = file_view.entry(index);
+            ExtractedFileTerm {
+                xorb_hash: term.xorb_hash,
+                unpacked_segment_bytes: term.unpacked_segment_bytes,
+                chunk_index_start: term.chunk_index_start,
+                chunk_index_end: term.chunk_index_end,
+            }
+        });
+        if let Err(source) = visit(file_view.file_hash(), &mut terms) {
+            callback_error = Some(source);
+            return Err(CoreError::Other("file replay callback failed".to_owned()));
+        }
+        Ok(())
+    });
+    if let Some(source) = callback_error {
+        return Err(XetError::ShardReplayIo {
+            section: "shard file-info",
+            source,
+        });
+    }
+    parsed.map_err(|error| map_parse_error("shard file-info", error))?;
+    process_shard_xorb_info_section(reader, |_| Ok(()))
+        .map_err(|error| map_parse_error("shard xorb-info", error))?;
+    Ok(count)
+}
+
+/// Visit every xorb chunk without retaining chunks from other xorbs.
+///
+/// Chunk indices are emitted in canonical xorb order. The reader is consumed
+/// through both sections so the whole shard is structurally validated.
+pub fn visit_xorb_chunks_from_reader<R, F>(reader: &mut R, mut visit: F) -> Result<u64>
+where
+    R: Read,
+    F: FnMut(MerkleHash, u32, MerkleHash, u32) -> std::io::Result<()>,
+{
+    MDBShardFileHeader::deserialize(reader)
+        .map_err(|error| map_parse_error("shard header", error))?;
+    process_shard_file_info_section(reader, |_| Ok(()))
+        .map_err(|error| map_parse_error("shard file-info", error))?;
+    let mut count = 0_u64;
+    let mut callback_error = None;
+    let parsed = process_shard_xorb_info_section(reader, |xorb_view| {
+        let xorb_hash = xorb_view.xorb_hash();
+        for index in 0..xorb_view.num_entries() {
+            let chunk_index = u32::try_from(index)
+                .map_err(|_| CoreError::InvalidShard("xorb chunk index overflow".to_owned()))?;
+            let chunk = xorb_view.chunk(index);
+            if let Err(source) = visit(
+                xorb_hash,
+                chunk_index,
+                chunk.chunk_hash,
+                chunk.unpacked_segment_bytes,
+            ) {
+                callback_error = Some(source);
+                return Err(CoreError::Other("xorb replay callback failed".to_owned()));
+            }
+            count = count.checked_add(1).ok_or_else(|| {
+                CoreError::InvalidShard("xorb chunk entry count overflow".to_owned())
+            })?;
+        }
+        Ok(())
+    });
+    if let Some(source) = callback_error {
+        return Err(XetError::ShardReplayIo {
+            section: "shard xorb-info",
+            source,
+        });
+    }
+    parsed.map_err(|error| map_parse_error("shard xorb-info", error))?;
+    Ok(count)
+}
 
 /// Magic bytes at the end of Crab's canonical v1 bloom trailer.
 const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
@@ -784,6 +892,34 @@ mod tests {
             targeted[0].file_hash,
             MerkleHash::from([100, 100, 100, 100])
         );
+
+        let mut visited_files = Vec::new();
+        let mut reader = std::io::Cursor::new(bytes.as_ref());
+        let file_count = visit_file_entries_from_reader(&mut reader, |file_hash, terms| {
+            visited_files.push((file_hash, terms.collect::<Vec<_>>()));
+            Ok(())
+        })
+        .expect("visit files");
+        assert_eq!(file_count, 2);
+        assert_eq!(visited_files.len(), 2);
+        assert_eq!(visited_files[0].1.len(), 1);
+        assert_eq!(visited_files[0].1[0].chunk_index_start, 0);
+        assert_eq!(visited_files[0].1[0].chunk_index_end, 1);
+
+        let mut visited_chunks = Vec::new();
+        let mut reader = std::io::Cursor::new(bytes.as_ref());
+        let chunk_count = visit_xorb_chunks_from_reader(
+            &mut reader,
+            |xorb_hash, chunk_index, chunk_hash, size| {
+                visited_chunks.push((xorb_hash, chunk_index, chunk_hash, size));
+                Ok(())
+            },
+        )
+        .expect("visit chunks");
+        assert_eq!(chunk_count, 5);
+        assert_eq!(visited_chunks.len(), 5);
+        assert_eq!(visited_chunks[0].1, 0);
+        assert_eq!(visited_chunks[0].3, 1024);
     }
 
     #[test]
@@ -798,5 +934,23 @@ mod tests {
         let garbage = Bytes::from_static(b"not a shard");
         assert!(extract_chunk_entries_streaming(&garbage).is_empty());
         assert!(extract_file_entries_streaming(&garbage, MerkleHash::default()).is_empty());
+    }
+
+    #[test]
+    fn streaming_visitor_replays_more_than_legacy_materialization_limit() {
+        let chunk_count = MAX_SHARD_CHUNK_ENTRIES + 1;
+        let mut writer = ShardWriter::new();
+        writer
+            .add_xorb(make_xorb(900, chunk_count))
+            .expect("add large xorb metadata");
+        let (bytes, _) = writer.finalize().expect("finalize large shard");
+        let mut reader = std::io::Cursor::new(bytes);
+        let visited = visit_xorb_chunks_from_reader(
+            &mut reader,
+            |_xorb_hash, _chunk_index, _chunk_hash, _size| Ok(()),
+        )
+        .expect("streaming visitor must not impose the old materialization cap");
+
+        assert_eq!(visited, chunk_count as u64);
     }
 }

@@ -47,6 +47,7 @@ pub mod push_plan;
 pub mod recipe;
 mod recovery;
 mod segment;
+pub mod shard_replay;
 pub mod stats;
 pub mod stream;
 
@@ -1633,6 +1634,7 @@ fn recipe_payload_error_is_corruption(error: &StagingError) -> bool {
         | StagingError::Xet(_) => true,
         StagingError::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
         StagingError::Configuration { .. }
+        | StagingError::ShardReplayCorrupt { .. }
         | StagingError::StagingLocked { .. }
         | StagingError::Cancelled
         | StagingError::FileChangedDuringStaging { .. }

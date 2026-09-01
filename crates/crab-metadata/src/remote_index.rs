@@ -76,49 +76,80 @@ pub async fn write_index_entries(
     if file_entries.is_empty() && committed_chunk_entries.is_empty() {
         return Ok(());
     }
-
-    let file_db = if file_entries.is_empty() {
-        None
-    } else {
-        Some(
-            open_writer(
-                Arc::clone(&store),
-                &config.file_index_path,
-                FILE_INDEX_DB_LABEL,
-            )
-            .await?,
-        )
-    };
-
-    let chunk_db = if committed_chunk_entries.is_empty() {
-        None
-    } else {
-        match open_writer(
-            Arc::clone(&store),
-            &config.chunk_index_path,
-            CHUNK_INDEX_DB_LABEL,
-        )
-        .await
-        {
-            Ok(db) => Some(db),
-            Err(error) => {
-                let _ = close_writer(file_db, FILE_INDEX_DB_LABEL).await;
-                return Err(error);
-            }
-        }
-    };
-
-    let result = write_opened_entries(
-        file_db.as_ref(),
-        chunk_db.as_ref(),
-        file_entries,
-        committed_chunk_entries,
+    let writer = RemoteIndexWriter::open(
+        store,
+        config,
+        !file_entries.is_empty(),
+        !committed_chunk_entries.is_empty(),
     )
-    .await;
-    let close_result = close_opened_writers(file_db, chunk_db).await;
-
+    .await?;
+    let result = writer
+        .write_entries(file_entries, committed_chunk_entries)
+        .await;
+    let close_result = writer.close().await;
     result?;
     close_result
+}
+
+/// Long-lived bounded writer for a sequence of remote index batches.
+pub struct RemoteIndexWriter {
+    file_db: Option<slatedb::Db>,
+    chunk_db: Option<slatedb::Db>,
+}
+
+impl RemoteIndexWriter {
+    /// Open only the indexes selected by the caller.
+    pub async fn open(
+        store: Arc<dyn ObjectStore>,
+        config: &RemoteIndexConfig,
+        write_files: bool,
+        write_chunks: bool,
+    ) -> Result<Self> {
+        let file_db = if write_files {
+            Some(
+                open_writer(
+                    Arc::clone(&store),
+                    &config.file_index_path,
+                    FILE_INDEX_DB_LABEL,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let chunk_db = if write_chunks {
+            match open_writer(store, &config.chunk_index_path, CHUNK_INDEX_DB_LABEL).await {
+                Ok(db) => Some(db),
+                Err(error) => {
+                    let _ = close_writer(file_db, FILE_INDEX_DB_LABEL).await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Self { file_db, chunk_db })
+    }
+
+    /// Commit one bounded batch without closing the underlying databases.
+    pub async fn write_entries(
+        &self,
+        file_entries: &[(MerkleHash, CommittedFileRecord)],
+        committed_chunk_entries: &[(MerkleHash, CommittedChunkReceipt)],
+    ) -> Result<()> {
+        write_opened_entries(
+            self.file_db.as_ref(),
+            self.chunk_db.as_ref(),
+            file_entries,
+            committed_chunk_entries,
+        )
+        .await
+    }
+
+    /// Flush and close every database opened by this writer.
+    pub async fn close(self) -> Result<()> {
+        close_opened_writers(self.file_db, self.chunk_db).await
+    }
 }
 
 /// Read one chunk-index entry from a remote index.
@@ -213,7 +244,9 @@ async fn write_opened_entries(
     file_entries: &[(MerkleHash, CommittedFileRecord)],
     committed_chunk_entries: &[(MerkleHash, CommittedChunkReceipt)],
 ) -> Result<()> {
-    if let Some(db) = file_db {
+    if let Some(db) = file_db
+        && !file_entries.is_empty()
+    {
         let mut batch = slatedb::WriteBatch::new();
         for (file_hash, record) in file_entries {
             batch.put(
@@ -230,7 +263,9 @@ async fn write_opened_entries(
             })?;
     }
 
-    if let Some(db) = chunk_db {
+    if let Some(db) = chunk_db
+        && !committed_chunk_entries.is_empty()
+    {
         let mut batch = slatedb::WriteBatch::new();
         let mut heads: HashMap<MerkleHash, (u64, CommittedChunkPlacement)> = HashMap::new();
         let mut persisted_proofs = HashSet::new();

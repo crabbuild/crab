@@ -24,6 +24,7 @@ rusqlite = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -32,4 +33,3 @@ tracing = { workspace = true }
 [dev-dependencies]
 memory-stats = "1"
 proptest = "1"
-tempfile = { workspace = true }

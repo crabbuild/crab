@@ -153,6 +153,19 @@ impl From<crab_cache_store::CacheStoreError> for AuthServerError {
     }
 }
 
+impl From<crab_staging::StagingError> for AuthServerError {
+    fn from(error: crab_staging::StagingError) -> Self {
+        match error {
+            crab_staging::StagingError::Io(source) => Self::Io(source),
+            crab_staging::StagingError::ShardReplayCorrupt { reason } => Self::CorruptObject {
+                path: "Xet shard replay".to_owned(),
+                reason,
+            },
+            other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
 impl From<crab_lfs::LfsError> for AuthServerError {
     fn from(error: crab_lfs::LfsError) -> Self {
         match error {

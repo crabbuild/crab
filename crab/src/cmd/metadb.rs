@@ -29,7 +29,6 @@
 //! one helper set.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -47,8 +46,8 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
 use crate::git::url::CrabUrl;
 use crate::metadata::{MetaDb, MetaDbGuard, XorbRef};
-use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
-use crab_xet::hash::{HashedWrite, MerkleHash};
+use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
+use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
 use crab_xet::xorb::parser::XorbParser;
 
@@ -1735,10 +1734,7 @@ struct RebuildPayload {
 /// rebuild pass. Chosen to keep a single `Transaction` bounded in
 /// memory without making the commit fan-out run at tiny-batch
 /// granularity.
-const REBUILD_COMMIT_BATCH: usize = 1000;
 const MAX_METADATA_SHARD_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_METADATA_SHARD_FILE_ENTRIES: usize = 1_000_000;
-const MAX_METADATA_SHARD_CHUNK_ENTRIES: usize = 1_000_000;
 const MAX_METADATA_SHARDS: u64 = 1_000_000;
 const MAX_METADATA_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -1751,7 +1747,13 @@ fn create_shard_scan_workspace() -> Result<tempfile::TempDir> {
         .map_err(CrabError::Io)
 }
 
-async fn download_and_parse_shard(
+struct ParsedShardSpool {
+    inner: Arc<ShardReplaySpool>,
+    file_entries: u64,
+    chunk_entries: u64,
+}
+
+async fn download_and_spool_shard(
     storage: &crab_storage::Store,
     shard_path: &ObjectPath,
     expected_hash: MerkleHash,
@@ -1759,10 +1761,7 @@ async fn download_and_parse_shard(
     include_file_index: bool,
     include_chunk_index: bool,
     cancel: &CancellationToken,
-) -> Result<(
-    Vec<crab_xet::shard_parse::ExtractedFileRecipe>,
-    Vec<(MerkleHash, XorbRef)>,
-)> {
+) -> Result<ParsedShardSpool> {
     check_cancelled(cancel)?;
     let expected_size = tokio::select! {
         result = storage.head(shard_path) => result?.size,
@@ -1777,6 +1776,7 @@ async fn download_and_parse_shard(
         });
     }
     let local_path = workspace.join(format!("shard-{}", expected_hash.hex()));
+    let workspace_root = workspace.to_owned();
     let downloaded_size = tokio::select! {
         result = storage.download_to_path_bounded(shard_path, &local_path, MAX_METADATA_SHARD_BYTES) => result?,
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
@@ -1789,56 +1789,192 @@ async fn download_and_parse_shard(
             ),
         });
     }
-    let object_path = shard_path.to_string();
     let result = tokio::task::spawn_blocking(move || {
-        let result = (|| {
-            let mut source = File::open(&local_path).map_err(CrabError::Io)?;
-            let mut hashed = HashedWrite::new(std::io::sink());
-            std::io::copy(&mut source, &mut hashed).map_err(CrabError::Io)?;
-            if hashed.hash() != expected_hash {
-                return Err(CrabError::CorruptObject {
-                    path: object_path.clone(),
-                    reason: "shard body hash mismatch".to_owned(),
-                });
-            }
-
-            let mut source = File::open(&local_path).map_err(CrabError::Io)?;
-            let parsed = match (include_file_index, include_chunk_index) {
-                (true, true) => {
-                    crab_xet::shard_parse::extract_file_and_chunk_entries_from_reader_with_limits(
-                        &mut source,
-                        MAX_METADATA_SHARD_FILE_ENTRIES,
-                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
-                    )
-                }
-                (true, false) => {
-                    crab_xet::shard_parse::extract_file_recipes_from_reader_with_limits(
-                        &mut source,
-                        MAX_METADATA_SHARD_FILE_ENTRIES,
-                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
-                    )
-                    .map(|recipes| (recipes, Vec::new()))
-                }
-                (false, true) => {
-                    crab_xet::shard_parse::extract_chunk_entries_from_reader_with_limit(
-                        &mut source,
-                        MAX_METADATA_SHARD_CHUNK_ENTRIES,
-                    )
-                    .map(|chunks| (Vec::new(), chunks))
-                }
-                (false, false) => Ok((Vec::new(), Vec::new())),
-            };
-            parsed.map_err(|error| CrabError::CorruptObject {
-                path: object_path,
-                reason: format!("failed to parse shard entries: {error}"),
-            })
-        })();
+        let source = std::fs::File::open(&local_path).map_err(CrabError::Io)?;
+        let result = ShardReplaySpool::from_reader_in(
+            source,
+            &workspace_root,
+            expected_hash,
+            include_file_index,
+            include_chunk_index,
+        )
+        .map_err(CrabError::from);
         let _ = std::fs::remove_file(&local_path);
         result
     })
     .await
     .map_err(|error| CrabError::Internal(format!("shard scan worker failed: {error}")))?;
-    result
+    let inner = Arc::new(result?);
+    Ok(ParsedShardSpool {
+        file_entries: inner.file_entries,
+        chunk_entries: inner.chunk_entries,
+        inner,
+    })
+}
+
+async fn read_spooled_file_batch(
+    spool: Arc<ShardReplaySpool>,
+    after_id: i64,
+) -> Result<Vec<(i64, MerkleHash, [u8; 32])>> {
+    tokio::task::spawn_blocking(move || {
+        spool
+            .file_batch(after_id, REPLAY_BATCH_ENTRIES)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.id, row.file_hash, row.recipe_hash))
+                    .collect()
+            })
+            .map_err(CrabError::from)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("file replay worker failed: {error}")))?
+}
+
+async fn read_spooled_chunk_batch(
+    spool: Arc<ShardReplaySpool>,
+    after_id: i64,
+) -> Result<Vec<(i64, MerkleHash, XorbRef)>> {
+    tokio::task::spawn_blocking(move || {
+        spool
+            .chunk_batch(after_id, REPLAY_BATCH_ENTRIES)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            row.id,
+                            row.chunk_hash,
+                            XorbRef {
+                                xorb_hash: row.xorb_hash,
+                                chunk_index: row.chunk_index,
+                                uncompressed_size: row.uncompressed_size,
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(CrabError::from)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("chunk replay worker failed: {error}")))?
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "replay rows are bound to independent repository, generation, registry, shard, and database anchors"
+)]
+async fn replay_spooled_shard(
+    spool: &ParsedShardSpool,
+    storage: &crab_storage::Store,
+    router: &crab_storage::StoreLayout<crab_storage::Store>,
+    repo_prefix: &str,
+    shard_hash: MerkleHash,
+    committed_generation: u64,
+    shard_index_hash: MerkleHash,
+    gc_registry_generation: u64,
+    file_store: Option<&crate::metadata::FileIndexStore>,
+    chunk_store: Option<&crate::metadata::ChunkIndexStore>,
+    guard: &MetaDbGuard,
+    cancel: &CancellationToken,
+    verified_xorb: &mut Option<(MerkleHash, RebuildVerifiedXorb)>,
+) -> Result<(u64, u64)> {
+    let mut file_entries_written = 0_u64;
+    let mut after_file_id = 0_i64;
+    loop {
+        check_cancelled(cancel)?;
+        let rows = read_spooled_file_batch(Arc::clone(&spool.inner), after_file_id).await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut pending_file = Vec::with_capacity(rows.len());
+        for (id, file_hash, recipe_hash) in rows {
+            after_file_id = id;
+            pending_file.push((
+                file_hash,
+                crab_metadata::value_codec::CommittedFileRecord {
+                    recipe_hash,
+                    shard_hash,
+                    committed_generation,
+                    shard_index_hash,
+                },
+            ));
+        }
+        let mut pending_chunk = Vec::new();
+        let mut pending_committed_chunk = Vec::new();
+        let (files, _) = flush_rebuild_batch(
+            guard,
+            file_store,
+            None,
+            &mut pending_file,
+            &mut pending_chunk,
+            &mut pending_committed_chunk,
+            cancel,
+        )
+        .await?;
+        file_entries_written = file_entries_written
+            .checked_add(files)
+            .ok_or_else(|| CrabError::Internal("rebuilt file entry count overflow".to_owned()))?;
+    }
+    if file_entries_written != spool.file_entries {
+        return Err(CrabError::CorruptObject {
+            path: format!("shard {} replay spool", shard_hash.hex()),
+            reason: format!(
+                "shard replay emitted {file_entries_written} file rows, expected {}",
+                spool.file_entries
+            ),
+        });
+    }
+
+    let mut chunk_entries_written = 0_u64;
+    let mut after_chunk_id = 0_i64;
+    while chunk_store.is_some() {
+        check_cancelled(cancel)?;
+        let rows = read_spooled_chunk_batch(Arc::clone(&spool.inner), after_chunk_id).await?;
+        if rows.is_empty() {
+            break;
+        }
+        let mut pending_chunk = Vec::with_capacity(rows.len());
+        for (id, chunk_hash, xorb_ref) in rows {
+            after_chunk_id = id;
+            pending_chunk.push((chunk_hash, xorb_ref));
+        }
+        let mut pending_committed_chunk = rebuild_committed_chunk_receipts(
+            storage,
+            router,
+            repo_prefix,
+            shard_hash,
+            committed_generation,
+            shard_index_hash,
+            gc_registry_generation,
+            cancel,
+            &pending_chunk,
+            verified_xorb,
+        )
+        .await?;
+        let mut pending_file = Vec::new();
+        let (_, chunks) = flush_rebuild_batch(
+            guard,
+            None,
+            chunk_store,
+            &mut pending_file,
+            &mut pending_chunk,
+            &mut pending_committed_chunk,
+            cancel,
+        )
+        .await?;
+        chunk_entries_written = chunk_entries_written
+            .checked_add(chunks)
+            .ok_or_else(|| CrabError::Internal("rebuilt chunk entry count overflow".to_owned()))?;
+    }
+    if chunk_entries_written != spool.chunk_entries {
+        return Err(CrabError::CorruptObject {
+            path: format!("shard {} replay spool", shard_hash.hex()),
+            reason: format!(
+                "shard replay emitted {chunk_entries_written} chunk rows, expected {}",
+                spool.chunk_entries
+            ),
+        });
+    }
+    Ok((file_entries_written, chunk_entries_written))
 }
 
 async fn run_rebuild(db: DbSelector, mode: OutputMode, cancel: &CancellationToken) -> Result<()> {
@@ -2117,12 +2253,9 @@ async fn publish_candidate_shard_indexes_with_guard(
     check_cancelled(cancel)?;
     let file_store = guard.file_index().await?;
     let chunk_store = guard.chunk_index().await?;
-    let mut pending_file = Vec::new();
-    let mut pending_chunk = Vec::new();
-    let mut pending_committed_chunk = Vec::new();
     let mut file_entries_written = 0_u64;
     let mut chunk_entries_written = 0_u64;
-    let mut verified_xorbs = HashMap::new();
+    let mut verified_xorb = None;
     let workspace = create_shard_scan_workspace()?;
 
     for shard_hash_hex in shard_hashes {
@@ -2133,7 +2266,7 @@ async fn publish_candidate_shard_indexes_with_guard(
                 reason: format!("candidate shard hash is invalid: {error}"),
             })?;
         let shard_path = router.shard_path(shard_hash_hex);
-        let (recipes, chunk_entries) = download_and_parse_shard(
+        let spool = download_and_spool_shard(
             storage,
             &shard_path,
             shard_hash,
@@ -2143,7 +2276,8 @@ async fn publish_candidate_shard_indexes_with_guard(
             cancel,
         )
         .await?;
-        let committed_chunk_entries = rebuild_committed_chunk_receipts(
+        let (files, chunks) = replay_spooled_shard(
+            &spool,
             storage,
             &router,
             repo_prefix,
@@ -2151,68 +2285,20 @@ async fn publish_candidate_shard_indexes_with_guard(
             candidate.generation,
             shard_index_hash,
             gc_registry_generation,
+            Some(&file_store),
+            Some(&chunk_store),
+            guard,
             cancel,
-            &chunk_entries,
-            &mut verified_xorbs,
+            &mut verified_xorb,
         )
         .await?;
-
-        for recipe in recipes {
-            let file_size = recipe.chunks.iter().try_fold(0_u64, |total, (_, size)| {
-                total.checked_add(*size).ok_or_else(|| {
-                    CrabError::StagingCorrupt("candidate recipe size overflow".to_owned())
-                })
-            })?;
-            let recipe_hash = FileRecipe::from_staged_chunks(
-                ChunkingPolicyId::XetGearV1_64KiB,
-                recipe.file_hash,
-                file_size,
-                &recipe.chunks,
-            )?
-            .hash();
-            pending_file.push((
-                recipe.file_hash,
-                crab_metadata::value_codec::CommittedFileRecord {
-                    recipe_hash,
-                    shard_hash,
-                    committed_generation: candidate.generation,
-                    shard_index_hash,
-                },
-            ));
-        }
-        pending_chunk.extend(chunk_entries);
-        pending_committed_chunk.extend(committed_chunk_entries);
-
-        if pending_file.len() >= REBUILD_COMMIT_BATCH || pending_chunk.len() >= REBUILD_COMMIT_BATCH
-        {
-            let (files, chunks) = flush_rebuild_batch(
-                guard,
-                Some(&file_store),
-                Some(&chunk_store),
-                &mut pending_file,
-                &mut pending_chunk,
-                &mut pending_committed_chunk,
-                cancel,
-            )
-            .await?;
-            file_entries_written = file_entries_written.saturating_add(files);
-            chunk_entries_written = chunk_entries_written.saturating_add(chunks);
-            verified_xorbs.clear();
-        }
+        file_entries_written = file_entries_written
+            .checked_add(files)
+            .ok_or_else(|| CrabError::Internal("candidate file count overflow".to_owned()))?;
+        chunk_entries_written = chunk_entries_written
+            .checked_add(chunks)
+            .ok_or_else(|| CrabError::Internal("candidate chunk count overflow".to_owned()))?;
     }
-
-    let (files, chunks) = flush_rebuild_batch(
-        guard,
-        Some(&file_store),
-        Some(&chunk_store),
-        &mut pending_file,
-        &mut pending_chunk,
-        &mut pending_committed_chunk,
-        cancel,
-    )
-    .await?;
-    file_entries_written = file_entries_written.saturating_add(files);
-    chunk_entries_written = chunk_entries_written.saturating_add(chunks);
     Ok(CandidateShardIndexPublication {
         gc_registry_generation,
         file_entries_written,
@@ -2279,33 +2365,22 @@ async fn rebuild_with_guard(
     };
 
     let mut shards_processed: u64 = 0;
-    let mut shards_failed: u64 = 0;
+    let shards_failed: u64 = 0;
     let mut file_entries_written: u64 = 0;
     let mut chunk_entries_written: u64 = 0;
     let mut notes: Vec<String> = Vec::new();
-
-    // Entries pending commit. Batched across shards so operators
-    // don't pay one commit per shard when bucket shards are small.
-    let mut pending_file: Vec<(MerkleHash, crab_metadata::value_codec::CommittedFileRecord)> =
-        Vec::new();
-    let mut pending_chunk: Vec<(MerkleHash, XorbRef)> = Vec::new();
-    let mut pending_committed_chunk: Vec<(
-        MerkleHash,
-        crab_metadata::receipts::CommittedChunkReceipt,
-    )> = Vec::new();
-    let mut verified_xorbs = HashMap::new();
+    let mut verified_xorb = None;
     let workspace = create_shard_scan_workspace()?;
 
     for shard_hash_hex in committed_shards {
         check_cancelled(cancel)?;
-        let Ok(shard_hash) = MerkleHash::from_hex(&shard_hash_hex) else {
-            warn!(shard_hash = %shard_hash_hex, "skipping committed shard with invalid hash");
-            shards_failed += 1;
-            continue;
-        };
+        let shard_hash =
+            MerkleHash::from_hex(&shard_hash_hex).map_err(|error| CrabError::CorruptObject {
+                path: router.shard_path(&shard_hash_hex).to_string(),
+                reason: format!("committed shard hash is invalid: {error}"),
+            })?;
         let shard_path = router.shard_path(&shard_hash_hex);
-
-        let (recipes, chunk_entries) = match download_and_parse_shard(
+        let spool = download_and_spool_shard(
             &storage,
             &shard_path,
             shard_hash,
@@ -2314,116 +2389,39 @@ async fn rebuild_with_guard(
             db.includes_chunk_index(),
             cancel,
         )
-        .await
-        {
-            Ok(result) => result,
-            Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
-            Err(error) => {
-                warn!(shard = %shard_hash.hex(), error = %error, "failed to download or parse shard during rebuild");
-                shards_failed += 1;
-                continue;
-            }
-        };
-        let committed_chunk_entries = if chunk_entries.is_empty() {
-            Vec::new()
-        } else {
-            match rebuild_committed_chunk_receipts(
-                &storage,
-                &router,
-                repo_prefix,
-                shard_hash,
-                manifest.generation,
-                shard_index_hash,
-                gc_registry_generation,
-                cancel,
-                &chunk_entries,
-                &mut verified_xorbs,
-            )
-            .await
-            {
-                Ok(receipts) => receipts,
-                Err(error) => {
-                    warn!(
-                        shard = %shard_hash.hex(),
-                        error = %error,
-                        "committed shard xorb proof failed during rebuild"
-                    );
-                    shards_failed += 1;
-                    continue;
-                }
-            }
-        };
-
-        if db.includes_file_index() {
-            for recipe in recipes {
-                let file_size = recipe.chunks.iter().try_fold(0u64, |total, (_, size)| {
-                    total.checked_add(*size).ok_or_else(|| {
-                        CrabError::StagingCorrupt("rebuilt recipe size overflow".to_owned())
-                    })
-                })?;
-                let recipe_hash = FileRecipe::from_staged_chunks(
-                    ChunkingPolicyId::XetGearV1_64KiB,
-                    recipe.file_hash,
-                    file_size,
-                    &recipe.chunks,
-                )?
-                .hash();
-                pending_file.push((
-                    recipe.file_hash,
-                    crab_metadata::value_codec::CommittedFileRecord {
-                        recipe_hash,
-                        shard_hash,
-                        committed_generation: manifest.generation,
-                        shard_index_hash,
-                    },
-                ));
-            }
-        }
-        if db.includes_chunk_index() {
-            pending_chunk.extend(chunk_entries);
-            pending_committed_chunk.extend(committed_chunk_entries);
-        }
+        .await?;
+        let (files, chunks) = replay_spooled_shard(
+            &spool,
+            &storage,
+            &router,
+            repo_prefix,
+            shard_hash,
+            manifest.generation,
+            shard_index_hash,
+            gc_registry_generation,
+            file_store.as_ref(),
+            chunk_store.as_ref(),
+            guard,
+            cancel,
+            &mut verified_xorb,
+        )
+        .await?;
 
         shards_processed += 1;
+        file_entries_written = file_entries_written
+            .checked_add(files)
+            .ok_or_else(|| CrabError::Internal("rebuilt file count overflow".to_owned()))?;
+        chunk_entries_written = chunk_entries_written
+            .checked_add(chunks)
+            .ok_or_else(|| CrabError::Internal("rebuilt chunk count overflow".to_owned()))?;
 
-        // Flush in batches so a single transaction stays bounded.
-        if pending_file.len() >= REBUILD_COMMIT_BATCH || pending_chunk.len() >= REBUILD_COMMIT_BATCH
-        {
-            let (fi, ci) = flush_rebuild_batch(
-                guard,
-                file_store.as_ref(),
-                chunk_store.as_ref(),
-                &mut pending_file,
-                &mut pending_chunk,
-                &mut pending_committed_chunk,
-                cancel,
-            )
-            .await?;
-            file_entries_written += fi;
-            chunk_entries_written += ci;
-
-            if emit_progress {
-                println!(
-                    "  rebuilding: {shards_processed} shard(s) processed, \
-                     {file_entries_written} file entries / {chunk_entries_written} chunk entries emitted",
-                );
-            }
+        if emit_progress {
+            println!(
+                "  rebuilding: {shards_processed} shard(s) processed, \
+                 {file_entries_written} file entries / {chunk_entries_written} chunk entries emitted",
+            );
         }
     }
-
-    // Flush any trailing entries below the batch threshold.
-    let (fi, ci) = flush_rebuild_batch(
-        guard,
-        file_store.as_ref(),
-        chunk_store.as_ref(),
-        &mut pending_file,
-        &mut pending_chunk,
-        &mut pending_committed_chunk,
-        cancel,
-    )
-    .await?;
-    file_entries_written += fi;
-    chunk_entries_written += ci;
 
     let (git_packs_processed, git_packs_failed, git_objects_written, git_object_locator_digest) =
         if matches!(db, DbSelector::Both) {
@@ -2431,8 +2429,16 @@ async fn rebuild_with_guard(
         } else {
             (0, 0, 0, [0; 32])
         };
+    if git_packs_failed > 0 {
+        return Err(CrabError::CorruptObject {
+            path: router.manifest_path().to_string(),
+            reason: format!(
+                "metadata rebuild could not verify {git_packs_failed} committed Git pack(s)"
+            ),
+        });
+    }
 
-    if matches!(db, DbSelector::Both) && shards_failed == 0 && git_packs_failed == 0 {
+    if matches!(db, DbSelector::Both) {
         let pack_index_hash = if manifest.pack_index_hash.is_empty() {
             MerkleHash::default()
         } else {
@@ -2496,11 +2502,6 @@ async fn rebuild_with_guard(
 
     if shards_processed == 0 {
         notes.push("manifest has no committed shards; nothing to rebuild".to_owned());
-    }
-    if shards_failed > 0 {
-        notes.push(format!(
-            "{shards_failed} shard(s) skipped after download or parse failure; see warn! logs"
-        ));
     }
     if !db.includes_file_index() {
         notes.push(String::from("--db chunk_index: file-index entries skipped"));
@@ -3092,7 +3093,7 @@ async fn rebuild_committed_chunk_receipts(
     gc_registry_generation: u64,
     cancel: &CancellationToken,
     entries: &[(MerkleHash, XorbRef)],
-    verified_xorbs: &mut HashMap<MerkleHash, RebuildVerifiedXorb>,
+    verified_xorb: &mut Option<(MerkleHash, RebuildVerifiedXorb)>,
 ) -> Result<Vec<(MerkleHash, crab_metadata::receipts::CommittedChunkReceipt)>> {
     if committed_generation == 0 || gc_registry_generation == 0 {
         return Err(CrabError::Internal(
@@ -3102,7 +3103,10 @@ async fn rebuild_committed_chunk_receipts(
     let mut receipts = Vec::with_capacity(entries.len());
     for (chunk_hash, xorb_ref) in entries {
         check_cancelled(cancel)?;
-        if !verified_xorbs.contains_key(&xorb_ref.xorb_hash) {
+        if verified_xorb
+            .as_ref()
+            .is_none_or(|(hash, _)| *hash != xorb_ref.xorb_hash)
+        {
             let path = router.xorb_path(&xorb_ref.xorb_hash);
             let (body, etag) = tokio::select! {
                 result = storage.get_with_etag_bounded(&path, MAX_XORB_SIZE as u64) => result?,
@@ -3126,7 +3130,7 @@ async fn rebuild_committed_chunk_receipts(
                 let meta = parser.chunk_meta(index)?;
                 chunks.push((meta.hash, meta.uncompressed_len));
             }
-            verified_xorbs.insert(
+            *verified_xorb = Some((
                 xorb_ref.xorb_hash,
                 RebuildVerifiedXorb {
                     origin: crab_metadata::receipts::OriginReceipt::new(
@@ -3140,11 +3144,15 @@ async fn rebuild_committed_chunk_receipts(
                     ),
                     chunks,
                 },
-            );
+            ));
         }
-        let verified = verified_xorbs.get(&xorb_ref.xorb_hash).ok_or_else(|| {
-            CrabError::Internal("verified xorb cache insertion was lost".to_owned())
-        })?;
+        let verified = verified_xorb
+            .as_ref()
+            .filter(|(hash, _)| *hash == xorb_ref.xorb_hash)
+            .map(|(_, verified)| verified)
+            .ok_or_else(|| {
+                CrabError::Internal("verified xorb cache insertion was lost".to_owned())
+            })?;
         let index =
             usize::try_from(xorb_ref.chunk_index).map_err(|_| CrabError::CorruptObject {
                 path: router.xorb_path(&xorb_ref.xorb_hash).to_string(),
@@ -4466,6 +4474,24 @@ mod tests {
             ));
             v
         };
+        let expected_recipes = [shard_a_bytes.clone(), shard_b_bytes.clone()]
+            .into_iter()
+            .flat_map(|bytes| {
+                crab_xet::shard_parse::extract_file_recipes(&bytes).expect("extract recipes")
+            })
+            .map(|recipe| {
+                let file_size = recipe.chunks.iter().map(|(_, size)| size).sum();
+                let recipe_hash = crab_staging::recipe::FileRecipe::from_staged_chunks(
+                    crab_staging::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+                    recipe.file_hash,
+                    file_size,
+                    &recipe.chunks,
+                )
+                .expect("build expected recipe")
+                .hash();
+                (recipe.file_hash, recipe_hash)
+            })
+            .collect::<HashMap<_, _>>();
         assert_eq!(
             expected_files.len(),
             4,
@@ -4481,6 +4507,11 @@ mod tests {
                 .flatten()
                 .expect("file entry present after rebuild");
             assert_eq!(got.shard_hash, *shard_hash, "file→shard pair round-trips");
+            assert_eq!(
+                Some(&got.recipe_hash),
+                expected_recipes.get(file_hash),
+                "disk-spooled replay preserves the canonical ordered recipe identity"
+            );
         }
 
         let expected_chunks = {
@@ -4504,6 +4535,35 @@ mod tests {
             assert_eq!(got, *expected_ref, "chunk→xorb ref round-trips");
         }
 
+        guard.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn rebuild_fails_when_a_committed_shard_cannot_be_replayed() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let shard_bytes = bytes::Bytes::from_static(b"not a metadata shard");
+        let shard_hash = crab_xet::hash::compute_data_hash(&shard_bytes);
+        let shard_path = crab_storage::canonical_global_content_path("shards", &shard_hash.hex());
+        store
+            .put(&shard_path, shard_bytes.into())
+            .await
+            .expect("put corrupt committed shard");
+        seed_committed_shard_index(Arc::clone(&store), "org/test-repo", &[shard_hash]).await;
+
+        let (metadb, _cache_dir) = test_metadb(Arc::clone(&store));
+        let guard = MetaDbGuard::new(metadb);
+        let error = rebuild_with_guard(
+            &store,
+            "org/test-repo",
+            DbSelector::FileIndex,
+            false,
+            &guard,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("a committed shard parse failure must fail the rebuild");
+
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
         guard.close().await.expect("close");
     }
 

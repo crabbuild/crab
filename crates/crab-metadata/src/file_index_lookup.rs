@@ -20,7 +20,7 @@ use crab_xet::xorb::format::MerkleHash;
 
 const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
-const SHARD_SEARCH_CONCURRENCY: usize = 16;
+const SHARD_SEARCH_CONCURRENCY: usize = 4;
 
 fn file_index_path(repo_prefix: &str) -> String {
     format!("{}/file_index_db/", repo_prefix.trim_end_matches('/'))
@@ -370,6 +370,16 @@ impl FileIndexLookupSession {
                 let unresolved = unresolved.clone();
                 async move {
                     let path = router.shard_path(&shard_hash);
+                    if crate::bloom_prefilter::check_shard_file_bloom_any(
+                        &storage,
+                        &path,
+                        &unresolved,
+                    )
+                    .await?
+                        == crate::bloom_prefilter::BloomCheck::DefinitelyAbsent
+                    {
+                        return Ok::<_, MetadataError>(Vec::new());
+                    }
                     let (body, _) = storage
                         .get_with_etag_bounded(
                             &path,
@@ -663,6 +673,7 @@ mod tests {
         .expect("upload shard index");
         let mut manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
         manifest.generation = 1;
+        manifest.seal_git_validation();
         manifest.shard_index_hash = shard_index_hash.clone();
         manifest.seal_git_validation();
         crate::manifest_store::create_manifest(&storage, &router, &manifest)
@@ -870,14 +881,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn journal_candidate_index_is_visible_before_compaction() {
+    async fn journal_candidate_index_survives_concurrent_sibling_transaction() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let storage = crab_storage::Store::new(Arc::clone(&store));
         let repo_prefix = "org/journal-index";
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
         let file_hash = hash_from_seed(62);
         let shard_hash = hash_from_seed(63);
-        let manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
+        let mut manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.seal_git_validation();
         crate::manifest_store::create_manifest(&storage, &router, &manifest)
             .await
             .unwrap();
@@ -903,14 +916,38 @@ mod tests {
         crate::ref_journal::commit_ref_transaction(&storage, &router, &transaction, &[head])
             .await
             .unwrap();
-        let (shard_index_hash, _, _) =
-            crate::manifests::compact_shard_index(1, &[shard_hash.hex()]).unwrap();
+        let sibling_ref = "refs/heads/sibling";
+        let sibling_head = crate::ref_journal::read_ref_head(&storage, &router, sibling_ref)
+            .await
+            .unwrap();
+        let sibling = crate::ref_journal::RefJournalTransaction::new(
+            BTreeMap::from([(
+                sibling_ref.to_owned(),
+                sibling_head.visible_transaction.clone(),
+            )]),
+            vec![crate::ref_journal::RefJournalEdit {
+                ref_name: sibling_ref.to_owned(),
+                old_oid: None,
+                new_oid: Some("b".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            vec![hash_from_seed(64).hex()],
+        )
+        .unwrap();
+        crate::ref_journal::commit_ref_transaction(&storage, &router, &sibling, &[sibling_head])
+            .await
+            .unwrap();
         let db = slatedb::Db::open(
             ObjectPath::from(file_index_path(repo_prefix).as_str()),
             Arc::clone(&store),
         )
         .await
         .unwrap();
+        let (base_shard_index_hash, _, _) = crate::manifests::compact_shard_index(1, &[]).unwrap();
         db.put(
             crate::key_codec::encode_committed_file_key(&file_hash, 1),
             crate::value_codec::encode_committed_file_record(
@@ -918,7 +955,7 @@ mod tests {
                     recipe_hash: [7; 32],
                     shard_hash,
                     committed_generation: 1,
-                    shard_index_hash: MerkleHash::from_hex(&shard_index_hash).unwrap(),
+                    shard_index_hash: MerkleHash::from_hex(&base_shard_index_hash).unwrap(),
                 },
             ),
         )
