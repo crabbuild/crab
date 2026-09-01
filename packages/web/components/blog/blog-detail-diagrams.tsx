@@ -246,14 +246,15 @@ function ReachabilityMarker() {
   return (
     <marker
       id="gc-reachability-arrow"
-      viewBox="0 0 10 10"
-      refX="9"
-      refY="5"
-      markerWidth="8"
+      viewBox="0 0 10 8"
+      refX="0"
+      refY="4"
+      markerWidth="10"
       markerHeight="8"
+      markerUnits="userSpaceOnUse"
       orient="auto"
     >
-      <path d="M1 1 9 5 1 9Z" fill="#64748b" />
+      <path d="M0 0 10 4 0 8Z" fill="#64748b" />
     </marker>
   )
 }
@@ -281,11 +282,11 @@ export function GarbageCollectionReachabilityDiagram() {
           <ReachabilityMarker />
         </defs>
 
-        <path d="M175 104 C175 130 330 120 330 145" {...connector} />
-        <path d="M585 104 C585 130 430 120 430 145" {...connector} />
-        <path d="M330 217 C330 241 114 234 114 260" {...connector} />
-        <path d="M380 217 V260" {...connector} />
-        <path d="M430 217 C430 241 646 234 646 260" {...connector} />
+        <path d="M175 104 C175 130 330 120 330 135" {...connector} />
+        <path d="M585 104 C585 130 430 120 430 135" {...connector} />
+        <path d="M330 217 C330 241 114 234 114 250" {...connector} />
+        <path d="M380 217 V250" {...connector} />
+        <path d="M430 217 C430 241 646 234 646 250" {...connector} />
 
         <g>
           <rect
