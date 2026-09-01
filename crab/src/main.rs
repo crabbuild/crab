@@ -6186,14 +6186,16 @@ mod tests {
             assert!(matches!(parsed.cmd, Some(Cmd::Upgrade)));
 
             let help = Cli::try_parse_from(["crab", "upgrade", "--help"])
-                .expect_err("help should stop before command dispatch");
+                .err()
+                .expect("help should stop before command dispatch");
             assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
             let rendered = help.to_string();
             assert!(rendered.contains("Usage: crab upgrade"));
             assert!(rendered.contains("crab upgrade"));
 
             let unexpected = Cli::try_parse_from(["crab", "upgrade", "now"])
-                .expect_err("upgrade arguments should be rejected by clap");
+                .err()
+                .expect("upgrade arguments should be rejected by clap");
             assert_eq!(unexpected.kind(), clap::error::ErrorKind::UnknownArgument);
         });
     }
