@@ -62,10 +62,10 @@ timestamp distinguish official builds from locally rebuilt binaries that share
 the same package version. When comparing two machines, verify the command path
 as well as the printed version if different installations may be present.
 
-Use [`crab update --check`](/docs/cli/reference/crab-update) to contact the
-release source and compare versions. Keep `crab version` in incident evidence
-because a later update can change command syntax, output schemas, and supported
-storage behavior.
+Use [`crab upgrade`](/docs/cli/reference/crab-upgrade) to contact the release
+source and install a newer stable version when one exists. Keep `crab version`
+in incident evidence because a later upgrade can change command syntax, output
+schemas, and supported storage behavior.
 
 ## Related commands
 

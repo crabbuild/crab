@@ -94,7 +94,7 @@ pub const COMMAND_SECTIONS: &[(&str, &[&str])] = &[
             "completions",
             "errors",
             "skills",
-            "update",
+            "upgrade",
             "version",
         ],
     ),

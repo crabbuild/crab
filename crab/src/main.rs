@@ -471,21 +471,9 @@ enum Cmd {
     /// List and install the self-contained skills shipped with Crab.
     #[command(subcommand)]
     Skills(crab::cmd::skills::SkillsCommand),
-    /// Update crab from the latest GitHub release.
-    Update {
-        /// Only check whether an update is available.
-        #[arg(long)]
-        check: bool,
-        /// Skip the confirmation prompt.
-        #[arg(long, short)]
-        yes: bool,
-        /// Reinstall the latest release even when versions match.
-        #[arg(long)]
-        force: bool,
-        /// Structured JSON output (envelope format).
-        #[arg(long)]
-        json: bool,
-    },
+    /// Upgrade Crab to the latest stable release.
+    #[command(after_help = "Examples:\n  crab upgrade\n")]
+    Upgrade,
     /// Manage crab configuration.
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -2082,7 +2070,6 @@ impl Cmd {
             | Self::Doctor { json, .. }
             | Self::Errors { json, .. }
             | Self::Version { json, .. }
-            | Self::Update { json, .. }
             | Self::Track { json, .. } => OutputMode::from_flags(*json, false),
             Self::Skills(command) => command.output_mode(),
             Self::Stat {
@@ -2460,7 +2447,7 @@ impl Cmd {
             Self::Version { .. } => "version",
             Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
             Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
-            Self::Update { .. } => "update",
+            Self::Upgrade => "upgrade",
             Self::Login { .. } => "login",
             Self::Logout { .. } => "logout",
             Self::Organization(_) => "managed.organization",
@@ -3122,21 +3109,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::skills::run(sub)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Update {
-            check,
-            yes,
-            force,
-            json,
-        }) => {
-            let _span = tracing::info_span!("update").entered();
-            let mode = OutputMode::from_flags(json, false);
-            let args = crab::cmd::update::UpdateArgs {
-                check,
-                yes,
-                force,
-                mode,
-            };
-            crab::cmd::update::run_update(args).await?;
+        Some(Cmd::Upgrade) => {
+            let _span = tracing::info_span!("upgrade").entered();
+            crab::cmd::upgrade::run_upgrade().await?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Login {
@@ -6200,6 +6175,26 @@ mod tests {
 
             assert_eq!(categorized.len(), categorized_count);
             assert_eq!(categorized, expected);
+        });
+    }
+
+    #[test]
+    fn upgrade_cli_has_a_dedicated_argument_free_help_surface() {
+        parse_cli_on_large_stack(|| {
+            let parsed = Cli::try_parse_from(["crab", "upgrade"])
+                .expect("argument-free upgrade should parse");
+            assert!(matches!(parsed.cmd, Some(Cmd::Upgrade)));
+
+            let help = Cli::try_parse_from(["crab", "upgrade", "--help"])
+                .expect_err("help should stop before command dispatch");
+            assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+            let rendered = help.to_string();
+            assert!(rendered.contains("Usage: crab upgrade"));
+            assert!(rendered.contains("crab upgrade"));
+
+            let unexpected = Cli::try_parse_from(["crab", "upgrade", "now"])
+                .expect_err("upgrade arguments should be rejected by clap");
+            assert_eq!(unexpected.kind(), clap::error::ErrorKind::UnknownArgument);
         });
     }
 

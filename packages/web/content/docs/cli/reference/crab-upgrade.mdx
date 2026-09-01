@@ -1,0 +1,49 @@
+---
+title: "crab upgrade"
+description: "Upgrade Crab to the latest stable release."
+meta:
+  contentType: Reference
+  goal: "Upgrade the installed Crab executable from official release artifacts."
+  audience: "Crab users who install official release binaries."
+---
+
+# crab upgrade
+
+Upgrade the running Crab executable to the latest stable release.
+
+## Synopsis
+
+```bash
+crab upgrade
+```
+
+The command reads the bounded `crab-release.json` asset from the latest public
+GitHub release. It does not call the GitHub API. Crab selects the archive for
+the exact build target, verifies its declared size and SHA-256 digest, checks
+the staged executable's version, and only then replaces the installation.
+
+When the installed release is current, the command exits successfully without
+changing files:
+
+```text
+Crab 1.2.3 is already the latest version.
+```
+
+Crab never downgrades a development build whose version is newer than the
+latest stable release. Unsupported build targets and installations that are
+not writable by the current user fail with an actionable error.
+
+## Examples
+
+```bash
+crab version
+crab upgrade
+crab version
+```
+
+Homebrew-managed installations should normally be upgraded with
+`brew upgrade crab` so package metadata remains consistent.
+
+## Related commands
+
+- [`crab version`](/docs/cli/reference/crab-version): print the installed version and build metadata.

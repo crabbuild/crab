@@ -365,6 +365,7 @@ auth-helper-packaging-check:
 
 release-archive-contents-check:
 	@$(PYTHON) scripts/release/check-release-archive-contents.py
+	@$(PYTHON) scripts/release/generate-release-manifest.py --self-test
 
 final-integration-check:
 	@$(PYTHON) scripts/check-final-integration.py --cargo "$(CARGO)"

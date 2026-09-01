@@ -75,7 +75,7 @@
     "crab-audit",
     "crab-release",
     "crab-recover",
-    "crab-update",
+    "crab-upgrade",
     "crab-completions",
     "crab-version",
     "external-providers"

@@ -211,6 +211,8 @@ console = "0.15"
 zstd = "0.13"
 flate2 = "1"
 tar = "0.4"
+zip = { version = "6.0", default-features = false, features = ["deflate"] }
+self-replace = "1.5"
 
 # Retry jitter.
 rand = "0.9"
@@ -397,7 +399,7 @@ memory-stats = "1"
 serde_yaml = { workspace = true }
 
 # HTTP client for client-side CachingStore.
-reqwest = { workspace = true, features = ["blocking", "rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-tls", "json", "stream"] }
 
 # Unix flock for single-writer staging guard.
 [target.'cfg(unix)'.dependencies]

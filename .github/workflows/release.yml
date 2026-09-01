@@ -1466,6 +1466,11 @@ jobs:
           sha256sum crab-*.* > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
 
+      - name: Generate public release manifest
+        run: >-
+          python3 crab/scripts/release/generate-release-manifest.py
+          "${{ needs.prepare.outputs.tag }}" dist
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1504,9 +1509,16 @@ jobs:
             --repo "$RELEASE_REPO" \
             --verify-tag \
             --fail-on-no-commits \
-            --latest \
+            --draft \
             --title "Crab ${TAG}" \
             --notes-file "$notes_file"
+
+          gh release upload "$TAG" dist/crab-release.json \
+            --repo "$RELEASE_REPO"
+
+          gh release edit "$TAG" --repo "$RELEASE_REPO" \
+            --draft=false \
+            --latest
 
   homebrew:
     name: Update Homebrew tap

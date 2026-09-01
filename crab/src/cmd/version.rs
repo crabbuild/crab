@@ -56,7 +56,6 @@ fn schema_registry() -> BTreeMap<String, String> {
         ("status", "1.0"),
         ("tier.plan", "1.0"),
         ("track", "1.0"),
-        ("update", "1.0"),
         ("version", "1.0"),
         // Enterprise replication schemas — v1.0
         ("replica.certification", "1.0"),
@@ -198,7 +197,6 @@ mod tests {
             "status",
             "tier.plan",
             "track",
-            "update",
             "version",
             "replica.certification",
             "replica.evidence.verify",
