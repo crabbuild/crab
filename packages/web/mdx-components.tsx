@@ -16,6 +16,7 @@ import {
   TakeawayBox,
 } from "@/components/blog/blog-mdx-helpers"
 import { GitArchitecturePlayer } from "@/components/blog/git-architecture-player"
+import { LaunchMotionFigure } from "@/components/blog/launch-motion-figure"
 import { CrabIntroductionWorkbench } from "@/components/blog/crab-introduction-workbench"
 import { BlogProcessPlayer } from "@/components/blog/blog-process-player"
 import {
@@ -184,6 +185,7 @@ export function getMDXComponents(components?: MDXComponents) {
     SystemNote,
     TakeawayBox,
     GitArchitecturePlayer,
+    LaunchMotionFigure,
     CrabIntroductionWorkbench,
     BlogProcessPlayer,
     ChunkAddressMap,

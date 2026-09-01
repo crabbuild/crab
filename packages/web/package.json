@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
+    "export:launch-motion-assets": "node scripts/export-launch-motion-gifs.mjs",
     "audit:docs-content": "node scripts/audit-docs-content.mjs",
     "check:links": "node scripts/check-links.mjs",
     "start": "next start",
@@ -48,6 +49,7 @@
     "postcss": "^8",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.6"

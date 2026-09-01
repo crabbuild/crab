@@ -60,7 +60,7 @@ Imagine four 8 GB checkpoints. Each new version changes only 0.5 GB of encoded b
 
 Ordinary Git still sees four complete blobs. A content-addressed data plane can keep the shared regions once and add only the new identities.
 
-<BinaryHistoryGrowthDiagram />
+<LaunchMotionFigure story="dedup" />
 
 That example is illustrative, not a savings guarantee. Recompressed or encrypted data may change broadly even when the logical edit is small.
 
@@ -137,7 +137,7 @@ Three decisions remain independent:
 
 A branch must never point to a missing chunk. Crab therefore prepares every immutable dependency before it changes the destination ref.
 
-<GitArchitecturePlayer story="push" />
+<LaunchMotionFigure story="publish" />
 
 The expected-old comparison is the authority: move the ref only if it still names the commit this push planned against.
 
@@ -167,7 +167,7 @@ crab hydrate 'models/encoder.safetensors'
 crab dehydrate 'models/*.safetensors'
 ```
 
-<GitArchitecturePlayer story="hydrate" />
+<LaunchMotionFigure story="hydrate" />
 
 Hydration is a proof-oriented read path:
 
@@ -244,7 +244,7 @@ Deleting a path does not prove its chunks are unused. The same content may still
 
 Crab GC starts from retained roots, walks the complete Git and file-data closure, compares the mark set with repository inventory, and then applies a grace window.
 
-<GarbageCollectionReachabilityDiagram />
+<LaunchMotionFigure story="gc" />
 
 An object is eligible only when both statements are true:
 
