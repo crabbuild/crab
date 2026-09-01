@@ -77,35 +77,35 @@ in this checkout or on the main disk.
 - Before any Cargo command that can compile (`build`, `check`, `test`,
   `clippy`, `bench`, `doc`, `install`, `package`, or a Make target that invokes
   one), set `CARGO_TARGET_DIR` beneath
-  `/Users/carolwang/Workspace/crabbuild-target`.
+  `$HOME/Workspace/crabbuild-target`.
 - Every repository checkout and worktree must have its own target directory.
   Never share one Cargo target directory between different repositories or
   concurrent worktrees: feature sets, build scripts, and locks can collide.
 - Use a stable, descriptive directory such as
-  `/Users/carolwang/Workspace/crabbuild-target/crab-main` for this checkout and
-  `/Users/carolwang/Workspace/crabbuild-target/crab-<worktree-name>` for another
+  `$HOME/Workspace/crabbuild-target/crab-main` for this checkout and
+  `$HOME/Workspace/crabbuild-target/crab-<worktree-name>` for another
   Crab worktree. For another repository, include that repository and
   checkout/worktree name.
 - Set the variable on every new shell/tool invocation; do not assume an export
   from an earlier command persists. For example:
 
   ```bash
-  CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main \
+  CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
     cargo test -p crab --locked
   ```
 
 - Verify the volume is mounted and the chosen directory is writable before a
   long build. Create only the specific per-checkout directory needed. If
-  `/Users/carolwang/Workspace` is unavailable, stop and report it rather than
+  `$HOME/Workspace` is unavailable, stop and report it rather than
   falling back to a local `target/` directory.
 - Do not delete, clean, or reuse another repository's target directory. Run
   `cargo clean` only with the intended `CARGO_TARGET_DIR` explicitly set and
   only when the task actually requires reclaiming or invalidating those
   artifacts.
 - Find repositories used to qualify Crab against real repositories under
-  `/Users/carolwang/Workspace/Github` first. When a task genuinely requires a
+  `$HOME/Workspace/Github` first. When a task genuinely requires a
   missing public repository, clone it under
-  `/Users/carolwang/Workspace/Github/<owner>/<repository>`; do not clone
+  `$HOME/Workspace/Github/<owner>/<repository>`; do not clone
   qualification repositories into the Crab tree, `/tmp`, or another GitHub
   folder.
 - Treat external qualification repositories as read-only inputs. Do not
@@ -126,11 +126,11 @@ to trigger a second local build silently.
 
 ```bash
 cd crab
-CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make install  # release binaries + install + git-remote-crab symlink
-CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make test     # full cargo test + error_codes test
-CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make clippy   # lint
-CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make fmt      # format
-CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make check    # fast compile check
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make install  # release binaries + install + git-remote-crab symlink
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make test     # full cargo test + error_codes test
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make clippy   # lint
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make fmt      # format
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make check    # fast compile check
 ```
 
 **Never** `cargo install` or manually copy binaries. Always `make install`.
@@ -207,7 +207,7 @@ npm run check:links        # docs/link validation
 
 ## Tests
 
-- **Rust**: `cd crab && CARGO_TARGET_DIR=/Users/carolwang/Workspace/crabbuild-target/crab-main make test`. Property tests with `proptest`. Snapshot tests with `cargo insta`. `#[tokio::test(flavor = "multi_thread")]` for concurrency.
+- **Rust**: `cd crab && CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main make test`. Property tests with `proptest`. Snapshot tests with `cargo insta`. `#[tokio::test(flavor = "multi_thread")]` for concurrency.
 - **Web**: `cd packages/web && npm run test` (Vitest); also run `npm run typecheck` and `npm run lint`, plus `npm run check:links` for docs/link changes.
 - Name the property, not the requirement: `batch_remove_preserves_entries_for_non_deleted_xorbs`.
 - One logical assertion per test. Clean timers/env/globals/mocks.
