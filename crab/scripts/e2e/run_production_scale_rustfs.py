@@ -6,7 +6,8 @@ beneath ``~/Workspace/CrabRepos/ml-model-300gb`` and keeps its source, clone,
 logs, manifests, and report for investigation. The files are sparse with
 deterministic repeated blocks: they exercise 300 GiB of logical content and
 deduplication without consuming several additional terabytes of host storage.
-Every version changes representative files from 100 MiB through 5 GiB.
+Every version changes representative files from 100 MiB through 10 GiB, and
+the clone reconstructs every retained version of those files from a cold cache.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ class Report:
     commands: list[dict[str, Any]] = field(default_factory=list)
     checks: list[dict[str, Any]] = field(default_factory=list)
     versions: list[dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     started_at: str = ""
     finished_at: str = ""
@@ -124,11 +126,11 @@ def block(label: str, length: int) -> bytes:
 
 def build_workload_plan() -> WorkloadPlan:
     files: list[FileSpec] = []
-    foundation = FileSpec("models/foundation-model-000.safetensors", 5 * GIB, "model", 0x1000)
+    foundation = FileSpec("models/foundation-model-000.safetensors", 10 * GIB, "model", 0x1000)
     files.append(foundation)
     files.extend(
         FileSpec(f"models/checkpoint-{index:03}.safetensors", 5 * GIB, "model", 0x1001 + index)
-        for index in range(9)
+        for index in range(8)
     )
     medium = FileSpec("models/medium-model-000.safetensors", 2 * GIB, "medium-model", 0x2000)
     files.append(medium)
@@ -500,6 +502,7 @@ class ProductionScaleRunner:
         self.stage_paths(self.source, paths, "initial")
         self.commit(self.source, "production-scale initial 300 GiB repository")
         self.push(self.source, "initial")
+        self.record_history_version(manifest, 1, {})
         self.pointer_check(self.source, manifest, "initial-index-pointers")
         after = self.object_stats(".crab/xorbs/", "initial xorb")
         delta = after["bytes"] - before["bytes"]
@@ -514,6 +517,35 @@ class ProductionScaleRunner:
             if item["path"] == path:
                 return item
         raise WorkflowError(f"manifest is missing {path}")
+
+    def record_history_version(
+        self,
+        manifest: dict[str, Any],
+        version: int,
+        offsets: dict[str, int],
+    ) -> None:
+        revision = self.run_git(
+            self.source,
+            ["rev-parse", "HEAD"],
+            f"resolve version {version} revision",
+        )
+        commit = Path(revision.stdout_log).read_text(encoding="utf-8").strip()
+        self.report.history.append(
+            {
+                "version": version,
+                "commit": commit,
+                "offsets": offsets,
+                "files": [
+                    {
+                        "path": target.path,
+                        "size": target.size,
+                        "sha256": self.find_entry(manifest, target.path)["sha256"],
+                    }
+                    for target in self.plan.version_targets
+                ],
+            }
+        )
+        self.write_report()
 
     def write_version_patch(self, target_spec: FileSpec, version: int) -> int:
         target = self.source / target_spec.path
@@ -557,6 +589,7 @@ class ProductionScaleRunner:
             self.stage_paths(self.source, target_paths, f"version {version}")
             self.commit(self.source, f"production-scale size-class files version {version}")
             self.push(self.source, f"version {version}")
+            self.record_history_version(manifest, version, offsets)
             diffs = self.diff_reports()
             after = self.object_stats(".crab/xorbs/", f"version {version} xorb")
             xorb_delta = after["bytes"] - before["bytes"]
@@ -616,6 +649,92 @@ class ProductionScaleRunner:
                 failures.append(item["path"])
         self.check(name, not failures, {"files": len(manifest["files"]), "failures": failures[:10]})
 
+    def reset_cache(self) -> None:
+        if self.cache.exists():
+            shutil.rmtree(self.cache)
+        self.cache.mkdir(parents=True)
+
+    def verify_historical_versions(self) -> None:
+        self.check(
+            "large-file-history-complete",
+            len(self.report.history) == self.plan.version_count + 1,
+            {
+                "versions": len(self.report.history),
+                "mutations_per_file": self.plan.version_count,
+                "files": len(self.plan.version_targets),
+            },
+        )
+        for version in self.report.history:
+            version_number = int(version["version"])
+            self.reset_cache()
+            self.run_git(
+                self.clone,
+                ["checkout", "--detach", str(version["commit"])],
+                f"checkout historical version {version_number}",
+            )
+            failures: list[dict[str, Any]] = []
+            for file in version["files"]:
+                relative = str(file["path"])
+                path = self.clone / relative
+                pointer_before = (
+                    path.is_file()
+                    and path.stat().st_size <= 256
+                    and path.read_bytes().startswith(b"version https://crab.dev/spec/v1\n")
+                )
+                self.run_crab(
+                    self.clone,
+                    ["hydrate", relative, "--jsonl"],
+                    f"hydrate historical version {version_number} {relative}",
+                    timeout=12 * 60 * 60,
+                )
+                actual_size = path.stat().st_size
+                actual_hash = sha256_file(path)
+                self.run_crab(
+                    self.clone,
+                    ["dehydrate", relative, "--jsonl"],
+                    f"dehydrate historical version {version_number} {relative}",
+                    timeout=12 * 60 * 60,
+                )
+                pointer_after = (
+                    path.is_file()
+                    and path.stat().st_size <= 256
+                    and path.read_bytes().startswith(b"version https://crab.dev/spec/v1\n")
+                )
+                if (
+                    not pointer_before
+                    or actual_size != int(file["size"])
+                    or actual_hash != file["sha256"]
+                    or not pointer_after
+                ):
+                    failures.append(
+                        {
+                            "path": relative,
+                            "pointer_before": pointer_before,
+                            "pointer_after": pointer_after,
+                            "size": actual_size,
+                            "sha256": actual_hash,
+                            "expected_sha256": file["sha256"],
+                        }
+                    )
+            status = self.run_git(
+                self.clone,
+                ["status", "--porcelain"],
+                f"historical version {version_number} status",
+            )
+            dirty = Path(status.stdout_log).read_text(encoding="utf-8").strip()
+            self.check(
+                f"historical-version-{version_number}-byte-identity",
+                not failures and not dirty,
+                {
+                    "commit": version["commit"],
+                    "files": len(version["files"]),
+                    "cold_cache": True,
+                    "failures": failures,
+                    "git_status": dirty,
+                },
+            )
+        self.run_git(self.clone, ["checkout", "main"], "restore clone main")
+
     def clone_hydrate_cycle(self, manifest: dict[str, Any]) -> None:
         self.run_cmd("crab clone lazy", ["crab", "clone", self.remote_url, str(self.clone), "--jsonl"], cwd=self.run_root, timeout=12 * 60 * 60)
         self.run_git(self.clone, ["config", "user.email", "clone-developer@crab.local"], "clone git config email")
@@ -634,7 +753,7 @@ class ProductionScaleRunner:
             if sha256_file(self.clone / target) != entry["sha256"]:
                 failures.append(target)
         self.check(
-            "selective-100-mib-through-5-gib-hydrate",
+            "selective-100-mib-through-10-gib-hydrate",
             not failures,
             {"paths": targets, "failures": failures},
         )
@@ -642,6 +761,7 @@ class ProductionScaleRunner:
         self.verify_manifest(self.clone, manifest, "clone-hydrate-byte-identity")
         self.run_crab(self.clone, ["dehydrate", "--all", "--jsonl"], "clone dehydrate all", timeout=12 * 60 * 60)
         self.worktree_pointers(self.clone, manifest, "clone-dehydrate-pointers")
+        self.verify_historical_versions()
         self.run_crab(self.clone, ["hydrate", "--all", "--jsonl"], "clone rehydrate all", timeout=12 * 60 * 60)
         self.verify_manifest(self.clone, manifest, "clone-rehydrate-byte-identity")
 
