@@ -33,7 +33,7 @@ from typing import Any
 
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_FILE_COUNTS = (1, 5, 10)
 DEFAULT_REPO_COUNTS = (10, 50, 100)
 DEFAULT_LATENCY_REPEATS = 3

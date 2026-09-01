@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Verify a production-shaped 200 GiB Crab repository against local RustFS.
+"""Verify a production-shaped 300 GiB Crab repository against local RustFS.
 
 The qualification is deliberately explicit. It creates one isolated run
-beneath ``/Volumes/Workspace/CrabRepos/ml-model-200gb`` and keeps its source, clone,
+beneath ``~/Workspace/CrabRepos/ml-model-300gb`` and keeps its source, clone,
 logs, manifests, and report for investigation. The files are sparse with
-deterministic repeated blocks: they exercise 200 GiB of logical content and
+deterministic repeated blocks: they exercise 300 GiB of logical content and
 deduplication without consuming several additional terabytes of host storage.
+Every version changes representative files from 100 MiB through 5 GiB.
 """
 
 from __future__ import annotations
@@ -28,12 +29,13 @@ from typing import Any
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 PATCH_BLOCK_BYTES = MIB
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_VERSION_COUNT = 12
-DEFAULT_VERSION_PATCH_BYTES = 16 * MIB
-DEFAULT_RUN_NAME = "ml-model-200gb"
+DEFAULT_VERSION_PATCH_BYTES = 4 * MIB
+DEFAULT_RUN_NAME = "ml-model-300gb"
+DEFAULT_CARGO_TARGET_ROOT = Path.home() / "Workspace" / "crabbuild-target"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SECRET_ENV_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -58,7 +60,7 @@ class FileSpec:
 class WorkloadPlan:
     files: tuple[FileSpec, ...]
     logical_bytes: int
-    version_target: FileSpec
+    version_targets: tuple[FileSpec, ...]
     version_count: int
     version_patch_bytes: int
 
@@ -128,28 +130,41 @@ def build_workload_plan() -> WorkloadPlan:
         FileSpec(f"models/checkpoint-{index:03}.safetensors", 5 * GIB, "model", 0x1001 + index)
         for index in range(9)
     )
+    medium = FileSpec("models/medium-model-000.safetensors", 2 * GIB, "medium-model", 0x2000)
+    files.append(medium)
     files.extend(
-        FileSpec(f"datasets/train-shard-{index:03}.parquet", GIB, "dataset", 0x2000 + index)
-        for index in range(40)
+        FileSpec(f"models/medium-model-{index:03}.safetensors", 2 * GIB, "medium-model", 0x2000 + index)
+        for index in range(1, 25)
     )
+    dataset = FileSpec("datasets/train-shard-000.parquet", GIB, "dataset", 0x3000)
+    files.append(dataset)
     files.extend(
-        FileSpec(f"embeddings/partition-{index:03}.arrow", 512 * MIB, "embedding", 0x3000 + index)
-        for index in range(100)
+        FileSpec(f"datasets/train-shard-{index:03}.parquet", GIB, "dataset", 0x3000 + index)
+        for index in range(1, 50)
     )
+    embedding = FileSpec("embeddings/partition-000.arrow", 512 * MIB, "embedding", 0x4000)
+    files.append(embedding)
     files.extend(
-        FileSpec(f"cache/tensor-{index:03}.bin", 256 * MIB, "tensor", 0x4000 + index)
-        for index in range(200)
+        FileSpec(f"embeddings/partition-{index:03}.arrow", 512 * MIB, "embedding", 0x4000 + index)
+        for index in range(1, 100)
     )
+    tensor = FileSpec("cache/tensor-000.bin", 256 * MIB, "tensor", 0x5000)
+    files.append(tensor)
     files.extend(
-        FileSpec(f"metadata/batch-{index:03}.jsonl", 50 * MIB, "metadata", 0x5000 + index)
-        for index in range(200)
+        FileSpec(f"cache/tensor-{index:03}.bin", 256 * MIB, "tensor", 0x5000 + index)
+        for index in range(1, 200)
     )
-    files.append(FileSpec("checkpoints/catalog.ckpt", 240 * MIB, "checkpoint", 0x6000))
+    metadata = FileSpec("metadata/batch-000.jsonl", 100 * MIB, "metadata", 0x6000)
+    files.append(metadata)
+    files.extend(
+        FileSpec(f"metadata/batch-{index:03}.jsonl", 100 * MIB, "metadata", 0x6000 + index)
+        for index in range(1, 512)
+    )
     logical_bytes = sum(item.size for item in files)
     return WorkloadPlan(
         files=tuple(files),
         logical_bytes=logical_bytes,
-        version_target=foundation,
+        version_targets=(metadata, tensor, embedding, dataset, medium, foundation),
         version_count=DEFAULT_VERSION_COUNT,
         version_patch_bytes=DEFAULT_VERSION_PATCH_BYTES,
     )
@@ -178,6 +193,7 @@ class ProductionScaleRunner:
         self.logs = self.run_root / "logs"
         self.artifacts = self.run_root / "artifacts"
         self.cache = self.run_root / "cache"
+        self.cargo_target = DEFAULT_CARGO_TARGET_ROOT / f"crab-production-scale-{self.run_id}"
         self.remote_url = f"crab://{args.bucket}/e2e-production-scale/{self.run_id}"
         self.command_index = 0
         self.env = self.build_env()
@@ -211,6 +227,7 @@ class ProductionScaleRunner:
                 "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "CRAB_CACHE_DIR": str(self.cache),
+                "CARGO_TARGET_DIR": str(self.cargo_target),
                 "GIT_TERMINAL_PROMPT": "0",
                 "GIT_MERGE_AUTOEDIT": "no",
             }
@@ -304,7 +321,7 @@ class ProductionScaleRunner:
         self.write_report()
 
     def preflight(self) -> None:
-        required = 550 * GIB
+        required = 400 * GIB
         free = shutil.disk_usage(self.args.root).free
         self.check(
             "workspace-capacity",
@@ -315,6 +332,12 @@ class ProductionScaleRunner:
         missing = [command for command in required_commands if shutil.which(command) is None]
         self.check("host-dependencies", not missing, {"missing": missing})
         self.check("rustfs-launcher", START_RUSTFS.is_file(), {"path": str(START_RUSTFS)})
+        self.cargo_target.mkdir(parents=True, exist_ok=True)
+        self.check(
+            "cargo-target",
+            self.cargo_target.is_dir() and os.access(self.cargo_target, os.W_OK),
+            {"path": str(self.cargo_target)},
+        )
 
     def start_rustfs(self) -> None:
         self.run_cmd("start RustFS", ["bash", str(START_RUSTFS)], cwd=REPO_ROOT, timeout=10 * 60)
@@ -394,8 +417,8 @@ class ProductionScaleRunner:
         manifest = self.create_manifest(self.source, list(self.plan.files), "initial")
         physical_bytes = sum((self.source / item["path"]).stat().st_blocks * 512 for item in manifest["files"])
         self.check(
-            "logical-200-gib-workload",
-            manifest_total_bytes(manifest) == 200 * GIB,
+            "logical-300-gib-workload",
+            manifest_total_bytes(manifest) == 300 * GIB,
             {"files": len(manifest["files"]), "logical_bytes": manifest_total_bytes(manifest), "physical_bytes": physical_bytes},
         )
         return manifest
@@ -475,7 +498,7 @@ class ProductionScaleRunner:
         before = self.object_stats(".crab/xorbs/", "baseline xorb")
         paths = [item["path"] for item in manifest["files"]]
         self.stage_paths(self.source, paths, "initial")
-        self.commit(self.source, "production-scale initial 200 GiB repository")
+        self.commit(self.source, "production-scale initial 300 GiB repository")
         self.push(self.source, "initial")
         self.pointer_check(self.source, manifest, "initial-index-pointers")
         after = self.object_stats(".crab/xorbs/", "initial xorb")
@@ -492,54 +515,67 @@ class ProductionScaleRunner:
                 return item
         raise WorkflowError(f"manifest is missing {path}")
 
-    def write_version_patch(self, version: int) -> int:
-        target = self.source / self.plan.version_target.path
+    def write_version_patch(self, target_spec: FileSpec, version: int) -> int:
+        target = self.source / target_spec.path
         maximum = target.stat().st_size - self.plan.version_patch_bytes
-        offset = (version * 389 * MIB) % maximum
+        offset = (version * (target_spec.seed + 389) * MIB) % maximum
         with target.open("r+b", buffering=0) as handle:
             handle.seek(offset)
-            handle.write(block(f"crab-production-scale:version:{version}", self.plan.version_patch_bytes))
+            handle.write(
+                block(
+                    f"crab-production-scale:version:{target_spec.path}:{version}",
+                    self.plan.version_patch_bytes,
+                )
+            )
         return offset
 
-    def diff_report(self) -> dict[str, Any]:
+    def diff_reports(self) -> dict[str, dict[str, Any]]:
         record = self.run_crab(self.source, ["diff", "--json", "HEAD~1", "HEAD"], "crab diff version")
         payload = self.stdout_json(record)
         try:
             reports = [item["report"] for item in payload["data"]["files"]]
         except (KeyError, TypeError) as exc:
             raise WorkflowError(f"unexpected crab diff JSON: {record.stdout_log}") from exc
-        for report in reports:
-            if report.get("path") == self.plan.version_target.path:
-                return report
-        raise WorkflowError("crab diff did not report the versioned foundation model")
+        return {
+            str(report["path"]): report
+            for report in reports
+            if isinstance(report, dict) and isinstance(report.get("path"), str)
+        }
 
     def run_versions(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        target_path = self.plan.version_target.path
+        target_paths = [target.path for target in self.plan.version_targets]
         for version in range(2, self.plan.version_count + 2):
             before = self.object_stats(".crab/xorbs/", f"version {version} baseline xorb")
-            offset = self.write_version_patch(version)
-            entry = self.find_entry(manifest, target_path)
-            entry["sha256"] = sha256_file(self.source / target_path)
-            entry["version"] = version
-            self.stage_paths(self.source, [target_path], f"version {version}")
-            self.commit(self.source, f"production-scale foundation model version {version}")
+            offsets = {
+                target.path: self.write_version_patch(target, version)
+                for target in self.plan.version_targets
+            }
+            for target_path in target_paths:
+                entry = self.find_entry(manifest, target_path)
+                entry["sha256"] = sha256_file(self.source / target_path)
+                entry["version"] = version
+            self.stage_paths(self.source, target_paths, f"version {version}")
+            self.commit(self.source, f"production-scale size-class files version {version}")
             self.push(self.source, f"version {version}")
-            diff = self.diff_report()
+            diffs = self.diff_reports()
             after = self.object_stats(".crab/xorbs/", f"version {version} xorb")
             xorb_delta = after["bytes"] - before["bytes"]
-            unchanged = int(diff.get("unchanged_bytes", 0))
-            dedup_ratio = float(diff.get("dedup_ratio", 0))
+            target_bytes = sum(target.size for target in self.plan.version_targets)
+            unchanged = sum(int(diffs.get(path, {}).get("unchanged_bytes", 0)) for path in target_paths)
+            dedup_ratios = [float(diffs.get(path, {}).get("dedup_ratio", 0)) for path in target_paths]
             version_ok = (
-                unchanged >= self.plan.version_target.size - self.plan.version_patch_bytes
-                and dedup_ratio > 0.90
-                and 0 <= xorb_delta <= 256 * MIB
+                len(diffs) >= len(target_paths)
+                and unchanged >= target_bytes - len(target_paths) * self.plan.version_patch_bytes
+                and all(ratio > 0.90 for ratio in dedup_ratios)
+                and 0 <= xorb_delta <= 512 * MIB
             )
             detail = {
                 "version": version,
-                "offset": offset,
+                "offsets": offsets,
+                "paths": target_paths,
                 "patch_bytes": self.plan.version_patch_bytes,
                 "unchanged_bytes": unchanged,
-                "dedup_ratio": dedup_ratio,
+                "dedup_ratios": dedup_ratios,
                 "xorb_delta_bytes": xorb_delta,
                 "before": before,
                 "after": after,
@@ -585,11 +621,23 @@ class ProductionScaleRunner:
         self.run_git(self.clone, ["config", "user.email", "clone-developer@crab.local"], "clone git config email")
         self.run_git(self.clone, ["config", "user.name", "Clone Developer"], "clone git config name")
         self.worktree_pointers(self.clone, manifest, "lazy-clone-pointers")
-        target = self.plan.version_target.path
-        self.run_crab(self.clone, ["hydrate", target, "--jsonl"], "clone selective hydrate", timeout=12 * 60 * 60)
-        target_entry = self.find_entry(manifest, target)
-        target_ok = sha256_file(self.clone / target) == target_entry["sha256"]
-        self.check("selective-5-gib-hydrate", target_ok, {"path": target, "size": target_entry["size"]})
+        targets = [target.path for target in self.plan.version_targets]
+        self.run_crab(
+            self.clone,
+            ["hydrate", *targets, "--jsonl"],
+            "clone selective size-class hydrate",
+            timeout=12 * 60 * 60,
+        )
+        failures = []
+        for target in targets:
+            entry = self.find_entry(manifest, target)
+            if sha256_file(self.clone / target) != entry["sha256"]:
+                failures.append(target)
+        self.check(
+            "selective-100-mib-through-5-gib-hydrate",
+            not failures,
+            {"paths": targets, "failures": failures},
+        )
         self.run_crab(self.clone, ["hydrate", "--all", "--jsonl"], "clone hydrate all", timeout=12 * 60 * 60)
         self.verify_manifest(self.clone, manifest, "clone-hydrate-byte-identity")
         self.run_crab(self.clone, ["dehydrate", "--all", "--jsonl"], "clone dehydrate all", timeout=12 * 60 * 60)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Qualify Crab with a real large Git repository against RustFS.
 
-The default workload uses the existing read-only Kubernetes checkout at
-``/Volumes/Workspace/Github/kubernetes/kubernetes``. It pushes ``HEAD~1000``
+The default workload uses the existing read-only Kubernetes checkout below
+``~/Workspace/Github/kubernetes/kubernetes``. It pushes ``HEAD~1000``
 as the seed, replays the final 1,000 first-parent commits one at a time, and
 measures full, filtered, shallow, and incremental reads. All generated local
-state lives below ``/Volumes/Workspace/CrabBuild/crabbuild-qualification``.
+state lives below ``~/Workspace/CrabBuild/crabbuild-qualification``.
 
 The script never cleans or modifies the source checkout. Remote cleanup, when
 requested, is restricted to the unique repository prefix created by this run.
@@ -37,8 +37,9 @@ from typing import Any, Callable, Iterable
 
 SCHEMA = "crab.large-repository-rustfs"
 VERSION = "1.3"
-DEFAULT_SOURCE = Path("/Volumes/Workspace/Github/kubernetes/kubernetes")
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabBuild/crabbuild-qualification")
+WORKSPACE_ROOT = Path.home() / "Workspace"
+DEFAULT_SOURCE = WORKSPACE_ROOT / "Github" / "kubernetes" / "kubernetes"
+DEFAULT_ROOT = WORKSPACE_ROOT / "CrabBuild" / "crabbuild-qualification"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_REPLAY_COUNT = 1_000
@@ -601,7 +602,7 @@ class LargeRepositoryQualification:
     def preflight(self) -> tuple[str, str, list[str]]:
         self.check(
             "workspace-volume",
-            self.args.root.anchor == "/" and str(self.args.root).startswith("/Volumes/Workspace/"),
+            self.args.root.is_absolute() and self.args.root.is_relative_to(WORKSPACE_ROOT),
             {"root": str(self.args.root)},
         )
         self.check(
