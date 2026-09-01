@@ -15,6 +15,9 @@ pub enum StagingError {
     #[error("staging corrupt: {0}")]
     StagingCorrupt(String),
 
+    #[error("Xet shard replay found corrupt metadata: {reason}")]
+    ShardReplayCorrupt { reason: String },
+
     #[error("staging is locked by another process")]
     StagingLocked { holder_pid: Option<u32> },
 
@@ -49,4 +52,10 @@ pub enum StagingError {
 
     #[error("internal staging error: {0}")]
     Internal(String),
+}
+
+impl From<rusqlite::Error> for StagingError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Io(std::io::Error::other(error))
+    }
 }

@@ -10,9 +10,8 @@
 //! Each `submit()` spawns a [`xet_data::file_reconstruction::FileReconstructor`]
 //! task that drives reconstruction through the shared [`StoreClient`]
 //! adapter (which implements xet-core's `Client` trait). Reconstructed
-//! bytes accumulate into an in-memory `Vec<u8>` — the delayed-smudge
-//! protocol requires the bytes to stream back to git later, so we
-//! buffer the whole file in memory.
+//! bytes stream into an auto-deleting temporary file. The delayed-smudge
+//! protocol serves that file later without retaining whole-file buffers.
 //!
 //! Total memory is bounded two ways:
 //!
@@ -31,7 +30,7 @@
 //! tasks so the filter process exits without leaking bytes.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,7 +85,7 @@ pub struct PrefetchQueue {
 struct PrefetchState {
     in_flight: HashMap<String, JoinHandle<PrefetchTaskResult>>,
     completed: Vec<String>,
-    results: HashMap<String, Vec<u8>>,
+    results: HashMap<String, PrefetchedFile>,
     errors: HashMap<String, String>,
 }
 
@@ -94,7 +93,21 @@ struct PrefetchState {
 /// because `FileReconstructionError` is not `Send + 'static`-friendly
 /// to keep around indefinitely and the filter just logs + falls back
 /// on the on-demand path.
-type PrefetchTaskResult = std::result::Result<Vec<u8>, String>;
+type PrefetchTaskResult = std::result::Result<PrefetchedFile, String>;
+
+/// Completed delayed-smudge output, deleted automatically after serving or shutdown.
+#[derive(Debug)]
+pub struct PrefetchedFile {
+    path: tempfile::TempPath,
+    size: u64,
+}
+
+impl PrefetchedFile {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 impl PrefetchQueue {
     /// Build a queue with the given dependencies.
@@ -201,6 +214,12 @@ impl PrefetchQueue {
             hints.insert(file_hash, shard_hash);
         }
 
+        let mut state = self.state.lock().await;
+        if state.in_flight.contains_key(&pathname) || state.results.contains_key(&pathname) {
+            debug!(path = %pathname, "prefetch submit ignored: already in flight or completed");
+            return;
+        }
+
         let client = self.client.clone();
         let chunk_cache = self.chunk_cache.clone();
         let semaphore = self.semaphore.clone();
@@ -223,48 +242,34 @@ impl PrefetchQueue {
                 reconstructor = reconstructor.with_chunk_cache(cache);
             }
 
-            // `SequentialWriter` takes ownership of the `Write` impl so
-            // we can't reclaim a plain `Vec<u8>` after reconstruction.
-            // Funnel writes through a shared cursor we can drain back
-            // in the task body once the reconstructor returns.
-            let shared = Arc::new(std::sync::Mutex::new(Cursor::new(Vec::<u8>::new())));
-            let writer = SharedCursorWriter(shared.clone());
+            let root = crate::cache::default_cache_root().join("prefetch");
+            if let Err(error) = std::fs::create_dir_all(&root) {
+                return Err(format!("failed to create prefetch workspace: {error}"));
+            }
+            let temporary = match tempfile::NamedTempFile::new_in(root) {
+                Ok(file) => file,
+                Err(error) => return Err(format!("failed to create prefetch output: {error}")),
+            };
+            let writer = match temporary.reopen() {
+                Ok(file) => file,
+                Err(error) => return Err(format!("failed to open prefetch output: {error}")),
+            };
+            let path = temporary.into_temp_path();
 
             match reconstructor.reconstruct_to_writer(writer).await {
-                Ok(_bytes_written) => {
-                    let mut guard = match shared.lock() {
-                        Ok(g) => g,
-                        Err(_) => {
-                            return Err("reconstruction writer poisoned".to_string());
-                        }
-                    };
-                    let bytes = std::mem::take(guard.get_mut());
+                Ok(bytes_written) => {
                     if let Some(m) = metrics.as_ref() {
                         m.inc_prefetch_completed();
-                        m.add_prefetch_bytes(bytes.len() as u64);
+                        m.add_prefetch_bytes(bytes_written);
                     }
-                    Ok(bytes)
+                    Ok(PrefetchedFile {
+                        path,
+                        size: bytes_written,
+                    })
                 }
                 Err(e) => Err(e.to_string()),
             }
         });
-
-        let mut state = self.state.lock().await;
-
-        // If a task for this pathname is already in flight, don't spawn
-        // a duplicate — the previous submission's result will be served
-        // to whichever caller asks first. Aborting and respawning
-        // throws away any work already done on a nearly-complete task.
-        // See finding CR2-F26.
-        //
-        // If a completed result is already materialized, the caller
-        // will pick it up via take_result without needing a new task.
-        if state.in_flight.contains_key(&pathname) || state.results.contains_key(&pathname) {
-            debug!(path = %pathname, "prefetch submit ignored: already in flight or completed");
-            // Drop the handle we spawned above so its Drop aborts the task.
-            drop(handle);
-            return;
-        }
         state.in_flight.insert(pathname, handle);
     }
 
@@ -307,18 +312,15 @@ impl PrefetchQueue {
             }
         }
 
-        // Warn when completed but un-taken results grow large. The
-        // filter-process is expected to drain results promptly via
-        // `take_result` after listing completed blobs; if the results
-        // map accumulates, it pins the full reconstructed content in
-        // memory. See finding CR2-F27.
+        // Warn when completed but un-taken results grow large. Content is
+        // disk-backed, but callers should still release temporary files.
         const WARN_RESULT_COUNT: usize = 64;
         if state.results.len() >= WARN_RESULT_COUNT {
-            let total_bytes: usize = state.results.values().map(Vec::len).sum();
+            let total_bytes: u64 = state.results.values().map(|result| result.size).sum();
             warn!(
                 pending_results = state.results.len(),
                 bytes_held = total_bytes,
-                "prefetch results accumulating in memory; caller must drain via take_result"
+                "prefetch results accumulating on disk; caller must drain via take_result"
             );
         }
 
@@ -350,7 +352,7 @@ impl PrefetchQueue {
     ///
     /// If the task has not completed yet, waits for it. Returns an
     /// error if the task failed or the pathname was never submitted.
-    pub async fn take_result(&self, pathname: &str) -> Result<Vec<u8>> {
+    pub async fn take_result(&self, pathname: &str) -> Result<PrefetchedFile> {
         // Fast path: result already materialized by `poll_completed`.
         {
             let mut state = self.state.lock().await;
@@ -435,29 +437,6 @@ impl PrefetchQueue {
 fn permits_from_budget(budget_bytes: u64) -> u64 {
     let raw = budget_bytes / AVG_CHUNK_SIZE_BYTES;
     raw.max(MIN_PREFETCH_PERMITS)
-}
-
-/// `std::io::Write` adapter that funnels into an `Arc<Mutex<Cursor>>`
-/// so the submitter task can reclaim the reconstructed bytes after the
-/// `SequentialWriter` has taken ownership of the writer handle.
-struct SharedCursorWriter(Arc<std::sync::Mutex<Cursor<Vec<u8>>>>);
-
-impl std::io::Write for SharedCursorWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut guard = self
-            .0
-            .lock()
-            .map_err(|_| std::io::Error::other("prefetch writer mutex poisoned"))?;
-        std::io::Write::write(&mut *guard, buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let mut guard = self
-            .0
-            .lock()
-            .map_err(|_| std::io::Error::other("prefetch writer mutex poisoned"))?;
-        std::io::Write::flush(&mut *guard)
-    }
 }
 
 #[cfg(test)]

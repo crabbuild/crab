@@ -2,7 +2,7 @@
 """Run concurrent Crab push smokes against a local RustFS/S3 endpoint.
 
 The harness creates a unique remote under ``crab://<bucket>/e2e-concurrent-push``
-and local workdirs under ``/Volumes/Workspace/CrabRepos`` by default. It models
+and local workdirs under ``~/Workspace/CrabRepos`` by default. It models
 two AI-agent push cases:
 
 * branch fanout: many agents push independent branches at the same time; all
@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 REMOTE_PREFIX = "e2e-concurrent-push"

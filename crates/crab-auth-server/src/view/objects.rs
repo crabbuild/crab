@@ -5,9 +5,9 @@ use bytes::Bytes;
 use crab_metadata::receipts::{
     CommittedChunkReceipt, OriginReceipt, RECEIPT_SCHEMA_VERSION, generation_file_index_digest,
 };
-use crab_metadata::remote_index::{RemoteIndexConfig, write_index_entries};
+use crab_metadata::remote_index::{RemoteIndexConfig, RemoteIndexWriter};
 use crab_metadata::value_codec::CommittedFileRecord;
-use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
+use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use crab_xet::reconstruction::{ChunkPlacementMap, build_file_terms};
@@ -201,106 +201,151 @@ pub(super) async fn commit_view_metadb(
 ) -> Result<[u8; 32]> {
     let shard_index_hash = MerkleHash::from_hex(&manifest.shard_index_hash)
         .map_err(|error| AuthServerError::Internal(format!("invalid view shard index: {error}")))?;
-    let mut file_entries = Vec::new();
-    let mut chunk_source_shards = HashMap::new();
-    for (bytes, shard_hash) in &uploaded.shards {
-        for recipe in crab_xet::shard_parse::extract_file_recipes(&Bytes::from(bytes.clone()))? {
-            let file_size = recipe.chunks.iter().try_fold(0u64, |total, (_, size)| {
-                total.checked_add(*size).ok_or_else(|| {
-                    AuthServerError::Internal("view recipe size overflow".to_owned())
-                })
-            })?;
-            let recipe_hash = FileRecipe::from_staged_chunks(
-                ChunkingPolicyId::XetGearV1_64KiB,
-                recipe.file_hash,
-                file_size,
-                &recipe.chunks,
-            )
-            .map_err(|error| AuthServerError::Internal(error.to_string()))?
-            .hash();
-            file_entries.push((
-                recipe.file_hash,
-                CommittedFileRecord {
-                    recipe_hash,
-                    shard_hash: *shard_hash,
-                    committed_generation: manifest.generation,
-                    shard_index_hash,
-                },
-            ));
-            for (chunk_hash, _) in recipe.chunks {
-                chunk_source_shards.entry(chunk_hash).or_insert(*shard_hash);
-            }
-        }
-    }
-    let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
-    let mut committed_chunk_entries = Vec::with_capacity(uploaded.placement.len());
-    for (chunk_hash, entry) in &uploaded.placement {
-        let source_shard_hash = chunk_source_shards.get(chunk_hash).ok_or_else(|| {
-            AuthServerError::IncompleteShardReconstruction {
-                file_hash: String::new(),
-                path: None,
-                uncovered_chunks: 1,
-                example_chunk_hash: chunk_hash.hex(),
-                example_chunk_index: entry.chunk_index,
-            }
-        })?;
-        let origin = if let Some(origin) = origins.get(&entry.xorb_hash) {
-            origin.clone()
-        } else {
-            let path = router.xorb_path(&entry.xorb_hash);
-            let meta = store.head(&path).await?;
-            let payload_digest = uploaded
-                .payload_digests
-                .get(&entry.xorb_hash)
-                .copied()
-                .ok_or_else(|| {
-                    AuthServerError::Internal(format!(
-                        "missing payload digest for view xorb {}",
-                        entry.xorb_hash.hex()
-                    ))
-                })?;
-            let origin = OriginReceipt::new(
-                "canonical-origin".to_owned(),
-                path.to_string(),
-                entry.xorb_hash.into(),
-                payload_digest,
-                meta.size,
-                meta.e_tag,
-                meta.version,
-            );
-            origins.insert(entry.xorb_hash, origin.clone());
-            origin
-        };
-        committed_chunk_entries.push((
-            *chunk_hash,
-            CommittedChunkReceipt {
-                schema_version: RECEIPT_SCHEMA_VERSION,
-                chunk_hash: (*chunk_hash).into(),
-                xorb_hash: entry.xorb_hash.into(),
-                chunk_index: entry.chunk_index,
-                uncompressed_size: entry.uncompressed_size,
-                origin,
-                source_repo_prefix: router.repo_prefix().to_owned(),
-                source_shard_hash: (*source_shard_hash).into(),
-                committed_generation: manifest.generation,
-                shard_index_hash: shard_index_hash.into(),
-                gc_registry_generation,
-            },
-        ));
-    }
     let config = RemoteIndexConfig::for_repo_with_global_prefix(
         router.repo_prefix(),
         router.global_prefix(),
     );
-
     let digest = generation_file_index_digest(shard_index_hash.into());
-    write_index_entries(
-        Arc::clone(store.inner()),
-        &config,
-        &file_entries,
-        &committed_chunk_entries,
-    )
-    .await?;
+    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
+    let workspace = tempfile::tempdir()?;
+    let operation = async {
+        let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
+        let mut seen_chunks = HashSet::new();
+        for (bytes, shard_hash) in &uploaded.shards {
+            let spool = ShardReplaySpool::from_reader_in(
+                std::io::Cursor::new(bytes),
+                workspace.path(),
+                *shard_hash,
+                true,
+                true,
+            )?;
+            let mut after_id = 0_i64;
+            loop {
+                let rows = spool.file_batch(after_id, REPLAY_BATCH_ENTRIES)?;
+                if rows.is_empty() {
+                    break;
+                }
+                let entries = rows
+                    .into_iter()
+                    .map(|row| {
+                        after_id = row.id;
+                        (
+                            row.file_hash,
+                            CommittedFileRecord {
+                                recipe_hash: row.recipe_hash,
+                                shard_hash: *shard_hash,
+                                committed_generation: manifest.generation,
+                                shard_index_hash,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                writer.write_entries(&entries, &[]).await?;
+            }
+
+            let mut after_id = 0_i64;
+            loop {
+                let rows = spool.chunk_batch(after_id, REPLAY_BATCH_ENTRIES)?;
+                if rows.is_empty() {
+                    break;
+                }
+                let mut entries = Vec::with_capacity(rows.len());
+                for row in rows {
+                    after_id = row.id;
+                    if !seen_chunks.insert(row.chunk_hash) {
+                        continue;
+                    }
+                    let placement = uploaded.placement.get(&row.chunk_hash).ok_or_else(|| {
+                        AuthServerError::IncompleteShardReconstruction {
+                            file_hash: String::new(),
+                            path: None,
+                            uncovered_chunks: 1,
+                            example_chunk_hash: row.chunk_hash.hex(),
+                            example_chunk_index: row.chunk_index,
+                        }
+                    })?;
+                    if placement.xorb_hash != row.xorb_hash
+                        || placement.chunk_index != row.chunk_index
+                        || placement.uncompressed_size != row.uncompressed_size
+                    {
+                        return Err(AuthServerError::CorruptObject {
+                            path: format!("view shard {}", shard_hash.hex()),
+                            reason: format!(
+                                "chunk {} placement differs from uploaded xorb",
+                                row.chunk_hash.hex()
+                            ),
+                        });
+                    }
+                    let origin = if let Some(origin) = origins.get(&row.xorb_hash) {
+                        origin.clone()
+                    } else {
+                        let path = router.xorb_path(&row.xorb_hash);
+                        let meta = store.head(&path).await?;
+                        let payload_digest = uploaded
+                            .payload_digests
+                            .get(&row.xorb_hash)
+                            .copied()
+                            .ok_or_else(|| {
+                                AuthServerError::Internal(format!(
+                                    "missing payload digest for view xorb {}",
+                                    row.xorb_hash.hex()
+                                ))
+                            })?;
+                        let origin = OriginReceipt::new(
+                            "canonical-origin".to_owned(),
+                            path.to_string(),
+                            row.xorb_hash.into(),
+                            payload_digest,
+                            meta.size,
+                            meta.e_tag,
+                            meta.version,
+                        );
+                        origins.insert(row.xorb_hash, origin.clone());
+                        origin
+                    };
+                    entries.push((
+                        row.chunk_hash,
+                        CommittedChunkReceipt {
+                            schema_version: RECEIPT_SCHEMA_VERSION,
+                            chunk_hash: row.chunk_hash.into(),
+                            xorb_hash: row.xorb_hash.into(),
+                            chunk_index: row.chunk_index,
+                            uncompressed_size: row.uncompressed_size,
+                            origin,
+                            source_repo_prefix: router.repo_prefix().to_owned(),
+                            source_shard_hash: (*shard_hash).into(),
+                            committed_generation: manifest.generation,
+                            shard_index_hash: shard_index_hash.into(),
+                            gc_registry_generation,
+                        },
+                    ));
+                }
+                writer.write_entries(&[], &entries).await?;
+            }
+        }
+        if seen_chunks.len() != uploaded.placement.len() {
+            let missing = uploaded
+                .placement
+                .keys()
+                .find(|hash| !seen_chunks.contains(hash))
+                .copied()
+                .ok_or_else(|| {
+                    AuthServerError::Internal("view chunk coverage count mismatch".to_owned())
+                })?;
+            return Err(AuthServerError::IncompleteShardReconstruction {
+                file_hash: String::new(),
+                path: None,
+                uncovered_chunks: (uploaded.placement.len() - seen_chunks.len()) as u64,
+                example_chunk_hash: missing.hex(),
+                example_chunk_index: uploaded.placement[&missing].chunk_index,
+            });
+        }
+        Ok::<_, AuthServerError>(())
+    }
+    .await;
+    let close_result = writer.close().await;
+    operation?;
+    close_result?;
     Ok(digest)
 }
 

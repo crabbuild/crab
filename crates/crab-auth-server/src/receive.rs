@@ -25,12 +25,12 @@ use crab_metadata::{
         RECEIPT_SCHEMA_VERSION, generation_file_index_digest, generation_git_object_locator_digest,
     },
     ref_registry::ActiveActiveCoordinatorRegistration,
-    remote_index::{RemoteIndexConfig, write_index_entries},
+    remote_index::{RemoteIndexConfig, RemoteIndexWriter},
     segmented::{self, SegmentIndex, SegmentKind},
     segmented_store,
     value_codec::CommittedFileRecord,
 };
-use crab_staging::recipe::{ChunkingPolicyId, FileRecipe};
+use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
 use crab_storage::{
     StagedWrite, StorageError, StorageProviderKind, Store, StoreLayout,
     canonical_global_content_path, content_hash_from_path,
@@ -1197,30 +1197,129 @@ pub async fn commit_service_metadata(
     manifest: &Manifest,
     gc_registry_generation: u64,
 ) -> Result<[u8; 32]> {
-    let (file_entries, committed_chunk_entries) =
-        collect_service_metadata_entries(store, router, plan, manifest, gc_registry_generation)
-            .await?;
     let shard_index_hash = if manifest.shard_index_hash.is_empty() {
         MerkleHash::default()
     } else {
         merkle_hash_from_hex(&manifest.shard_index_hash, "committed shard-index hash")?
     };
     let digest = generation_file_index_digest(shard_index_hash.into());
-    if file_entries.is_empty() && committed_chunk_entries.is_empty() {
+    let Some(candidate_hash) = non_empty(&plan.candidate_manifest.shard_index_hash) else {
         return Ok(digest);
-    }
+    };
+    let index =
+        read_staged_segment_index(store, router, SegmentKind::Shard, candidate_hash, plan).await?;
 
     let config = RemoteIndexConfig::for_repo_with_global_prefix(
         router.repo_prefix(),
         router.global_prefix(),
     );
-    write_index_entries(
-        std::sync::Arc::clone(store.inner()),
-        &config,
-        &file_entries,
-        &committed_chunk_entries,
-    )
-    .await?;
+    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
+    let workspace = tempfile::tempdir()?;
+    let operation = async {
+        for segment in index.segments {
+            let segment_path = router.repo_path(&segment.path);
+            let segment_key = segment_path.as_ref().to_owned();
+            let bytes = read_staged_object_bytes(store, plan, &segment_key).await?;
+            let entries = segmented::parse_shard_segment_entries(&segment, &bytes, &segment_key)?;
+            for entry in entries {
+                let shard_hash = merkle_hash_from_hex(&entry.shard_hash, "shard segment entry")?;
+                let shard_bytes = read_shard_bytes(store, router, plan, &shard_hash).await?;
+                let workspace_path = workspace.path().to_owned();
+                let spool = tokio::task::spawn_blocking(move || {
+                    ShardReplaySpool::from_reader_in(
+                        Cursor::new(shard_bytes),
+                        &workspace_path,
+                        shard_hash,
+                        true,
+                        true,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    AuthServerError::Internal(format!("shard replay worker failed: {error}"))
+                })??;
+
+                let mut after_id = 0_i64;
+                loop {
+                    let rows = spool.file_batch(after_id, REPLAY_BATCH_ENTRIES)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let entries = rows
+                        .into_iter()
+                        .map(|row| {
+                            after_id = row.id;
+                            (
+                                row.file_hash,
+                                CommittedFileRecord {
+                                    recipe_hash: row.recipe_hash,
+                                    shard_hash,
+                                    committed_generation: manifest.generation,
+                                    shard_index_hash,
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    writer.write_entries(&entries, &[]).await?;
+                }
+
+                let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
+                let mut after_id = 0_i64;
+                loop {
+                    let rows = spool.chunk_batch(after_id, REPLAY_BATCH_ENTRIES)?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut entries = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        after_id = row.id;
+                        let origin = if let Some(origin) = origins.get(&row.xorb_hash) {
+                            origin.clone()
+                        } else {
+                            let xorb_key = router.xorb_path(&row.xorb_hash).as_ref().to_owned();
+                            let xorb_path = ObjectPath::from(xorb_key.as_str());
+                            let meta = store.head(&xorb_path).await?;
+                            let payload_digest =
+                                read_xorb_payload_digest(store, &xorb_path, meta.size).await?;
+                            let origin = OriginReceipt::new(
+                                "canonical-origin".to_owned(),
+                                xorb_key,
+                                row.xorb_hash.into(),
+                                payload_digest,
+                                meta.size,
+                                meta.e_tag,
+                                meta.version,
+                            );
+                            origins.insert(row.xorb_hash, origin.clone());
+                            origin
+                        };
+                        entries.push((
+                            row.chunk_hash,
+                            CommittedChunkReceipt {
+                                schema_version: RECEIPT_SCHEMA_VERSION,
+                                chunk_hash: row.chunk_hash.into(),
+                                xorb_hash: row.xorb_hash.into(),
+                                chunk_index: row.chunk_index,
+                                uncompressed_size: row.uncompressed_size,
+                                origin,
+                                source_repo_prefix: router.repo_prefix().to_owned(),
+                                source_shard_hash: shard_hash.into(),
+                                committed_generation: manifest.generation,
+                                shard_index_hash: shard_index_hash.into(),
+                                gc_registry_generation,
+                            },
+                        ));
+                    }
+                    writer.write_entries(&[], &entries).await?;
+                }
+            }
+        }
+        Ok::<_, AuthServerError>(())
+    }
+    .await;
+    let close_result = writer.close().await;
+    operation?;
+    close_result?;
     Ok(digest)
 }
 
@@ -1997,101 +2096,6 @@ pub async fn build_service_candidate_manifest(
     // before this candidate reaches the service-owned commit workflow.
     manifest.seal_git_validation();
     Ok(manifest)
-}
-
-async fn collect_service_metadata_entries(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-    manifest: &Manifest,
-    gc_registry_generation: u64,
-) -> Result<(
-    Vec<(MerkleHash, CommittedFileRecord)>,
-    Vec<(MerkleHash, CommittedChunkReceipt)>,
-)> {
-    let Some(candidate_hash) = non_empty(&plan.candidate_manifest.shard_index_hash) else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let index =
-        read_staged_segment_index(store, router, SegmentKind::Shard, candidate_hash, plan).await?;
-    let mut file_entries = Vec::new();
-    let mut committed_chunk_entries = Vec::new();
-    let shard_index_hash =
-        merkle_hash_from_hex(&manifest.shard_index_hash, "committed shard-index hash")?;
-
-    for segment in index.segments {
-        let segment_path = router.repo_path(&segment.path);
-        let segment_key = segment_path.as_ref().to_owned();
-        let bytes = read_staged_object_bytes(store, plan, &segment_key).await?;
-        let entries = segmented::parse_shard_segment_entries(&segment, &bytes, &segment_key)?;
-        for entry in entries {
-            let shard_hash = merkle_hash_from_hex(&entry.shard_hash, "shard segment entry")?;
-            let shard_bytes = read_shard_bytes(store, router, plan, &shard_hash).await?;
-            let recipes = crab_xet::shard_parse::extract_file_recipes(&bytes::Bytes::from(
-                shard_bytes.clone(),
-            ))?;
-            for recipe in recipes {
-                let file_size = recipe.chunks.iter().try_fold(0u64, |total, (_, size)| {
-                    total
-                        .checked_add(*size)
-                        .ok_or_else(|| invalid("service recipe size overflow"))
-                })?;
-                let recipe_hash = FileRecipe::from_staged_chunks(
-                    ChunkingPolicyId::XetGearV1_64KiB,
-                    recipe.file_hash,
-                    file_size,
-                    &recipe.chunks,
-                )
-                .map_err(|error| invalid(format!("invalid service file recipe: {error}")))?
-                .hash();
-                file_entries.push((
-                    recipe.file_hash,
-                    CommittedFileRecord {
-                        recipe_hash,
-                        shard_hash,
-                        committed_generation: manifest.generation,
-                        shard_index_hash,
-                    },
-                ));
-            }
-            for (relative_xorb_key, chunks) in strict_xorb_references_from_shard(&shard_bytes)? {
-                let xorb_hash = xorb_hash_from_key(&relative_xorb_key)?;
-                let xorb_key = router.xorb_path(&xorb_hash).as_ref().to_owned();
-                let xorb_path = ObjectPath::from(xorb_key.as_str());
-                let meta = store.head(&xorb_path).await?;
-                let payload_digest = read_xorb_payload_digest(store, &xorb_path, meta.size).await?;
-                let origin = OriginReceipt::new(
-                    "canonical-origin".to_owned(),
-                    xorb_key,
-                    xorb_hash.into(),
-                    payload_digest,
-                    meta.size,
-                    meta.e_tag,
-                    meta.version,
-                );
-                for chunk in chunks {
-                    committed_chunk_entries.push((
-                        chunk.hash,
-                        CommittedChunkReceipt {
-                            schema_version: RECEIPT_SCHEMA_VERSION,
-                            chunk_hash: chunk.hash.into(),
-                            xorb_hash: xorb_hash.into(),
-                            chunk_index: chunk.index,
-                            uncompressed_size: chunk.uncompressed_size,
-                            origin: origin.clone(),
-                            source_repo_prefix: router.repo_prefix().to_owned(),
-                            source_shard_hash: shard_hash.into(),
-                            committed_generation: manifest.generation,
-                            shard_index_hash: shard_index_hash.into(),
-                            gc_registry_generation,
-                        },
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok((file_entries, committed_chunk_entries))
 }
 
 async fn read_xorb_payload_digest(

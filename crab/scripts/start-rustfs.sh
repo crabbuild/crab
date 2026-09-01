@@ -6,7 +6,7 @@ set -euo pipefail
 
 IMAGE="rustfs/rustfs:latest"
 CONTAINER="rustfs"
-DATA_DIR="/Volumes/Workspace/CrabData"
+DATA_DIR="${CRAB_RUSTFS_DATA_DIR:-$HOME/Workspace/CrabData}"
 ENDPOINT_URL="http://127.0.0.1:9000"
 BUCKET="crab"
 
@@ -96,7 +96,7 @@ EOF
     grep -Fxq 'docker pull rustfs/rustfs:latest' "$call_log"
     grep -Fxq 'docker rm -f rustfs' "$call_log"
     grep -Fxq \
-        'docker run -d --name rustfs -p 9000:9000 -p 9001:9001 -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab -e RUSTFS_CONSOLE_ENABLE=true -v /Volumes/Workspace/CrabData:/data rustfs/rustfs:latest /data' \
+        "docker run -d --name rustfs -p 9000:9000 -p 9001:9001 -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab -e RUSTFS_CONSOLE_ENABLE=true -v $DATA_DIR:/data rustfs/rustfs:latest /data" \
         "$call_log"
     grep -Fxq \
         'aws credentials=crab/crab region=us-east-1 --endpoint-url http://127.0.0.1:9000 s3api list-buckets' \

@@ -961,6 +961,7 @@ impl From<crab_xet::error::XetError> for CrabError {
             crab_xet::error::XetError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
+            crab_xet::error::XetError::ShardReplayIo { source, .. } => Self::Io(source),
             crab_xet::error::XetError::ChunkNotFound { hash } => Self::ChunkNotFound { hash },
             crab_xet::error::XetError::IncompleteShardReconstruction {
                 file_hash,
@@ -1084,6 +1085,10 @@ impl From<crab_staging::StagingError> for CrabError {
             }
             crab_staging::StagingError::Io(source) => Self::Io(source),
             crab_staging::StagingError::StagingCorrupt(message) => Self::StagingCorrupt(message),
+            crab_staging::StagingError::ShardReplayCorrupt { reason } => Self::CorruptObject {
+                path: "Xet shard replay".to_owned(),
+                reason,
+            },
             crab_staging::StagingError::StagingLocked { holder_pid } => {
                 Self::StagingLocked { holder_pid }
             }

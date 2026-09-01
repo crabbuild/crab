@@ -610,30 +610,50 @@ pub(crate) async fn read_ref_journal_frontier(
 fn transaction_order(
     transactions: &BTreeMap<String, RefJournalTransaction>,
 ) -> Result<Vec<String>> {
-    let mut remaining = transactions.keys().cloned().collect::<BTreeSet<_>>();
-    let mut order = Vec::with_capacity(remaining.len());
-    while !remaining.is_empty() {
-        let ready = remaining
-            .iter()
-            .filter(|transaction_id| {
-                transactions
-                    .get(*transaction_id)
-                    .into_iter()
-                    .flat_map(|transaction| transaction.parents.values().flatten())
-                    .all(|parent| !remaining.contains(parent))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if ready.is_empty() {
-            return Err(corrupt_object(
-                "ref journal transactions",
-                "ref journal transaction parent graph contains a cycle",
-            ));
+    let mut indegree = transactions
+        .keys()
+        .map(|transaction_id| (transaction_id.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (transaction_id, transaction) in transactions {
+        let parents = transaction
+            .parents
+            .values()
+            .flatten()
+            .filter(|parent| transactions.contains_key(*parent))
+            .collect::<BTreeSet<_>>();
+        indegree.insert(transaction_id.clone(), parents.len());
+        for parent in parents {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(transaction_id.clone());
         }
-        for transaction_id in ready {
-            remaining.remove(&transaction_id);
-            order.push(transaction_id);
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(transaction_id, degree)| (*degree == 0).then_some(transaction_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(transactions.len());
+    while let Some(transaction_id) = ready.pop_first() {
+        order.push(transaction_id.clone());
+        for child in children.get(&transaction_id).into_iter().flatten() {
+            let degree = indegree.get_mut(child).ok_or_else(|| {
+                MetadataError::Internal("ref journal child disappeared".to_owned())
+            })?;
+            *degree = degree.checked_sub(1).ok_or_else(|| {
+                MetadataError::Internal("ref journal indegree underflow".to_owned())
+            })?;
+            if *degree == 0 {
+                ready.insert(child.clone());
+            }
         }
+    }
+    if order.len() != transactions.len() {
+        return Err(corrupt_object(
+            "ref journal transactions",
+            "ref journal transaction parent graph contains a cycle",
+        ));
     }
     Ok(order)
 }
@@ -1293,5 +1313,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.refs["refs/heads/main"], "a".repeat(40));
+    }
+
+    #[test]
+    fn transaction_order_handles_five_thousand_commit_chain() {
+        let mut transactions = BTreeMap::new();
+        let mut parent = None;
+        for index in 0..5_000_u64 {
+            let transaction_id = format!("{index:064x}");
+            let parents = BTreeMap::from([("refs/heads/main".to_owned(), parent.clone())]);
+            let transaction = RefJournalTransaction::new(
+                parents,
+                vec![edit("refs/heads/main", 'a')],
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            transactions.insert(transaction_id.clone(), transaction);
+            parent = Some(transaction_id);
+        }
+
+        let order = transaction_order(&transactions).unwrap();
+        assert_eq!(order.len(), 5_000);
+        assert_eq!(order.first().unwrap(), &format!("{:064x}", 0));
+        assert_eq!(order.last().unwrap(), &format!("{:064x}", 4_999));
     }
 }

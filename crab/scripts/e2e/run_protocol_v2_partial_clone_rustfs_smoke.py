@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - Windows has no resource module.
 
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 REMOTE_PREFIX = "e2e-protocol-v2-partial"
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 SECRET_FLAGS = {"--access-key", "--secret-key", "--session-token"}

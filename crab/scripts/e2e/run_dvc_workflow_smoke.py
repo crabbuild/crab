@@ -2,7 +2,7 @@
 """Run a DVC-style Crab workflow/experiment smoke against RustFS.
 
 The script creates a unique Crab repo under ``crab://<bucket>/e2e-dvc/<run-id>``
-and keeps all local artifacts under ``/Volumes/Workspace/CrabRepos`` by
+and keeps all local artifacts under ``~/Workspace/CrabRepos`` by
 default. It is intentionally command-level: every check shells out to the
 installed ``crab`` binary rather than importing Rust code or test helpers.
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ROOT = Path("/Volumes/Workspace/CrabRepos")
+DEFAULT_ROOT = Path.home() / "Workspace" / "CrabRepos"
 DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 REMOTE_PREFIX = "e2e-dvc"

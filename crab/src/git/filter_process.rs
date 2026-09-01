@@ -77,9 +77,11 @@ struct FilterWorktreePaths {
     shared_staging_root: PathBuf,
 }
 
+#[derive(Debug)]
 enum SmudgeOutput {
     Bytes(Bytes),
     File(PathBuf),
+    TemporaryFile(tempfile::TempPath),
 }
 
 /// How long the filter process will wait for the next command before
@@ -1168,13 +1170,13 @@ fn dispatch_command<R: Read, W: Write>(
             // bytes git sent are the same pointer bytes as before — we
             // just hand back the prefetched result.
             if let (Some(pf), Some(h)) = (prefetch, handle)
-                && let Some(bytes) = h.block_on(async {
+                && let Some(file) = h.block_on(async {
                     // Non-blocking peek: take_result only succeeds if
                     // the result is already materialized or the task is
                     // ready. A missing entry surfaces as NotFound and
                     // we fall through to the inline smudge path.
                     match pf.take_result(&cmd.pathname).await {
-                        Ok(bytes) => Some(bytes),
+                        Ok(file) => Some(file),
                         Err(CrabError::NotFound { .. }) => None,
                         Err(e) => {
                             tracing::warn!(
@@ -1189,7 +1191,7 @@ fn dispatch_command<R: Read, W: Write>(
             {
                 write_status(output, "success")?;
                 write_flush(output)?;
-                write_content(output, &bytes)?;
+                write_content_file(output, file.path())?;
                 write_flush(output)?;
                 write_flush(output)?;
                 output.flush().map_err(CrabError::Io)?;
@@ -1205,7 +1207,7 @@ fn dispatch_command<R: Read, W: Write>(
                 handle,
             )? {
                 Some(output) => output,
-                None => SmudgeOutput::Bytes(smudge_content(
+                None => smudge_content(
                     &content,
                     &cmd.pathname,
                     lazy,
@@ -1213,7 +1215,7 @@ fn dispatch_command<R: Read, W: Write>(
                     session,
                     hydrator,
                     handle,
-                )?),
+                )?,
             };
 
             write_status(output, "success")?;
@@ -1338,7 +1340,21 @@ fn try_stream_lfs_smudge(
     }
 }
 
-/// Classify incoming smudge content and return the appropriate output bytes.
+fn reconstruct_crab_to_temp(
+    hydrator: &crate::cmd::hydrate::ShardHydrator,
+    handle: &tokio::runtime::Handle,
+    pointer_bytes: &[u8],
+) -> Result<tempfile::TempPath> {
+    let root = crate::cache::default_cache_root().join("smudge");
+    std::fs::create_dir_all(&root).map_err(CrabError::Io)?;
+    let path = tempfile::NamedTempFile::new_in(root)
+        .map_err(CrabError::Io)?
+        .into_temp_path();
+    handle.block_on(hydrator.reconstruct_from_pointer_to_path(pointer_bytes, &path))?;
+    Ok(path)
+}
+
+/// Classify incoming smudge content and return its bounded output source.
 ///
 /// Dispatches based on pointer type:
 /// - LFS pointer + lazy mode → pass through unchanged
@@ -1354,7 +1370,7 @@ fn smudge_content(
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
-) -> Result<Bytes> {
+) -> Result<SmudgeOutput> {
     // Resolve filter from .gitattributes before blob classification.
     let resolved_filter = session.resolve_filter_for(pathname);
 
@@ -1365,16 +1381,16 @@ fn smudge_content(
             // LFS smudge anyway (re-processing will happen on next clean).
             if lazy {
                 tracing::debug!(path = %pathname, "smudge: LFS-filtered path in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
             if !session.should_lfs_smudge(pathname) {
                 tracing::debug!(path = %pathname, "smudge: LFS fetch filters excluded path, passing through");
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
             // Git LFS deliberately leaves empty tracked files as empty Git
             // blobs. They are not pointers and have no remote dependency.
             if content.is_empty() {
-                return Ok(Bytes::new());
+                return Ok(SmudgeOutput::Bytes(Bytes::new()));
             }
             // Try LFS smudge regardless of blob content type.
             if let Ok(ptr) = crab_git::lfs_pointer::LfsPointer::parse(content) {
@@ -1382,7 +1398,7 @@ fn smudge_content(
                 if let Some(local) = try_local_lfs_cache(&ptr, session)? {
                     tracing::debug!(oid = %oid_hex, "smudge: LFS-filtered path resolved from local cache");
                     let content = crate::lfs::extension::smudge_content(&ptr, local, pathname)?;
-                    return Ok(Bytes::from(content));
+                    return Ok(SmudgeOutput::Bytes(Bytes::from(content)));
                 }
                 if let Some(store) = lfs_store.resolve() {
                     tracing::debug!(oid = %oid_hex, "smudge: downloading LFS object for LFS-filtered path");
@@ -1395,21 +1411,21 @@ fn smudge_content(
                                 error = %error,
                                 "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
                             );
-                            return Ok(Bytes::copy_from_slice(content));
+                            return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
                         }
                         Err(error) => return Err(CrabError::from(error)),
                     };
                     cache_lfs_locally(&ptr, &bytes, session)?;
                     let content =
                         crate::lfs::extension::smudge_content(&ptr, bytes.to_vec(), pathname)?;
-                    return Ok(Bytes::from(content));
+                    return Ok(SmudgeOutput::Bytes(Bytes::from(content)));
                 }
                 if session.should_skip_lfs_download_errors() {
                     tracing::warn!(
                         oid = %oid_hex,
                         "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
                     );
-                    return Ok(Bytes::copy_from_slice(content));
+                    return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
                 }
                 tracing::warn!(oid = %oid_hex, "smudge: LFS object not available for LFS-filtered path");
                 return Err(CrabError::Configuration {
@@ -1419,13 +1435,13 @@ fn smudge_content(
             }
             // Content isn't an LFS pointer — pass through.
             tracing::debug!(path = %pathname, "smudge: LFS-filtered path, content is not an LFS pointer, passing through");
-            Ok(Bytes::copy_from_slice(content))
+            Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)))
         }
         Some(crate::git::filter_attr_cache::FilterKind::Crab) => {
             // User explicitly chose XET for this path. Try Crab reconstruction.
             if lazy && !session.should_auto_hydrate(pathname) {
                 tracing::debug!(path = %pathname, "smudge: Crab-filtered path in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
             if let Ok(pointer) = crab_types::pointer::Pointer::parse(content)
                 && let (Some(h), Some(rt)) = (hydrator, handle)
@@ -1434,8 +1450,8 @@ fn smudge_content(
                     file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
                     "smudge: reconstructing Crab-filtered path inline"
                 );
-                match rt.block_on(h.reconstruct_from_pointer(content)) {
-                    Ok(reconstructed) => return Ok(Bytes::from(reconstructed)),
+                match reconstruct_crab_to_temp(h, rt, content) {
+                    Ok(path) => return Ok(SmudgeOutput::TemporaryFile(path)),
                     Err(e) => {
                         tracing::warn!(
                             file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
@@ -1446,7 +1462,7 @@ fn smudge_content(
                 }
             }
             tracing::debug!(path = %pathname, "smudge: Crab-filtered path, passing through");
-            Ok(Bytes::copy_from_slice(content))
+            Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)))
         }
         None => {
             // No .gitattributes filter — fall back to blob classification.
@@ -1467,7 +1483,7 @@ fn smudge_by_blob_classification(
     session: &super::clean::CleanSession,
     hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
     handle: Option<&tokio::runtime::Handle>,
-) -> Result<Bytes> {
+) -> Result<SmudgeOutput> {
     match classify(content) {
         PointerKind::Lfs(pointer) => {
             if lazy {
@@ -1475,11 +1491,11 @@ fn smudge_by_blob_classification(
                     oid = %crab_git::lfs_pointer::hex_encode(&pointer.oid),
                     "smudge: LFS pointer in lazy mode, passing through"
                 );
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
             if !session.should_lfs_smudge(pathname) {
                 tracing::debug!(path = %pathname, "smudge: LFS fetch filters excluded path, passing through");
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
 
             let oid_hex = crab_git::lfs_pointer::hex_encode(&pointer.oid);
@@ -1488,7 +1504,7 @@ fn smudge_by_blob_classification(
             if let Some(local) = try_local_lfs_cache(&pointer, session)? {
                 tracing::debug!(oid = %oid_hex, "smudge: resolved from local LFS cache");
                 let content = crate::lfs::extension::smudge_content(&pointer, local, pathname)?;
-                return Ok(Bytes::from(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::from(content)));
             }
 
             // Fall back to remote store download.
@@ -1507,7 +1523,7 @@ fn smudge_by_blob_classification(
                             error = %error,
                             "smudge: LFS download failed; preserving pointer because skipdownloaderrors is enabled"
                         );
-                        return Ok(Bytes::copy_from_slice(content));
+                        return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
                     }
                     Err(error) => return Err(CrabError::from(error)),
                 };
@@ -1515,7 +1531,7 @@ fn smudge_by_blob_classification(
                 cache_lfs_locally(&pointer, &bytes, session)?;
                 let content =
                     crate::lfs::extension::smudge_content(&pointer, bytes.to_vec(), pathname)?;
-                return Ok(Bytes::from(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::from(content)));
             }
 
             if session.should_skip_lfs_download_errors() {
@@ -1523,7 +1539,7 @@ fn smudge_by_blob_classification(
                     oid = %oid_hex,
                     "smudge: LFS object unavailable; preserving pointer because skipdownloaderrors is enabled"
                 );
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
 
             // Non-lazy smudge must not silently materialize a pointer when
@@ -1545,7 +1561,7 @@ fn smudge_by_blob_classification(
             // fail. See finding CR4-F2.
             if lazy && !session.should_auto_hydrate(pathname) {
                 tracing::debug!(path = %pathname, "smudge: crab pointer in lazy mode, passing through");
-                return Ok(Bytes::copy_from_slice(content));
+                return Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)));
             }
 
             // Non-lazy or auto-hydrate: attempt inline reconstruction
@@ -1556,10 +1572,8 @@ fn smudge_by_blob_classification(
                     size = pointer.size,
                     "smudge: reconstructing crab pointer inline"
                 );
-                match rt.block_on(h.reconstruct_from_pointer(content)) {
-                    Ok(reconstructed) => {
-                        return Ok(Bytes::from(reconstructed));
-                    }
+                match reconstruct_crab_to_temp(h, rt, content) {
+                    Ok(path) => return Ok(SmudgeOutput::TemporaryFile(path)),
                     Err(e) => {
                         tracing::warn!(
                             file_hash = %crab_types::pointer::hex_encode(&pointer.file_hash),
@@ -1577,12 +1591,12 @@ fn smudge_by_blob_classification(
                 size = pointer.size,
                 "smudge: crab pointer, deferring to hydrate command"
             );
-            Ok(Bytes::copy_from_slice(content))
+            Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)))
         }
         PointerKind::NotAPointer => {
             // Not a recognized pointer — pass through unchanged.
             tracing::debug!("smudge: not a pointer, passing through");
-            Ok(Bytes::copy_from_slice(content))
+            Ok(SmudgeOutput::Bytes(Bytes::copy_from_slice(content)))
         }
     }
 }
@@ -1829,6 +1843,7 @@ fn write_smudge_output<W: Write>(output: &mut W, content: &SmudgeOutput) -> Resu
     match content {
         SmudgeOutput::Bytes(data) => write_content(output, data),
         SmudgeOutput::File(path) => write_content_file(output, path),
+        SmudgeOutput::TemporaryFile(path) => write_content_file(output, path),
     }
 }
 
@@ -2020,6 +2035,14 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
     use std::sync::MutexGuard;
+
+    fn output_bytes(output: &SmudgeOutput) -> Vec<u8> {
+        match output {
+            SmudgeOutput::Bytes(bytes) => bytes.to_vec(),
+            SmudgeOutput::File(path) => std::fs::read(path).unwrap(),
+            SmudgeOutput::TemporaryFile(path) => std::fs::read(path).unwrap(),
+        }
+    }
 
     #[test]
     fn lfs_store_source_caches_unavailable_remote() {
@@ -2283,7 +2306,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.is_empty());
+        assert!(output_bytes(&output).is_empty());
     }
 
     #[test]
@@ -2348,6 +2371,9 @@ mod tests {
             SmudgeOutput::File(path) => path,
             SmudgeOutput::Bytes(_) => {
                 panic!("local LFS object should not be materialized in memory")
+            }
+            SmudgeOutput::TemporaryFile(_) => {
+                panic!("local LFS object should use its persistent cache path")
             }
         };
         assert_eq!(path, &crate::lfs::cache::object_path(&lfs_dir, &oid));
@@ -2859,7 +2885,7 @@ size 1048576\n";
         )
         .unwrap();
 
-        assert_eq!(result.as_ref(), pointer_bytes.as_slice());
+        assert_eq!(output_bytes(&result), pointer_bytes);
     }
 
     #[tokio::test]
@@ -3007,7 +3033,7 @@ size 1048576\n";
                 None,
             )
             .unwrap();
-            assert_eq!(excluded.as_ref(), pointer_bytes.as_slice());
+            assert_eq!(output_bytes(&excluded), pointer_bytes);
 
             let included = smudge_content(
                 &pointer_bytes,
@@ -3019,7 +3045,7 @@ size 1048576\n";
                 None,
             )
             .unwrap();
-            assert_eq!(included.as_ref(), original_content);
+            assert_eq!(output_bytes(&included), original_content);
         })
         .await
         .unwrap();

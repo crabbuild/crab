@@ -1278,6 +1278,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_file_commit_survives_memtable_flush_and_reopen() {
+        let store = stub_store();
+        let cache_dir = TempDir::new().expect("tempdir");
+        let file_hash = hash_from_seed(11);
+        let record = value_codec::CommittedFileRecord {
+            recipe_hash: [12; 32],
+            shard_hash: hash_from_seed(13),
+            committed_generation: 2,
+            shard_index_hash: hash_from_seed(14),
+        };
+
+        {
+            let config = MetaDbConfig {
+                local_chunk_index_path: cache_dir.path().join("chunk-index.sqlite"),
+                ..MetaDbConfig::for_repo("org/test-repo")
+            };
+            let metadb = MetaDb::new(Arc::clone(&store), String::from("org/test-repo"), config);
+            let file_store = metadb.file_index().await.expect("file index");
+            let mut txn = metadb.new_transaction();
+            file_store.save_committed_batch(&mut txn, &[(file_hash, record.clone())]);
+            metadb.commit_buffered(txn).await.expect("buffered commit");
+            metadb.flush_memtables().await.expect("memtable flush");
+            metadb.close_all().await.expect("writer close");
+        }
+
+        let config = MetaDbConfig {
+            local_chunk_index_path: cache_dir.path().join("chunk-index.sqlite"),
+            read_only: true,
+            ..MetaDbConfig::for_repo("org/test-repo")
+        };
+        let metadb = MetaDb::new(store, String::from("org/test-repo"), config);
+        let file_store = metadb.file_index().await.expect("file index reader");
+        let found = file_store
+            .get_committed_batch(&[file_hash])
+            .await
+            .expect("committed lookup");
+        assert_eq!(found, vec![Some(record)]);
+        metadb.close_all().await.expect("reader close");
+    }
+
+    #[tokio::test]
     async fn commit_chunk_only_opens_only_chunk_index_db() {
         let (metadb, _cache_dir) = test_metadb(stub_store());
         let chunk_store = metadb.chunk_index().await.expect("chunk_index");
