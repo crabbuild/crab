@@ -263,8 +263,8 @@ mod tests {
             "missing error schema"
         );
 
-        // Total count: 8 migrated + 25 new json + 12 streaming + 14 events + 1 error = 60
-        assert_eq!(schemas.len(), 60, "unexpected schema count");
+        // Total count: 8 migrated + 24 new json + 12 streaming + 14 events + 1 error = 59
+        assert_eq!(schemas.len(), 59, "unexpected schema count");
     }
 
     #[test]
