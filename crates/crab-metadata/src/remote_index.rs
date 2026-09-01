@@ -25,6 +25,14 @@ use crab_xet::xorb::format::{MerkleHash, XorbRef};
 const FILE_INDEX_DB_LABEL: &str = "file_index_db";
 const CHUNK_INDEX_DB_LABEL: &str = "chunk_index_db";
 
+/// Default L0 target for the global chunk index.
+///
+/// One high-entropy 5 GiB file produces roughly 32 MiB of compact placement
+/// rows. Keeping that generation in one memtable avoids object-store and
+/// compaction amplification while SlateDB's backpressure still bounds larger
+/// publications.
+pub const DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Remote SlateDB paths for Crab's file and chunk indexes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteIndexConfig {
@@ -254,13 +262,19 @@ async fn write_opened_entries(
                 encode_committed_file_record(record).as_slice(),
             );
         }
-        db.write(batch)
-            .await
-            .map(|_| ())
-            .map_err(|source| MetadataError::SlateDbWrite {
-                db: FILE_INDEX_DB_LABEL.to_owned(),
-                source,
-            })?;
+        db.write_with_options(
+            batch,
+            &slatedb::config::WriteOptions {
+                await_durable: false,
+                ..slatedb::config::WriteOptions::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|source| MetadataError::SlateDbWrite {
+            db: FILE_INDEX_DB_LABEL.to_owned(),
+            source,
+        })?;
     }
 
     if let Some(db) = chunk_db
@@ -322,13 +336,19 @@ async fn write_opened_entries(
                 value.as_slice(),
             );
         }
-        db.write(batch)
-            .await
-            .map(|_| ())
-            .map_err(|source| MetadataError::SlateDbWrite {
-                db: CHUNK_INDEX_DB_LABEL.to_owned(),
-                source,
-            })?;
+        db.write_with_options(
+            batch,
+            &slatedb::config::WriteOptions {
+                await_durable: false,
+                ..slatedb::config::WriteOptions::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|source| MetadataError::SlateDbWrite {
+            db: CHUNK_INDEX_DB_LABEL.to_owned(),
+            source,
+        })?;
     }
 
     Ok(())
@@ -415,7 +435,19 @@ async fn open_writer(
     path: &str,
     db: &'static str,
 ) -> Result<slatedb::Db> {
-    slatedb::Db::open(ObjectPath::from(path), store)
+    let l0_sst_size_bytes = usize::try_from(DEFAULT_CHUNK_INDEX_L0_SST_SIZE_BYTES)
+        .map_err(|error| MetadataError::Internal(format!("L0 SST size unsupported: {error}")))?;
+    let settings = slatedb::config::Settings {
+        // Publication owns the final close barrier. Timer flushes turn bounded
+        // replay batches into one remote WAL object each without making the
+        // pre-visibility result any safer.
+        flush_interval: None,
+        l0_sst_size_bytes,
+        ..slatedb::config::Settings::default()
+    };
+    slatedb::Db::builder(ObjectPath::from(path), store)
+        .with_settings(settings)
+        .build()
         .await
         .map_err(|source| MetadataError::SlateDbOpen {
             db: db.to_owned(),
@@ -477,10 +509,45 @@ fn is_manifest_missing(err: &slatedb::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use object_store::memory::InMemory;
 
     fn hash_from_seed(seed: u64) -> MerkleHash {
         MerkleHash::from([seed, seed.wrapping_mul(31), seed.wrapping_mul(97), seed])
+    }
+
+    #[tokio::test]
+    async fn bounded_writer_defers_remote_flush_until_close() {
+        let memory = Arc::new(InMemory::new());
+        let store: Arc<dyn ObjectStore> = memory.clone();
+        let config = RemoteIndexConfig::for_repo("org/buffered");
+        let writer = RemoteIndexWriter::open(store, &config, true, false)
+            .await
+            .expect("open writer");
+        let objects_after_open = memory.list(None).count().await;
+
+        for seed in 1..=8 {
+            writer
+                .write_entries(
+                    &[(
+                        hash_from_seed(seed),
+                        CommittedFileRecord {
+                            recipe_hash: [seed as u8; 32],
+                            shard_hash: hash_from_seed(seed + 100),
+                            committed_generation: 1,
+                            shard_index_hash: hash_from_seed(500),
+                        },
+                    )],
+                    &[],
+                )
+                .await
+                .expect("buffer entry");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        assert_eq!(memory.list(None).count().await, objects_after_open);
+        writer.close().await.expect("close writer");
+        assert!(memory.list(None).count().await > objects_after_open);
     }
 
     #[tokio::test]

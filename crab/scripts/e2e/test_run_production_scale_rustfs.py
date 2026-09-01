@@ -23,7 +23,7 @@ class ProductionScaleWorkloadTests(unittest.TestCase):
         plan = QUALIFICATION.build_workload_plan()
 
         self.assertEqual(plan.logical_bytes, 300 * QUALIFICATION.GIB)
-        self.assertEqual(len(plan.files), 897)
+        self.assertEqual(len(plan.files), 896)
         self.assertEqual(
             [target.size for target in plan.version_targets],
             [
@@ -32,9 +32,16 @@ class ProductionScaleWorkloadTests(unittest.TestCase):
                 512 * QUALIFICATION.MIB,
                 QUALIFICATION.GIB,
                 2 * QUALIFICATION.GIB,
-                5 * QUALIFICATION.GIB,
+                10 * QUALIFICATION.GIB,
             ],
         )
+
+    def test_every_large_file_receives_twelve_historical_mutations(self) -> None:
+        plan = QUALIFICATION.build_workload_plan()
+
+        self.assertEqual(plan.version_count, 12)
+        self.assertGreaterEqual(plan.version_count, 10)
+        self.assertLessEqual(plan.version_count, 20)
 
 
 if __name__ == "__main__":
