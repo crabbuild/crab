@@ -60,6 +60,12 @@ struct CommittedShardAnchor {
     shards: HashSet<MerkleHash>,
 }
 
+#[derive(Debug, Default)]
+struct ManifestFallbackCache {
+    found: HashMap<MerkleHash, MerkleHash>,
+    missing: HashSet<MerkleHash>,
+}
+
 fn validate_record(
     record: CommittedFileRecord,
     anchor: Option<&CommittedShardAnchor>,
@@ -137,7 +143,7 @@ pub struct FileIndexLookupSession {
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
     router: crab_storage::StoreLayout<crab_storage::Store>,
-    manifest_fallback: tokio::sync::OnceCell<HashMap<MerkleHash, MerkleHash>>,
+    manifest_fallback: tokio::sync::Mutex<ManifestFallbackCache>,
 }
 
 impl FileIndexLookupSession {
@@ -167,15 +173,38 @@ impl FileIndexLookupSession {
         let anchor = match crate::manifest_store::read_repository_snapshot(&storage, &router).await
         {
             Ok(snapshot) if !snapshot.journal.shards.is_empty() => {
-                let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
-                    MerkleHash::default()
+                // Active journal transactions are the current repository state.
+                // Derive the exact anchor the next compaction will publish so
+                // candidate rows become usable at the same visibility boundary.
+                let (generation, shard_index_hash) = if snapshot.journal.transactions.is_empty() {
+                    let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
+                        MerkleHash::default()
+                    } else {
+                        MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(
+                            |error| MetadataError::CorruptObject {
+                                path: router.manifest_path().to_string(),
+                                reason: format!("invalid shard-index hash: {error}"),
+                            },
+                        )?
+                    };
+                    (snapshot.manifest.generation, shard_index_hash)
                 } else {
-                    MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(|error| {
-                        MetadataError::CorruptObject {
-                            path: router.manifest_path().to_string(),
-                            reason: format!("invalid shard-index hash: {error}"),
-                        }
-                    })?
+                    let generation =
+                        snapshot.manifest.generation.checked_add(1).ok_or_else(|| {
+                            MetadataError::Internal("manifest generation overflow".to_owned())
+                        })?;
+                    let (shard_index_hash, _, _) = crate::manifests::compact_shard_index(
+                        generation,
+                        &snapshot.journal.shards,
+                    )?;
+                    let shard_index_hash =
+                        MerkleHash::from_hex(&shard_index_hash).map_err(|error| {
+                            MetadataError::CorruptObject {
+                                path: "projected repository shard inventory".to_owned(),
+                                reason: format!("invalid shard-index hash: {error}"),
+                            }
+                        })?;
+                    (generation, shard_index_hash)
                 };
                 let shards = snapshot
                     .journal
@@ -189,7 +218,7 @@ impl FileIndexLookupSession {
                     })
                     .collect::<Result<HashSet<_>>>()?;
                 Some(CommittedShardAnchor {
-                    generation: snapshot.manifest.generation,
+                    generation,
                     shard_index_hash,
                     shards,
                 })
@@ -228,7 +257,7 @@ impl FileIndexLookupSession {
             anchor,
             storage,
             router,
-            manifest_fallback: tokio::sync::OnceCell::new(),
+            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
         })
     }
 
@@ -326,59 +355,69 @@ impl FileIndexLookupSession {
         let Some(anchor) = self.anchor.as_ref() else {
             return Ok(vec![None; file_hashes.len()]);
         };
-        let found = self
-            .manifest_fallback
-            .get_or_try_init(|| async {
-                Ok::<_, MetadataError>(
-                    stream::iter(anchor.shards.iter().copied().map(|shard_hash| {
-                        let storage = self.storage.clone();
-                        let router = self.router.clone();
-                        async move {
-                            let path = router.shard_path(&shard_hash);
-                            let (body, _) = storage
-                                .get_with_etag_bounded(
-                                    &path,
-                                    crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
-                                )
-                                .await?;
-                            if crab_xet::hash::compute_data_hash(&body) != shard_hash {
-                                return Err(MetadataError::CorruptObject {
-                                    path: path.to_string(),
-                                    reason: "manifest-scoped shard body hash mismatch".to_owned(),
-                                });
-                            }
-                            let recipes = crab_xet::shard_parse::extract_file_recipes(&body)?;
-                            Ok::<_, MetadataError>(
-                                recipes
-                                    .into_iter()
-                                    .map(|recipe| (recipe.file_hash, shard_hash))
-                                    .collect::<Vec<_>>(),
-                            )
-                        }
-                    }))
-                    .buffer_unordered(SHARD_SEARCH_CONCURRENCY.min(anchor.shards.len()).max(1))
-                    .try_collect::<Vec<Vec<(MerkleHash, MerkleHash)>>>()
-                    .await?
-                    .into_iter()
-                    .flatten()
-                    .collect::<HashMap<_, _>>(),
-                )
+        let mut cache = self.manifest_fallback.lock().await;
+        let unresolved = file_hashes
+            .iter()
+            .filter(|file_hash| {
+                !cache.found.contains_key(*file_hash) && !cache.missing.contains(*file_hash)
             })
+            .copied()
+            .collect::<HashSet<_>>();
+        if !unresolved.is_empty() {
+            let batches = stream::iter(anchor.shards.iter().copied().map(|shard_hash| {
+                let storage = self.storage.clone();
+                let router = self.router.clone();
+                let unresolved = unresolved.clone();
+                async move {
+                    let path = router.shard_path(&shard_hash);
+                    let (body, _) = storage
+                        .get_with_etag_bounded(
+                            &path,
+                            crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
+                        )
+                        .await?;
+                    if crab_xet::hash::compute_data_hash(&body) != shard_hash {
+                        return Err(MetadataError::CorruptObject {
+                            path: path.to_string(),
+                            reason: "manifest-scoped shard body hash mismatch".to_owned(),
+                        });
+                    }
+                    let recipes =
+                        crab_xet::shard_parse::extract_file_recipes_for_hashes(&body, &unresolved)?;
+                    Ok::<_, MetadataError>(
+                        recipes
+                            .into_iter()
+                            .map(|recipe| (recipe.file_hash, shard_hash))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            }))
+            .buffer_unordered(SHARD_SEARCH_CONCURRENCY.min(anchor.shards.len()).max(1))
+            .try_collect::<Vec<Vec<(MerkleHash, MerkleHash)>>>()
             .await?;
+            for (file_hash, shard_hash) in batches.into_iter().flatten() {
+                cache.found.entry(file_hash).or_insert(shard_hash);
+            }
+            for file_hash in unresolved {
+                if !cache.found.contains_key(&file_hash) {
+                    cache.missing.insert(file_hash);
+                }
+            }
+        }
         let repaired_files = file_hashes
             .iter()
-            .filter(|file_hash| found.contains_key(*file_hash))
+            .filter(|file_hash| cache.found.contains_key(*file_hash))
             .count();
         if repaired_files > 0 {
             tracing::warn!(
                 repaired_files,
                 generation = anchor.generation,
-                "file-index miss resolved from one cached manifest-scoped shard scan; run metadb rebuild"
+                "file-index miss resolved from a bounded manifest-scoped shard scan; run metadb rebuild"
             );
         }
         Ok(file_hashes
             .iter()
-            .map(|file_hash| found.get(file_hash).copied())
+            .map(|file_hash| cache.found.get(file_hash).copied())
             .collect())
     }
 
@@ -824,6 +863,71 @@ mod tests {
             .unwrap();
 
         let session = FileIndexLookupSession::open(store, "org/journal")
+            .await
+            .unwrap();
+        assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn journal_candidate_index_is_visible_before_compaction() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let repo_prefix = "org/journal-index";
+        let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+        let file_hash = hash_from_seed(62);
+        let shard_hash = hash_from_seed(63);
+        let manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
+        crate::manifest_store::create_manifest(&storage, &router, &manifest)
+            .await
+            .unwrap();
+        let ref_name = "refs/heads/main";
+        let head = crate::ref_journal::read_ref_head(&storage, &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = crate::ref_journal::RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![crate::ref_journal::RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            vec![shard_hash.hex()],
+        )
+        .unwrap();
+        crate::ref_journal::commit_ref_transaction(&storage, &router, &transaction, &[head])
+            .await
+            .unwrap();
+        let (shard_index_hash, _, _) =
+            crate::manifests::compact_shard_index(1, &[shard_hash.hex()]).unwrap();
+        let db = slatedb::Db::open(
+            ObjectPath::from(file_index_path(repo_prefix).as_str()),
+            Arc::clone(&store),
+        )
+        .await
+        .unwrap();
+        db.put(
+            crate::key_codec::encode_committed_file_key(&file_hash, 1),
+            crate::value_codec::encode_committed_file_record(
+                &crate::value_codec::CommittedFileRecord {
+                    recipe_hash: [7; 32],
+                    shard_hash,
+                    committed_generation: 1,
+                    shard_index_hash: MerkleHash::from_hex(&shard_index_hash).unwrap(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let session = FileIndexLookupSession::open(store, repo_prefix)
             .await
             .unwrap();
         assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));

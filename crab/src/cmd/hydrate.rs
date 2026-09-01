@@ -1430,10 +1430,14 @@ impl ShardHydrator {
         };
 
         let xet_context = new_xet_context()?;
+        // xet-data cancels its supplied token when an internal worker fails.
+        // Isolate that signal so the operation token still distinguishes a
+        // user cancellation from the reconstruction error returned below.
+        let reconstruction_cancel = cancel.child_token();
         let reconstructor =
             xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
-                .with_cancellation_token(cancel.clone());
+                .with_cancellation_token(reconstruction_cancel);
         let reconstructor = match self.chunk_cache.clone() {
             Some(cache) => reconstructor.with_chunk_cache(cache),
             None => reconstructor,
@@ -1564,10 +1568,13 @@ impl ShardHydrator {
         };
 
         let xet_context = new_xet_context()?;
+        // Keep xet-data's error-triggered cancellation local to this file;
+        // otherwise one failed reconstruction poisons the whole hydrate batch.
+        let reconstruction_cancel = cancel.child_token();
         let reconstructor =
             xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
-                .with_cancellation_token(cancel.clone());
+                .with_cancellation_token(reconstruction_cancel);
         let reconstructor = match self.chunk_cache.clone() {
             Some(cache) => reconstructor.with_chunk_cache(cache),
             None => reconstructor,

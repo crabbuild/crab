@@ -281,8 +281,8 @@ async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -
 const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
 const GLOBAL_CHUNK_LOOKUP_BUDGET: Duration = Duration::from_secs(120);
 const BASE_SHARD_LOOKUP_LIMIT: usize = 4_096;
-const POST_COMMIT_METADATA_BATCH_SIZE: usize = 2_048;
-const POST_COMMIT_METADATA_FLUSH_BATCHES: usize = 8;
+const CANDIDATE_METADATA_BATCH_SIZE: usize = 2_048;
+const CANDIDATE_METADATA_FLUSH_BATCHES: usize = 8;
 const STAGING_VERIFY_CONCURRENCY: usize = 4;
 const REMOTE_XORB_PROOF_MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 const REMOTE_XORB_PROOF_PAYLOAD_CONCURRENCY: usize = 16;
@@ -4137,7 +4137,7 @@ pub struct PushPipeline {
     committed_chunk_receipt_candidates: tokio::sync::Mutex<CommittedChunkCandidates>,
     verified_committed_chunk_receipts: tokio::sync::Mutex<HashMap<MerkleHash, [u8; 32]>>,
     /// Candidate deletions discovered during read-only planning and applied
-    /// by the short post-CAS metadata writer.
+    /// before the candidate manifest becomes visible.
     pending_committed_receipt_tombstones: tokio::sync::Mutex<HashSet<(MerkleHash, [u8; 32])>>,
     /// Pointer blobs discovered in step 1.
     pointers: tokio::sync::Mutex<Vec<super::walk::PointerBlob>>,
@@ -4155,7 +4155,7 @@ pub struct PushPipeline {
     /// Maps file_hash → index into `shard_results`, so step 9 knows which
     /// shard contains each file's reconstruction info.
     file_shard_index: tokio::sync::Mutex<HashMap<MerkleHash, usize>>,
-    /// File-index writes held until the manifest CAS commits their shards.
+    /// File-index writes held until the candidate manifest binds their shards.
     pending_file_index_plan: tokio::sync::Mutex<Vec<(MerkleHash, usize)>>,
     /// File hashes that step 2 verified are already durable on the remote
     /// (via `MetaDb::file_index().get_batch()`). Steps 8 and 9 skip
@@ -4227,7 +4227,7 @@ pub struct PushPipeline {
     ///
     /// When `None` (test call sites that don't wire a MetaDb), step 2
     /// falls back to treating every staging-miss as unpushable and
-    /// step 9b skips the commit-and-warm entirely.
+    /// candidate index publication skips the commit-and-warm entirely.
     metadb: tokio::sync::Mutex<Option<crate::metadata::MetaDbGuard>>,
     /// Base manifest read at the start of the push (before step 1).
     /// Used by `build_manifest` to compute the new manifest from the
@@ -4249,8 +4249,6 @@ pub struct PushPipeline {
     /// ETag of the base manifest, used for CAS writes in step 12.
     /// `None` when the manifest is service-owned or no store exists in a test.
     manifest_etag: tokio::sync::Mutex<Option<String>>,
-    /// Generation and shard-index hash returned by a successful manifest CAS.
-    committed_manifest_anchor: tokio::sync::Mutex<Option<CommittedManifestAnchor>>,
     /// Whether this generation has the complete bounded visibility proof that
     /// protocol-v2 admission requires alongside exact locator coverage.
     git_visibility_published: std::sync::atomic::AtomicBool,
@@ -7418,7 +7416,6 @@ impl PushPipeline {
             base_commit_graph: tokio::sync::Mutex::new(None),
             base_commit_graph_loaded: tokio::sync::Mutex::new(false),
             manifest_etag: tokio::sync::Mutex::new(None),
-            committed_manifest_anchor: tokio::sync::Mutex::new(None),
             git_visibility_published: std::sync::atomic::AtomicBool::new(false),
             failure_stage: std::sync::OnceLock::new(),
             push_commit_receipt: tokio::sync::Mutex::new(None),
@@ -8907,7 +8904,6 @@ impl PushPipeline {
             commit_uploaded_push_refs(coordinator.as_ref(), plan.request.clone()).await?;
         match self.materialize_active_active_manifest(manifest).await {
             Ok(()) => {
-                *self.committed_manifest_anchor.lock().await = committed_manifest_anchor(manifest)?;
                 match coordinator
                     .as_ref()
                     .mark_region_materialized(&outcome.operation_id, &plan.request.region)
@@ -9041,7 +9037,6 @@ impl PushPipeline {
             return Ok(false);
         }
 
-        let anchor = committed_manifest_anchor(manifest)?;
         let git_dir = self.common_git_dir()?;
         let store = self
             .store
@@ -9059,7 +9054,6 @@ impl PushPipeline {
             write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
 
         *self.manifest_etag.lock().await = Some(new_etag);
-        *self.committed_manifest_anchor.lock().await = anchor;
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
@@ -9170,6 +9164,7 @@ impl PushPipeline {
             (manifest, _) = self
                 .apply_decisions_with_sha_map(&decisions, false, sha_map)
                 .await?;
+            self.publish_candidate_metadb(&manifest).await?;
         }
         if !had_conflicts
             && self
@@ -14083,9 +14078,9 @@ impl PushPipeline {
     ///
     /// The bucket-global chunk index is single-writer fenced. Holding its
     /// writer while a large push classifies and uploads would fence unrelated
-    /// repositories, so mutation starts only after this push commits its
-    /// manifest and remains repairable if the writer cannot be opened.
-    async fn promote_metadb_to_post_commit_writer(&self) -> Result<()> {
+    /// repositories, so mutation starts only after the immutable candidate
+    /// objects and generation anchor are complete.
+    async fn promote_metadb_to_candidate_writer(&self) -> Result<()> {
         let reader = { self.metadb.lock().await.take() };
         if let Some(reader) = reader {
             reader.close().await?;
@@ -14095,7 +14090,7 @@ impl PushPipeline {
             .as_ref()
             .ok_or_else(|| CrabError::Configuration {
                 key: "push store".to_owned(),
-                origin: "post-commit metadata writer requires canonical origin".to_owned(),
+                origin: "candidate metadata writer requires canonical origin".to_owned(),
             })?;
         let writer = build_push_metadb_guard_with_object_store(
             store,
@@ -14192,7 +14187,7 @@ impl PushPipeline {
         }
         debug!(
             stale_chunks = chunk_hashes.len(),
-            "queued stale chunk candidates for post-CAS tombstone"
+            "queued stale chunk candidates for candidate tombstone"
         );
     }
 
@@ -14206,7 +14201,7 @@ impl PushPipeline {
             .extend(entries.iter().copied());
         debug!(
             stale_receipts = entries.len(),
-            "queued stale committed chunk receipts for post-CAS tombstone"
+            "queued stale committed chunk receipts for candidate tombstone"
         );
     }
 
@@ -14749,11 +14744,12 @@ impl PushPipeline {
                                 ),
                             });
                         }
-                        let recipes = crab_xet::shard_parse::extract_file_recipes(&body)?;
+                        let recipes = crab_xet::shard_parse::extract_file_recipes_for_hashes(
+                            &body, &missing,
+                        )?;
                         Ok::<_, CrabError>(
                             recipes
                                 .into_iter()
-                                .filter(|recipe| missing.contains(&recipe.file_hash))
                                 .map(|recipe| (recipe.file_hash, shard_hash))
                                 .collect::<Vec<_>>(),
                         )
@@ -14842,8 +14838,14 @@ impl PushPipeline {
                             if actual != shard_hash {
                                 RemoteFileIndexProof::HashMismatch { actual }
                             } else {
+                                let requested = files
+                                    .iter()
+                                    .map(|(file_hash, _)| *file_hash)
+                                    .collect::<HashSet<_>>();
                                 let extracted =
-                                    match crab_xet::shard_parse::extract_file_recipes(&body) {
+                                    match crab_xet::shard_parse::extract_file_recipes_for_hashes(
+                                        &body, &requested,
+                                    ) {
                                         Ok(recipes) => recipes
                                             .into_iter()
                                             .map(|recipe| (recipe.file_hash, recipe.chunks))
@@ -15301,20 +15303,116 @@ impl PushPipeline {
         })
     }
 
-    /// Step 9b implementation: commit the push's canonical file-index
-    /// metadata and chunk-index acceleration data via a single
-    /// `Transaction`, then warm local cache tiers.
+    /// Publish generation-pinned indexes before exposing a candidate manifest.
+    async fn publish_candidate_metadb(&self, manifest: &Manifest) -> Result<()> {
+        if self.config.protected_push.is_some() {
+            return Ok(());
+        }
+        let file_index_plan = self.pending_file_index_plan.lock().await.clone();
+        let shard_hashes = self.uploaded_shard_hashes.lock().await.clone();
+        let needs_write = !file_index_plan.is_empty()
+            || !self
+                .pending_committed_receipt_tombstones
+                .lock()
+                .await
+                .is_empty();
+        if !needs_write {
+            return Ok(());
+        }
+        let anchor = self
+            .candidate_metadata_anchor(manifest, &shard_hashes)
+            .await?;
+        self.promote_metadb_to_candidate_writer().await?;
+        self.commit_metadb_and_warm_cache(&file_index_plan, &shard_hashes, anchor)
+            .await
+    }
+
+    async fn candidate_metadata_anchor(
+        &self,
+        manifest: &Manifest,
+        shard_hashes: &[MerkleHash],
+    ) -> Result<CommittedManifestAnchor> {
+        if self.config.active_active_replication.is_some() {
+            return committed_manifest_anchor(manifest)?.ok_or_else(|| {
+                CrabError::Internal(
+                    "active-active candidate manifest did not expose an index anchor".to_owned(),
+                )
+            });
+        }
+        let store = self.store.as_ref().ok_or_else(|| {
+            CrabError::Internal("candidate metadata requires an object store".to_owned())
+        })?;
+        let snapshot =
+            crate::metadata::manifest::read_repository_snapshot(store, &self.router).await?;
+        let initial_manifest = snapshot.manifest.generation == 0
+            && snapshot.manifest.refs.is_empty()
+            && snapshot.manifest.shard_index_hash.is_empty()
+            && snapshot.manifest.pack_index_hash.is_empty()
+            && snapshot.journal.transactions.is_empty()
+            && manifest.generation == 1;
+        if initial_manifest {
+            return committed_manifest_anchor(manifest)?.ok_or_else(|| {
+                CrabError::Internal(
+                    "initial candidate manifest did not expose an index anchor".to_owned(),
+                )
+            });
+        }
+
+        // Ordinary refs become visible through the journal. Pin rows to the
+        // deterministic next-compaction inventory, including prior active
+        // transactions, rather than to the uncommitted append-only manifest.
+        let generation = snapshot
+            .manifest
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| CrabError::Internal("manifest generation overflow".to_owned()))?;
+        let mut shards = snapshot.journal.shards.into_iter().collect::<BTreeSet<_>>();
+        shards.extend(shard_hashes.iter().map(MerkleHash::hex));
+        let shards = shards.into_iter().collect::<Vec<_>>();
+        let mut packs = snapshot
+            .journal
+            .packs
+            .into_iter()
+            .map(|pack| (pack.pack_id.clone(), pack))
+            .collect::<BTreeMap<_, _>>();
+        packs.extend(
+            self.uploaded_packs
+                .lock()
+                .await
+                .iter()
+                .map(|uploaded| (uploaded.entry.pack_id.clone(), uploaded.entry.clone())),
+        );
+        let packs = packs.into_values().collect::<Vec<_>>();
+        let (shard_index_hash, _, _) =
+            crab_metadata::manifests::compact_shard_index(generation, &shards)?;
+        let (pack_index_hash, _, _) =
+            crab_metadata::manifests::compact_pack_index(generation, &packs)?;
+        Ok(CommittedManifestAnchor {
+            generation,
+            shard_index_hash: MerkleHash::from_hex(&shard_index_hash).map_err(|error| {
+                CrabError::Internal(format!(
+                    "projected candidate shard-index hash invalid: {error}"
+                ))
+            })?,
+            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).map_err(|error| {
+                CrabError::Internal(format!(
+                    "projected candidate pack-index hash invalid: {error}"
+                ))
+            })?,
+        })
+    }
+
+    /// Commit the push's canonical file-index metadata and chunk-index
+    /// acceleration data via bounded transactions, then warm local caches.
     ///
     /// When no [`MetaDbGuard`] is installed (test and offline paths),
     /// this is a no-op — the shard is already durable on S3, no
     /// metadata to commit, no cache to warm.
     ///
-    /// The remote commit is post-CAS acceleration. A failure cannot undo
-    /// committed refs and is repaired from the manifest shard index.
-    ///
     /// # Ordering
     ///
-    /// Invoked only after the manifest CAS commits the uploaded shards.
+    /// Invoked only after immutable shards and the complete candidate manifest
+    /// exist, and before any ref or manifest visibility boundary advances.
     async fn commit_metadb_and_warm_cache(
         &self,
         file_index_plan: &[(MerkleHash, usize)],
@@ -15330,10 +15428,10 @@ impl PushPipeline {
         let Some(guard) = taken_guard else {
             if self.store.is_some() && self.config.protected_push.is_none() {
                 return Err(CrabError::Internal(
-                    "step 9b: metadata commit requires an installed MetaDb guard".to_owned(),
+                    "candidate metadata commit requires an installed MetaDb guard".to_owned(),
                 ));
             }
-            debug!("step 9b: no MetaDb guard installed, skipping metadata commit");
+            debug!("no MetaDb guard installed, skipping candidate metadata commit");
             return Ok(());
         };
 
@@ -15352,7 +15450,7 @@ impl PushPipeline {
         result
     }
 
-    async fn commit_post_commit_metadata_batch(
+    async fn commit_candidate_metadata_batch(
         guard: &crate::metadata::MetaDbGuard,
         txn: crate::metadata::metadb::Transaction,
         aggregate: &mut crate::metadata::metadb::PushWriteReceipt,
@@ -15361,7 +15459,7 @@ impl PushPipeline {
         if txn.is_empty() {
             return Ok(());
         }
-        // These indexes are post-commit acceleration. Buffering several
+        // These indexes are rebuildable acceleration. Buffering several
         // batches avoids one object-store WAL PUT per 2,048 rows; the
         // explicit memtable boundaries below make the group durable.
         let receipt = Box::pin(guard.commit_buffered(txn)).await?;
@@ -15370,13 +15468,13 @@ impl PushPipeline {
         aggregate.bytes_written += receipt.bytes_written;
         aggregate.elapsed += receipt.elapsed;
         *batch_count += 1;
-        if (*batch_count).is_multiple_of(POST_COMMIT_METADATA_FLUSH_BATCHES) {
+        if (*batch_count).is_multiple_of(CANDIDATE_METADATA_FLUSH_BATCHES) {
             guard.flush_memtables().await?;
         }
         Ok(())
     }
 
-    /// The real step 9b body, with the `MetaDbGuard` held by
+    /// The candidate metadata body, with the `MetaDbGuard` held by
     /// reference after being temporarily taken out of the
     /// pipeline's sync mutex.
     async fn commit_metadb_and_warm_cache_with_guard(
@@ -15422,8 +15520,7 @@ impl PushPipeline {
             .map(|receipt| receipt.gc_registry_generation)
             .ok_or_else(|| {
                 CrabError::Internal(
-                    "step 9b: committed chunk receipts require the successful push receipt"
-                        .to_owned(),
+                    "candidate metadata requires the complete push dependency receipt".to_owned(),
                 )
             })?;
         let origin_receipts = self.origin_receipts.lock().await.clone();
@@ -15469,7 +15566,7 @@ impl PushPipeline {
             })?;
             origin_receipts.get(&placement.xorb_hash).ok_or_else(|| {
                 CrabError::Internal(format!(
-                    "step 9b: xorb {} lost its canonical-origin receipt",
+                    "candidate metadata xorb {} lost its canonical-origin receipt",
                     placement.xorb_hash.hex()
                 ))
             })?;
@@ -15484,15 +15581,15 @@ impl PushPipeline {
             .copied()
             .collect::<Vec<_>>();
 
-        // These indexes are post-CAS, rebuildable acceleration data. Keep each
+        // These indexes are pre-visibility, rebuildable acceleration data. Keep each
         // SlateDB WriteBatch bounded so metadata memory stays independent of
         // total push size. Partial batch success remains safe and repairable.
         let mut aggregate = crate::metadata::metadb::PushWriteReceipt::default();
         let mut batch_count = 0usize;
-        for batch in receipt_tombstones.chunks(POST_COMMIT_METADATA_BATCH_SIZE) {
+        for batch in receipt_tombstones.chunks(CANDIDATE_METADATA_BATCH_SIZE) {
             let mut txn = guard.new_transaction()?;
             chunk_store.delete_committed_receipts(&mut txn, batch);
-            Box::pin(Self::commit_post_commit_metadata_batch(
+            Box::pin(Self::commit_candidate_metadata_batch(
                 guard,
                 txn,
                 &mut aggregate,
@@ -15500,10 +15597,10 @@ impl PushPipeline {
             ))
             .await?;
         }
-        for batch in file_entries.chunks(POST_COMMIT_METADATA_BATCH_SIZE) {
+        for batch in file_entries.chunks(CANDIDATE_METADATA_BATCH_SIZE) {
             let mut txn = guard.new_transaction()?;
             file_store.save_committed_batch(&mut txn, batch);
-            Box::pin(Self::commit_post_commit_metadata_batch(
+            Box::pin(Self::commit_candidate_metadata_batch(
                 guard,
                 txn,
                 &mut aggregate,
@@ -15515,7 +15612,7 @@ impl PushPipeline {
         loop {
             let source_batch = source_iter
                 .by_ref()
-                .take(POST_COMMIT_METADATA_BATCH_SIZE)
+                .take(CANDIDATE_METADATA_BATCH_SIZE)
                 .collect::<Vec<_>>();
             if source_batch.is_empty() {
                 break;
@@ -15536,7 +15633,7 @@ impl PushPipeline {
                     .cloned()
                     .ok_or_else(|| {
                         CrabError::Internal(format!(
-                            "step 9b: xorb {} lost its canonical-origin receipt",
+                            "candidate metadata xorb {} lost its canonical-origin receipt",
                             placement.xorb_hash.hex()
                         ))
                     })?;
@@ -15559,7 +15656,7 @@ impl PushPipeline {
             }
             let mut txn = guard.new_transaction()?;
             chunk_store.save_committed_receipts(&mut txn, &entries)?;
-            Box::pin(Self::commit_post_commit_metadata_batch(
+            Box::pin(Self::commit_candidate_metadata_batch(
                 guard,
                 txn,
                 &mut aggregate,
@@ -15582,7 +15679,7 @@ impl PushPipeline {
             batches = batch_count,
             bytes = aggregate.bytes_written,
             elapsed_ms = aggregate.elapsed.as_millis() as u64,
-            "step 9b: metadb commit complete"
+            "candidate metadb commit complete"
         );
 
         // Best-effort local-cache warm for each shard produced by
@@ -15640,7 +15737,7 @@ impl PushPipeline {
                     warn!(
                         file_hash = %file_hash.hex(),
                         error = %e,
-                        "step 9b: failed to resolve chunk list for warm grouping; skipping file"
+                        "candidate metadata failed to resolve chunk list for warm grouping; skipping file"
                     );
                     continue;
                 }
@@ -15650,7 +15747,7 @@ impl PushPipeline {
                     file_hash = %file_hash.hex(),
                     shard_idx,
                     shards = per_shard_chunks.len(),
-                    "step 9b: file_index_plan points past uploaded shard hashes, skipping local warm"
+                    "candidate metadata file-index plan points past uploaded shard hashes, skipping local warm"
                 );
                 continue;
             };
@@ -15663,7 +15760,7 @@ impl PushPipeline {
                 warn!(
                     file_hash = %file_hash.hex(),
                     error = %error,
-                    "step 9b: failed to page recipe for warm grouping; skipping file"
+                    "candidate metadata failed to page recipe for warm grouping; skipping file"
                 );
             }
         }
@@ -15685,7 +15782,7 @@ impl PushPipeline {
                     shard_hash = %shard_hash.hex(),
                     entries = entries.len(),
                     error = %e,
-                    "step 9b: local chunk-index warm failed (non-fatal)"
+                    "candidate metadata local chunk-index warm failed (non-fatal)"
                 );
             }
         }
@@ -16322,7 +16419,7 @@ impl PushPipeline {
         let result = Box::pin(self.execute_inner()).await;
 
         // Close the MetaDb guard before returning on either path.
-        // On the happy path, step 9b already committed every SlateDB
+        // On the happy path, candidate publication already committed every SlateDB
         // write we cared about; the close here drains WAL segments
         // and releases the handle. On the error path, `on_failure`
         // still runs below (releasing the push lock, etc.) — the
@@ -16754,6 +16851,14 @@ impl PushPipeline {
                 .apply_decisions_with_sha_map(&decisions, self.config.atomic, &sha_map)
                 .await;
             let (manifest, bulk) = self.at_stage(PushFailureStage::RefCommit, apply_result)?;
+            let metadata_phase = PhaseTimer::start("push", "candidate_metadb");
+            let metadata_result = self.publish_candidate_metadb(&manifest).await;
+            self.at_stage(PushFailureStage::RefCommit, metadata_result)?;
+            self.emit_perf_phase(metadata_phase.finish(
+                0,
+                0,
+                self.pending_file_index_plan.lock().await.len() as u64,
+            ));
             let manifest_bytes = self
                 .at_stage(
                     PushFailureStage::RefCommit,
@@ -16799,58 +16904,6 @@ impl PushPipeline {
 
         if let Some(committed) = admission_commit.take() {
             let _ = committed.send(());
-        }
-
-        if decisions.is_some() && self.config.protected_push.is_none() {
-            let file_index_plan = self.pending_file_index_plan.lock().await.clone();
-            let shard_hashes = self.uploaded_shard_hashes.lock().await.clone();
-            let anchor = *self.committed_manifest_anchor.lock().await;
-            let needs_metadb_write = !file_index_plan.is_empty()
-                || !self
-                    .pending_committed_receipt_tombstones
-                    .lock()
-                    .await
-                    .is_empty();
-            let metadb_phase = PhaseTimer::start("push", "post_cas_metadb");
-            let indexing = if !needs_metadb_write {
-                Ok(())
-            } else {
-                match self.promote_metadb_to_post_commit_writer().await {
-                    Ok(()) => match anchor {
-                        Some(anchor) => {
-                            self.commit_metadb_and_warm_cache(
-                                &file_index_plan,
-                                &shard_hashes,
-                                anchor,
-                            )
-                            .await
-                        }
-                        None if file_index_plan.is_empty() => Ok(()),
-                        None => Err(CrabError::Internal(
-                            "committed manifest did not expose a shard-index anchor".to_owned(),
-                        )),
-                    },
-                    Err(error) => Err(error),
-                }
-            };
-            self.emit_perf_phase(metadb_phase.finish(0, 0, file_index_plan.len() as u64));
-            if let Err(error) = indexing {
-                warn!(
-                    error = %error,
-                    "post-CAS MetaDb indexing failed; refs are committed and repair will rebuild acceleration records"
-                );
-            }
-
-            // The active marker is the durable ref-update boundary. Locator
-            // rows and their generation receipt are derived acceleration state;
-            // publishing them here would reopen a repository-sized SlateDB
-            // catalog in every short-lived push process.
-            if anchor.is_some() {
-                info!(
-                    generation = anchor.map(|value| value.generation),
-                    "post-CAS Git locator publication deferred to generation owner"
-                );
-            }
         }
 
         // Step 13: post-success cleanup
@@ -18611,7 +18664,7 @@ pub(crate) fn build_push_metadb_guard_with_object_store(
     // The cache-aware wrapper keeps SlateDB's mutable discovery, boundary,
     // and CAS paths on origin while routing append-only versioned manifests
     // and tables through the cache service. That is safe for both readers
-    // and the short-lived post-CAS writer, and avoids re-fetching metadata
+    // and the short-lived candidate writer, and avoids re-fetching metadata
     // that the cache service already warmed during the previous push.
     let metadb_store = metadb_object_store.unwrap_or_else(|| Arc::clone(store.inner()));
     let metadb = match metrics.as_ref() {
@@ -21241,7 +21294,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn push_promotes_planning_reader_to_post_commit_writer() {
+    async fn push_promotes_planning_reader_to_candidate_writer() {
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let store = Store::new(inner);
@@ -21268,7 +21321,7 @@ mod tests {
         ));
 
         pipeline
-            .promote_metadb_to_post_commit_writer()
+            .promote_metadb_to_candidate_writer()
             .await
             .expect("promote reader");
         let guard = pipeline.metadb.lock().await.take().expect("writer guard");
@@ -31943,7 +31996,73 @@ mod tests {
         );
     }
 
-    // --- Step 9b: MetaDb commit ---
+    // --- Candidate MetaDb publication ---
+
+    #[tokio::test]
+    async fn candidate_metadata_anchor_includes_active_journal_shards() {
+        let (store, router) = test_store_router("candidate-anchor-journal");
+        crate::metadata::manifest::create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let prior_shard = MerkleHash::from([71_u64, 0, 0, 0]);
+        let new_shard = MerkleHash::from([72_u64, 0, 0, 0]);
+        let ref_name = "refs/heads/main";
+        let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            vec![prior_shard.hex()],
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        let mut candidate = Manifest::default_for_repo(ref_name);
+        candidate.generation = 1;
+        let anchor = pipeline
+            .candidate_metadata_anchor(&candidate, &[new_shard])
+            .await
+            .unwrap();
+        let mut shards = vec![prior_shard.hex(), new_shard.hex()];
+        shards.sort_unstable();
+        let (expected_shard_index, _, _) =
+            crate::metadata::manifest::compact_shard_index(1, &shards).unwrap();
+
+        assert_eq!(anchor.generation, 1);
+        assert_eq!(anchor.shard_index_hash.hex(), expected_shard_index);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn metadb_commit_requires_guard_when_store_is_present() {
@@ -32195,7 +32314,7 @@ mod tests {
             assert!(committed.placements.contains_key(&new_chunk));
             assert!(
                 !committed.placements.contains_key(&existing_chunk),
-                "step 9b must not duplicate a generation-pinned committed receipt"
+                "candidate publication must not duplicate a generation-pinned committed receipt"
             );
             assert_eq!(
                 chunk_store.get(&new_chunk).await.expect("new chunk"),
@@ -32215,7 +32334,7 @@ mod tests {
                     chunk_index: 9,
                     uncompressed_size: 200,
                 }),
-                "post-commit local shard warming must still cover the complete recipe"
+                "candidate local shard warming must still cover the complete recipe"
             );
         }
 
@@ -32335,7 +32454,7 @@ mod tests {
                     .await
                     .expect("existing chunk"),
                 None,
-                "step 9b should not rewrite every merged placement into chunk_index_db"
+                "candidate publication should not rewrite every merged placement into chunk_index_db"
             );
         }
 
