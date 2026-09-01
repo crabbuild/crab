@@ -1,10 +1,11 @@
 //! Build script for `crab`.
 //!
-//! Exposes three `env!`-accessible strings to the crate:
+//! Exposes four `env!`-accessible strings to the crate:
 //!
 //! - `CRAB_BUILD_VERSION`  — forwarded `CARGO_PKG_VERSION`.
 //! - `CRAB_BUILD_GIT_SHA`  — short git sha of the workspace, or `"unknown"`.
 //! - `CRAB_BUILD_TIMESTAMP` — human-readable UTC build time.
+//! - `CRAB_BUILD_TARGET` — the exact Rust target triple.
 //!
 //! Also generates `$OUT_DIR/pricing_embedded.rs` from the YAML pricing
 //! seed file at `pricing/data/<version>.yaml`. The build fails if the
@@ -88,6 +89,9 @@ fn main() {
 // ── Build metadata ──────────────────────────────────────────────────
 
 fn emit_build_metadata() {
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
+    println!("cargo:rustc-env=CRAB_BUILD_TARGET={target}");
+
     // Allow overriding the version via CRAB_BUILD_VERSION env var (e.g., from CI).
     // Falls back to CARGO_PKG_VERSION from Cargo.toml.
     let version = std::env::var("CRAB_BUILD_VERSION")

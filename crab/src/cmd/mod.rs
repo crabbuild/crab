@@ -77,7 +77,7 @@ pub mod tier;
 pub mod track;
 pub mod unadopt;
 pub mod undo;
-pub mod update;
+pub mod upgrade;
 pub mod version;
 pub mod why;
 pub mod workflow;

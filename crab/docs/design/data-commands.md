@@ -2,7 +2,7 @@
 
 `crab data` owns source provenance that must survive a migration from DVC.
 It is separate from the existing raw object-store `crab import` command and
-the CLI self-update `crab update` command.
+the CLI self-upgrade `crab upgrade` command.
 
 Every successful `data import` or `data import-url` writes a versioned,
 credential-free descriptor under `.crab/workflow/sources/<id>.json`. The

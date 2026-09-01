@@ -72,5 +72,5 @@ gh attestation verify crab-linux-x86_64.tar.gz --repo crabbuild/crab
 ```
 
 Confirm that the release is marked latest and immutable, the public installers
-resolve the new tag, and `crab update --check` reports the new version from an
-older installation.
+resolve the new tag, and `crab upgrade` installs the new version from an older
+installation.
