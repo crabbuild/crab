@@ -5,6 +5,16 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.0.1 - 2026-08-31
+
+### Push And Large Files
+
+- Published large-file indexes before refs so newly pushed file versions are
+  visible to readers only after their index data is available.
+- Bounded metadata shard replay and isolated reconstruction cancellation to
+  prevent large repositories or one failed file from exhausting a push or
+  hydrate operation.
+
 ## 1.0.0 - 2026-08-31
 
 ### Open Source Launch
