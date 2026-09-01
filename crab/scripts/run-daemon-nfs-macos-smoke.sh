@@ -4,7 +4,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRAB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$CRAB_DIR/.." && pwd)"
 RUN_ID="${CRAB_DAEMON_NFS_SMOKE_RUN_ID:-daemon-nfs-macos-$(date -u +%Y%m%d-%H%M%S)}"
 RUN_ROOT="${CRAB_DAEMON_NFS_SMOKE_ROOT:-/tmp/crab-daemon-nfs-macos-smoke}/$RUN_ID"
 HOME_DIR="$RUN_ROOT/home"
@@ -13,7 +12,7 @@ MOUNT_ROOT="$RUN_ROOT/mounts"
 SOURCE="$RUN_ROOT/source"
 REMOTE="$RUN_ROOT/remote.git"
 LOG_DIR="$RUN_ROOT/logs"
-CRAB_EXE="$REPO_ROOT/target/debug/crab"
+CRAB_EXE="${CRAB_DAEMON_NFS_SMOKE_CRAB_EXE:-}"
 DAEMON_PID=""
 HOST_HOME="${HOME:-}"
 HOST_CARGO_HOME="${CARGO_HOME:-${HOST_HOME:+$HOST_HOME/.cargo}}"
@@ -84,7 +83,17 @@ cleanup() {
 [ "$(uname -s)" = Darwin ] || die "this smoke test requires macOS"
 command -v cargo >/dev/null 2>&1 || die "cargo is required"
 command -v git >/dev/null 2>&1 || die "git is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v mount_nfs >/dev/null 2>&1 || die "mount_nfs is required"
+
+if [ -z "$CRAB_EXE" ]; then
+    TARGET_DIR="$(
+        cd "$CRAB_DIR"
+        cargo metadata --format-version=1 --no-deps \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+    )"
+    CRAB_EXE="$TARGET_DIR/debug/crab"
+fi
 
 mkdir -p "$HOME_DIR" "$DAEMON_ROOT" "$MOUNT_ROOT" "$SOURCE" "$LOG_DIR"
 RUN_ROOT="$(cd "$RUN_ROOT" && pwd -P)"
@@ -107,7 +116,13 @@ fi
 git config --global user.email daemon-nfs-smoke@crab.local
 git config --global user.name 'Crab Daemon NFS Smoke'
 
-cargo build -p crab --bin crab >"$LOG_DIR/cargo-build.log" 2>&1
+if [ "${CRAB_DAEMON_NFS_SMOKE_SKIP_BUILD:-0}" != 1 ]; then
+    (
+        cd "$CRAB_DIR"
+        cargo build -p crab --bin crab
+    ) >"$LOG_DIR/cargo-build.log" 2>&1
+fi
+[ -x "$CRAB_EXE" ] || die "crab binary is not executable: $CRAB_EXE"
 
 git -C "$SOURCE" init -b main >"$LOG_DIR/git-init.log" 2>&1
 git -C "$SOURCE" config user.email daemon-nfs-smoke@crab.local
