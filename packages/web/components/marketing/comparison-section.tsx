@@ -1,4 +1,4 @@
-import { Check, Minus, X } from "lucide-react"
+import { Check, X } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -11,13 +11,26 @@ import {
 } from "@/components/ui/table"
 import { ResponsiveTableWrapper } from "@/components/marketing/responsive-table-wrapper"
 import { Reveal } from "@/components/marketing/reveal"
+import { ComparisonTooltip } from "@/components/marketing/comparison-tooltip"
 import { cn } from "@/lib/utils"
 
 /* ------------------------------------------------------------------ */
 /*  Data                                                               */
 /* ------------------------------------------------------------------ */
 
-type CellValue = true | false | "partial" | "apache-2.0"
+interface LicenseValue {
+  kind: "license"
+  label: string
+  explanation?: string
+}
+
+interface ExplainedStatusValue {
+  kind: "status"
+  supported: boolean
+  explanation: string
+}
+
+type CellValue = boolean | LicenseValue | ExplainedStatusValue
 
 interface ComparisonRow {
   feature: string
@@ -37,12 +50,47 @@ const ROWS: ComparisonRow[] = [
     values: [true, false, true, false],
   },
   {
-    feature: "Standard Git CLI",
-    values: [true, true, false, "partial"],
+    feature: "Git clone/add/commit/push",
+    values: [
+      {
+        kind: "status",
+        supported: true,
+        explanation:
+          "Requires the Crab CLI, which installs Git's Crab remote helper and file-filter integration.",
+      },
+      {
+        kind: "status",
+        supported: true,
+        explanation:
+          "Requires the Git LFS extension and a compatible LFS server for large-file transfers.",
+      },
+      {
+        kind: "status",
+        supported: false,
+        explanation:
+          "Git versions DVC metadata, while large-file transfers use dvc pull and dvc push.",
+      },
+      {
+        kind: "status",
+        supported: true,
+        explanation:
+          "Requires Git LFS and Git Xet to download and upload large files through Git.",
+      },
+    ],
   },
   {
     feature: "FUSE virtual filesystem",
-    values: [true, false, false, false],
+    values: [
+      true,
+      false,
+      false,
+      {
+        kind: "status",
+        supported: true,
+        explanation:
+          "Requires hf-mount and OS-level FUSE support. Repository mounts are read-only; bucket mounts can be read-write.",
+      },
+    ],
   },
   {
     feature: "ML pipeline engine",
@@ -53,8 +101,18 @@ const ROWS: ComparisonRow[] = [
     values: [true, false, true, true],
   },
   {
-    feature: "Open source",
-    values: ["apache-2.0", true, true, "partial"],
+    feature: "License",
+    values: [
+      { kind: "license", label: "Apache-2.0" },
+      { kind: "license", label: "MIT" },
+      { kind: "license", label: "Apache-2.0" },
+      {
+        kind: "license",
+        label: "Proprietary Hub",
+        explanation:
+          "The hosted Hub service is proprietary. The huggingface_hub client library is licensed under Apache-2.0.",
+      },
+    ],
   },
 ]
 
@@ -63,40 +121,50 @@ const ROWS: ComparisonRow[] = [
 /* ------------------------------------------------------------------ */
 
 function CellIndicator({ value }: { value: CellValue }) {
-  if (value === true) {
-    return (
-      <Check
-        className="size-5 text-primary"
-        strokeWidth={2.5}
-        aria-label="Supported"
-      />
-    )
-  }
+  const supported =
+    typeof value === "object" && value.kind === "status"
+      ? value.supported
+      : value
 
-  if (value === "partial") {
+  if (supported === true) {
     return (
-      <span className="inline-flex items-center gap-1 text-amber-500 dark:text-amber-400">
-        <Minus className="size-5" strokeWidth={2.5} aria-hidden="true" />
-        <span className="text-xs font-medium">Partial</span>
+      <span className="grid w-full grid-cols-[1fr_1.25rem_1fr] items-center">
+        <Check
+          className="col-start-2 size-5 text-primary"
+          strokeWidth={2.5}
+          aria-label="Supported"
+        />
+        {typeof value === "object" && value.kind === "status" && (
+          <span className="col-start-3 ml-1 justify-self-start">
+            <ComparisonTooltip message={value.explanation} />
+          </span>
+        )}
       </span>
     )
   }
 
-  if (value === "apache-2.0") {
+  if (typeof value === "object" && value.kind === "license") {
     return (
-      <span className="inline-flex items-center gap-1 text-primary">
-        <Check className="size-5" strokeWidth={2.5} aria-hidden="true" />
-        <span className="text-xs font-medium">Apache-2.0</span>
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-foreground">
+        <span>{value.label}</span>
+        {value.explanation && <ComparisonTooltip message={value.explanation} />}
       </span>
     )
   }
 
   return (
-    <X
-      className="size-5 text-muted-foreground/50"
-      strokeWidth={2}
-      aria-label="Not supported"
-    />
+    <span className="grid w-full grid-cols-[1fr_1.25rem_1fr] items-center">
+      <X
+        className="col-start-2 size-5 text-muted-foreground/50"
+        strokeWidth={2}
+        aria-label="Not supported"
+      />
+      {typeof value === "object" && value.kind === "status" && (
+        <span className="col-start-3 ml-1 justify-self-start">
+          <ComparisonTooltip message={value.explanation} />
+        </span>
+      )}
+    </span>
   )
 }
 
@@ -121,8 +189,8 @@ export function ComparisonSection() {
               How Crab stacks up
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-lg text-muted-foreground">
-              See how Crab compares to other popular tools for managing large
-              files, datasets, and ML assets alongside your code.
+              See how Crab compares with popular tools and platforms for
+              managing large files, datasets, and ML assets alongside your code.
             </p>
           </div>
         </Reveal>
@@ -138,7 +206,7 @@ export function ComparisonSection() {
                     className={cn(
                       "sticky left-0 z-10 min-w-[180px] bg-muted/40 px-4 py-3 text-foreground",
                       /* Solid bg so content underneath doesn't bleed through */
-                      "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-border",
+                      "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-border"
                     )}
                   >
                     Feature
@@ -151,7 +219,7 @@ export function ComparisonSection() {
                         "min-w-[110px] px-4 py-3 text-center",
                         i === crabColIdx
                           ? "border-t-2 border-t-primary bg-primary-muted font-semibold text-foreground"
-                          : "bg-muted/40 text-foreground",
+                          : "bg-muted/40 text-foreground"
                       )}
                     >
                       {col}
@@ -169,7 +237,7 @@ export function ComparisonSection() {
                         "sticky left-0 z-10 bg-card px-4 py-3 font-medium text-foreground",
                         "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-px after:bg-border",
                         /* Alternate-row tint must match the row */
-                        "group-even:bg-muted/30",
+                        "group-even:bg-muted/30"
                       )}
                     >
                       {row.feature}
@@ -180,12 +248,10 @@ export function ComparisonSection() {
                         key={`${row.feature}-${COLUMNS[colIdx]}`}
                         className={cn(
                           "px-4 py-3 text-center",
-                          colIdx === crabColIdx && "bg-primary-muted/60",
+                          colIdx === crabColIdx && "bg-primary-muted/60"
                         )}
                       >
-                        <span className="inline-flex items-center justify-center">
-                          <CellIndicator value={value} />
-                        </span>
+                        <CellIndicator value={value} />
                       </TableCell>
                     ))}
                   </TableRow>
