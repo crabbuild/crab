@@ -14,7 +14,7 @@ export type HeroAnimatedBackground = "grid" | "gradient-mesh" | "particles" | "n
 export type HeroHeadlineEffect = "gradient" | "typing" | "shimmer" | "none"
 
 export interface HeroSectionProps {
-  badge?: { text: string; dot?: boolean }
+  badge?: { text: string; href?: string; dot?: boolean }
   headline: React.ReactNode
   subheadline: React.ReactNode
   primaryCTA?: { label: string; href: string; icon?: LucideIcon }
@@ -158,7 +158,10 @@ export function HeroSection({
         {badge && (
           <Reveal>
             <div className="mb-6 inline-flex">
-              <Badge variant="secondary">
+              <Badge
+                variant="secondary"
+                render={badge.href ? <Link href={badge.href} /> : undefined}
+              >
                 {badge.dot && (
                   <span
                     aria-hidden="true"
