@@ -13,8 +13,10 @@ reachability, and an auditable recovery path.
 
 1. Inventory live manifests, refs, object age, storage class, restore state,
    retention, and pending transitions.
-2. `tier plan` produces candidates and cost/latency consequences. Review the
-   plan before `tier apply` or rollback.
+2. `tier plan` renders provider lifecycle rules. `tier plan --apply` performs
+   the provider mutation, `--dry-run` keeps it read-only, `--merge` preserves
+   non-Crab rules, and `tier rollback <backup>` restores a saved lifecycle
+   configuration.
 3. Archived objects require an explicit restore request, selected tier, and
    restore duration. Hydration must wait for readable state or report the
    provider failure; never substitute fabricated bytes.
@@ -27,16 +29,25 @@ reachability, and an auditable recovery path.
   evidence freshness.
 - `replica doctor` diagnoses credentials, endpoint, control-plane, data-plane,
   permissions, and configuration problems without mutating state.
+- `replica add/export/cost/runbook` plans provider resources and operations;
+  provider changes require the command's explicit apply boundary.
 - Backfill is separate from read enablement. Inventory historical objects,
   copy missing data, verify checksums, then advance the durable watermark.
+- Use `wait`, deep `verify`, and `backfill status` before `enable`. Disable or
+  remove a replica explicitly; `remove --apply` only owns documented
+  Crab-created reversible resources.
 - Enable reads only after manifest-referenced objects and current indexes are
   verified in the target region.
-- Failover is a fenced state transition: plan, stop or fence the old writer,
-  promote the selected region, verify leases and refs, then resume traffic.
+- Active-active mode requires declared writers and a managed coordinator.
+  `writers` and `coordinator` manage those identities; the `failover` status,
+  plan, fence, run, and resume operations form one fenced state machine.
+- Read-replica `promote` and guarded `set-primary` differ from active-active
+  failover. Preview them and require their explicit force/apply contract.
 - Repair must converge regional state from coordinator truth, not from a stale
   replica snapshot.
-- Cost and runbook commands are evidence/reporting paths; they do not imply
-  that a replica is healthy or production-ready.
+- `diagnostics` collects a redacted bundle. `certify` runs stricter readiness
+  gates, and `evidence verify` validates retained certification artifacts.
+  Status, cost, doctor, or a generated runbook alone is not production proof.
 
 ## Invariants
 
