@@ -21,8 +21,8 @@ state, inventory-only evidence, unavailable bytes, and irrecoverable loss.
 4. Gather recovery inventory from release manifests, pointer roots, workflow or
    import journals, shard/xorb/pack listings, file indexes, replicas, and fsck
    reports. Mark each source and confidence level.
-5. Run `recover plan`, inspect each candidate identity and action, and retain
-   the plan before applying anything.
+5. Run `recover plan --manifest ...`, inspect each candidate identity and
+   action with `recover show`, and retain the plan before applying anything.
 6. Apply only explicitly authorized actions: restore verified files, rebuild an
    index, restore objects, or repair selected refs through the canonical path.
 7. Re-run doctor and integrity checks, inspect the audit event, and prove a
@@ -34,10 +34,16 @@ state, inventory-only evidence, unavailable bytes, and irrecoverable loss.
   diagnostics; they should not mutate repository data.
 - Support bundles must be redacted. Active cache-service probes are opt-in
   write/read/cleanup tests and require a clearly bounded target.
-- `update` changes the installed binary; it is not a recovery workaround.
-- History recovery can discover immutable roots without making their bytes
-  readable. Keep discoverability, metadata integrity, byte availability, and
-  remote repair as separate statuses.
+- `upgrade` verifies the official release manifest, archive size, SHA-256, and
+  staged binary version before replacing the executable; it is not a recovery
+  workaround. Package-manager installations should use their package manager.
+- `recover history list/verify/restore/prune` operates on immutable repository
+  history roots. Listing a root does not prove its bytes are readable; keep
+  discoverability, metadata integrity, byte availability, and remote repair as
+  separate statuses. `prune` and `restore` require reviewed mutation intent.
+- `recover apply` materializes verified files by default. Remote shard, xorb,
+  pack, file-index, and ref repair stay behind their explicit flags and
+  refspecs.
 
 ## Recovery invariants
 

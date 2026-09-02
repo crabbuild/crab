@@ -11,14 +11,17 @@ scope explicit.
 
 ## Command scope
 
-`init`, `setup`, `clone`, `mirror`, `worktree`, `config`, `track`, `untrack`,
-`install`, `uninstall`, and `completions`.
+`configure`, `init`, `setup`, `clone`, `mirror`, `worktree`, `config`, `track`,
+`untrack`, `install`, `uninstall`, and `completions`.
 
 ## Onboarding sequence
 
 1. Inspect Git remotes, branch and worktree state, Crab configuration,
    `.gitattributes`, existing tracking patterns, and any uncommitted changes.
 2. Choose one entry path:
+   - `crab configure` is the guided default: it selects the provider, discovers
+     credentials, initializes the Git/remote state, installs integration, and
+     proposes or applies tracking. Use `--dry-run` for a non-mutating plan.
    - `crab init` creates or adopts a Crab remote configuration.
    - `crab setup` installs local large-file integration after initialization.
    - `crab clone` creates a new checkout; choose lazy, eager, include, exclude,
@@ -30,7 +33,9 @@ scope explicit.
    config scope. Do not silently switch between local, global, and system
    installation.
 5. For worktrees, inspect shared Git metadata and Crab worktree state before
-   creating, switching, hydrating, pruning, or removing a worktree.
+   creating, switching, hydrating, pruning, or removing a worktree. Give each
+   concurrent agent its own linked worktree and branch unless they must
+   serialize on one ref.
 6. Prove one real path: add/commit/push for an existing checkout, or
    clone/hydrate for a new one. Check both Git state and reconstructed bytes.
 
@@ -38,16 +43,24 @@ scope explicit.
 
 - Use `init` for remote and project configuration; do not use `setup` as a
   substitute for remote initialization.
+- Use `configure` when both are wanted. With no remote it may reuse discovered
+  `crab.toml`; in non-interactive automation supply the remote explicitly.
 - Use `clone` when Git history and a new working tree are required. Use
   `download` when selected files are needed without a checkout.
 - Use mirror mode only when a named Git remote should be synchronized into a
   Crab remote; make the direction and ref policy visible.
 - Use `install` or `uninstall` at the requested Git config scope. Global and
   system changes affect other repositories and require explicit authorization.
+- Top-level `install` owns Git filter/diff drivers, repository hooks,
+  completions, and optional aliases. Agent skills are installed only through
+  `crab skills install`.
 - Use `config get` to inspect value origin before changing a key. Preserve
   arrays, unknown sections, comments where supported, and unrelated values.
-- Use `worktree` operations with the same cleanup and lock discipline as the
-  main checkout; never assume a second worktree has independent metadata.
+- Linked worktrees share Git common state and Crab staging, but each has its
+  own hydrated-pointer database and hydration policy under the shared `.crab`
+  tree. A sibling's state is never authoritative. Hydration may use a verified
+  content-addressed filesystem CoW clone, then falls back to normal remote
+  reconstruction.
 
 ## Safety
 

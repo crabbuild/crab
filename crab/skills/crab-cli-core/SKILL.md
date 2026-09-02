@@ -10,15 +10,17 @@ stable machine output, and evidence for every externally visible claim.
 
 ## Route by command family
 
-- Repository setup: `init`, `setup`, `clone`, `mirror`, `worktree`, `config`,
-  `track`, `untrack`, `install`, `uninstall`, and `completions`.
+- Repository setup: `configure`, `init`, `setup`, `clone`, `mirror`,
+  `worktree`, `config`, `track`, `untrack`, `install`, `uninstall`, and
+  `completions`.
 - Native large files: `add`, `reset`, `status`, `why`, `hydrate`, `dehydrate`,
   `diff`, `ls-files`, `fetch`, `prune`, `du`, `stat`, `cache`, `staging`,
   `adopt`, `unadopt`, `undo`, `migrate`, and selective `download`.
 - Git synchronization: `push`, `pull`, `ship`, `import`, `export`, locks, and
   the `crab://` remote helper.
 - Workflows: `run`, `repro`, `stage`, `freeze`, `unfreeze`, `exp`, `queue`,
-  `workflow`, `params`, `metrics`, `plots`, and workflow cache operations.
+  `workflow`, `data`, `artifacts`, `params`, `metrics`, `plots`, and workflow
+  cache operations.
 - LFS compatibility: `lfs`, the transfer agent, and `optimize lfs`.
 - Storage operations: `gc`, `fsck`, `compact`, `repack`, `optimize`, `metadb`,
   cache/staging maintenance, and storage-focused `du` or `stat`.
@@ -27,7 +29,7 @@ stable machine output, and evidence for every externally visible claim.
 - Mounts: `mount`, `unmount`, `daemon`, and virtual filesystem coordination.
 - Managed operations: authentication, organizations, repositories, members,
   service accounts, audit, and release manifests.
-- Recovery: `doctor`, `env`, `errors`, `logs`, `version`, `update`, and
+- Recovery: `doctor`, `env`, `errors`, `logs`, `version`, `upgrade`, and
   `recover`.
 - Skill management: `skills list` and `skills install`.
 
@@ -39,9 +41,10 @@ moving policy to the correct command.
 
 1. Parse command arguments before opening repositories, credentials, or remote
    clients.
-2. Resolve output mode once. `--json` is one envelope on stdout; human text
-   belongs on stdout or stderr according to the command contract, and logs do
-   not contaminate machine output.
+2. Resolve output mode once. `--json` is one terminal envelope; `--jsonl`,
+   where supported, is an event stream ending in a result. Machine output owns
+   stdout, progress and logs use stderr, and Git-invoked protocols keep stdout
+   reserved for their wire contract.
 3. Preserve typed errors and their source chain. Use stable error codes when a
    failure is user-visible; never stringify an error and discard its cause.
 4. Keep cancellation safe. Release locks, close metadata databases, flush
@@ -53,6 +56,20 @@ moving policy to the correct command.
 6. Treat config keys, pointer formats, storage layouts, schema names, and
    command flags as cross-component contracts. Search all consumers before
    changing any of them.
+
+## Agent execution contract
+
+- Discover the installed surface with `crab version`, command-specific
+  `--help`, and `crab skills list`; do not infer flags from a different release.
+- Prefer read-only commands and `--json` for decisions. Use `--jsonl` only
+  when progress events are useful, and require its terminal `result` event.
+- Treat stable error code, category, `retryable`, and exit code as the retry
+  contract. Never retry from matching a human log phrase.
+- Before mutation, name the repository, worktree, ref, remote, and intended
+  side effect. Re-read state after mutation instead of trusting optimistic
+  progress.
+- Give concurrent agents separate worktrees and refs by default. Same-ref
+  publication still follows the Git-sync skill's lock and rebase contract.
 
 ## Implementation loop
 
@@ -69,6 +86,10 @@ moving policy to the correct command.
    filesystem claim, perform an end-to-end smoke with a disposable fixture.
 
 ## Skill installation contract
+
+`crab install` configures Crab's Git filter/diff drivers, hooks, completions,
+and optional aliases. It does not install agent skills. Use the `skills`
+namespace for the embedded Agent Skills catalog.
 
 List the embedded catalog with:
 
@@ -96,8 +117,8 @@ isolated or project-scoped installs. Existing destination directories require
 Use a volume-backed, checkout-specific Cargo target directory:
 
 ```bash
-CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/<checkout> cargo check --locked
-CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/<checkout> cargo test --locked
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> cargo check --locked
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> cargo test --locked
 ```
 
 Run the command’s real side effect in a disposable repository or local S3

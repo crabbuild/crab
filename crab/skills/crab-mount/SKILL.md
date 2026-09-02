@@ -24,6 +24,11 @@ daemon ownership explicit.
 - Foreground: keep the process attached for supervision. Background mode must
   persist enough state for `unmount`, daemon status, and cleanup.
 
+`crab mount` is the interactive mountpoint-oriented workflow. `crab daemon`
+is a separate persistent named-repository service with a registry, shared
+cache, reconciliation loop, and explicit repository control subcommands. Do
+not mix their state or assume one command manages the other mode.
+
 ## Lifecycle
 
 1. Validate source URL/path, revision, backend, mountpoint, permissions, and
@@ -36,12 +41,28 @@ daemon ownership explicit.
 5. On every failure, release locks, stop workers, close databases, remove
    temporary state, and leave the mountpoint in a known state.
 
+## Overlay publication
+
+- Review `mount status --live-only --verbose` and `mount diff`; ordinary
+  status may fall back to persisted metadata and is not live-health proof.
+- Pause writers before `mount export`, `commit`, or `reset`. Independent paths
+  may mutate concurrently, but intersecting paths serialize and publication
+  takes an exclusive overlay snapshot.
+- `mount commit` checks that the base ref did not move, creates a Git commit,
+  refreshes the snapshot, then clears the overlay. With `--push`, a failed push
+  retains both overlay and transaction identity for a matching retry.
+- `mount reset --overlay --yes`, daemon `remount --clean-overlay`, and
+  `mount clean --all` are explicit destructive boundaries.
+
 ## Backend discipline
 
 Keep FUSE and NFS behavior behind the same source and overlay contracts while
 respecting platform-specific error and permission semantics. Do not make a
 backend look healthy by swallowing mount, refresh, or hydration errors. Never
 run an unsafe nested mount without an explicit allow flag.
+
+`--backend=auto` prefers a ready NFS backend and otherwise uses FUSE when
+available. NFS is a local loopback export, not a shared network filesystem.
 
 ## Verification
 

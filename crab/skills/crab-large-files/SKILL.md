@@ -34,6 +34,13 @@ full file -> verified pointer -> dehydrate -> disk bytes released
 6. Use `fetch` or cache warming when bytes should be available locally without
    replacing pointers. Use selective `download` for files outside a checkout.
 
+Do not confuse native file tracking with source provenance or artifact
+versioning. `crab data import/update` materializes external sources and records
+credential-free descriptors; `crab artifacts version create/get/promote`
+manages immutable workflow outputs and mutable stage labels. A file may later
+be Crab-tracked, but those commands do not replace `crab add` or pointer
+publication.
+
 ## Command map
 
 - `add`, `reset`, `adopt`, `unadopt`, and `undo` change working-tree or index
@@ -45,6 +52,9 @@ full file -> verified pointer -> dehydrate -> disk bytes released
   add-time staging area. `cache` commands operate on reusable local objects.
 - `stat push-plan --verify` checks prepared xorb metadata; it does not replace
   authoritative staged bytes.
+- `data list/status` is read-only source/worktree evidence. Data imports reject
+  existing or unsafe targets, and updates install verified content plus its
+  descriptor transactionally; `--dry-run` must leave both unchanged.
 - `migrate` rewrites history or converts representations. Require a dry run,
   list affected refs, and preserve a recovery point before mutation.
 - `du` distinguishes local staging/cache usage from remote object usage.
@@ -59,6 +69,8 @@ full file -> verified pointer -> dehydrate -> disk bytes released
 - Dehydration never discards uncommitted bytes or silently overwrites a file.
 - GC and cache eviction never remove data still referenced by a live pointer or
   protected by the configured grace period.
+- Native pointers and Git LFS pointers remain different serialized contracts;
+  use the LFS skill for LFS filters, transfers, and history rewrites.
 
 ## Verification
 

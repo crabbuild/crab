@@ -1,6 +1,6 @@
 ---
 name: crab-workflow
-description: Build, run, inspect, reproduce, and maintain Crab content-addressed workflows and experiments. Use for workflow files, stages, run/repro, caches, lockfiles, journals, DAGs, parameters, metrics, plots, experiments, queues, and cache push.
+description: Build, run, inspect, reproduce, and maintain Crab content-addressed workflows, experiments, external data sources, and immutable artifacts. Use for workflow files, stages, run/repro, caches, lockfiles, journals, DAGs, data, artifacts, parameters, metrics, plots, experiments, queues, and cache push.
 ---
 
 # Crab workflow
@@ -29,13 +29,22 @@ match the requested stage.
 - `run` is the canonical executor; `repro` is its compatible spelling.
 - `stage add/list` edits or inspects declarations.
 - `freeze/unfreeze` controls eligibility, not stage definition.
-- `status --workflow`, `workflow status`, `workflow dag`, and `workflow
-  journal` explain graph state. Use dependency expansion and why-style output
+- `status --workflow`, `workflow status`, `workflow dag`, and workflow journal
+  commands explain graph state. Use dependency expansion and why-style output
   rather than guessing from timestamps.
 - `workflow lockfile resolve/split` manages lockfile structure and merge
   conflicts.
 - `exp` creates and inspects isolated experiment runs; `queue` manages batch
-  workers and cleanup.
+  workers and cleanup. Each run uses a temporary worktree; inspect `show` or
+  `diff` before `apply` or `promote`; save, rename, transfer, removal, cleanup,
+  and GC are separate metadata lifecycles.
+- `data list/status/import/import-url/import-db/update` manages materialized
+  external inputs plus credential-free source descriptors. Imports require a
+  new safe target; update is transactional and has a read-only dry run.
+- `artifacts list/show/get/version create/promote/history` manages declared
+  workflow outputs. Versions and payloads are immutable and content-addressed;
+  promotion is a compare-and-swap stage-label move. Retrieval verifies bytes
+  and never overwrites an existing destination.
 - `params`, `metrics`, and `plots` read or compare recorded workflow data.
 - `migrate from-dvc` converts pipeline declarations. Preview generated output
   and preserve unsupported semantics instead of dropping them.
@@ -50,6 +59,9 @@ match the requested stage.
   worker may still own.
 - Separate workflow output hydration from workflow execution; a pointer output
   is not a materialized output.
+- A remote artifact registry is canonical when a Crab remote exists; local
+  registry state is a cache/recovery mirror. Do not delete old remote artifact
+  versions: automatic remote artifact GC is not yet a supported lifecycle.
 - Keep environment capture deterministic and redact secrets from identity,
   logs, and reports.
 

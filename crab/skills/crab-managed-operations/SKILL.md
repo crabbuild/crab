@@ -1,6 +1,6 @@
 ---
 name: crab-managed-operations
-description: Manage Crab authentication, managed-service organizations and repositories, memberships, service accounts, audit events, and signed release manifests.
+description: Manage Crab authentication, managed-service organizations and repositories, protected transfer grants and pushes, memberships, service accounts, audit events, and signed release manifests.
 ---
 
 # Crab managed operations
@@ -24,19 +24,37 @@ selected service and the resulting state.
 
 - Before create/update/delete, confirm service, organization, repository,
   member, actor, and requested ownership change.
-- Read current state, use idempotent operations where supported, and do not
-  silently rename or transfer ownership.
+- Read current state, use idempotency keys for creates/jobs and the returned
+  revision for `If-Match` mutations. Do not silently rename, archive, restore,
+  delete, or transfer ownership.
 - Treat service-account keys and one-time secrets as write-only material. Show
   only identifiers and redacted status after creation.
 - Keep pagination, retry, rate limits, and authorization failures distinct in
   errors so automation can decide whether to retry.
 
+## Managed transfer boundary
+
+- Resolve a logical repository through the managed service. The client must
+  not learn or persist its physical prefix or canonical provider credential.
+- Clone, fetch, and hydrate request short-lived, repository- and
+  operation-scoped read grants. A protected push first prepares a session and
+  `push_upload` staging grant, uploads immutable objects, then finalizes the
+  exact request digest through the service.
+- Finalize is the publication authority. An upload or successful HTTP response
+  before finalize does not advance refs. Abort uncommitted sessions when safe;
+  retry a timed-out request with its idempotency identity rather than creating
+  an unrelated push.
+- Managed and direct-storage modes have different authorities. Never fall back
+  from a denied or unavailable managed request to ambient bucket credentials.
+
 ## Audit and releases
 
-- Audit log, verify, and export operate on an append-only event chain. Check
-  schema, sequence, digest, timestamp, redaction, and operation filters.
-- A release manifest binds a Git revision to pointer inventory, workflow
-  metadata, parameters, metrics, and optional signatures.
+- Local `audit log/verify/export` operates on `.crab/audit/events.jsonl` and
+  its digest-protected events. Managed audit query/export is a tenant service
+  API. Do not claim the local file is the managed tenant ledger.
+- `release create/verify/export/list` binds a Git revision to pointer inventory,
+  workflow metadata, parameters, metrics, and optional detached signatures;
+  `--publish` stores a named manifest in the repository release namespace.
 - Release creation should reject unintended dirty state. A forced override is
   an explicit policy decision and must appear in evidence.
 - Deep verification reconstructs pointer-backed files and checks identity; JSON

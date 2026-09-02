@@ -11,8 +11,9 @@ locks, and verification rules remain distinct.
 
 ## Operating modes
 
-1. Determine whether the checkout uses native LFS, the transfer-agent mode, or
-   a conversion path before changing behavior.
+1. Determine whether the checkout uses Crab-native pointers, Crab's Git LFS
+   filter/storage implementation, the custom transfer agent, or a conversion
+   path before changing behavior.
 2. Inspect `.gitattributes`, Git filters, LFS configuration, pointer format,
    object location, and the hook or protocol entry point.
 3. For fetch, push, pull, and checkout, prove both remote object identity and
@@ -25,19 +26,30 @@ locks, and verification rules remain distinct.
 
 ## Command scope
 
-- `crab lfs` covers status, locks, fetch, push, pull, logs, and transfer-agent
-  operations.
+- `crab lfs install/uninstall/update` owns LFS Git config and hooks. It is
+  separate from top-level `crab install` and from `crab skills install`.
+- `track/untrack`, `pointer`, `clean`, `smudge`, `filter-process`,
+  `merge-driver`, hooks, and `ext` own Git LFS compatibility surfaces.
+- `fetch/pull/push/checkout`, `ls-files`, `status`, `fsck`, `prune`, locks,
+  environment, version, and logs own transfer and local-object lifecycle.
+- `crab lfs clone` is a deprecated compatibility wrapper; new automation
+  should use normal clone plus explicit fetch/pull behavior.
 - `crab lfs-transfer-agent` is a Git-invoked machine protocol, not a human
   command.
-- `crab optimize lfs dedup` removes verified duplicate storage.
-- `crab optimize lfs convert` changes representation with a reversible plan.
-- `crab optimize lfs prune` removes unreachable local objects under explicit
-  verification, age, confirmation, and failure-mode flags.
+- `crab lfs convert` changes the current representation with dry-run and
+  rollback boundaries. `crab lfs migrate import/export/info` is the explicit
+  history-analysis and rewrite surface.
+- `crab lfs dedup` and `crab optimize lfs dedup` remove only verified duplicate
+  storage. `crab optimize lfs prune` and `crab lfs prune` require explicit
+  reachability, recent-object, remote-verification, and confirmation policy.
 
 ## Protocol discipline
 
 - Keep transfer-agent stdin/stdout strictly machine-readable; send diagnostics
   to the correct log channel.
+- A pre-push hook must upload required LFS objects before the Git ref becomes
+  visible. Clean/smudge/filter-process transform bytes locally and do not by
+  themselves prove remote publication.
 - Preserve lock ownership, force semantics, retry boundaries, and request IDs.
 - Never place credentials, signed URLs, or raw authorization headers in logs.
 - Distinguish an LFS pointer parse, an object download, and a verified checkout
