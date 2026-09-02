@@ -179,7 +179,11 @@ export default function LandingPage() {
     <MarketingLayout>
       {/* ── Hero: Enhanced with floating particles + shimmer headline ── */}
       <HeroSection
-        badge={{ text: "Now in Private Beta", dot: true }}
+        badge={{
+          text: "Now Open Source",
+          href: "/blog/git-for-large-files-at-any-scale",
+          dot: true,
+        }}
         headline="Git for any file at any scale"
         subheadline={
           <>

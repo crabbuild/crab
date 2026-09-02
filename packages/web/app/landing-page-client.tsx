@@ -124,10 +124,13 @@ export function LandingPageClient() {
           />
           <div className="relative z-1 mx-auto max-w-[920px]">
             <Reveal>
-              <span className="mb-5 inline-flex items-center gap-[7px] rounded-full border border-primary/20 bg-primary-muted px-3.5 py-1 text-xs font-semibold text-primary">
+              <Link
+                href="/blog/git-for-large-files-at-any-scale"
+                className="mb-5 inline-flex items-center gap-[7px] rounded-full border border-primary/20 bg-primary-muted px-3.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary-muted/70"
+              >
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
-                Now in Private Beta
-              </span>
+                Now Open Source
+              </Link>
             </Reveal>
             <Reveal>
               <h1 className="mb-4 text-[clamp(32px,5vw,54px)] font-extrabold leading-[1.1] tracking-tight text-foreground">
