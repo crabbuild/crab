@@ -28,9 +28,15 @@ pub enum CacheError {
         requested_bytes: u64,
     },
 
-    /// A bounded local cache inspection exceeded its wall-clock deadline.
+    /// SQLite cooperatively interrupted an inspection after its query deadline.
+    #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
     #[error("cache inspection timed out after {timeout_ms} ms at {path}")]
-    InspectionTimeout { path: String, timeout_ms: u64 },
+    InspectionTimeout {
+        path: String,
+        timeout_ms: u64,
+        #[source]
+        source: rusqlite::Error,
+    },
 
     /// The cache service returned an invalid or unsupported response.
     #[error("cache service error: {reason}")]

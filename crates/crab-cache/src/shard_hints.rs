@@ -235,6 +235,8 @@ fn inspect_database_at_with_limits(
     };
     let deadline = Instant::now() + timeout;
     let interrupt_cancel = cancel.clone();
+    // SQLite calls this between VM operations, not inside blocking VFS I/O.
+    // Keep lock admission bounded separately; this is not a hard syscall deadline.
     database.progress_handler(
         progress_ops,
         Some(move || interrupt_cancel.is_cancelled() || Instant::now() >= deadline),
@@ -299,6 +301,7 @@ fn inspection_error(
             return CacheError::InspectionTimeout {
                 path: path.display().to_string(),
                 timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+                source,
             };
         }
     }
@@ -560,7 +563,9 @@ mod tests {
         ShardHintCache::update(
             &root_path,
             &scope("bucket", ".crab"),
-            vec![(make_hash(1), make_hash(42))],
+            (0..2_048)
+                .map(|seed| (make_hash(seed), make_hash(42)))
+                .collect(),
         )
         .await
         .unwrap();
@@ -571,13 +576,14 @@ mod tests {
             &root_path,
             &tokio_util::sync::CancellationToken::new(),
             Duration::ZERO,
-            1,
+            DATABASE_INSPECTION_PROGRESS_OPS,
         )
         .unwrap_err();
 
         assert!(matches!(
             error,
-            CacheError::InspectionTimeout { timeout_ms: 0, .. }
+            CacheError::InspectionTimeout { timeout_ms: 0, source, .. }
+                if source.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)
         ));
     }
 
@@ -589,7 +595,9 @@ mod tests {
         ShardHintCache::update(
             &root_path,
             &scope("bucket", ".crab"),
-            vec![(make_hash(1), make_hash(42))],
+            (0..2_048)
+                .map(|seed| (make_hash(seed), make_hash(42)))
+                .collect(),
         )
         .await
         .unwrap();
@@ -602,11 +610,76 @@ mod tests {
             &root_path,
             &cancel,
             DATABASE_INSPECTION_TIMEOUT,
-            1,
+            DATABASE_INSPECTION_PROGRESS_OPS,
         )
         .unwrap_err();
 
         assert!(matches!(error, CacheError::Cancelled));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn interrupted_inspection_preserves_files_and_releases_reader_locks() {
+        let dir = TempDir::new().unwrap();
+        let root_path = cache_root(&dir);
+        ShardHintCache::update(
+            &root_path,
+            &scope("bucket", ".crab"),
+            (0..2_048)
+                .map(|seed| (make_hash(seed), make_hash(42)))
+                .collect(),
+        )
+        .await
+        .unwrap();
+        let root = PinnedRoot::open(&root_path).unwrap();
+        let database = root
+            .open_database(
+                Path::new(SHARD_HINTS_DATABASE),
+                DatabaseMode::Create,
+                DATABASE_BUSY_TIMEOUT,
+            )
+            .unwrap();
+        // In rollback mode a leaked read transaction prevents a native exclusive
+        // writer. WAL writers alone would not prove that the reader was released.
+        database
+            .execute_batch("PRAGMA journal_mode = DELETE;")
+            .unwrap();
+        drop(database);
+        let snapshot = || {
+            std::fs::read_dir(root_path.join("hints"))
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+
+        for cancelled in [false, true] {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let error = inspect_database_at_with_limits(
+                &root,
+                &root_path,
+                &cancel,
+                Duration::ZERO,
+                DATABASE_INSPECTION_PROGRESS_OPS,
+            )
+            .unwrap_err();
+            assert!(matches!(error, CacheError::Cancelled) == cancelled);
+            assert_eq!(snapshot(), before, "cancelled={cancelled}");
+
+            let native = rusqlite::Connection::open_with_flags(
+                database_path(&root_path),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .unwrap();
+            native.busy_timeout(Duration::ZERO).unwrap();
+            native.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;").unwrap();
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

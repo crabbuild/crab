@@ -3924,12 +3924,26 @@ mod tests {
         let error = CrabError::from(crab_cache::CacheError::InspectionTimeout {
             path: "cache/hints/shard-hints.sqlite".into(),
             timeout_ms: 5_000,
+            source: rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                None,
+            ),
         });
         let CrabError::Io(source) = error else {
             panic!("cache inspection timeouts must retain I/O attribution");
         };
 
         assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
+        let cache_error = source
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<crab_cache::CacheError>()
+            .unwrap();
+        assert!(
+            std::error::Error::source(cache_error)
+                .unwrap()
+                .is::<rusqlite::Error>()
+        );
     }
 
     #[test]

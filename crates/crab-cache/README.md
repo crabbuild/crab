@@ -60,8 +60,10 @@ handle closes, the same persisted directory may reopen with a new budget.
 Product stats and doctor use `health::inspect_cache`: one pinned root, one
 streaming filesystem walk, a read-only catalog transaction, and read-only
 validation of the shard-hint database schema, row shape, row bound, and SQLite
-`quick_check`. Shard-hint SQLite work checks cancellation and has a five-second
-wall-clock deadline. Every linked file is counted by family, including databases,
+`quick_check`. Shard-hint SQLite VM progress checks cancellation and a five-second
+query deadline. This cooperative limit cannot interrupt blocked filesystem calls
+and starts after database open; lock admission has a separate timeout.
+Every linked file is counted by family, including databases,
 side files, temporaries, hints, and retained/unknown state. Logical file lengths
 and allocated 512-byte blocks are separate; directory allocation has its own
 row. The walk retains at most 64 issue details, marks affected families

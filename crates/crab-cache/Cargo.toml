@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [features]
 default = []
 active-probe = ["dep:reqwest"]
-local-cache = ["dep:errno", "dep:filetime", "dep:fs4", "dep:libc", "dep:rusqlite", "dep:tokio", "dep:tokio-util"]
+local-cache = ["dep:errno", "dep:filetime", "dep:fs4", "dep:libc", "dep:rusqlite", "rusqlite?/hooks", "dep:tokio", "dep:tokio-util"]
 remote-client = ["active-probe", "dep:futures-util", "dep:tokio"]
 xet-chunk-cache = [
     "dep:async-trait",
@@ -43,7 +43,7 @@ fs4 = { version = "0.13", optional = true }
 libc = { version = "0.2", optional = true }
 futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"], optional = true }
-rusqlite = { workspace = true, features = ["hooks"], optional = true }
+rusqlite = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

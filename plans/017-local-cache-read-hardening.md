@@ -3652,15 +3652,18 @@ the surrounding filesystem scan's cancellation contract.
 SQLite progress callback before opening the deferred inspection transaction.
 Every 1,000 virtual-machine operations it observes the scan cancellation token
 and a five-second monotonic deadline. Cancellation remains `CacheError::Cancelled`;
-deadline interruption becomes a typed `InspectionTimeout` with the database path
-and elapsed budget. The same read-only connection, transaction, schema checks,
-`quick_check(1)`, row-shape query, and no-repair policy remain canonical. No timer
+deadline interruption becomes a typed `InspectionTimeout` with the database path,
+configured query budget, and original SQLite source error. The same read-only
+connection, transaction, schema checks, `quick_check(1)`, row-shape query, and
+no-repair policy remain canonical. No timer
 thread, write transaction, checkpoint, retry loop, or alternate connection is
 introduced.
 
-**Acceptance criteria.** A forced zero-duration deadline interrupts SQLite and
-retains timeout attribution. A pre-cancelled inspection returns cancellation,
-not timeout or generic index failure. Existing healthy, malformed, and busy
+**Acceptance criteria.** A populated 2,048-row database scanned with the production
+1,000-operation callback interval and a forced zero-duration deadline interrupts
+SQLite and retains timeout attribution and its source. A pre-cancelled inspection
+returns cancellation, not timeout or generic index failure. Existing healthy,
+malformed, and busy
 database health tests remain unchanged, and whole-tree before/after snapshots
 continue proving that inspection does not mutate database or side files.
 
@@ -3677,10 +3680,34 @@ bypass, one-MiB pruning, fsck, clean Git state, and independent byte identity.
 It retained prior objects and every new remote object; no shared-bucket cleanup
 or bucket-wide GC ran.
 
-**Remaining work.** Five seconds bounds this one shard-hint database scan; it
-does not yet impose a single deadline across the complete filesystem/catalog
-health operation, inspect other index families, or bound repair, startup, and
+**Remaining work.** This is a cooperative query deadline, not a hard five-second
+wall-clock bound: the callback cannot run inside blocked VFS/filesystem calls,
+and the deadline starts after database open. It does not impose a single deadline
+across the complete filesystem/catalog health operation, inspect other index
+families, or bound repair, startup, and
 all-family maintenance work.
+
+**Post-checkpoint audit.** The original one-row/one-operation interruption
+tests could stop during transaction startup rather than prove scan interruption.
+The populated production-interval tests above replace that evidence. An additional
+rollback-journal test interrupts both deadline and cancellation paths, compares
+all hint filenames and bytes, then acquires a native SQLite exclusive transaction
+without waiting; this proves the read transaction and locks are released. Timeout
+source retention is also checked through the Crab I/O adapter. SQLite `hooks`
+now belongs only to `local-cache`, with weak feature forwarding so range-only and
+minimal builds do not inherit it or expose another optional-dependency feature.
+Proof: 252 all-feature cache tests, 10 local-cache-only hint tests, range-only and
+minimal compilation, strict all-target cache Clippy, the Crab timeout error-chain
+test, formatting, and docs links (398 pages / 4,292 fragments) pass.
+The installed `69bf18d` workload above predates this provenance/test refinement;
+it is not represented as exact-head qualification of later changes.
+
+The architecture job at `9d0c001` remains a merge blocker. Its completed log
+rejects the new cache persistence/range feature graph, `crab-storage` dev-feature
+edges, and test-only Xet imports/stdio handshakes. These are accumulated branch
+changes, not proven failures on `origin/main`. The protected policy inventories
+were not edited; their reconciliation requires explicit approval and review of
+the intended boundaries, not automatic acceptance of the observed graph.
 
 ### Cache-write completion checkpoint
 

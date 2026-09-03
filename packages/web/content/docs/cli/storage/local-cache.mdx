@@ -83,7 +83,9 @@ Shows the shared budget and per-family logical/allocated usage, including
 databases, hints, bloom files, temporaries, and retained state. Add `--json`
 for a versioned report. Inspection leaves missing roots missing, reads the
 catalog without mutation, validates shard-hint SQLite schema and row shape, and
-stops that SQLite work on cancellation or after five seconds. It does not
+requests interruption of that SQLite query work on cancellation or after five
+seconds. The deadline is checked between SQLite VM operations; it cannot interrupt
+a blocked filesystem call and does not bound the full health scan. It does not
 initialize Xet state or repair entries. A failed family remains visible
 without hiding independent family counts; partial reports have a nonzero exit.
 These are live linked-entry measurements, not an atomic snapshot, full
