@@ -101,6 +101,21 @@ impl ReservedFile {
 }
 
 impl CacheReservation {
+    #[cfg(all(feature = "remote-client", feature = "local-cache"))]
+    pub(crate) async fn anonymous_file(self) -> Result<(std::fs::File, Self)> {
+        tokio::task::spawn_blocking(move || {
+            self.generation
+                .validate(&self.root, Path::new(CATALOG_FILE))?;
+            let file = self
+                .root
+                .pending_file(&self.relative_path)?
+                .into_unlinked_file()?;
+            Ok((file, self))
+        })
+        .await
+        .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+    }
+
     fn pending_file_sync(mut self) -> Result<ReservedFile> {
         self.generation
             .validate(&self.root, Path::new(CATALOG_FILE))?;

@@ -264,6 +264,11 @@ impl PendingFile {
         Ok(tokio::fs::File::from_std(self.0.file().try_clone()?))
     }
 
+    #[cfg(all(feature = "remote-client", feature = "local-cache"))]
+    pub(crate) fn into_unlinked_file(self) -> Result<std::fs::File> {
+        self.0.into_unlinked_file()
+    }
+
     pub(crate) fn lease(&self) -> Result<std::fs::File> {
         let file = self.0.file().try_clone()?;
         if !fs4::fs_std::FileExt::try_lock_shared(&file)? {
@@ -782,6 +787,16 @@ mod platform {
             &self.file
         }
 
+        #[cfg(all(feature = "remote-client", feature = "local-cache"))]
+        pub(super) fn into_unlinked_file(mut self) -> Result<File> {
+            let file = self.file.try_clone()?;
+            self.directory.remove(&self.temporary)?;
+            // No pathname may outlive this unpublished stream. Closing its
+            // final descriptor also reclaims bytes after cancellation or exit.
+            self.published = true;
+            Ok(file)
+        }
+
         pub(super) fn commit(mut self) -> Result<()> {
             let _mutation = self.directory.mutation()?;
             // SAFETY: both single-component names are relative to the same
@@ -1163,6 +1178,11 @@ mod platform {
 
         pub(super) fn file(&self) -> &File {
             &self.0
+        }
+
+        #[cfg(all(feature = "remote-client", feature = "local-cache"))]
+        pub(super) fn into_unlinked_file(self) -> Result<File> {
+            Err(unsupported(Path::new("cache")))
         }
 
         pub(super) fn commit(self) -> Result<()> {

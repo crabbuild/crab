@@ -610,8 +610,13 @@ impl CachingStore {
 
         use futures_util::StreamExt as _;
 
-        let stream = response
-            .into_stream()
+        // Consumers can observe bytes immediately after get_opts returns.
+        // Finish the cache body first so a later HTTP failure cannot leak a
+        // partial prefix or prevent whole-object origin fallback.
+        let Some(stream) = response.complete(&self.local_cache).await? else {
+            return Ok(None);
+        };
+        let stream = stream
             .map(|result| {
                 result.map_err(|error| object_store::Error::Generic {
                     store: "crab-cache",
@@ -2486,6 +2491,65 @@ mod tests {
             1,
             "object-store consumers should receive warm pack streams without origin reads"
         );
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn incomplete_cache_stream_uses_complete_origin_body() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        for path in [
+            "repo/file_index_db/manifest/00000000000000000001.manifest",
+            "repo/file_index_db/wal/00000000000000000001.sst",
+            "repo/packs/pack-test.pack",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut request = [0_u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nincomplete cache prefix")
+                        .await;
+                }
+            });
+            let origin = Arc::new(InMemory::new());
+            let path = Path::from(path);
+            let expected = Bytes::from_static(b"complete authoritative object");
+            origin.put(&path, expected.clone().into()).await.unwrap();
+            let counting = Arc::new(CountingObjectStore::new(origin));
+            let root = tempfile::tempdir().unwrap();
+            let caching = CachingStore::new_with_local_cache(
+                Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>),
+                cache_service_config(addr),
+                Arc::new(LocalCache::new(root.path().join("cache"))),
+            )
+            .unwrap();
+
+            let actual = caching
+                .object_store()
+                .get(&path)
+                .await
+                .unwrap()
+                .bytes()
+                .await;
+            counting.delete(&path).await.unwrap();
+            let missing = caching.object_store().get(&path).await;
+            server.abort();
+            let _ = server.await;
+
+            assert_eq!(actual.unwrap(), expected, "{path}");
+            assert!(
+                matches!(missing, Err(object_store::Error::NotFound { .. })),
+                "{path}: origin error must win"
+            );
+            assert_eq!(
+                counting.counts().full,
+                2,
+                "{path}: one origin attempt per operation"
+            );
+        }
     }
 
     #[cfg(feature = "remote-client")]

@@ -12,6 +12,8 @@ use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderName};
 
 use crate::error::{CacheError, Result};
+#[cfg(feature = "local-cache")]
+mod completed_body;
 pub use crate::service::{
     CacheObjectHead, CacheObjectRange, CacheServiceAuth, CacheServiceCapabilities,
     CacheServiceLimits, CacheServiceMode, DedupQueryResult, KnownChunk,
@@ -36,6 +38,18 @@ impl CacheObjectStream {
     #[must_use]
     pub fn content_length(&self) -> Option<u64> {
         self.content_length
+    }
+
+    /// Complete the HTTP body within the cache budget before exposing bytes.
+    ///
+    /// Returns `None` when admission is unavailable. Transport, length, or
+    /// private-file errors leave the caller free to read the complete origin.
+    #[cfg(feature = "local-cache")]
+    pub async fn complete(
+        self,
+        cache: &crate::LocalCache,
+    ) -> Result<Option<futures_util::stream::BoxStream<'static, Result<Bytes>>>> {
+        completed_body::complete(self, cache).await
     }
 
     /// Convert the response body into a bounded-memory stream of cache errors.
