@@ -257,6 +257,21 @@ fn per_ref_visibility_keeps_independent_object_closures() {
 }
 
 #[test]
+fn shared_missing_parent_never_yields_a_partial_pointer_inventory() {
+    let repo = Repo::new();
+    let tree = repo.tree(&repo.blob(&pointer().serialize()));
+    let parent = repo.commit(&tree, None);
+    let first = repo.commit(&tree, Some(&parent));
+    let other_tree = repo.tree(&repo.blob(b"other branch\n"));
+    let second = repo.commit(&other_tree, Some(&parent));
+    std::fs::remove_file(repo.object_path(&parent)).unwrap();
+    assert!(matches!(
+        repo.scan(&[&first, &second], limits()),
+        Err(WalkError::BeyondShallowBoundary { .. })
+    ));
+}
+
+#[test]
 fn cancellation_before_open_and_during_history_never_returns_partial_pointers() {
     assert!(matches!(
         scan_pointers(Path::new("absent"), &[], limits(), &|| true),

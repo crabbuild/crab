@@ -4844,16 +4844,31 @@ code growth pays for union traversal while retaining the required per-ref
 result, not a compatibility fallback or duplicate Git object reader.
 
 **Current proof and next acceptance.** The 100-tag/40-commit regression failed
-at 800 lookups before the change and passes afterward. All 19 traversal tests
+at 800 lookups before the change and passes afterward. All 20 traversal tests
 pass with both minimal and facade features, including missing/corrupt/wrong
 kind objects, nested tags, direct tree/blob targets, budgets, cancellation and
-per-ref isolation. All 70 mirror tests and `crab-git` library Clippy pass.
-The full cold/warm Kubernetes retry is running on the dirty debug candidate
-in `phase2-k8s-readonly-union-debug-d45ac62-20260903`; it is not yet acceptance
-evidence. Require completed pointer verification with all refs and zero
-mutation attempts, then repeat on the committed release candidate. Neither
-development-host timings nor a debug/release comparison can establish a
-performance improvement or close the controlled regression gate.
+per-ref isolation. A shared missing parent also rejects the entire pointer
+inventory. All 70 mirror tests and `crab-git` library Clippy pass.
+
+The committed release candidate `1e21e36` passes
+`phase2-k8s-readonly-union-release-1e21e36-20260903/artifacts/report.json`:
+nine commands and ten checks, including cold/warm exact source-ref inventories,
+equal published main, one discovered and verified managed file hash, matching
+recipe digests, zero mutation attempts, and unchanged source/binary identities.
+Binary SHA-256:
+`1bb4fec16e57a444a61f3af4fb1972463d8e18aef225723a34a7f7fd06187555`.
+Both raw results correctly remain `source_ahead` with `ci_passed: false`:
+the source retains tags absent from the earlier main-only publication. This is
+successful full pointer inspection and drift classification, not convergence
+or permission to publish those tags. Observed cold/warm durations were
+106,418/70,032 ms; neither uncontrolled development-host timings nor the separate
+debug run establish a performance improvement. The debug candidate run
+`phase2-k8s-readonly-union-debug-d45ac62-20260903` remains separate and pending.
+
+The controlled regression gate, long destination-only remote ancestry, and
+GC lifetime remain open. Independently qualify caller-abortion ownership of
+the pointer-scan blocking worker: cooperative cancellation coverage alone does
+not prove that dropping the caller retains its cache until that worker exits.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
