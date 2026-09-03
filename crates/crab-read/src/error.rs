@@ -143,6 +143,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconstruction_recognizes_source_free_storage_cancellation() {
+        use std::error::Error;
+
+        let storage = crab_cache_store::CacheStoreError::from(StorageError::Cancelled);
+        let client = xet_client::ClientError::internal(ReadError::from(storage));
+        let reconstruction = ReconstructionError(client.into());
+
+        assert!(reconstruction.is_cancelled());
+        assert!(
+            std::iter::successors(reconstruction.source(), |source| (*source).source()).any(
+                |source| matches!(
+                    source.downcast_ref::<StorageError>(),
+                    Some(StorageError::Cancelled)
+                )
+            )
+        );
+    }
+
+    #[test]
     fn remote_git_error_retains_its_safe_diagnostic() {
         let error = ReadError::from(crab_remote_git::Error::LimitExceeded {
             limit: "decoded object bytes",

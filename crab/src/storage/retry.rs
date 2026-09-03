@@ -289,7 +289,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
 // `error_map` helper (e.g., because the call site used the blanket
 // `#[from]`). Apply the same transient-vs-permanent split here so those
 // paths still retry correctly.
-fn classify_storage(err: &object_store::Error) -> RetryClass {
+pub(crate) fn classify_storage(err: &object_store::Error) -> RetryClass {
     match err {
         object_store::Error::Generic { .. } => RetryClass::Transient,
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {

@@ -58,10 +58,12 @@ const DEFAULT_LOCAL_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 #[derive(Debug, thiserror::Error)]
 pub enum CacheStoreError {
     /// Local or remote cache behavior failed.
-    #[error(transparent)]
+    // Keep the domain error in the chain: transparent would skip its type,
+    // losing terminal auth/integrity classification at reconstruction callers.
+    #[error("{0}")]
     Cache(#[from] CacheError),
     /// Origin object-store behavior failed.
-    #[error(transparent)]
+    #[error("{0}")]
     Storage(#[from] StorageError),
     /// Origin bytes were readable but failed data-plane integrity checks.
     #[error("origin object at {path} failed integrity verification: {source}")]
@@ -1485,6 +1487,36 @@ fn immutable_read_limit(path: &Path) -> Option<u64> {
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_wrappers_preserve_typed_source_and_display() {
+        use std::error::Error as _;
+
+        let storage = CacheStoreError::from(StorageError::Forbidden {
+            path: "repo/xorbs/private".into(),
+        });
+        let cache = CacheStoreError::from(CacheError::Cancelled);
+        for wrapped in [storage, cache] {
+            let source = wrapped.source().unwrap();
+            assert_eq!(wrapped.to_string(), source.to_string());
+            match &wrapped {
+                CacheStoreError::Storage(inner) => {
+                    assert!(std::ptr::eq(
+                        source.downcast_ref::<StorageError>().unwrap(),
+                        inner
+                    ));
+                }
+                CacheStoreError::Cache(inner) => {
+                    assert!(std::ptr::eq(
+                        source.downcast_ref::<CacheError>().unwrap(),
+                        inner
+                    ));
+                }
+                CacheStoreError::OriginIntegrity { .. } => unreachable!(),
+            }
+        }
+    }
+
     #[cfg(feature = "remote-client")]
     use async_trait::async_trait;
     #[cfg(feature = "remote-client")]

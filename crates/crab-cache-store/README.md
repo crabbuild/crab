@@ -37,6 +37,12 @@ entries are bypassed even when eviction fails; corrupt origin bytes return
 `CacheStoreError::OriginIntegrity` with their verification error retained.
 Transport retry policy remains owned by `crab-storage`.
 
+`CacheStoreError::Cache` and `Storage` preserve the domain error itself as
+`Error::source()`, including source-free failures such as access denial.
+Display text stays unchanged. Reconstruction consumers can classify the typed
+failure without parsing text or mistaking an origin SDK's nested I/O for an
+output-writer failure.
+
 `xorb_chunk_metadata` verifies bounded footer/metadata ranges and the xorb
 identity without reading payload. Selective chunk reads verify the requested
 payload ranges. High-coverage reads may install a verified complete xorb, but

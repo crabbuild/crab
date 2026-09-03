@@ -3708,6 +3708,9 @@ impl CrabError {
     }
 }
 
+const STORAGE_HINT: &str = "Run `crab doctor` to check the remote, credentials, and repository. Retry with `--log-level debug` if the cause is still unclear.";
+const STORAGE_DOCS_ANCHOR: &str = "cli/diagnostics/health-check";
+
 impl CrabError {
     /// Human-readable remediation hint for CLI display.
     pub fn hint(&self) -> Option<&'static str> {
@@ -3732,9 +3735,7 @@ impl CrabError {
             Self::Configuration { .. } => Some(
                 "Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.",
             ),
-            Self::Storage(_) => Some(
-                "Run `crab doctor` to check the remote, credentials, and repository. Retry with `--log-level debug` if the cause is still unclear.",
-            ),
+            Self::Storage(_) => Some(STORAGE_HINT),
             _ => None,
         }
     }
@@ -3752,7 +3753,7 @@ impl CrabError {
                 Some("cli/authentication/static-credentials#troubleshooting")
             }
             Self::Configuration { .. } => Some("cli/reference/crab-configure"),
-            Self::Storage(_) => Some("cli/diagnostics/health-check"),
+            Self::Storage(_) => Some(STORAGE_DOCS_ANCHOR),
             _ => None,
         }
     }

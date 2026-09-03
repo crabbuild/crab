@@ -299,6 +299,94 @@ are unchanged outside the publication edits. This is not a green lint gate.
 Nested storage classification and the remaining Plan 017 acceptance gates stay
 open.
 
+### Nested storage diagnostic repair, 2026-09-03
+
+The tightened installed check fails on `886c10d`: actual denied xorb GETs
+still produce `CRAB-E0099`, category `internal`, and exit 9. The retained
+`hydrate-outcomes-storage-baseline/report.json` records this before-fix
+result; completion-row and failure-count checks pass before the diagnostic
+assertion fails.
+
+Two owner boundaries need correction. `CacheStoreError` used thiserror's
+transparent form, which forwards `source()` to the inner error's own source:
+source-free storage errors such as `Forbidden` disappear from the typed chain.
+The wrapper now preserves both `StorageError` and `CacheError` themselves as
+sources, with identical display text and unchanged enum fields/conversions.
+This follows the pinned thiserror 2.0.18 contract, rather than adding special
+knowledge of skipped wrapper fields in each consumer. Tests prove exact inner
+pointer identity for both siblings and recognition of storage cancellation
+through the pinned Xet reconstruction bridge.
+
+At the CLI boundary, `ReadFailure` recognizes typed storage before descending
+into an SDK's implementation-level I/O source. It copies only diagnostic
+fields into the existing product variants and delegates their code, exit,
+category, details, guidance, and retry policy. Opaque SDK/I/O errors stay
+borrowed; the original source chain stays owned by the read failure. Raw
+object-store retry classification shares the existing product helper. Writer
+I/O remains terminal: retry metadata does not authorize replaying partial
+output. No dependency, config, cache key, remote format, or error-code catalog
+entry changes.
+
+Focused proof: all 25 typed storage cases agree with direct product conversion
+on diagnostics; each nested source keeps its original identity. I/O's terminal
+writer policy is explicit.
+A real Xet reconstruction with only xorb body reads blocked proves that
+`NetworkTransient` takes precedence over its SDK's nested I/O cause. All 81
+CLI error/catalog/retry tests and 80 hydration tests pass. All 60 cache-store
+tests (remote client enabled), 39 minimal-feature cache-store tests, all 84
+shared-read tests, both auth-server source-preservation tests, both error-code
+integration tests, strict all-target
+all-feature cache-store Clippy, and strict shared-read library Clippy pass.
+CLI no-dependency library Clippy still reports 478 findings, none in
+`read_failure.rs`; this remains a failed gate, not a waiver.
+
+Installed repair: **33 passing checks / 8 commands** in
+`hydrate-outcomes-storage-fixed/report.json`. Ordinary JSONL, manifest JSONL,
+JSON, and mixed local recovery now return `CRAB-E0031`, category `permanent`,
+`retryable: false`, exit 7, and the denied xorb path in structured details.
+Each command emits one terminal error, failed rows report zero bytes, failed
+pointers remain unchanged, and successful local recovery retains its row.
+Restoring origin independently verifies all four 128 MiB files and clean Git
+state. The baseline report is retained unchanged.
+
+Artifact: `storage-diagnostics/bin/crab`, label
+`886c10d-storage-diagnostics-dirty`, built 2026-09-03 08:06:45 UTC via isolated
+`make install`; both release feature shapes pass. Binary SHA-256:
+`b65ee4430b6b7e230fd034b89da9c898cdbed8b3ab80b676dd98593258fba7e0`.
+Source-only patch SHA-256 against `886c10d`:
+`a38241d2afd1c56e64f9ff6b9beb2fef2865ceca7a32c4693a2c660999381ce0`.
+The prototype harness gained a required-diagnostic check for this repeat; it
+has not yet been integrated as maintained Phase 7 qualification tooling.
+
+The same artifact also passes **111 checks / 50 commands** in
+`publication-storage-workload/report.json`: cold/warm hydration, separate
+fetch-to-hydrate, corruption repair, scoped clean, cold origin denial and
+recovery, unchanged add/index, and ten two-process CoW hydration rounds.
+Warm hydration, fetch-to-hydrate, and every concurrent round make zero xorb
+body attempts under enforced denial. Independent hashes and final clean Git
+state pass. These are 144 checks across 58 commands for this artifact; the
+earlier add/commit/push/delta proof remains the separately identified checkpoint.
+
+The production growth implements borrowed diagnostic dispatch for shared Xet
+errors that cannot be moved or cloned safely; it reuses product policy instead
+of adding a second code/category/guidance table. The source-field mapping is
+checked against the owned `From<StorageError>` conversion. Most additional
+lines are the exhaustive diagnostic and source-boundary regression fixtures.
+
+Qualification limits and next actions:
+
+- The installed denial matrix above closes the reproduced xorb permission
+  classification gap, not all read-error provenance or provider behavior.
+- The initial fixture blocked shard and metadata bodies as well as xorbs and
+  returned `CRAB-E0070`. Its fall-through from shard lookup into file-index
+  lookup needs separate source-attribution proof. Denying only xorbs qualifies
+  the reproduced xorb path; it does not close metadata diagnostics.
+- Auth-server retains shared read sources but has its own user-facing policy;
+  complete its native failure-classification proof. VFS-to-CLI conversion
+  delegates `VfsError::Read` to the same product conversion, but native mounted
+  error behavior is still unqualified. Other cache-family faults, provider
+  qualification, and all remaining phase gates stay open.
+
 ### Delivery ledger
 
 | Phase | Status | Retained proof |
