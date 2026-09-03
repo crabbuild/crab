@@ -275,19 +275,18 @@ pub(super) fn install_pre_push_hook_at(hooks_dir: &Path, force: bool) -> Result<
             origin: format!("failed to read {}: {e}", hook_path.display()),
         })?;
 
-        if existing == crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK {
+        if existing == crate::cmd::install::MIRROR_PRE_PUSH_HOOK {
             make_pre_push_hook_executable(&hook_path)?;
-            tracing::debug!(path = %hook_path.display(), "LFS pre-push hook already installed");
+            tracing::debug!(path = %hook_path.display(), "mirror pre-push hook already owns LFS publication");
             return Ok(());
         }
-        if existing == crate::cmd::install::MIRROR_PRE_PUSH_HOOK
-            || existing
-                == format!(
-                    "#!/bin/sh\n{}",
-                    crate::cmd::install::OBSOLETE_MIRROR_PRE_PUSH_BODY
-                )
+        if existing
+            == format!(
+                "#!/bin/sh\n{}",
+                crate::cmd::install::OBSOLETE_MIRROR_PRE_PUSH_BODY
+            )
         {
-            crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK.to_owned()
+            crate::cmd::install::MIRROR_PRE_PUSH_HOOK.to_owned()
         } else if let Some(composed) = with_mirror_hook(&existing) {
             // Only a known mirror remainder is combined. A standalone LFS
             // install must not enable mirror mode merely because it owns stdin.
@@ -354,11 +353,6 @@ fn uninstall_pre_push_hook_at(hooks_dir: &Path) -> Result<()> {
         return Ok(());
     };
 
-    if content == crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK {
-        fs::write(&hook_path, crate::cmd::install::MIRROR_PRE_PUSH_HOOK)?;
-        return Ok(());
-    }
-
     let managed_remainder =
         managed_hook_remainder(&content).or_else(|| legacy_hook_remainder(&content));
     if let Some(remainder) = managed_remainder {
@@ -400,12 +394,7 @@ fn legacy_hook_remainder(content: &str) -> Option<&str> {
 }
 
 pub(crate) fn with_mirror_hook(existing: &str) -> Option<String> {
-    use crate::cmd::install::{
-        MIRROR_LFS_PRE_PUSH_HOOK, MIRROR_PRE_PUSH_HOOK, OBSOLETE_MIRROR_PRE_PUSH_BODY,
-    };
-    if existing == MIRROR_LFS_PRE_PUSH_HOOK {
-        return Some(existing.to_owned());
-    }
+    use crate::cmd::install::{MIRROR_PRE_PUSH_HOOK, OBSOLETE_MIRROR_PRE_PUSH_BODY};
     let remainder = managed_hook_remainder(existing).or_else(|| legacy_hook_remainder(existing))?;
     let remainder = remainder.trim();
     let current_mirror = MIRROR_PRE_PUSH_HOOK.strip_prefix("#!/bin/sh\n")?;
@@ -413,7 +402,7 @@ pub(crate) fn with_mirror_hook(existing: &str) -> Option<String> {
         || remainder == current_mirror.trim()
         || remainder == OBSOLETE_MIRROR_PRE_PUSH_BODY.trim()
     {
-        return Some(MIRROR_LFS_PRE_PUSH_HOOK.to_owned());
+        return Some(MIRROR_PRE_PUSH_HOOK.to_owned());
     }
     None
 }
@@ -896,7 +885,7 @@ mod tests {
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
 
         let content = fs::read_to_string(&hook).unwrap();
-        assert_eq!(content, crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK);
+        assert_eq!(content, crate::cmd::install::MIRROR_PRE_PUSH_HOOK);
     }
 
     #[test]
@@ -913,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn install_composes_with_crab_mirror_pre_push_hook() {
+    fn install_preserves_mirror_publication_owner() {
         let dir = temp_git_repo();
         let hook = dir.path().join(".git").join("hooks").join("pre-push");
         let mirror = crate::cmd::install::MIRROR_PRE_PUSH_HOOK;
@@ -922,7 +911,7 @@ mod tests {
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
 
         let content = fs::read_to_string(&hook).unwrap();
-        assert_eq!(content, crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK);
+        assert_eq!(content, mirror);
     }
 
     #[test]
@@ -933,7 +922,7 @@ mod tests {
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
         crate::cmd::install::install_mirror_hooks(dir.path()).unwrap();
         let content = fs::read_to_string(dir.path().join(".git/hooks/pre-push")).unwrap();
-        assert_eq!(content, crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK);
+        assert_eq!(content, crate::cmd::install::MIRROR_PRE_PUSH_HOOK);
     }
 
     #[cfg(unix)]
@@ -948,7 +937,7 @@ mod tests {
         let crab = bin_dir.path().join("crab");
         fs::write(
             &crab,
-            "#!/bin/sh\n[ \"$1\" = mirror-pre-push ] && [ \"$2\" = --lfs ] || exit 99\nexit 23\n",
+            "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = mirror-pre-push ] || exit 99\nexit 23\n",
         )
         .unwrap();
 

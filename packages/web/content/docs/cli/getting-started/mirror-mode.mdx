@@ -133,18 +133,21 @@ Same behavior as post-checkout, triggered by `git pull` and `git merge`.
 
 ### LFS and existing hooks
 
-`crab lfs install` and mirror installation compose into one input owner:
+Mirror publication owns both Crab and LFS dependencies. `crab lfs install`
+configures the LFS filters and preserves the same mirror hook:
 
 ```bash
 #!/bin/sh
-# Crab LFS: publish objects before refs
 # Crab mirror: publish the exact pre-push ref batch
-crab mirror-pre-push --lfs "$@" || exit $?
+crab mirror-pre-push "$@" || exit $?
 ```
 
-Both guards use the same decoded object IDs. LFS uploads use the configured
-Crab destination, not the GitHub/GitLab URL. Either install order produces
-this hook; uninstalling LFS preserves the mirror guard.
+The hook passes the captured object IDs to one prepared push. That pipeline
+checks LFS locks, uploads missing content, and verifies its bytes under the
+existing writer admission before publishing Crab refs. LFS uploads use the
+configured Crab destination, not the GitHub/GitLab URL. Either install order
+produces this hook; uninstalling LFS preserves it. Direct pushes to a Crab
+remote use the same dependency gate without recursively running the mirror.
 
 Installation honors `core.hooksPath` and is idempotent for recognized Crab
 hooks. An unknown/custom pre-push hook is left unchanged and installation

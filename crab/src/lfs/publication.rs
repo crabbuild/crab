@@ -354,6 +354,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publication_rejects_foreign_lfs_lock_before_upload() {
+        let (repo, pointer, content, head) = fixture();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let owner = format!(
+            "{}-other",
+            crate::cmd::lfs::store_setup::git_user_identity().unwrap_or_default()
+        );
+        LockManager::lfs(crate::storage::Store::from_storage(store.clone()), "repo")
+            .lock_with_expiry("asset.bin", &owner, None)
+            .await
+            .unwrap();
+
+        let result = publish_reachable(
+            store.clone(),
+            "repo".to_owned(),
+            repo.path().join(".git"),
+            vec![head],
+            Vec::new(),
+            &CancellationToken::new(),
+        )
+        .await;
+        let uploaded = LfsObjectStore::new(store, "repo")
+            .exists(&pointer.oid)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(CrabError::LfsLockConflict { path, .. }) if path == "asset.bin")
+                && !uploaded
+        );
+    }
+
+    #[tokio::test]
     async fn publication_rejects_missing_local_dependency() {
         let (repo, pointer, _content, head) = fixture();
         let store = crab_storage::Store::new(Arc::new(InMemory::new()));

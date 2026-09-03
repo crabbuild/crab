@@ -70,8 +70,10 @@ This is input validation, not atomic publication across collaboration and
 Crab remotes.
 
 With Crab's mirror hook installed, the generated hook invokes
-`crab mirror-pre-push --lfs` instead. One owner reads the batch and passes the
-same object IDs to LFS upload and mirror publication. The LFS store is the
+`crab mirror-pre-push` instead. One owner reads the batch and passes its exact
+object IDs to the prepared push, whose admitted dependency gate checks LFS
+locks, uploads missing objects, and verifies their bytes before publishing
+Crab refs. There is no separate mirror LFS upload mode. The LFS store is the
 configured Crab destination, not the collaboration host. Do not concatenate
 two stdin-consuming hook commands; see [Mirror Mode](/docs/cli/getting-started/mirror-mode)
 for installation, failure, and qualification boundaries.

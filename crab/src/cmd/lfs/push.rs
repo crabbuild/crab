@@ -281,7 +281,7 @@ pub fn run_lfs_pre_push(
     run_lfs_pre_push_batch(remote, &updates, cancel)
 }
 
-pub(crate) fn run_lfs_pre_push_batch(
+fn run_lfs_pre_push_batch(
     remote: Option<&str>,
     updates: &[PrePushUpdate],
     cancel: &CancellationToken,

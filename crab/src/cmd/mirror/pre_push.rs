@@ -21,9 +21,6 @@ pub struct MirrorPrePushArgs {
     pub remote: String,
     /// Git's resolved destination URL.
     pub url: String,
-    /// Run the installed LFS guard on the same decoded batch.
-    #[arg(long)]
-    pub lfs: bool,
 }
 
 /// Validate and publish Git's complete hook batch before collaboration push.
@@ -36,12 +33,9 @@ pub async fn run_mirror_pre_push(
     if updates.is_empty() {
         return Ok(());
     }
-    // Native Crab publication already owns dependency validation. The
-    // optional LFS guard still runs, but cannot recursively mirror this push.
+    // Native Crab publication already owns Crab and LFS dependencies under
+    // writer admission. Running another uploader here would bypass that owner.
     if args.url.starts_with("crab://") {
-        if args.lfs {
-            crate::cmd::lfs::push::run_lfs_pre_push_batch(Some(&args.url), &updates, cancel)?;
-        }
         return Ok(());
     }
 
@@ -103,11 +97,8 @@ pub async fn run_mirror_pre_push(
     )
     .await?;
 
-    if args.lfs {
-        // Collaboration URLs point at Git hosts, not the Crab LFS store.
-        // Both guards use the captured Crab destination and the same OIDs.
-        crate::cmd::lfs::push::run_lfs_pre_push_batch(Some(destination), &updates, cancel)?;
-    }
+    // The prepared push owns LFS lock checks, uploads and byte verification.
+    // Keep them inside its admission instead of publishing before its lease.
     check_cancelled(cancel)?;
     crate::cmd::push::run_push_prepared_refspecs(
         Some(destination),

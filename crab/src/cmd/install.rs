@@ -583,12 +583,6 @@ pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh
 # Crab mirror: publish the exact pre-push ref batch
 crab mirror-pre-push \"$@\" || exit $?
 ";
-pub(crate) const MIRROR_LFS_PRE_PUSH_HOOK: &str = "#!/bin/sh
-# Crab LFS: publish objects before refs
-# Crab mirror: publish the exact pre-push ref batch
-crab mirror-pre-push --lfs \"$@\" || exit $?
-";
-
 /// Hook definitions for mirror mode: (hook_name, content_lines).
 const MIRROR_HOOKS: &[(&str, &str)] = &[
     ("pre-push", MIRROR_PRE_PUSH_HOOK),

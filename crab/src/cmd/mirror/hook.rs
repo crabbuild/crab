@@ -85,9 +85,7 @@ pub fn mirror_hook_status(root: &Path) -> MirrorHookStatus {
         }
     };
     let executable = hook_is_executable(&hook_path);
-    if content == crate::cmd::install::MIRROR_PRE_PUSH_HOOK
-        || content == crate::cmd::install::MIRROR_LFS_PRE_PUSH_HOOK
-    {
+    if content == crate::cmd::install::MIRROR_PRE_PUSH_HOOK {
         if executable {
             return MirrorHookStatus {
                 state: MirrorHookState::Installed,

@@ -5013,6 +5013,67 @@ through final read-back, managed-grant fault qualification and read-only GC
 observation remain open. Do not mark those sibling surfaces complete from
 this shared-pipeline ordering change.
 
+### Mirror hook LFS ownership consolidation: 2026-09-03 UTC
+
+**Context and observed gap.** Moving shared-pipeline LFS publication inside
+admission did not cover the separately composed mirror hook. Its `--lfs`
+mode invoked the standalone uploader before the prepared push acquired its
+writer permit. The same mode also uploaded before direct Crab pushes entered
+their common pipeline. No released tag contains `mirror-pre-push`; the removed
+mode is an unreleased implementation, not a compatibility contract.
+
+**Executable regression.** Run
+`python3 crab/scripts/e2e/run_mirror_lfs_admission_rustfs_smoke.py` with
+`--crab-bin <release-binary> --source-root <matching-checkout>` and
+`--root <workspace-qualification-directory> --run-id <unique-id>` plus
+`--endpoint-url http://127.0.0.1:9000 --bucket crabbuild --require-existing-bucket`.
+The driver installs real mirror/LFS hooks, stages a new 128 KiB LFS payload,
+denies only the disposable repository's admission-slot PUTs, and records any
+LFS mutation attempts. It requires failure without changed refs or uploaded
+LFS content, then restores admission, retries, freshly clones, verifies exact
+LFS bytes and runs strict Git fsck. Collaboration and native Crab destinations
+are separate cases. The existing bucket and other prefixes are never faulted;
+no GC or bucket cleanup runs.
+
+The retained before-report
+`phase2-hook-admission-baseline-802dec8-20260903/artifacts/report.json` binds
+the clean `802dec8` source checkout and its release binary. Admission is
+denied and both remotes' refs remain unchanged, but the collaboration case
+fails: three LFS mutation requests leave one 131,072-byte object. This proves
+the ordering defect, not data loss. An earlier attempt ending in
+`phase2-hook-admission-before-802dec8-20260903` stopped at the source/binary
+identity check and is not behavioral evidence.
+
+**Phase A — one publication owner.** Remove the optional mirror LFS flag,
+its hook template and both standalone-uploader calls. The canonical mirror
+hook delegates the exact batch to the existing prepared push; its admitted
+LFS gate already checks locks, discovers missing dependencies, uploads and
+verifies bytes. Preserve standalone `crab lfs pre-push`, custom-hook refusal,
+both installation orders and mirror preservation during LFS uninstall.
+Production Rust shrinks; no new configuration, format or dependency is added.
+
+Acceptance: the installer regression fails before the production change;
+the focused mirror/install/standalone-LFS/publication tests pass afterward,
+including a foreign-lock rejection with no upload. The focused 128-test run
+passes. Web typecheck, lint, tests, production build and link checks pass
+(existing unrelated lint warnings remain); link validation covers 398 HTML
+pages and 4,300 fragments.
+
+**Phase B — release qualification.** Build the committed release, run the
+scoped admission driver and existing installed mixed-ref hook qualification,
+and retain exact binary/source identities. Acceptance requires both denied
+push cases to produce no LFS writes, preserve both ref sets and successfully
+retry to byte-identical fresh clones. This gate is pending until release
+reports are recorded below; unit results alone do not close it.
+
+**Remaining boundary.** This consolidation does not move pointer/deduplication
+classification or terminal mirror read-back under the publication permit.
+Their revalidation/lifetime work, managed-grant faults, read-only GC identity,
+controlled performance and the full support matrix remain separate open gates.
+Earlier Kubernetes qualification is for `802dec8`, not a claim about an
+unbuilt candidate. The known v1.0.1 hook upgrade path remains; unrecognized
+older/custom hook bodies still require explicit manual composition.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression
