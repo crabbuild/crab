@@ -217,6 +217,12 @@ pub async fn run_clone_in(
     checkout_head(&target_dir, &args.url)?;
     emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
 
+    // Historical revisions may predate project configuration. Persist the
+    // explicit clone location for subsequent reads only after checkout, so
+    // an existing project file remains authoritative and is never clobbered.
+    check_cancelled(cancel)?;
+    ensure_project_remote(&target_dir, &args.url)?;
+
     // Step 3b: Auto-track extensions for any pointer blobs that landed
     // in the working tree. Cloned repositories sometimes ship a stale
     // or missing `.gitattributes` — if we only relied on the remote's
@@ -800,19 +806,11 @@ fn scrub_git_pack_appledouble_files(target: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Load committed `crab.toml` before checkout when possible.
 fn project_config_for_checkout(
     target: &Path,
 ) -> Result<Option<crate::core::project_config::ProjectConfig>> {
-    match project_config_from_head(target)? {
-        Some(config) => Ok(Some(config)),
-        None => crate::core::project_config::ProjectConfig::load_for_repo(target),
-    }
-}
-
-fn project_config_from_head(
-    target: &Path,
-) -> Result<Option<crate::core::project_config::ProjectConfig>> {
+    // Only the cloned revision owns pre-checkout policy. Walking ancestors
+    // when HEAD lacks this file can select an unrelated enclosing project.
     let output = Command::new("git")
         .args(["show", "HEAD:crab.toml"])
         .current_dir(target)
@@ -848,6 +846,39 @@ async fn setup_crab_config(target: &Path) -> Result<()> {
 fn configure_lazy_checkout(target: &Path) -> Result<()> {
     let config_path = target.join(".crab/local.toml");
     crate::cmd::config::run_config_set_at("checkout.lazy", "true", &config_path)
+}
+
+fn ensure_project_remote(target: &Path, url: &str) -> Result<()> {
+    use crate::core::project_config::{CONFIG_FILE_NAME, ProjectConfig, RemoteConfig};
+
+    let path = target.join(CONFIG_FILE_NAME);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => return ProjectConfig::load(&path).map(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let config = ProjectConfig {
+        version: 1,
+        remote: RemoteConfig {
+            url: url.to_owned(),
+        },
+        track: None,
+        hydrate: None,
+        mirror: None,
+        replication: None,
+        auth: None,
+        prefetch: None,
+        workflow: None,
+    };
+    let temporary = tempfile::NamedTempFile::new_in(target)?;
+    ProjectConfig::write(temporary.path(), &config)?;
+    temporary.as_file().sync_all()?;
+    // A concurrently created project file must win without being overwritten.
+    // Leave Git's index untouched; adopting this project policy is explicit.
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Auto-hydrate the `always` prefetch profile after a clone.
@@ -1545,6 +1576,99 @@ mod tests {
         assert!(!config.contains("[remote]"));
         assert!(!config.contains("gateway"));
         assert!(!config.contains("credential"));
+    }
+
+    #[test]
+    fn clone_project_remote_is_persisted_without_staging() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_in(root, &["init"]);
+        std::fs::write(root.join("README.md"), "original\n").unwrap();
+        git_in(root, &["add", "README.md"]);
+        let before = std::fs::read(root.join(".git/index")).unwrap();
+
+        ensure_project_remote(root, "crab://bucket/history").unwrap();
+
+        let config = crate::core::config::Config::resolve_for_repo(root).unwrap();
+        assert_eq!(config.remote_url.as_deref(), Some("crab://bucket/history"));
+        assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), before);
+        assert!(!root.join(".crab/local.toml").exists());
+    }
+
+    #[test]
+    fn clone_project_remote_preserves_existing_policy_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let original = "# Team policy\nversion = 1\n[remote]\nurl = \"crab://primary/team\"\n[hydrate]\ndefault = \"eager\"\n";
+        let path = root.join("crab.toml");
+        std::fs::write(&path, original).unwrap();
+
+        ensure_project_remote(root, "crab://clone-location/other").unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn clone_project_remote_rejects_invalid_files_without_replacing_them() {
+        for content in [
+            "[",
+            "version = 99\n[remote]\nurl = \"crab://bucket/repo\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("crab.toml");
+            std::fs::write(&path, content).unwrap();
+
+            assert!(ensure_project_remote(dir.path(), "crab://bucket/history").is_err());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn clone_project_remote_does_not_inherit_an_enclosing_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://parent/unrelated\"\n",
+        )
+        .unwrap();
+        let target = dir.path().join("clone");
+        std::fs::create_dir(&target).unwrap();
+
+        ensure_project_remote(&target, "crab://bucket/history").unwrap();
+
+        let config =
+            crate::core::project_config::ProjectConfig::load(&target.join("crab.toml")).unwrap();
+        assert_eq!(config.remote.url, "crab://bucket/history");
+    }
+
+    #[test]
+    fn clone_project_remote_ignores_parent_policy_before_checkout() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://parent/unrelated\"\n[hydrate]\ndefault = \"eager\"\n",
+        )
+        .unwrap();
+        let target = dir.path().join("clone");
+        std::fs::create_dir(&target).unwrap();
+        git_in(&target, &["init"]);
+
+        assert!(project_config_for_checkout(&target).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clone_project_remote_rejects_a_dangling_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crab.toml");
+        let absent = dir.path().join("absent.toml");
+        std::os::unix::fs::symlink(&absent, &path).unwrap();
+
+        assert!(ensure_project_remote(dir.path(), "crab://bucket/history").is_err());
+        assert_eq!(std::fs::read_link(path).unwrap(), absent);
+        assert!(!absent.exists());
     }
 
     #[tokio::test]

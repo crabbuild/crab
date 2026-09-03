@@ -3295,6 +3295,93 @@ before changing ownership. Both historical payloads must hydrate to their
 original bytes before restarting the long replay. No history substitution,
 success-marker relaxation or source-checkout edits.
 
+### Restore clone's canonical remote context: 2026-09-03 UTC
+
+**Context and observed failure.** A historical revision can contain Crab
+pointers without `crab.toml`. Clone's checkout child receives a temporary
+remote override, but later hydrate does not. The `82bfebc` historical probe
+passed push, clone and Git fsck, then failed normal hydration. A separate
+diagnostic with only the existing clone-time override reconstructed
+581,598,168 bytes, matching original SHA-256
+`94102d4fe056bf3a4fde375d693aae96a429157dad0345af9853d7157d6bd5bd`.
+The failed report remains failed; `remote-selection-diagnostic.md` records
+the manual follow-up. The clone implementation is unchanged between that
+candidate and `123884c`, and tagged `v1.0.1` documents clone as replacing the
+manual clone/init/hydrate sequence. This is a missing initialization step,
+not evidence that the uploaded historical bytes disappeared.
+
+**Design.** Keep `crab.toml` as the existing project remote authority. After
+checkout, before optional hydration, create a minimal file from the explicit
+resolved clone URL only if the root project file is absent. Existing policy
+is parsed but remains byte-identical; no replacement on parse failure. The
+new file is deliberately untracked: no index edits or automatic commit.
+Use the existing project serializer and a same-directory temporary file,
+synchronize its contents, then persist without overwriting a raced-in file.
+Preserve underlying persistence errors. No new config key, local remote file,
+Git-remote guessing chain, dependency, persistent schema or environment knob.
+Before checkout, policy comes only from the cloned revision. Remove the
+ancestor-search fallback that could inherit an unrelated enclosing project's
+eager hydration policy. Its new isolation regression failed before removal.
+
+**Executable acceptance.**
+
+1. Cloning a revision without project config followed by a separate ordinary
+   hydrate command reconstructs exact original bytes without remote overrides.
+   Include both historical Kubernetes payloads, cold clones, ref comparisons
+   and strict Git fsck before restarting the 1,000-commit replay.
+2. Existing project policy is byte-identical, including when it declares a
+   primary distinct from the clone location. Invalid version/TOML and dangling
+   symlinks fail without replacing the file or writing its target.
+3. An enclosing repository's policy is not selected before checkout or when
+   creating the new file.
+   The new project URL resolves through ordinary configuration; the Git index
+   remains byte-identical. Ordinary Git/local-path clones remain untouched.
+4. Qualify lazy-plus-explicit-hydrate, eager clone and selective clone with
+   real storage. Preserve committed-config behavior and managed canonical
+   identity; never persist resolved placement or credentials. Existing
+   unconfigured checkouts still use `crab configure <REMOTE>`.
+5. Run exact-binary native-Git/mirror and LFS regressions; retain candidate
+   identity and cross-OS execution. New project-remote unit cases are selected
+   explicitly by the existing Linux/macOS/Windows protocol workflow.
+
+**Source checkpoint.** All sixteen focused clone/configuration tests pass,
+including six new cases. The pre-checkout ancestor-policy regression failed
+before the fallback was removed and passes after removal.
+The larger clone/configuration selection is **41 passed, 1 failed**, not
+green: `clone_shard_sync_uses_selected_replica_store` builds two manifests
+without their canonical layout descriptors. That unchanged fixture fails
+at snapshot admission before its replica assertions; the stricter requirement
+originated earlier in this PR. Approval to initialize valid fixture layouts,
+with assertions and product validation unchanged, is pending alongside the
+existing history-recovery fixture request. No test or expected-failure gate
+was removed or weakened. Candidate build/live proof and final checks remain
+required. The approximately 30 net production lines establish missing durable configuration
+at clone's ownership boundary; they do not add another read-resolution path.
+
+**Sibling work remains.** Explicit hydrate and eager/selective clone already
+have real `ShardHydrator` composition once configuration exists. Pull and
+always-profile hydration still call `run_hydrate`, whose default SmudgeSession
+has no cloud dependencies; profile also resolves configuration from process
+cwd instead of its target root. Consolidate those callers into the canonical
+hydration owner with explicit roots, cancellation, restore policy and
+fail-closed remote selection. Preserve unpublished local-staging hydration
+and verify managed/replica behavior. This initialization change alone does not
+certify those paths or native Git clone without Crab setup.
+
+**Dependency contract.** [`tempfile` 3.27.0 `persist_noclobber`](https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist_noclobber)
+never replaces an existing target and preserves the underlying failure. Its
+cross-platform contract can leave an extra temporary hard link after a crash;
+do not claim universal atomic cleanup or directory durability from it.
+
+**Prior packet, not this candidate.** `123884c` passed 116 focused LFS tests,
+optimized build, standalone bulk-upload RustFS (35 commands, 8 checks), bulk
+fetch (57 commands, 27 checks) and native Git/mirror (464 commands, 133 checks).
+Binary SHA-256 remained
+`807126c9c84c1188423b1a1a951468936ecfa6d0ec2aab82d243b3df5ad99db5`.
+Protocol CI 33749651295 was still running at this checkpoint; predecessor
+33747451500 was superseded with eight jobs passed and Windows cancelled.
+Neither narrow local proof nor a cancelled workflow closes the full matrix.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

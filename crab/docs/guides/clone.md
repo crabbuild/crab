@@ -41,7 +41,7 @@ complete Git packs while deferring Crab-managed payload bytes.
 ## How It Works
 
 1. Runs `git clone` with the crab filter driver injected via `--config` flags.
-2. Creates the `.crab/` configuration directory and writes the remote URL.
+2. Creates the `.crab/` directory for local checkout settings.
 3. Registers the filter and diff drivers in the cloned repo's local git config.
 4. If `--lazy` (default), configures lazy checkout so files remain as pointers.
 5. If `--include` patterns are provided, runs selective hydration on matching
@@ -51,6 +51,19 @@ complete Git packs while deferring Crab-managed payload bytes.
 For lazy clones, `git clone --no-checkout` is used first, then lazy mode is
 configured, and finally `git checkout HEAD` populates the working tree with
 pointer stubs.
+
+After checkout, an existing `crab.toml` remains authoritative and byte-identical.
+If the selected revision has none, Crab creates a minimal `crab.toml` with the
+explicit clone URL before post-clone hydration. This makes later `crab hydrate`
+and configured LFS reads resolve the same storage location without a temporary
+environment override. The new file is not staged or committed automatically;
+review it before adding it to the project. No endpoint credentials or resolved
+managed placement are stored in it.
+
+A malformed existing project file is an error, not permission to replace its
+policy. Ordinary Git URLs and local Git paths still delegate to Git without
+creating Crab configuration. This initialization is specific to `crab clone`;
+an existing unconfigured checkout needs `crab configure <REMOTE>`.
 
 ## Examples
 
