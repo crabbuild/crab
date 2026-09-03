@@ -3523,10 +3523,30 @@ and global-prefix isolation; three scopes storing different shard hashes for
 the same file hash without cross-reads; round-trip pointer construction; and a
 missing-root read that creates nothing. The focused seven-test shard-hint suite,
 whole Crab package check, formatting, and strict `crab-cache` Clippy pass on
-macOS. Installed RustFS add/commit/push/hydrate/clone qualification is still
-required before claiming this slice complete. Linux native-process proof is a
-CI gate; Windows continues to take advisory misses because the Phase 4 private
-SQLite owner is not implemented there.
+macOS.
+
+Installed RustFS qualification uses source commit `abc2161a4d58f381beef0b51ba4a933fe1ea5e97`,
+Make-installed `crab 1.0.1`, and CLI SHA-256
+`d29c40b4125f16ced879efb83915d8338287be92b70337f51851935c823ba193`
+against dedicated bucket `crabbuild-cache-hints-2p6cq7-v1`. A private `0700`
+cache root produces a `0600` schema-version-1 database and generation owner.
+The first add/commit/push stores one scoped row; a second `crab add` of identical
+content loads that row and emits a pointer whose `shard-hint` bytes exactly
+match it. The installed hydrate consumer resolves those bytes to authoritative
+shard `1e2c54367c8035c981c742361f9094bd7352a0cb19260a76fcc6de1b3dd867e5`,
+records a hint hit, and reconstructs the file. A lazy clone followed by hinted
+and unhinted hydration produces four identical 1 MiB files with SHA-256
+`ba9df3440b4db8ddadb2c8c8ffab237f8ec03e1458362e8a1be3825c708a86a9`.
+
+The maintained RustFS product smoke also passes all **1,192 checks / 89
+commands**, including add/commit/push/dedup, clone/hydrate, restart, and recovery,
+but its client cache roots are pre-created as `0755`. The private filesystem
+correctly rejects shard-hint persistence there, and advisory fallback preserves
+correctness. That report is broad non-regression evidence, not shard-hint
+feature evidence. The harness must create `0700` roots and assert database
+presence before a future run can cover this feature. Linux native-process proof
+is a CI gate; Windows continues to take advisory misses because the Phase 4
+private SQLite owner is not implemented there.
 
 This completes the transactional and scope-isolation behavior in Phase 5 work
 item 5. It does not complete Phase 5: all-family verify/repair, hint-database
