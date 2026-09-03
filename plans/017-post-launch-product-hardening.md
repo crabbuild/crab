@@ -5264,10 +5264,10 @@ timeout or suppressing one LFS diagnostic does not prevent request loss.
       the error within five seconds afterward, and then serves a bodyless
       delayed-blob query and another file on the same connection. Cover early
       clean failure with unread packets and late smudge failure.
-- [ ] Exact-source release RustFS qualification passes eager/lazy/selected
+- [x] Exact-source release RustFS qualification passes eager/lazy/selected
       clone bytes, strict JSON and Git integrity. Scoped denied LFS reads fail
       within ten seconds, independently of the unchanged 60-second idle guard.
-- [ ] Native protocol, partial/shallow operations, mirror reconciliation and
+- [x] Native protocol, partial/shallow operations, mirror reconciliation and
       tagged rollback remain passing against that release binary.
 
 Run the existing cold-LFS and protocol-v2 RustFS drivers with unique run IDs,
@@ -5279,7 +5279,25 @@ performance comparison. Preserve the earlier slow/failed reports.
 Local proof: 45 filter tests and 54 clean tests pass, including the open-socket
 exchange and injected partial-read panic. `cargo fmt --all` and diff whitespace
 checks pass. Production code shrinks by 19 lines; added tests exercise protocol
-behavior, not an alternate implementation. Release evidence remains pending.
+behavior, not an alternate implementation.
+
+**Release evidence.** Source `48c201a` builds successfully. Binary SHA-256:
+`80815b41e03aa059f27bf3361275c4217fc15553f1acbed980f72d6972af0222`.
+`phase2-filter-framing-48c201a-20260903/artifacts/report.json` passes 30
+commands/23 checks. The denied-read clone exits unsuccessfully with exactly
+one error JSON envelope in 549 ms, below the ten-second bound; eager, lazy and
+selected checkout retain exact Crab/LFS bytes and pass Git integrity checks.
+`phase2-protocol-mirror-framing-48c201a-20260903/artifacts/report.json`
+passes 481 commands/139 checks, including native refs, partial/shallow reads,
+mixed hooks, mirror plan/apply/replay and tagged v1.0.1 rollback. Combined:
+511 commands/162 checks. The prior slow report remains unchanged.
+
+Both reports bind the binary to `48c201a` and explicitly record a dirty source
+checkout. The only uncommitted files were the separate GC incarnation test
+inside `#[cfg(test)]` and the two user-owned generated web files; none changes
+release Rust behavior. They remain uncommitted. This is local macOS/RustFS
+functional proof, not a new Kubernetes lifecycle, a clean-checkout release
+qualification, a cross-provider matrix or a controlled performance claim.
 
 **Scope limits.** This change owns input framing, not output-response phase
 tracking: a file/output error after success/content has started still needs
