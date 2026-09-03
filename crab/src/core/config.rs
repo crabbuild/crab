@@ -619,23 +619,16 @@ pub(crate) const CACHE_SERVICE_URL_ENV: &str = "CRAB_CACHE_SERVICE_URL";
 
 /// Client-side cache service configuration from the `[cache]` TOML section.
 ///
-/// The `chunk_cache_bytes` size limit lives at the top-level config
-/// ([`Config::chunk_cache_bytes`]) — that field is reused by the
-/// xet-core `DiskCache` integration so users who already set it keep a
-/// single ceiling across both the legacy [`crate::cache::ChunkCache`]
-/// and the xet-core cache. Only the directory is a new per-section key.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Product-wide byte budget for disposable local cache state.
+    pub max_bytes: u64,
     /// Cache service URL (e.g., `"https://crab-cache.internal:8443"`).
     pub service_url: Option<String>,
     /// Service mode: cache, dedup, or both.
     pub service_mode: ServiceMode,
     /// Warm cache on push.
     pub push_warming: bool,
-    /// Directory for xet-core's xorb-range `DiskCache`. `None` resolves
-    /// at runtime to `{default_cache_root}/chunks/`. Setting this to a
-    /// custom path lets operators pin the cache to a dedicated volume.
-    pub chunk_cache_dir: Option<PathBuf>,
     /// Authentication mode for the cache service.
     pub service_auth: ServiceAuth,
     /// Path to a PEM CA bundle for connecting to cache services using
@@ -650,10 +643,10 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            max_bytes: DEFAULT_CACHE_BYTES,
             service_url: None,
             service_mode: ServiceMode::CacheAndDedup,
             push_warming: true,
-            chunk_cache_dir: None,
             service_auth: ServiceAuth::None,
             service_ca_cert: None,
             service_client_cert: None,
@@ -665,6 +658,7 @@ impl Default for CacheConfig {
 impl From<&CacheConfig> for crab_cache_store::CacheConfig {
     fn from(config: &CacheConfig) -> Self {
         Self {
+            max_bytes: config.max_bytes,
             service_url: config.service_url.clone(),
             service_mode: config.service_mode,
             push_warming: config.push_warming,
@@ -913,7 +907,7 @@ const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_RETRIES: u32 = 5;
 
 /// Default chunk cache size: 256 MiB.
-const DEFAULT_CHUNK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Default maximum size of each pack generated on push: 2 GiB.
 ///
@@ -1045,12 +1039,6 @@ pub struct Config {
     pub operation_timeout: Duration,
     /// Maximum retries for transient failures.
     pub max_retries: u32,
-
-    // -- Cache settings --
-    /// Maximum bytes for the local chunk cache.
-    pub chunk_cache_bytes: u64,
-    /// Maximum bytes for the local shard cache (`None` = unbounded).
-    pub shard_cache_bytes: Option<u64>,
 
     // -- Shard settings --
     /// Memory ceiling for the in-memory ChunkIndex HashMap (bytes).
@@ -1273,8 +1261,6 @@ impl Default for Config {
             download_concurrency: DEFAULT_DOWNLOAD_CONCURRENCY,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
             max_retries: DEFAULT_MAX_RETRIES,
-            chunk_cache_bytes: DEFAULT_CHUNK_CACHE_BYTES,
-            shard_cache_bytes: None,
             shard_chunk_index_table_max_size: DEFAULT_SHARD_CHUNK_INDEX_TABLE_MAX_SIZE,
             gc_grace_period: DEFAULT_GC_GRACE_PERIOD,
             gc_delete_concurrency: DEFAULT_GC_DELETE_CONCURRENCY,
@@ -1425,9 +1411,6 @@ pub struct ConfigOverlay {
     pub download_concurrency: Option<usize>,
     pub operation_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
-
-    pub chunk_cache_bytes: Option<u64>,
-    pub shard_cache_bytes: Option<u64>,
 
     pub gc_grace_period_secs: Option<u64>,
     pub gc_delete_concurrency: Option<usize>,
@@ -1672,12 +1655,10 @@ pub struct RemoteOverlay {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheOverlay {
+    pub max_bytes: Option<u64>,
     pub service_url: Option<String>,
     pub service_mode: Option<String>,
     pub push_warming: Option<bool>,
-    /// Directory for the xet-core `DiskCache`. Accepts a path string;
-    /// `None` or absent keeps the default (`~/.cache/crab/chunks/`).
-    pub chunk_cache_dir: Option<String>,
     /// Authentication mode: `"psk"`, `"bearer"`, `"mtls"`, or `"none"`.
     pub service_auth: Option<String>,
     /// Pre-shared key value (used when `service_auth = "psk"`).
@@ -2092,12 +2073,6 @@ impl Config {
         if let Some(v) = overlay.max_retries {
             self.max_retries = v;
         }
-        if let Some(v) = overlay.chunk_cache_bytes {
-            self.chunk_cache_bytes = v;
-        }
-        if let Some(v) = overlay.shard_cache_bytes {
-            self.shard_cache_bytes = Some(v);
-        }
         if let Some(v) = overlay.gc_grace_period_secs {
             self.gc_grace_period = Duration::from_secs(v);
         }
@@ -2390,6 +2365,9 @@ impl Config {
     }
 
     fn apply_cache_overlay(&mut self, overlay: CacheOverlay) {
+        if let Some(max_bytes) = overlay.max_bytes {
+            self.cache.max_bytes = max_bytes;
+        }
         if let Some(url) = overlay.service_url {
             self.cache.service_url = Some(url);
         }
@@ -2400,9 +2378,6 @@ impl Config {
         }
         if let Some(pw) = overlay.push_warming {
             self.cache.push_warming = pw;
-        }
-        if let Some(dir) = overlay.chunk_cache_dir {
-            self.cache.chunk_cache_dir = Some(PathBuf::from(dir));
         }
         if let Some(ca) = overlay.service_ca_cert {
             self.cache.service_ca_cert = Some(PathBuf::from(ca));
@@ -2650,17 +2625,9 @@ impl Config {
         }
     }
 
-    /// Resolve the effective directory for xet-core's chunk `DiskCache`.
-    ///
-    /// Uses [`CacheConfig::chunk_cache_dir`] when set, otherwise falls
-    /// back to `{default_cache_root}/chunks/`. Called by the hydrate,
-    /// smudge, and prefetch paths so every consumer of the xet-core
-    /// cache agrees on the directory.
+    /// Resolve the decoded-range family beneath the single cache root.
     #[must_use]
     pub fn effective_chunk_cache_dir(&self) -> PathBuf {
-        if let Some(ref dir) = self.cache.chunk_cache_dir {
-            return dir.clone();
-        }
         crate::cache::default_cache_root().join("chunks")
     }
 
@@ -2990,8 +2957,7 @@ mod tests {
         assert_eq!(cfg.download_concurrency, 8);
         assert_eq!(cfg.operation_timeout, Duration::from_secs(300));
         assert_eq!(cfg.max_retries, 5);
-        assert_eq!(cfg.chunk_cache_bytes, 256 * 1024 * 1024);
-        assert!(cfg.shard_cache_bytes.is_none());
+        assert_eq!(cfg.cache.max_bytes, 10 * 1024 * 1024 * 1024);
         assert_eq!(cfg.shard_chunk_index_table_max_size, 64 * 1024 * 1024);
         assert_eq!(cfg.gc_grace_period, Duration::from_secs(24 * 60 * 60));
         assert_eq!(cfg.gc_delete_concurrency, 64);
@@ -3787,27 +3753,37 @@ storage_provider = "gcs"
     }
 
     #[test]
-    fn overlay_cache_chunk_cache_dir_sets_path() {
+    fn overlay_cache_max_bytes_sets_product_budget() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
-        std::fs::write(&p, "[cache]\nchunk_cache_dir = \"/var/tmp/crab-chunks\"\n").unwrap();
+        std::fs::write(&p, "[cache]\nmax_bytes = 536870912\n").unwrap();
 
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
-            .expect("should parse cache.chunk_cache_dir");
-        assert_eq!(
-            cfg.cache.chunk_cache_dir.as_deref(),
-            Some(Path::new("/var/tmp/crab-chunks"))
-        );
-        assert_eq!(
-            cfg.effective_chunk_cache_dir(),
-            PathBuf::from("/var/tmp/crab-chunks")
-        );
+            .expect("should parse cache.max_bytes");
+        assert_eq!(cfg.cache.max_bytes, 536_870_912);
+    }
+
+    #[test]
+    fn overlay_cache_rejects_retired_and_unknown_settings() {
+        for input in [
+            "chunk_cache_bytes = 1024\n",
+            "shard_cache_bytes = 1024\n",
+            "[cache]\nchunk_cache_dir = 'ranges'\n",
+            "[cache]\nmax_size = 1024\n",
+            "[cache]\nmax_byte = 1024\n",
+        ] {
+            let error = toml::from_str::<ConfigOverlay>(input)
+                .expect_err("cache policy must not accept ineffective settings");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{input}: {error}"
+            );
+        }
     }
 
     #[test]
     fn effective_chunk_cache_dir_defaults_to_cache_root_chunks() {
         let cfg = Config::default();
-        assert!(cfg.cache.chunk_cache_dir.is_none());
         let dir = cfg.effective_chunk_cache_dir();
         assert!(
             dir.ends_with("chunks"),

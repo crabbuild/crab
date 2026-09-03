@@ -27,6 +27,12 @@ downloads from cloud storage.
 
 For conceptual background, see [Local Cache](/docs/cli/storage/local-cache).
 
+Clean, verify, and [`crab prune`](/docs/cli/reference/crab-prune) reject a cache
+root that resolves to the filesystem root, home directory, current directory,
+or an ancestor of the current directory. The corresponding `crab optimize cache`
+commands use the same safeguard. Missing cache roots are left missing; private
+payload I/O independently rejects symlinked or non-private roots.
+
 ## Subcommands
 
 ### stats
@@ -42,36 +48,31 @@ crab cache stats
 
 ### clean
 
-Remove cached data to free disk space.
+Remove recognized private cached payloads to free disk space.
 
 ```bash
 crab cache clean
 ```
 
-Cleanup checks all configured cache roots before removing data. An active
-mirror using an overlapping cache causes a nonzero, retryable refusal without
-deletion from any configured root. New mirror operations also refuse to start
-while cleanup owns the cache. Wait for the active operation and retry; do not
-delete its lock files.
-
-Cleanup retains `.crab-cache-use.lock` and `.crab-cache-clean.lock` markers
-and the directories needed to contain them. Reported file and byte counts
-exclude these markers. An idle mirror cache can be removed or emptied; the
-next mirror invocation rebuilds it, including when only nested coordination
-markers remain. Cloud objects and repository refs are not
-deleted. This coordination covers mirror directory owners, not arbitrary
-external programs or every concurrent cache fill. Cancellation or an I/O
-error during deletion stops further work but does not restore removed cache
-data.
+Unknown files/subtrees, live workspaces, mirror repositories, retained profiles,
+databases and side files, and unpublished temporaries are preserved. Active
+readers and concurrent publishers are skipped. The command reports actual
+removals plus retained, busy, and unsafe entry counts; retained subtrees count
+once without inspecting their contents. Empty directories remain.
 
 The current cache subcommands do not add command-specific selection flags;
 use `crab cache <command> --help` for global logging options.
 
 ### verify
 
-Validate content-addressed chunks, shards, and xorbs plus xet range filenames,
-lengths, offset headers, and CRCs, then evict corrupt entries. Range entries are
-verified as they are scanned. I/O failures fail the command.
+Validate content-addressed chunks and shards, xorb payload digests and decoded
+chunks, and range lengths, offset headers, CRCs, and applicable chunk identities.
+Verification streams recognized private entries and holds locks through each
+check and removal. Unknown files and busy entries are retained and excluded
+from checked totals. Operational I/O failures fail the command, rather than
+authorizing deletion. SQLite/root ownership and full reservation protection
+remain hardening work. Neither
+`crab cache clean` nor `crab optimize cache clean` currently exposes a dry-run flag.
 
 ## Remote Cache Service
 
@@ -84,7 +85,7 @@ The `crab cache` command manages your **local** disk cache — a per-machine sto
 | **Scope** | Single machine | Entire team / org |
 | **Storage** | Your local disk (`~/.cache/crab/`) | Dedicated server with NVMe |
 | **Population** | Filled on fetch/hydrate | Filled on fetch + push warming |
-| **Eviction** | LRU when over `max_size` | Background evictor with high/low watermarks |
+| **Eviction** | Range-cache write eviction plus explicit `crab prune` | Background evictor with high/low watermarks |
 | **Setup** | Zero config (automatic) | Requires server deployment |
 
 When both are configured, Crab checks the local cache first. On a local miss, it queries the remote cache service before falling back to cloud storage. This means the first developer to fetch a file warms the remote cache, and every subsequent fetch across the team is served at network-local speed.

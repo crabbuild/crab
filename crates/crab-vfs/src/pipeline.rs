@@ -376,7 +376,6 @@ impl MountPipelineBuilder {
             Arc::clone(c)
         } else {
             let cache_dir = self.config.cache_dir.join("chunks");
-            std::fs::create_dir_all(&cache_dir)?;
             Arc::new(ChunkCache::open(cache_dir, None)?)
         };
 
@@ -755,6 +754,52 @@ impl crate::data_plane::XorbFetcher for StubXorbFetcher {
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hydration_startup_bypasses_chunk_storage_without_touching_live_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("mount");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("chunks"), b"unavailable cache").unwrap();
+        std::fs::write(state.join("overlay-sentinel"), b"live state").unwrap();
+        let content = bytes::Bytes::from_static(b"actual remotely reconstructed bytes");
+        let stored = crate::test_support::StoredPointer::new(
+            &tmp.path().join("shared-cache"),
+            content.clone(),
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let builder = MountPipelineBuilder::new(PipelineConfig {
+            source: "crab://bucket/vfs-read-test".into(),
+            git_dir: tmp.path().join("git"),
+            ref_name: None,
+            read_only: false,
+            cache_dir: state.clone(),
+            cancel_token: cancel.clone(),
+        })
+        .with_read_context(stored.context.clone());
+        let (service, workers) = builder.step_start_hydration().unwrap();
+        assert_eq!(
+            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            content
+        );
+        assert_eq!(stored.xorb_body_requests(), 1);
+        cancel.cancel();
+        for worker in workers {
+            tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            std::fs::read(state.join("chunks")).unwrap(),
+            b"unavailable cache"
+        );
+        assert_eq!(
+            std::fs::read(state.join("overlay-sentinel")).unwrap(),
+            b"live state"
+        );
+    }
 
     #[test]
     fn resolve_head_symbolic_ref() {

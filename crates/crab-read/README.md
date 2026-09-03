@@ -40,8 +40,37 @@ object.
 `ShardHydrator` provides memory, file, and half-open byte-range reconstruction.
 Before full-file reconstruction it checks that the pointer's shard terms are
 covered; after reconstruction it verifies the requested file hash. A shared
-adaptive concurrency controller and optional Xet chunk cache keep parallel
-reads bounded.
+adaptive concurrency controller limits parallel downloads. In-memory outputs
+use checked, fallible reservation and cannot grow beyond the declared size;
+short or overlong results fail. This is not configured memory admission:
+large representable outputs, caller-retained results, and transient decode
+still need resource bounds. Cache capacity is not a whole-read memory bound.
+`ReadRuntimeBuilder` attaches
+the decoded-range cache using the object cache's
+resolved root and budget. Callers cannot accidentally omit range reuse;
+unavailable or unsafe cache storage degrades to verified origin reads.
+
+Reconstruction success waits for that operation's decoded-range cache-write
+attempts. Xet 1.6.0 starts those writes in detached tasks; an operation-local
+cache owner tracks even tasks not yet polled, so immediate runtime shutdown
+does not discard a healthy admitted fill after successful prefetch. Cache
+write errors remain best-effort and cannot replace valid origin output.
+Cancellation/drop stops pending write attempts. This is not a persistence
+promise when caching is unavailable, over budget, or concurrently evicted,
+nor an aggregate filesystem-latency bound.
+
+`ReadError::Reconstruction` retains the typed failure returned by Xet. Its
+source wrapper exposes the nested client/writer errors that Xet 1.6 keeps
+behind `Arc` without `Error::source` annotations. The store adapter passes
+typed errors into Xet instead of formatting them; consumers can walk the
+standard source chain to distinguish origin integrity, availability hooks,
+and writer I/O. Caller-token and source-reported cancellation return
+`ReadError::Cancelled`. Runtime initialization errors also retain their source.
+
+CLI/server adapters own user-facing classification. They must preserve this
+chain; converting only its display text loses recovery information. The CLI
+atomic-output adapter, not the shared writer API, owns publishing verified
+temporary files and leaving an existing destination untouched on failure.
 
 ## Usage
 
@@ -52,7 +81,7 @@ one hydrator for a read session:
 use crab_auth::CloudCredentials;
 use crab_auth_store::build_store_from_credentials;
 use crab_cache_store::{CacheConfig, CachingStore};
-use crab_read::{ReadStoreLayout, ShardHydrator};
+use crab_read::{ReadRuntimeBuilder, ReadStoreLayout};
 use crab_types::storage::StorageProviderKind;
 
 # async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
@@ -64,7 +93,7 @@ let origin = build_store_from_credentials(
 )?;
 let cached = CachingStore::new(origin.clone(), CacheConfig::default())?;
 let layout = ReadStoreLayout::new(origin, "repositories/team/project".to_owned());
-let hydrator = ShardHydrator::new(cached, layout, 16)?;
+let hydrator = ReadRuntimeBuilder::new(cached, layout, 16).build()?;
 let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
 # let _ = bytes;
 # Ok(())
@@ -74,6 +103,18 @@ let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
 Use `reconstruct_range_from_pointer` for partial reads and
 `reconstruct_to_path` for large files. The pointer and metadata remain the
 source of truth; caches only change where immutable bytes are fetched from.
+Use `reconstruct_to_writer` with a sink for verification or cache warming that
+does not need to retain the file. Success verifies actual whole-file hash and
+size, but a writer can receive bytes before final verification; consumers must
+keep output private until success. Streaming the output does not by itself
+bound decoding, downstream retention, or total process memory.
+
+Dropping reconstruction signals child cancellation and closes its owned
+buffer/destination even if upstream writer handles remain. This is not a join
+of all background work or a latency guarantee for an arbitrary blocking writer.
+Size violations are integrity errors; other source failures are preserved
+rather than relabeled as short output. Partial-range success checks the exact
+clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 
 ## Boundaries
 

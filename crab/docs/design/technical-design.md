@@ -1286,9 +1286,9 @@ Stale cache is possible if an object was deleted on S3 (by GC or another user). 
 ### 11.4 Cache Lifecycle Commands
 
 ```
-crab cache stats        # show size, hit rate, file counts
+crab cache stats        # show reported size and file counts
 crab cache prune        # evict to target size
-crab cache clean        # nuke cache; safe, just slow on next op
+crab cache clean        # remove eligible payloads; retain live/unknown state
 crab cache verify       # check content hashes against file names
 ```
 
@@ -1657,7 +1657,7 @@ crab fsck --repair                 Attempt auto-repair
 crab repack [<url>]                Consolidate packs
 crab cache stats                   Local cache statistics
 crab cache prune                   Evict to target size
-crab cache clean                   Wipe local cache
+crab cache clean                   Remove eligible local cache payloads
 crab migrate --from lfs <url>      Migrate from git-lfs to crab
 crab bench <file>                  Benchmark CDC chunking on a file
 crab version                       Version info

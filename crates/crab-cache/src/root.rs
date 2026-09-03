@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+#[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
+use crate::Result;
+
 /// Return the default Crab cache root directory.
 ///
 /// Respects `CRAB_CACHE_DIR` when set, otherwise falls back to
@@ -18,10 +21,25 @@ pub fn default_cache_root() -> PathBuf {
     )
 }
 
+/// Create or validate a private, non-symlinked cache directory.
+#[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
+pub fn ensure_private_cache_directory(path: &std::path::Path) -> Result<()> {
+    crate::private_fs::ensure_directory(path)
+}
+
+/// Return whether an existing root is safe to consume as private cache state.
+#[must_use]
+#[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
+pub fn private_cache_directory_is_safe(path: &std::path::Path) -> bool {
+    crate::private_fs::directory_is_safe(path)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
+    #[cfg(all(unix, any(feature = "local-cache", feature = "xet-chunk-cache")))]
+    use crate::CacheError;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -92,5 +110,43 @@ mod tests {
             |h| PathBuf::from(h).join(".cache/crab"),
         );
         assert_eq!(default_cache_root(), expected);
+    }
+
+    #[cfg(all(unix, any(feature = "local-cache", feature = "xet-chunk-cache")))]
+    #[test]
+    fn creates_private_directory_and_rejects_unsafe_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache").join("nested");
+
+        ensure_private_cache_directory(&root).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            ensure_private_cache_directory(&root),
+            Err(CacheError::UnsafeRoot { .. })
+        ));
+    }
+
+    #[cfg(all(unix, any(feature = "local-cache", feature = "xet-chunk-cache")))]
+    #[test]
+    fn rejects_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("cache");
+        symlink(&real, &link).unwrap();
+
+        assert!(matches!(
+            ensure_private_cache_directory(&link),
+            Err(CacheError::UnsafeRoot { .. })
+        ));
     }
 }

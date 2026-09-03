@@ -1,5 +1,10 @@
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+mod read;
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+pub(crate) use read::StoredPointer;
+
 pub static GIT_DIR_MUTEX: Mutex<()> = Mutex::new(());
 
 pub struct CleanGitEnvGuard {

@@ -318,18 +318,9 @@ fn source_hydrator(store: Store, source_repo: &str, temp_dir: &Path) -> Result<S
     let cache = Arc::new(crab_cache::LocalCache::new(temp_dir.join("hydrate-cache")));
     let caching = CachingStore::new_with_local_cache(store.clone(), CacheConfig::default(), cache)?;
     let router = StoreLayout::new(store, source_repo.to_owned());
-    ShardHydrator::new(caching, router, 16).map_err(read_error)
-}
-
-fn read_error(error: crab_read::ReadError) -> AuthServerError {
-    match error {
-        crab_read::ReadError::Io(source) => AuthServerError::Io(source),
-        crab_read::ReadError::NotFound { path } => AuthServerError::NotFound { path },
-        crab_read::ReadError::HashMismatch { requested, actual } => {
-            AuthServerError::HashMismatch { requested, actual }
-        }
-        other => AuthServerError::Internal(other.to_string()),
-    }
+    crab_read::ReadRuntimeBuilder::new(caching, router, 16)
+        .build()
+        .map_err(AuthServerError::from)
 }
 
 async fn verify_existing_view(
@@ -874,7 +865,7 @@ mod tests {
         let view_prefix = "org/repo/acl-views/v1/scope/1-deadbeef";
         let temp = tempfile::tempdir().unwrap();
 
-        let content = b"allowed source content".to_vec();
+        let content = b"allowed source content".repeat(65_537);
         let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
         let mut chunker = GearChunker::new();
         let mut chunks = chunker.feed(&content);
@@ -1160,8 +1151,23 @@ mod tests {
                 .await
                 .is_ok()
         );
-        verify_crab_pointers_backed_by_view(&store, view_prefix, &[pointer])
+        verify_crab_pointers_backed_by_view(&store, view_prefix, std::slice::from_ref(&pointer))
             .await
             .unwrap();
+        let cache = Arc::new(crab_cache::LocalCache::new(
+            temp.path().join("view-read-cache"),
+        ));
+        let caching =
+            CachingStore::new_with_local_cache(store, CacheConfig::default(), cache).unwrap();
+        let reader = crab_read::ReadRuntimeBuilder::new(caching, view_router, 2)
+            .build()
+            .unwrap();
+        assert_eq!(
+            reader
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await
+                .unwrap(),
+            content
+        );
     }
 }

@@ -1329,6 +1329,16 @@ impl Metrics {
     }
 }
 
+impl crab_read::ReadMetrics for Metrics {
+    fn shard_hint_hit(&self) {
+        self.inc_shard_hint_hits();
+    }
+
+    fn shard_hint_miss(&self) {
+        self.inc_shard_hint_misses();
+    }
+}
+
 impl crab_xet::xorb::builder::CompressionMetrics for Metrics {
     fn add_chunks_compressed(&self, n: u64) {
         Self::add_chunks_compressed(self, n);

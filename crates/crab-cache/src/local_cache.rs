@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -25,13 +25,15 @@ use tracing::{debug, warn};
 
 use crate::error::{CacheError, Result};
 use crate::key::CacheKey;
-use crab_xet::hash::{HashedWrite, compute_data_hash, xorb_hash};
+use crab_xet::hash::{compute_data_hash, xorb_hash};
+#[cfg(test)]
 use crab_xet::xorb::builder::FOOTER_SIZE;
 use crab_xet::xorb::format::{ChunkMeta, ChunkPlacement, MAX_XORB_SIZE, MerkleHash};
-use crab_xet::xorb::parser::{
-    XorbParser, verify_compressed_chunk, xorb_chunks_from_metadata, xorb_hash_from_metadata,
-    xorb_metadata_region,
-};
+use crab_xet::xorb::parser::XorbParser;
+
+mod maintenance;
+mod xorb_file;
+use xorb_file::{read_xorb_file_metadata, verify_xorb_file_identity, verify_xorb_file_payload};
 
 /// Default chunk cache ceiling: 10 GiB.
 const DEFAULT_CHUNK_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -50,7 +52,6 @@ const XORB_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const XORB_INDEX_OPEN_RETRY_DELAYS_MS: [u64; 4] = [5, 20, 50, 100];
 const CACHE_FILL_LOCK_STRIPES: usize = 256;
 pub const XORB_INDEX_SCHEMA_VERSION: i64 = 1;
-const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 fn new_fill_locks() -> Box<[tokio::sync::Mutex<()>]> {
     std::iter::repeat_with(|| tokio::sync::Mutex::new(()))
@@ -171,10 +172,11 @@ pub struct CachedRemoteXorbIndex {
 
 /// Per-repo local cache with hash-verified reads and LRU eviction.
 ///
-/// All I/O is async via `tokio::fs`. Writes use atomic
-/// tempfile-then-rename to avoid partial reads.
+/// Async entry points delegate scans and file verification to cancellable
+/// blocking workers. Writes publish complete private files atomically.
 pub struct LocalCache {
     root: PathBuf,
+    catalog: crate::catalog::CacheCatalog,
     /// Shared byte ceiling for large data objects: chunk fragments and xorbs.
     chunk_max_bytes: u64,
     shard_max_bytes: Option<u64>,
@@ -187,6 +189,7 @@ impl LocalCache {
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self {
+            catalog: crate::catalog::CacheCatalog::new(root.clone(), DEFAULT_CHUNK_MAX_BYTES),
             root,
             chunk_max_bytes: DEFAULT_CHUNK_MAX_BYTES,
             shard_max_bytes: None,
@@ -201,6 +204,7 @@ impl LocalCache {
     #[must_use]
     pub fn with_limits(root: PathBuf, chunk_max: u64, shard_max: Option<u64>) -> Self {
         Self {
+            catalog: crate::catalog::CacheCatalog::new(root.clone(), chunk_max),
             root,
             chunk_max_bytes: chunk_max,
             shard_max_bytes: shard_max,
@@ -213,6 +217,12 @@ impl LocalCache {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Product byte budget shared by object and decoded-range caches.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.catalog.max_bytes()
     }
 
     /// Get a cached object, or fetch and cache it.
@@ -343,37 +353,17 @@ impl LocalCache {
         }
     }
 
-    /// Get a committed remote xorb without publishing it as an add-side candidate.
+    /// Cache a committed remote xorb without publishing an add-side candidate.
     ///
     /// Remote xorbs are already discoverable through the canonical global chunk
     /// index. Avoiding the local placement index keeps bulk reads from serializing
     /// thousands of redundant SQLite writes while retaining the full-xorb cache.
-    pub async fn get_or_fetch_read_xorb_with<F, Fut, E>(
-        &self,
-        hash: &MerkleHash,
-        fetch: F,
-    ) -> std::result::Result<Bytes, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<Bytes, E>>,
-        E: From<CacheError>,
-    {
+    pub async fn put_read_xorb(&self, hash: &MerkleHash, data: Bytes) -> Result<()> {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
-        if let Some(data) = self.try_read_xorb_bytes(&path, hash).await {
-            return Ok(data);
-        }
-
-        let _fill_guard = self.fill_lock(&path).lock().await;
-        if let Some(data) = self.try_read_xorb_bytes(&path, hash).await {
-            return Ok(data);
-        }
-
-        let data = fetch().await?;
-        enforce_size_limit(&key, &data, Some(MAX_XORB_SIZE as u64)).map_err(E::from)?;
-        verify_xorb_serialized_payload(&data, hash).map_err(E::from)?;
-        self.atomic_write(&path, &data).await.map_err(E::from)?;
-        Ok(data)
+        enforce_size_limit(&key, &data, Some(MAX_XORB_SIZE as u64))?;
+        verify_xorb_serialized_payload(&data, hash)?;
+        self.atomic_write(&path, &data).await
     }
 
     /// Read an existing complete xorb without creating a cache entry on miss.
@@ -389,7 +379,8 @@ impl LocalCache {
     pub async fn get_read_xorb_if_present(&self, hash: &MerkleHash) -> Result<Option<Bytes>> {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
-        let Some(data) = read_file_bounded_result(&path, MAX_XORB_SIZE as u64).await? else {
+        let Some(data) = read_file_bounded_result(&self.root, &path, MAX_XORB_SIZE as u64).await?
+        else {
             return Ok(None);
         };
         if let Err(error) = verify_xorb_identity(&data, hash) {
@@ -402,11 +393,21 @@ impl LocalCache {
             let _ = self.evict(&key).await;
             return Err(error);
         }
-        touch_mtime(&path).await;
+        crate::private_fs::touch(&self.root, &path).await;
         Ok(Some(data))
     }
 
     async fn try_read_key_limited(&self, key: &CacheKey, max_bytes: Option<u64>) -> Option<Bytes> {
+        if !crate::root::private_cache_directory_is_safe(&self.root) {
+            warn!(
+                family = cache_family_for_path(&self.root, &self.hash_path(key)),
+                operation = "validate-root",
+                path = %self.root.display(),
+                recovery = "disable-cache-and-use-origin",
+                "unsafe local cache root"
+            );
+            return None;
+        }
         match key {
             CacheKey::Chunk(hash) | CacheKey::Shard(hash) => {
                 self.try_read_verified_limited(&self.hash_path(key), hash, max_bytes)
@@ -419,22 +420,66 @@ impl LocalCache {
             CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
                 let data = match max_bytes {
-                    Some(max_bytes) => read_file_bounded(&path, max_bytes).await?,
-                    None => Bytes::from(tokio::fs::read(&path).await.ok()?),
+                    Some(max_bytes) => {
+                        match read_file_bounded_result(&self.root, &path, max_bytes).await {
+                            Ok(Some(data)) => data,
+                            Ok(None) => return None,
+                            Err(error) => {
+                                warn!(
+                                    family = "stage",
+                                    operation = "bounded-read",
+                                    path = %path.display(),
+                                    recovery = "evict-and-use-origin",
+                                    error = %error,
+                                    "local cache read failed"
+                                );
+                                let _ = crate::private_fs::remove_file(&self.root, &path).await;
+                                return None;
+                            }
+                        }
+                    }
+                    None => read_file_bounded_result(&self.root, &path, MAX_CACHE_STAGE_BYTES)
+                        .await
+                        .ok()??,
                 };
-                touch_mtime(&path).await;
+                crate::private_fs::touch(&self.root, &path).await;
                 Some(data)
             }
             CacheKey::Manifest { name, etag } => {
                 let want_etag = etag.as_deref()?;
-                let cached_etag = read_string_if_exists(&self.manifest_etag_path(name)).await?;
+                let cached_etag =
+                    read_string_if_exists(&self.root, &self.manifest_etag_path(name)).await?;
                 if cached_etag.trim() != want_etag {
                     return None;
                 }
                 let path = self.manifest_data_path(name);
                 let data = match max_bytes {
-                    Some(max_bytes) => read_file_bounded(&path, max_bytes).await?,
-                    None => Bytes::from(tokio::fs::read(&path).await.ok()?),
+                    Some(max_bytes) => {
+                        match read_file_bounded_result(&self.root, &path, max_bytes).await {
+                            Ok(Some(data)) => data,
+                            Ok(None) => return None,
+                            Err(error) => {
+                                warn!(
+                                    family = "manifest",
+                                    operation = "bounded-read",
+                                    path = %path.display(),
+                                    recovery = "evict-and-use-origin",
+                                    error = %error,
+                                    "local cache read failed"
+                                );
+                                let _ = crate::private_fs::remove_file(&self.root, &path).await;
+                                let _ = crate::private_fs::remove_file(
+                                    &self.root,
+                                    &self.manifest_etag_path(name),
+                                )
+                                .await;
+                                return None;
+                            }
+                        }
+                    }
+                    None => read_file_bounded_result(&self.root, &path, MAX_CACHE_MANIFEST_BYTES)
+                        .await
+                        .ok()??,
                 };
                 debug!(manifest = %name, "manifest cache hit (ETag match)");
                 Some(data)
@@ -531,30 +576,24 @@ impl LocalCache {
         source: &Path,
         expected_len: u64,
     ) -> Result<()> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        if expected_len > self.catalog.max_bytes() {
+            return Ok(());
+        }
 
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let tmp = path.with_extension(format!("tmp.{pid}.{seq}"));
-
-        let install_result = async {
-            let payload_hash = copy_xorb_temp_file_with_blake3(source, &tmp, expected_len).await?;
-            verify_xorb_file_payload(&tmp, expected_len, hash).await?;
-            tokio::fs::rename(&tmp, &path).await?;
-            self.index_cached_xorb_file_best_effort(hash, &path, expected_len, payload_hash)
-                .await;
-            Ok(())
-        }
-        .await;
-        if install_result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
-        install_result
+        let Some(reservation) = self.catalog.reserve(&path, expected_len).await? else {
+            return Ok(());
+        };
+        let temporary = reservation.pending_file().await?;
+        let mut file = temporary.file()?;
+        let payload_hash = copy_xorb_temp_file_with_blake3(source, &mut file, expected_len).await?;
+        verify_xorb_file_payload(file, &path, expected_len, hash).await?;
+        let reservation = temporary.commit().await?;
+        self.record_completed_file("xorb", &path, hash.hex(), expected_len, reservation)
+            .await;
+        self.index_cached_xorb_file_best_effort(hash, &path, expected_len, payload_hash)
+            .await;
+        Ok(())
     }
 
     /// Put an already verified xorb file into the cache without reparsing every chunk.
@@ -570,37 +609,31 @@ impl LocalCache {
         expected_len: u64,
         expected_blake3: [u8; 32],
     ) -> Result<()> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        if expected_len > self.catalog.max_bytes() {
+            return Ok(());
+        }
 
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        let Some(reservation) = self.catalog.reserve(&path, expected_len).await? else {
+            return Ok(());
+        };
+        let temporary = reservation.pending_file().await?;
+        let mut file = temporary.file()?;
+        let actual_blake3 =
+            copy_xorb_temp_file_with_blake3(source, &mut file, expected_len).await?;
+        if actual_blake3 != expected_blake3 {
+            return Err(CacheError::CorruptObject {
+                path: source.display().to_string(),
+                reason: "copied xorb payload digest did not match preverified digest".to_owned(),
+            });
         }
-        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let tmp = path.with_extension(format!("tmp.{pid}.{seq}"));
-
-        let install_result = async {
-            let actual_blake3 = copy_xorb_temp_file_with_blake3(source, &tmp, expected_len).await?;
-            if actual_blake3 != expected_blake3 {
-                return Err(CacheError::CorruptObject {
-                    path: source.display().to_string(),
-                    reason: "copied xorb payload digest did not match preverified digest"
-                        .to_owned(),
-                });
-            }
-            verify_xorb_file_identity(&tmp, expected_len, hash).await?;
-            tokio::fs::rename(&tmp, &path).await?;
-            self.index_cached_xorb_file_best_effort(hash, &path, expected_len, expected_blake3)
-                .await;
-            Ok(())
-        }
-        .await;
-        if install_result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp).await;
-        }
-        install_result
+        drop(verify_xorb_file_identity(file, &path, expected_len, hash).await?);
+        let reservation = temporary.commit().await?;
+        self.record_completed_file("xorb", &path, hash.hex(), expected_len, reservation)
+            .await;
+        self.index_cached_xorb_file_best_effort(hash, &path, expected_len, expected_blake3)
+            .await;
+        Ok(())
     }
 
     /// Seed cache bytes without integrity checks for disk-corruption tests.
@@ -646,7 +679,11 @@ impl LocalCache {
             }
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
-        tokio::fs::metadata(&path).await.is_ok()
+        private_cache_file_metadata(&self.root, &path)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Return the size of an existing cache entry without reading its body.
@@ -657,12 +694,9 @@ impl LocalCache {
             }
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
-        match tokio::fs::metadata(path).await {
-            Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
-            Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        Ok(private_cache_file_metadata(&self.root, &path)
+            .await?
+            .map(|metadata| metadata.len()))
     }
 
     /// Check whether a cache entry exists and matches its key.
@@ -695,17 +729,16 @@ impl LocalCache {
     /// referencing it in pushed metadata.
     pub async fn index_xorb_if_present(&self, hash: &MerkleHash) -> Result<bool> {
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let metadata = match tokio::fs::metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
+        let file = match crate::private_fs::open_read(&self.root, &path).await {
+            Ok(file) => file,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         };
-        if !metadata.is_file() {
-            return Ok(false);
-        }
-
-        verify_xorb_file_identity(&path, metadata.len(), hash).await?;
-        let payload_hash = hash_file_blake3(&path).await?;
+        let metadata = file.metadata().await?;
+        let mut file = verify_xorb_file_identity(file, &path, metadata.len(), hash).await?;
+        let payload_hash = hash_file_blake3(&mut file).await?;
         self.index_cached_xorb_file(hash, &path, metadata.len(), payload_hash)
             .await?;
         Ok(true)
@@ -835,11 +868,7 @@ impl LocalCache {
             }
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+        crate::private_fs::remove_file(&self.root, &path).await?;
         if let CacheKey::Xorb(hash) = key
             && let Err(e) = remove_xorb_index_entries(&self.xorb_index_path(), hash)
         {
@@ -880,27 +909,30 @@ impl LocalCache {
         }
         let len = usize::try_from(range.end.checked_sub(range.start)?).ok()?;
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let meta = tokio::fs::metadata(&path).await.ok()?;
-        if !meta.is_file() || meta.len() > MAX_XORB_SIZE as u64 || range.end > meta.len() {
+        let file = crate::private_fs::open_read(&self.root, &path).await.ok()?;
+        let meta = file.metadata().await.ok()?;
+        if meta.len() > MAX_XORB_SIZE as u64 || range.end > meta.len() {
             return None;
         }
-        if let Err(e) = verify_xorb_file_identity(&path, meta.len(), hash).await {
-            warn!(
-                path = %path.display(),
-                expected = %hash.hex(),
-                error = %e,
-                "cached xorb range identity check failed — evicting"
-            );
-            let _ = tokio::fs::remove_file(&path).await;
-            return None;
-        }
-        let mut file = tokio::fs::File::open(&path).await.ok()?;
+        let mut file = match verify_xorb_file_identity(file, &path, meta.len(), hash).await {
+            Ok(file) => file,
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    expected = %hash.hex(),
+                    error = %e,
+                    "cached xorb range identity check failed — evicting"
+                );
+                let _ = crate::private_fs::remove_file(&self.root, &path).await;
+                return None;
+            }
+        };
         file.seek(std::io::SeekFrom::Start(range.start))
             .await
             .ok()?;
         let mut buf = vec![0u8; len];
         file.read_exact(&mut buf).await.ok()?;
-        touch_mtime(&path).await;
+        crate::private_fs::touch(&self.root, &path).await;
         Some((Bytes::from(buf), meta.len()))
     }
 
@@ -918,23 +950,21 @@ impl LocalCache {
         hash: &MerkleHash,
     ) -> Result<Option<(Vec<ChunkMeta>, u64)>> {
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let meta = match tokio::fs::metadata(&path).await {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let file = match crate::private_fs::open_read(&self.root, &path).await {
+            Ok(file) => file,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
-        if !meta.is_file() {
-            return Err(CacheError::CorruptObject {
-                path: path.display().to_string(),
-                reason: "cached xorb path is not a file".to_owned(),
-            });
-        }
-        match read_xorb_file_metadata(&path, meta.len()).await {
+        let meta = file.metadata().await?;
+        let metadata = read_xorb_file_metadata(file, &path, meta.len()).await;
+        match metadata {
             Ok((chunks, actual)) if actual == *hash => {
                 let payload_len = chunks.last().map_or(0, |chunk| {
                     u64::from(chunk.offset) + u64::from(chunk.compressed_len)
                 });
-                touch_mtime(&path).await;
+                crate::private_fs::touch(&self.root, &path).await;
                 Ok(Some((chunks, payload_len)))
             }
             Ok((_, actual)) => {
@@ -963,225 +993,6 @@ impl LocalCache {
         }
     }
 
-    /// Prune cache to configured limits using LRU eviction.
-    ///
-    /// Sorts cached files by mtime ascending and removes the oldest
-    /// until the total size is within the configured byte budget.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure during eviction.
-    pub async fn prune(&self) -> Result<PruneStats> {
-        self.prune_with_options(PruneOptions::default()).await
-    }
-
-    /// Evict oldest cache objects until at least `target_bytes` have
-    /// been reclaimed, returning the actual bytes removed.
-    ///
-    /// Eligible objects are chunks, xorbs, and shards. The returned
-    /// byte count is based on file sizes observed immediately before
-    /// deletion, so callers can compute exact before/after cache usage
-    /// deltas.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure during
-    /// eviction.
-    pub async fn evict_bytes(&self, target_bytes: u64) -> Result<PruneStats> {
-        if target_bytes == 0 {
-            return Ok(PruneStats::default());
-        }
-
-        let mut entries: Vec<TargetLruEntry> = collect_hash_entries(&self.root.join("chunks"))
-            .await?
-            .into_iter()
-            .map(|entry| TargetLruEntry {
-                entry,
-                kind: PruneObjectKind::Chunk,
-            })
-            .collect();
-        entries.extend(
-            collect_hash_entries(&self.root.join("xorbs"))
-                .await?
-                .into_iter()
-                .map(|entry| TargetLruEntry {
-                    entry,
-                    kind: PruneObjectKind::Xorb,
-                }),
-        );
-        entries.extend(
-            collect_hash_entries(&self.root.join("shards"))
-                .await?
-                .into_iter()
-                .map(|entry| TargetLruEntry {
-                    entry,
-                    kind: PruneObjectKind::Shard,
-                }),
-        );
-
-        entries.sort_by_key(|entry| entry.entry.mtime);
-
-        let mut stats = PruneStats::default();
-        for entry in entries {
-            if stats.bytes_freed >= target_bytes {
-                break;
-            }
-
-            match tokio::fs::remove_file(&entry.entry.path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-
-            match entry.kind {
-                PruneObjectKind::Chunk => stats.chunks_evicted += 1,
-                PruneObjectKind::Shard => stats.shards_evicted += 1,
-                PruneObjectKind::Xorb => {
-                    stats.xorbs_evicted += 1;
-                    if let Some(hash) = merkle_hash_from_path(&entry.entry.path)
-                        && let Err(e) = remove_xorb_index_entries(&self.xorb_index_path(), &hash)
-                    {
-                        warn!(
-                            xorb = %hash.hex(),
-                            error = %e,
-                            "local xorb cache index targeted-evict cleanup failed"
-                        );
-                    }
-                }
-            }
-            stats.bytes_freed = stats.bytes_freed.saturating_add(entry.entry.size);
-        }
-
-        Ok(stats)
-    }
-
-    /// Prune cache to configured limits using LRU eviction.
-    ///
-    /// When `dry_run` is true, returns the objects that would be evicted
-    /// without deleting files.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure during eviction.
-    pub async fn prune_with_options(&self, options: PruneOptions) -> Result<PruneStats> {
-        let mut stats = PruneStats::default();
-
-        let large_evicted = lru_evict_large_objects(
-            &self.root.join("chunks"),
-            &self.root.join("xorbs"),
-            &self.xorb_index_path(),
-            self.chunk_max_bytes,
-            options,
-        )
-        .await?;
-        stats.chunks_evicted = large_evicted.chunks;
-        stats.xorbs_evicted = large_evicted.xorbs;
-        stats.bytes_freed += large_evicted.bytes;
-        stats.entries.extend(large_evicted.entries);
-
-        if let Some(shard_max) = self.shard_max_bytes {
-            let shard_evicted = lru_evict(
-                &self.root.join("shards"),
-                shard_max,
-                PruneObjectKind::Shard,
-                options,
-            )
-            .await?;
-            stats.shards_evicted = shard_evicted.count;
-            stats.bytes_freed += shard_evicted.bytes;
-            stats.entries.extend(shard_evicted.entries);
-        }
-
-        debug!(
-            chunks_evicted = stats.chunks_evicted,
-            shards_evicted = stats.shards_evicted,
-            xorbs_evicted = stats.xorbs_evicted,
-            bytes_freed = stats.bytes_freed,
-            "cache prune complete"
-        );
-        Ok(stats)
-    }
-
-    /// Verify all cached chunks, shards, and xorbs.
-    ///
-    /// Corrupt entries are evicted. Manifests are skipped (no content hash).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure.
-    pub async fn verify(&self) -> Result<VerifyReport> {
-        let mut report = VerifyReport::default();
-        verify_dir(
-            &self.root.join("chunks"),
-            &mut report,
-            Some(MAX_CACHE_CHUNK_BYTES),
-        )
-        .await?;
-        verify_dir(
-            &self.root.join("shards"),
-            &mut report,
-            Some(MAX_CACHE_SHARD_BYTES),
-        )
-        .await?;
-        verify_xorb_dir(
-            &self.root.join("xorbs"),
-            &self.xorb_index_path(),
-            &mut report,
-        )
-        .await?;
-        debug!(
-            total = report.total,
-            valid = report.valid,
-            corrupt = report.corrupt,
-            "cache verify complete"
-        );
-        Ok(report)
-    }
-
-    /// Get cache statistics.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure.
-    pub async fn stats(&self) -> Result<CacheStats> {
-        let mut s = CacheStats::default();
-        let (cb, cc) = dir_size(&self.root.join("chunks")).await?;
-        s.chunk_bytes = cb;
-        s.chunk_count = cc;
-        let (sb, sc) = dir_size(&self.root.join("shards")).await?;
-        s.shard_bytes = sb;
-        s.shard_count = sc;
-        let (xb, xc) = dir_size(&self.root.join("xorbs")).await?;
-        s.xorb_bytes = xb;
-        s.xorb_count = xc;
-        let (tb, tc) = dir_size(&self.root.join("stages")).await?;
-        s.stage_bytes = tb;
-        s.stage_count = tc;
-        s.manifest_count = count_manifests(&self.root.join("manifests")).await?;
-        Ok(s)
-    }
-
-    /// Remove cached data while preserving coordination markers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CacheError::Io`] on filesystem failure or active cache ownership.
-    pub async fn clean(&self) -> Result<()> {
-        if !tokio::fs::try_exists(&self.root).await? {
-            return Ok(());
-        }
-        let root = self.root.clone();
-        tokio::task::spawn_blocking(move || {
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let guard = crate::lifecycle::CacheCleanGuard::acquire(&root, &cancel)?;
-            guard.clean(&cancel).map(|_| ())
-        })
-        .await
-        .map_err(|error| CacheError::Io(std::io::Error::other(error)))??;
-        debug!("cache cleaned");
-        Ok(())
-    }
-
     async fn index_cached_xorb_file(
         &self,
         hash: &MerkleHash,
@@ -1189,7 +1000,8 @@ impl LocalCache {
         expected_len: u64,
         payload_hash: [u8; 32],
     ) -> Result<()> {
-        let (chunks, actual) = read_xorb_file_metadata(path, expected_len).await?;
+        let file = crate::private_fs::open_read(&self.root, path).await?;
+        let (chunks, actual) = read_xorb_file_metadata(file, path, expected_len).await?;
         if actual != *hash {
             return Err(CacheError::HashMismatch {
                 requested: hash.hex(),
@@ -1249,16 +1061,19 @@ impl LocalCache {
         record: IndexedXorbRecord,
     ) -> Result<Option<CachedXorbCandidate>> {
         let path = self.hash_path(&CacheKey::Xorb(record.xorb_hash));
-        let metadata = match tokio::fs::metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let file = match crate::private_fs::open_read(&self.root, &path).await {
+            Ok(file) => file,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
+        let metadata = file.metadata().await?;
         if !metadata.is_file() || metadata.len() != record.xorb_bytes {
             return Ok(None);
         }
 
-        let (chunks, actual) = match read_xorb_file_metadata(&path, metadata.len()).await {
+        let (chunks, actual) = match read_xorb_file_metadata(file, &path, metadata.len()).await {
             Ok(parsed) => parsed,
             Err(e) => {
                 warn!(
@@ -1266,7 +1081,7 @@ impl LocalCache {
                     error = %e,
                     "cached xorb metadata check failed — evicting"
                 );
-                let _ = tokio::fs::remove_file(&path).await;
+                let _ = crate::private_fs::remove_file(&self.root, &path).await;
                 remove_xorb_index_entries(&self.xorb_index_path(), &record.xorb_hash)?;
                 return Ok(None);
             }
@@ -1278,7 +1093,7 @@ impl LocalCache {
                 actual = %actual.hex(),
                 "cached xorb identity mismatch — evicting"
             );
-            let _ = tokio::fs::remove_file(&path).await;
+            let _ = crate::private_fs::remove_file(&self.root, &path).await;
             remove_xorb_index_entries(&self.xorb_index_path(), &record.xorb_hash)?;
             return Ok(None);
         }
@@ -1296,7 +1111,7 @@ impl LocalCache {
             });
         }
 
-        touch_mtime(&path).await;
+        crate::private_fs::touch(&self.root, &path).await;
         Ok(Some(CachedXorbCandidate {
             xorb_hash: record.xorb_hash,
             path,
@@ -1341,7 +1156,7 @@ impl LocalCache {
 
     /// Read the cached ETag for a manifest, if any.
     pub async fn cached_manifest_etag(&self, name: &str) -> Option<String> {
-        read_string_if_exists(&self.manifest_etag_path(name)).await
+        read_string_if_exists(&self.root, &self.manifest_etag_path(name)).await
     }
 
     async fn try_read_verified_limited(
@@ -1351,9 +1166,24 @@ impl LocalCache {
         max_bytes: Option<u64>,
     ) -> Option<Bytes> {
         let max_bytes = max_bytes?;
-        let data = read_file_bounded(path, max_bytes).await?;
+        let data = match read_file_bounded_result(&self.root, path, max_bytes).await {
+            Ok(Some(data)) => data,
+            Ok(None) => return None,
+            Err(error) => {
+                warn!(
+                    family = "content-addressed",
+                    operation = "bounded-read",
+                    path = %path.display(),
+                    recovery = "evict-and-use-origin",
+                    error = %error,
+                    "local cache read failed"
+                );
+                let _ = crate::private_fs::remove_file(&self.root, path).await;
+                return None;
+            }
+        };
         if compute_data_hash(&data) == *expected {
-            touch_mtime(path).await;
+            crate::private_fs::touch(&self.root, path).await;
             return Some(data);
         }
 
@@ -1362,7 +1192,7 @@ impl LocalCache {
             expected = %expected.hex(),
             "cache hash mismatch — evicting"
         );
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = crate::private_fs::remove_file(&self.root, path).await;
         None
     }
 
@@ -1403,11 +1233,6 @@ impl LocalCache {
         Some(data)
     }
 
-    async fn try_read_xorb_bytes(&self, path: &Path, expected: &MerkleHash) -> Option<Bytes> {
-        self.try_read_xorb_bytes_limited(path, expected, Some(MAX_XORB_SIZE as u64))
-            .await
-    }
-
     async fn try_read_xorb_bytes_limited(
         &self,
         path: &Path,
@@ -1417,10 +1242,26 @@ impl LocalCache {
         let max_bytes = max_bytes
             .unwrap_or(MAX_XORB_SIZE as u64)
             .min(MAX_XORB_SIZE as u64);
-        let data = read_file_bounded(path, max_bytes).await?;
+        let data = match read_file_bounded_result(&self.root, path, max_bytes).await {
+            Ok(Some(data)) => data,
+            Ok(None) => return None,
+            Err(error) => {
+                warn!(
+                    family = "xorb",
+                    operation = "bounded-read",
+                    path = %path.display(),
+                    recovery = "evict-and-use-origin",
+                    error = %error,
+                    "local cache read failed"
+                );
+                let _ = crate::private_fs::remove_file(&self.root, path).await;
+                let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
+                return None;
+            }
+        };
 
         if verify_xorb_identity(&data, expected).is_ok() {
-            touch_mtime(path).await;
+            crate::private_fs::touch(&self.root, path).await;
             return Some(data);
         }
 
@@ -1429,20 +1270,23 @@ impl LocalCache {
             expected = %expected.hex(),
             "cached xorb identity mismatch — evicting"
         );
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = crate::private_fs::remove_file(&self.root, path).await;
         let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
         None
     }
 
     async fn try_verify_xorb_payload_file(&self, path: &Path, expected: &MerkleHash) -> bool {
-        let Ok(meta) = tokio::fs::metadata(path).await else {
+        let Ok(file) = crate::private_fs::open_read(&self.root, path).await else {
             return false;
         };
-        if verify_xorb_file_payload(path, meta.len(), expected)
+        let Ok(meta) = file.metadata().await else {
+            return false;
+        };
+        let verified = verify_xorb_file_payload(file, path, meta.len(), expected)
             .await
-            .is_ok()
-        {
-            touch_mtime(path).await;
+            .is_ok();
+        if verified {
+            crate::private_fs::touch(&self.root, path).await;
             return true;
         }
 
@@ -1451,7 +1295,7 @@ impl LocalCache {
             expected = %expected.hex(),
             "cached xorb payload check failed — evicting"
         );
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = crate::private_fs::remove_file(&self.root, path).await;
         let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
         false
     }
@@ -1464,36 +1308,79 @@ impl LocalCache {
     /// losers' tempfiles are cleaned up (best-effort) and the file on
     /// disk reflects the last successful rename.
     async fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        if data.len() as u64 > self.catalog.max_bytes() {
+            debug!(
+                family = cache_family_for_path(&self.root, path),
+                bytes = data.len(),
+                max_bytes = self.catalog.max_bytes(),
+                "cache entry exceeds product budget; serving without caching"
+            );
+            return Ok(());
         }
-        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let tmp = path.with_extension(format!("tmp.{pid}.{seq}"));
-        let mut f = tokio::fs::File::create(&tmp).await?;
-        let write_result = async {
-            f.write_all(data).await?;
-            f.flush().await?;
-            // Drop the handle before renaming so any pending writes are
-            // flushed to the OS on all supported platforms.
-            drop(f);
-            tokio::fs::rename(&tmp, path).await?;
-            Ok::<_, std::io::Error>(())
-        }
+        let Some(reservation) = self.catalog.reserve(path, data.len() as u64).await? else {
+            debug!(
+                family = cache_family_for_path(&self.root, path),
+                bytes = data.len(),
+                max_bytes = self.catalog.max_bytes(),
+                "cache budget has no room for entry; serving without caching"
+            );
+            return Ok(());
+        };
+        let reservation = reservation.write(data).await?;
+        self.record_completed_file(
+            cache_family_for_path(&self.root, path),
+            path,
+            path.file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            data.len() as u64,
+            reservation,
+        )
         .await;
-        if let Err(e) = write_result {
-            // Best-effort cleanup; ignore secondary errors.
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.into());
-        }
         Ok(())
+    }
+
+    async fn record_completed_file(
+        &self,
+        family: &'static str,
+        path: &Path,
+        logical_key: String,
+        size: u64,
+        reservation: crate::catalog::CacheReservation,
+    ) {
+        if let Err(error) = self
+            .catalog
+            .record_and_maintain(family, logical_key, size, reservation)
+            .await
+        {
+            warn!(
+                family,
+                operation = "record-and-maintain",
+                path = %path.display(),
+                recovery = "retain-entry-and-continue",
+                %error,
+                "cache maintenance failed"
+            );
+        }
     }
 }
 
 // --- free-standing helpers ---
+
+fn cache_family_for_path(root: &Path, path: &Path) -> &'static str {
+    match path
+        .strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+    {
+        Some("chunks") => "chunk",
+        Some("xorbs") => "xorb",
+        Some("shards") => "shard",
+        Some("manifests") => "manifest",
+        Some("stages") => "stage",
+        _ => "other",
+    }
+}
 
 fn enforce_size_limit(
     key: &CacheKey,
@@ -1545,19 +1432,19 @@ fn effective_read_limit(key: &CacheKey, requested: Option<u64>) -> Option<u64> {
     }
 }
 
-async fn read_file_bounded(path: &Path, max_bytes: u64) -> Option<Bytes> {
-    read_file_bounded_result(path, max_bytes)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn read_file_bounded_result(path: &Path, max_bytes: u64) -> Result<Option<Bytes>> {
-    let metadata = match tokio::fs::metadata(path).await {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+async fn read_file_bounded_result(
+    root: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<Bytes>> {
+    let file = match crate::private_fs::open_read(root, path).await {
+        Ok(file) => file,
+        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
+    let metadata = file.metadata().await?;
     if metadata.len() > max_bytes {
         return Err(CacheError::CorruptObject {
             path: path.display().to_string(),
@@ -1567,11 +1454,6 @@ async fn read_file_bounded_result(path: &Path, max_bytes: u64) -> Result<Option<
             ),
         });
     }
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
     let mut data = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut data)
@@ -1587,6 +1469,20 @@ async fn read_file_bounded_result(path: &Path, max_bytes: u64) -> Result<Option<
     Ok(Some(Bytes::from(data)))
 }
 
+async fn private_cache_file_metadata(
+    root: &Path,
+    path: &Path,
+) -> Result<Option<std::fs::Metadata>> {
+    let file = match crate::private_fs::open_read(root, path).await {
+        Ok(file) => file,
+        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Some(file.metadata().await?))
+}
+
 fn verify_data_hash(data: &[u8], expected: &MerkleHash) -> Result<()> {
     let actual = compute_data_hash(data);
     if actual == *expected {
@@ -1600,7 +1496,7 @@ fn verify_data_hash(data: &[u8], expected: &MerkleHash) -> Result<()> {
 
 async fn copy_xorb_temp_file_with_blake3(
     source: &Path,
-    tmp: &Path,
+    tmp_file: &mut tokio::fs::File,
     expected_len: u64,
 ) -> Result<[u8; 32]> {
     if expected_len > MAX_XORB_SIZE as u64 {
@@ -1609,8 +1505,7 @@ async fn copy_xorb_temp_file_with_blake3(
             reason: format!("xorb is {expected_len} bytes; format limit is {MAX_XORB_SIZE} bytes"),
         });
     }
-    let mut source_file = tokio::fs::File::open(source).await?;
-    let mut tmp_file = tokio::fs::File::create(tmp).await?;
+    let mut source_file = tokio::fs::File::open(source).await?.take(expected_len + 1);
     let mut hasher = blake3::Hasher::new();
     let mut copied = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
@@ -1620,17 +1515,22 @@ async fn copy_xorb_temp_file_with_blake3(
             break;
         }
         let chunk = &buffer[..read];
-        tmp_file.write_all(chunk).await?;
-        hasher.update(chunk);
         copied = copied
             .checked_add(read as u64)
             .ok_or_else(|| CacheError::CorruptObject {
                 path: source.display().to_string(),
                 reason: "copied xorb byte count overflowed".to_owned(),
             })?;
+        if copied > expected_len {
+            return Err(CacheError::CorruptObject {
+                path: source.display().to_string(),
+                reason: format!("source exceeds its expected {expected_len} bytes"),
+            });
+        }
+        tmp_file.write_all(chunk).await?;
+        hasher.update(chunk);
     }
-    tmp_file.flush().await?;
-    drop(tmp_file);
+    tmp_file.sync_all().await?;
 
     if copied == expected_len {
         return Ok(*hasher.finalize().as_bytes());
@@ -1671,149 +1571,8 @@ fn verify_xorb_serialized_payload(data: &Bytes, expected: &MerkleHash) -> Result
     Ok(parser)
 }
 
-async fn verify_xorb_file_identity(
-    path: &Path,
-    file_len: u64,
-    expected: &MerkleHash,
-) -> Result<()> {
-    if file_len > MAX_XORB_SIZE as u64 {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!("xorb is {file_len} bytes; format limit is {MAX_XORB_SIZE} bytes"),
-        });
-    }
-    let file_len = usize::try_from(file_len).map_err(|_| CacheError::CorruptObject {
-        path: path.display().to_string(),
-        reason: "xorb file length does not fit usize".to_string(),
-    })?;
-    if file_len < FOOTER_SIZE {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: "xorb too small for footer".to_string(),
-        });
-    }
-
-    let mut file = tokio::fs::File::open(path).await?;
-    let footer_start =
-        u64::try_from(file_len - FOOTER_SIZE).map_err(|_| CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: "xorb footer offset does not fit u64".to_string(),
-        })?;
-    file.seek(std::io::SeekFrom::Start(footer_start)).await?;
-    let mut footer = vec![0u8; FOOTER_SIZE];
-    file.read_exact(&mut footer).await?;
-
-    let region = xorb_metadata_region(file_len, &footer)?;
-    let offset = u64::try_from(region.offset).map_err(|_| CacheError::CorruptObject {
-        path: path.display().to_string(),
-        reason: "xorb metadata offset does not fit u64".to_string(),
-    })?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut metadata = vec![0u8; region.len];
-    file.read_exact(&mut metadata).await?;
-
-    let actual = xorb_hash_from_metadata(file_len, &footer, &metadata)?;
-    if actual == *expected {
-        return Ok(());
-    }
-
-    Err(CacheError::HashMismatch {
-        requested: expected.hex(),
-        actual: actual.hex(),
-    })
-}
-
-async fn verify_xorb_file_payload(path: &Path, file_len: u64, expected: &MerkleHash) -> Result<()> {
-    let current_len = tokio::fs::metadata(path).await?.len();
-    if current_len != file_len {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!(
-                "xorb changed during verification: indexed size {file_len}, current size {current_len}"
-            ),
-        });
-    }
-    let (chunks, actual) = read_xorb_file_metadata(path, file_len).await?;
-    if actual != *expected {
-        return Err(CacheError::HashMismatch {
-            requested: expected.hex(),
-            actual: actual.hex(),
-        });
-    }
-
-    let mut file = tokio::fs::File::open(path).await?;
-    for chunk in &chunks {
-        let compressed = read_compressed_xorb_chunk(&mut file, chunk).await?;
-        verify_compressed_chunk(chunk, &compressed)?;
-    }
-    let current_len = tokio::fs::metadata(path).await?.len();
-    if current_len != file_len {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!(
-                "xorb changed during verification: indexed size {file_len}, current size {current_len}"
-            ),
-        });
-    }
-    Ok(())
-}
-
-async fn read_xorb_file_metadata(
-    path: &Path,
-    file_len: u64,
-) -> Result<(Vec<ChunkMeta>, MerkleHash)> {
-    if file_len > MAX_XORB_SIZE as u64 {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!("xorb is {file_len} bytes; format limit is {MAX_XORB_SIZE} bytes"),
-        });
-    }
-    let file_len = usize::try_from(file_len).map_err(|_| CacheError::CorruptObject {
-        path: path.display().to_string(),
-        reason: "xorb file length does not fit usize".to_string(),
-    })?;
-    if file_len < FOOTER_SIZE {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: "xorb too small for footer".to_string(),
-        });
-    }
-
-    let mut file = tokio::fs::File::open(path).await?;
-    let footer_start =
-        u64::try_from(file_len - FOOTER_SIZE).map_err(|_| CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: "xorb footer offset does not fit u64".to_string(),
-        })?;
-    file.seek(std::io::SeekFrom::Start(footer_start)).await?;
-    let mut footer = vec![0u8; FOOTER_SIZE];
-    file.read_exact(&mut footer).await?;
-
-    let region = xorb_metadata_region(file_len, &footer)?;
-    let offset = u64::try_from(region.offset).map_err(|_| CacheError::CorruptObject {
-        path: path.display().to_string(),
-        reason: "xorb metadata offset does not fit u64".to_string(),
-    })?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut metadata = vec![0u8; region.len];
-    file.read_exact(&mut metadata).await?;
-
-    Ok(xorb_chunks_from_metadata(file_len, &footer, &metadata)?)
-}
-
-async fn read_compressed_xorb_chunk(
-    file: &mut tokio::fs::File,
-    chunk: &ChunkMeta,
-) -> Result<Vec<u8>> {
-    file.seek(std::io::SeekFrom::Start(u64::from(chunk.offset)))
-        .await?;
-    let mut compressed = vec![0u8; chunk.compressed_len as usize];
-    file.read_exact(&mut compressed).await?;
-    Ok(compressed)
-}
-
-async fn hash_file_blake3(path: &Path) -> Result<[u8; 32]> {
-    let mut file = tokio::fs::File::open(path).await?;
+async fn hash_file_blake3(file: &mut tokio::fs::File) -> Result<[u8; 32]> {
+    file.seek(std::io::SeekFrom::Start(0)).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
@@ -2284,11 +2043,7 @@ fn identity_tokens_match(
     true
 }
 
-fn open_xorb_index(index_path: &Path) -> Result<Connection> {
-    if let Some(parent) = index_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
+fn open_xorb_index(index_path: &Path) -> Result<crate::private_fs::Database> {
     let mut last_error = None;
     for delay_ms in [0].into_iter().chain(XORB_INDEX_OPEN_RETRY_DELAYS_MS) {
         if delay_ms > 0 {
@@ -2319,11 +2074,21 @@ fn open_xorb_index(index_path: &Path) -> Result<Connection> {
     })
 }
 
-fn open_xorb_index_once(index_path: &Path) -> Result<Connection> {
-    let conn =
-        Connection::open(index_path).map_err(|source| cache_index_error(index_path, source))?;
-    conn.busy_timeout(XORB_INDEX_BUSY_TIMEOUT)
-        .map_err(|source| cache_index_error(index_path, source))?;
+fn open_xorb_index_once(index_path: &Path) -> Result<crate::private_fs::Database> {
+    let root =
+        index_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| CacheError::UnsafeRoot {
+                path: index_path.display().to_string(),
+                reason: "xorb index has no cache root".into(),
+            })?;
+    let conn = crate::private_fs::open_database(
+        root,
+        index_path,
+        crate::private_fs::DatabaseMode::Create,
+        XORB_INDEX_BUSY_TIMEOUT,
+    )?;
 
     // Schema creation and validation share the same write transaction. A
     // concurrent opener therefore waits for initialization instead of
@@ -2455,408 +2220,11 @@ fn decode_fixed_hash(value: &[u8]) -> Option<[u8; HASH_BYTES]> {
 }
 
 /// Read a file to a string, returning `None` on any error.
-async fn read_string_if_exists(path: &Path) -> Option<String> {
-    tokio::fs::read_to_string(path).await.ok()
-}
-
-/// Update a file's mtime to now for LRU tracking.
-async fn touch_mtime(path: &Path) {
-    // Best-effort; failure doesn't affect correctness.
-    let path = path.to_path_buf();
-    let _ = tokio::task::spawn_blocking(move || {
-        filetime::set_file_mtime(&path, filetime::FileTime::now())
-    })
-    .await;
-}
-
-/// Entry with its size and mtime, used for LRU sorting.
-struct LruEntry {
-    path: PathBuf,
-    size: u64,
-    mtime: SystemTime,
-    regular: bool,
-}
-
-struct EvictResult {
-    count: u64,
-    bytes: u64,
-    entries: Vec<PrunedCacheObject>,
-}
-
-struct LargeEvictResult {
-    chunks: u64,
-    xorbs: u64,
-    bytes: u64,
-    entries: Vec<PrunedCacheObject>,
-}
-
-#[derive(Clone, Copy)]
-enum LargeObjectKind {
-    Chunk,
-    Xorb,
-}
-
-struct LargeLruEntry {
-    entry: LruEntry,
-    kind: LargeObjectKind,
-}
-
-struct TargetLruEntry {
-    entry: LruEntry,
-    kind: PruneObjectKind,
-}
-
-/// Evict chunks and xorbs under one shared LRU budget.
-async fn lru_evict_large_objects(
-    chunks_dir: &Path,
-    xorbs_dir: &Path,
-    xorb_index_path: &Path,
-    max_bytes: u64,
-    options: PruneOptions,
-) -> Result<LargeEvictResult> {
-    let mut entries: Vec<LargeLruEntry> = collect_hash_entries(chunks_dir)
-        .await?
-        .into_iter()
-        .map(|entry| LargeLruEntry {
-            entry,
-            kind: LargeObjectKind::Chunk,
-        })
-        .collect();
-    entries.extend(
-        collect_hash_entries(xorbs_dir)
-            .await?
-            .into_iter()
-            .map(|entry| LargeLruEntry {
-                entry,
-                kind: LargeObjectKind::Xorb,
-            }),
-    );
-
-    let total = checked_sum(entries.iter().map(|e| e.entry.size))?;
-    if total <= max_bytes {
-        return Ok(LargeEvictResult {
-            chunks: 0,
-            xorbs: 0,
-            bytes: 0,
-            entries: Vec::new(),
-        });
-    }
-
-    entries.sort_by_key(|e| e.entry.mtime);
-
-    let mut freed: u64 = 0;
-    let mut chunks: u64 = 0;
-    let mut xorbs: u64 = 0;
-    let mut pruned_entries = Vec::new();
-    let target = total - max_bytes;
-
-    for entry in &entries {
-        if freed >= target {
-            break;
-        }
-        if !options.dry_run {
-            match tokio::fs::remove_file(&entry.entry.path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        let kind = match entry.kind {
-            LargeObjectKind::Chunk => {
-                chunks += 1;
-                PruneObjectKind::Chunk
-            }
-            LargeObjectKind::Xorb => {
-                xorbs += 1;
-                if !options.dry_run
-                    && let Some(hash) = merkle_hash_from_path(&entry.entry.path)
-                    && let Err(e) = remove_xorb_index_entries(xorb_index_path, &hash)
-                {
-                    warn!(
-                        xorb = %hash.hex(),
-                        error = %e,
-                        "local xorb cache index prune cleanup failed"
-                    );
-                }
-                PruneObjectKind::Xorb
-            }
-        };
-        freed += entry.entry.size;
-        if options.record_entries {
-            pruned_entries.push(PrunedCacheObject {
-                kind,
-                path: entry.entry.path.clone(),
-                bytes: entry.entry.size,
-            });
-        }
-    }
-
-    Ok(LargeEvictResult {
-        chunks,
-        xorbs,
-        bytes: freed,
-        entries: pruned_entries,
-    })
-}
-
-/// Walk a two-level hash directory (`{prefix}/{hash}`) and evict oldest
-/// entries until total size ≤ `max_bytes`.
-async fn lru_evict(
-    dir: &Path,
-    max_bytes: u64,
-    kind: PruneObjectKind,
-    options: PruneOptions,
-) -> Result<EvictResult> {
-    let entries = collect_hash_entries(dir).await?;
-    let total = checked_sum(entries.iter().map(|e| e.size))?;
-    if total <= max_bytes {
-        return Ok(EvictResult {
-            count: 0,
-            bytes: 0,
-            entries: Vec::new(),
-        });
-    }
-
-    // Sort oldest-first (ascending mtime).
-    let mut sorted = entries;
-    sorted.sort_by_key(|e| e.mtime);
-
-    let mut freed: u64 = 0;
-    let mut evicted: u64 = 0;
-    let mut pruned_entries = Vec::new();
-    let target = total - max_bytes;
-
-    for entry in &sorted {
-        if freed >= target {
-            break;
-        }
-        if !options.dry_run {
-            match tokio::fs::remove_file(&entry.path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-
-        freed += entry.size;
-        evicted += 1;
-        if options.record_entries {
-            pruned_entries.push(PrunedCacheObject {
-                kind,
-                path: entry.path.clone(),
-                bytes: entry.size,
-            });
-        }
-    }
-
-    Ok(EvictResult {
-        count: evicted,
-        bytes: freed,
-        entries: pruned_entries,
-    })
-}
-
-fn merkle_hash_from_path(path: &Path) -> Option<MerkleHash> {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|hex| MerkleHash::from_hex(hex).ok())
-}
-
-/// Collect all files under a two-level hash directory.
-async fn collect_hash_entries(dir: &Path) -> Result<Vec<LruEntry>> {
-    let mut entries = Vec::new();
-    let mut prefixes = match tokio::fs::read_dir(dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-        Err(error) => return Err(error.into()),
-    };
-    while let Some(prefix_entry) = prefixes.next_entry().await? {
-        let prefix_path = prefix_entry.path();
-        if !prefix_entry.file_type().await?.is_dir() {
-            continue;
-        }
-        let mut files = tokio::fs::read_dir(&prefix_path).await?;
-        while let Some(file_entry) = files.next_entry().await? {
-            let path = file_entry.path();
-            let file_type = file_entry.file_type().await?;
-            if file_type.is_dir() {
-                continue;
-            }
-            let meta = tokio::fs::symlink_metadata(&path).await?;
-            if entries.len() >= MAX_CACHE_LRU_ENTRIES {
-                return Err(CacheError::Internal(format!(
-                    "cache directory {} contains more than {MAX_CACHE_LRU_ENTRIES} entries; refusing an unbounded LRU scan",
-                    dir.display()
-                )));
-            }
-            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            entries.push(LruEntry {
-                path,
-                size: meta.len(),
-                mtime,
-                regular: file_type.is_file(),
-            });
-        }
-    }
-    Ok(entries)
-}
-
-/// Verify all hash-keyed files in a two-level directory.
-async fn verify_dir(dir: &Path, report: &mut VerifyReport, max_bytes: Option<u64>) -> Result<()> {
-    let entries = collect_hash_entries(dir).await?;
-    for entry in &entries {
-        report.total += 1;
-        if !entry.regular {
-            report.corrupt += 1;
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        }
-        // The filename is the expected hex hash.
-        let Some(filename) = entry.path.file_name().and_then(|f| f.to_str()) else {
-            report.corrupt += 1;
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        };
-        let Ok(expected) = MerkleHash::from_hex(filename) else {
-            report.corrupt += 1;
-            warn!(
-                path = %entry.path.display(),
-                "invalid cache entry name — removing"
-            );
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        };
-        if max_bytes.is_some_and(|limit| entry.size > limit) {
-            report.corrupt += 1;
-            warn!(
-                path = %entry.path.display(),
-                bytes = entry.size,
-                limit = max_bytes.unwrap_or(0),
-                "oversized cache entry — removing"
-            );
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        }
-        match verify_data_file(&entry.path, expected).await {
-            Ok(true) => report.valid += 1,
-            Ok(false) => {
-                report.corrupt += 1;
-                warn!(
-                    path = %entry.path.display(),
-                    "corrupt cache entry — removing"
-                );
-                remove_discovered_entry(&entry.path).await?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => report.total -= 1,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-/// Verify all xorb files in a two-level directory.
-async fn verify_xorb_dir(
-    dir: &Path,
-    xorb_index_path: &Path,
-    report: &mut VerifyReport,
-) -> Result<()> {
-    let entries = collect_hash_entries(dir).await?;
-    for entry in &entries {
-        report.total += 1;
-        if !entry.regular {
-            report.corrupt += 1;
-            remove_discovered_entry(&entry.path).await?;
-            if let Some(hash) = merkle_hash_from_path(&entry.path) {
-                remove_xorb_index_entries(xorb_index_path, &hash)?;
-            }
-            continue;
-        }
-        let Some(filename) = entry.path.file_name().and_then(|f| f.to_str()) else {
-            report.corrupt += 1;
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        };
-        let Ok(expected) = MerkleHash::from_hex(filename) else {
-            report.corrupt += 1;
-            warn!(
-                path = %entry.path.display(),
-                "invalid cached xorb name — removing"
-            );
-            remove_discovered_entry(&entry.path).await?;
-            continue;
-        };
-        match verify_xorb_file_payload(&entry.path, entry.size, &expected).await {
-            Ok(()) => report.valid += 1,
-            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                report.total -= 1;
-            }
-            Err(_) => {
-                report.corrupt += 1;
-                warn!(
-                    path = %entry.path.display(),
-                    "corrupt cached xorb — removing"
-                );
-                remove_discovered_entry(&entry.path).await?;
-                remove_xorb_index_entries(xorb_index_path, &expected)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn verify_data_file(path: &Path, expected: MerkleHash) -> std::io::Result<bool> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let mut source = std::fs::File::open(path)?;
-        let mut hashed = HashedWrite::new(std::io::sink());
-        std::io::copy(&mut source, &mut hashed)?;
-        Ok(hashed.hash() == expected)
-    })
-    .await
-    .map_err(|error| std::io::Error::other(format!("cache verification worker failed: {error}")))?
-}
-
-/// Sum file sizes and count in a two-level hash directory.
-async fn dir_size(dir: &Path) -> Result<(u64, u64)> {
-    let entries = collect_hash_entries(dir).await?;
-    let bytes = checked_sum(entries.iter().map(|e| e.size))?;
-    let count = entries.len() as u64;
-    Ok((bytes, count))
-}
-
-fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64> {
-    values.try_fold(0u64, |total, value| {
-        total
-            .checked_add(value)
-            .ok_or_else(|| CacheError::Internal("cache byte total overflow".to_owned()))
-    })
-}
-
-async fn remove_discovered_entry(path: &Path) -> Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Count manifest data files (*.json) in the manifests directory.
-async fn count_manifests(dir: &Path) -> Result<u64> {
-    let mut rd = match tokio::fs::read_dir(dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
-    };
-    let mut count = 0u64;
-    while let Some(entry) = rd.next_entry().await? {
-        if entry.file_type().await?.is_file()
-            && entry.path().extension().is_some_and(|ext| ext == "json")
-        {
-            count += 1;
-        }
-    }
-    Ok(count)
+async fn read_string_if_exists(root: &Path, path: &Path) -> Option<String> {
+    let bytes = read_file_bounded_result(root, path, 16 * 1024)
+        .await
+        .ok()??;
+    std::str::from_utf8(&bytes).ok().map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -2868,9 +2236,12 @@ mod tests {
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
 
+    #[cfg(unix)]
+    mod maintenance;
+
     fn temp_cache() -> (tempfile::TempDir, LocalCache) {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LocalCache::new(dir.path().to_path_buf());
+        let cache = LocalCache::new(dir.path().join("cache"));
         (dir, cache)
     }
 
@@ -2911,6 +2282,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&fetched[..], data);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_creates_private_directories_and_file() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let (_dir, cache) = temp_cache();
+        let data = b"private cache bytes";
+        let key = CacheKey::Chunk(compute_data_hash(data));
+
+        cache.put(&key, data).await.unwrap();
+
+        let path = cache.hash_path(&key);
+        assert_eq!(
+            std::fs::symlink_metadata(path.parent().unwrap())
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(path).unwrap().mode() & 0o777,
+            0o600
+        );
     }
 
     #[tokio::test]
@@ -3039,11 +2435,10 @@ mod tests {
         let key = CacheKey::Chunk(hash);
 
         // Write wrong data directly to the cache path.
-        let path = cache.hash_path(&key);
-        tokio::fs::create_dir_all(path.parent().unwrap())
+        cache
+            .put_unchecked_for_test(&key, b"corrupted")
             .await
             .unwrap();
-        tokio::fs::write(&path, b"corrupted").await.unwrap();
 
         // get_or_fetch should detect mismatch, evict, and refetch.
         let result = cache
@@ -3051,6 +2446,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&result[..], good_data);
+    }
+
+    #[tokio::test]
+    async fn copied_xorb_cannot_exceed_its_reserved_bytes() {
+        let (dir, cache) = temp_cache();
+        let (hash, data) = test_xorb(b"source is longer than its advertised size");
+        let source = dir.path().join("source.xorb");
+        tokio::fs::write(&source, &data).await.unwrap();
+        let result = cache.put_xorb_file(&hash, &source, 8).await;
+        assert!(matches!(result, Err(CacheError::CorruptObject { .. })));
+        let destination = cache.hash_path(&CacheKey::Xorb(hash));
+        assert_eq!(
+            std::fs::read_dir(destination.parent().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -3104,13 +2516,12 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
-        let stats = cache.prune().await.unwrap();
-        assert!(stats.chunks_evicted > 0);
-        assert!(stats.bytes_freed > 0);
-
-        // After prune, total should be ≤ 100.
+        // Write-time maintenance keeps the product budget bounded; an
+        // explicit prune is idempotent after quiescence.
+        let _ = cache.prune().await.unwrap();
         let cache_stats = cache.stats().await.unwrap();
         assert!(cache_stats.chunk_bytes <= 100);
+        assert!(!cache.contains(&keys[0]).await);
     }
 
     #[tokio::test]
@@ -3134,7 +2545,6 @@ mod tests {
     #[tokio::test]
     async fn xorb_lru_eviction() {
         let (_dir, cache) = temp_cache();
-        let cache = LocalCache::with_limits(cache.root.clone(), 1, None);
 
         for i in 0u8..4 {
             let data = vec![i; 40];
@@ -3144,6 +2554,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
 
+        let cache = LocalCache::with_limits(cache.root.clone(), 1, None);
         let stats = cache.prune().await.unwrap();
         assert!(stats.xorbs_evicted > 0);
         assert!(stats.bytes_freed > 0);
@@ -3155,7 +2566,6 @@ mod tests {
     #[tokio::test]
     async fn xorb_lru_eviction_removes_index_candidate() {
         let (_dir, cache) = temp_cache();
-        let cache = LocalCache::with_limits(cache.root.clone(), 1, None);
         let (chunk_hashes, xorb_hash, xorb_data) = test_xorb_with_chunks(&[b"chunk-a", b"chunk-b"]);
         cache
             .put(&CacheKey::Xorb(xorb_hash), xorb_data.as_ref())
@@ -3169,6 +2579,7 @@ mod tests {
                 .is_empty()
         );
 
+        let cache = LocalCache::with_limits(cache.root.clone(), 1, None);
         let stats = cache.prune().await.unwrap();
 
         assert_eq!(stats.xorbs_evicted, 1);
@@ -3193,7 +2604,7 @@ mod tests {
         cache.put(&shard_key, &shard_data).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let (xorb_hash, xorb_data) = test_xorb(&vec![3; 50]);
+        let (xorb_hash, xorb_data) = test_xorb(&[3; 50]);
         let xorb_key = CacheKey::Xorb(xorb_hash);
         cache.put(&xorb_key, xorb_data.as_ref()).await.unwrap();
 
@@ -3215,7 +2626,6 @@ mod tests {
     #[tokio::test]
     async fn chunk_and_xorb_lru_share_large_object_budget() {
         let (_dir, cache) = temp_cache();
-        let cache = LocalCache::with_limits(cache.root.clone(), 120, None);
 
         let chunk_data = vec![1u8; 80];
         let chunk_hash = compute_data_hash(&chunk_data);
@@ -3225,14 +2635,14 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let (xorb_hash, xorb_data) = test_xorb(&vec![2u8; 80]);
+        let (xorb_hash, xorb_data) = test_xorb(&[2u8; 80]);
         let max_bytes = xorb_data.len() as u64 + 1;
-        let cache = LocalCache::with_limits(cache.root.clone(), max_bytes, None);
         cache
             .put(&CacheKey::Xorb(xorb_hash), xorb_data.as_ref())
             .await
             .unwrap();
 
+        let cache = LocalCache::with_limits(cache.root.clone(), max_bytes, None);
         let stats = cache.prune().await.unwrap();
         assert_eq!(stats.chunks_evicted, 1);
         assert_eq!(stats.xorbs_evicted, 0);
@@ -3304,26 +2714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_evicts_invalid_hash_entry_names() {
-        let (_dir, cache) = temp_cache();
-        let invalid = cache.root().join("chunks").join("xx").join("not-a-hash");
-        tokio::fs::create_dir_all(invalid.parent().unwrap())
-            .await
-            .unwrap();
-        tokio::fs::write(&invalid, b"orphan temp data")
-            .await
-            .unwrap();
-
-        let report = cache.verify().await.unwrap();
-
-        assert_eq!(report.total, 1);
-        assert_eq!(report.valid, 0);
-        assert_eq!(report.corrupt, 1);
-        assert!(!invalid.exists());
-    }
-
-    #[tokio::test]
-    async fn clean_removes_all() {
+    async fn clean_removes_payloads_but_preserves_other_owners() {
         let (_dir, cache) = temp_cache();
         let data = b"some data";
         let hash = compute_data_hash(data);
@@ -3359,16 +2750,27 @@ mod tests {
             .await
             .unwrap();
 
-        cache.clean().await.unwrap();
+        let report = crate::clean_cache(
+            cache.root(),
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.files_removed, 4);
 
         let stats = cache.stats().await.unwrap();
         assert_eq!(stats.chunk_bytes, 0);
         assert_eq!(stats.xorb_bytes, 0);
         assert_eq!(stats.stage_bytes, 0);
         assert_eq!(stats.manifest_count, 0);
-        assert!(!repo_index.exists());
-        assert!(!cache.root().join("bloom.bin").exists());
-        assert!(std::fs::read_dir(cache.root()).unwrap().next().is_none());
+        assert_eq!(tokio::fs::read(repo_index).await.unwrap(), b"sqlite");
+        assert_eq!(
+            tokio::fs::read(cache.root().join("bloom.bin"))
+                .await
+                .unwrap(),
+            b"bloom"
+        );
     }
 
     #[tokio::test]
@@ -3538,6 +2940,28 @@ mod tests {
             .query_row("SELECT COUNT(1) FROM xorb_index", [], |row| row.get(0))
             .unwrap();
         assert!(rows > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xorb_index_rejects_database_links_without_changing_the_target() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (temp, cache) = temp_cache();
+        let index = cache.xorb_index_path();
+        crate::ensure_private_cache_directory(index.parent().unwrap()).unwrap();
+        let target = temp.path().join("sentinel");
+        std::fs::write(&target, b"not disposable").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&target, &index).unwrap();
+        assert!(matches!(
+            open_xorb_index(&index),
+            Err(CacheError::UnsafeRoot { .. })
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"not disposable");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[tokio::test]
@@ -3722,7 +3146,8 @@ mod tests {
             test_xorb_with_chunks(&[b"remote index one", b"remote index two"]);
         let path = dir.path().join("remote-index.xorb");
         tokio::fs::write(&path, &data).await.unwrap();
-        let (chunks, actual_hash) = read_xorb_file_metadata(&path, data.len() as u64)
+        let file = tokio::fs::File::open(&path).await.unwrap();
+        let (chunks, actual_hash) = read_xorb_file_metadata(file, &path, data.len() as u64)
             .await
             .unwrap();
         assert_eq!(actual_hash, xorb_hash);
@@ -3803,7 +3228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_through_xorb_cache_does_not_publish_add_candidate() {
+    async fn read_xorb_cache_does_not_publish_add_candidate() {
         let (_dir, cache) = temp_cache();
         let (hash, data) = test_xorb(b"remote read-through xorb payload");
         let chunk_hash = XorbParser::parse(data.clone())
@@ -3811,32 +3236,14 @@ mod tests {
             .chunk_meta(0)
             .unwrap()
             .hash;
-        let fetches = AtomicUsize::new(0);
-
-        let fetched = cache
-            .get_or_fetch_read_xorb_with(&hash, || async {
-                fetches.fetch_add(1, Ordering::Relaxed);
-                Ok::<_, CacheError>(data.clone())
-            })
-            .await
-            .unwrap();
-        assert_eq!(fetched, data);
-        assert!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[chunk_hash])
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        cache.put_read_xorb(&hash, data.clone()).await.unwrap();
 
         let warm = cache
-            .get_or_fetch_read_xorb_with::<_, _, CacheError>(&hash, || async {
-                panic!("warm read-through xorb should not fetch")
-            })
+            .get_read_xorb_if_present(&hash)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(warm, data);
-        assert_eq!(fetches.load(Ordering::Relaxed), 1);
         assert!(
             cache
                 .cached_xorb_candidates_for_chunks(&[chunk_hash])
@@ -3862,9 +3269,11 @@ mod tests {
         corrupt[footer_start + 12..footer_start + 44].copy_from_slice(payload_digest.as_bytes());
         let corrupt = Bytes::from(corrupt);
 
+        cache.put_read_xorb(&hash, corrupt.clone()).await.unwrap();
         let fetched = cache
-            .get_or_fetch_read_xorb_with(&hash, || async { Ok::<_, CacheError>(corrupt.clone()) })
+            .get_read_xorb_if_present(&hash)
             .await
+            .unwrap()
             .unwrap();
 
         assert_eq!(fetched, corrupt);
@@ -4030,11 +3439,10 @@ mod tests {
         let (_dir, cache) = temp_cache();
         let (hash, data) = test_xorb(b"fresh xorb payload");
         let key = CacheKey::Xorb(hash);
-        let path = cache.hash_path(&key);
-        tokio::fs::create_dir_all(path.parent().unwrap())
+        cache
+            .put_unchecked_for_test(&key, b"corrupt xorb")
             .await
             .unwrap();
-        tokio::fs::write(&path, b"corrupt xorb").await.unwrap();
 
         let fetched = cache
             .get_or_fetch(&key, || {

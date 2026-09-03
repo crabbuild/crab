@@ -26,6 +26,16 @@ pub enum ReadError {
     #[error("xet data-plane error")]
     Xet(#[from] crab_xet::error::XetError),
 
+    #[error("xet runtime error: {0}")]
+    Runtime(#[from] xet_runtime::RuntimeError),
+
+    #[error("file reconstruction failed for {file_hash}: {source}")]
+    Reconstruction {
+        file_hash: String,
+        #[source]
+        source: ReconstructionError,
+    },
+
     #[error("I/O error")]
     Io(#[from] std::io::Error),
 
@@ -52,6 +62,12 @@ pub enum ReadError {
     #[error("read operation cancelled")]
     Cancelled,
 
+    #[error("xorb availability preparation failed")]
+    Availability {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("requested object is outside the visible generation")]
     UnauthorizedObject,
 
@@ -59,9 +75,66 @@ pub enum ReadError {
     Internal(String),
 }
 
+/// Reconstruction failure with the pinned Xet dependency's nested sources exposed.
+#[derive(Debug)]
+pub struct ReconstructionError(pub(crate) xet_data::file_reconstruction::FileReconstructionError);
+
+impl ReconstructionError {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        use std::error::Error;
+
+        let mut current = self.source();
+        while let Some(error) = current {
+            if matches!(
+                error.downcast_ref::<ReadError>(),
+                Some(ReadError::Cancelled)
+            ) || matches!(
+                error.downcast_ref::<StorageError>(),
+                Some(StorageError::Cancelled)
+            ) {
+                return true;
+            }
+            current = error.source();
+        }
+        false
+    }
+}
+
+impl std::fmt::Display for ReconstructionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for ReconstructionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        use xet_data::file_reconstruction::FileReconstructionError;
+
+        // Xet 1.6 retains these errors but omits their source annotations.
+        // Borrow through its Arc: cloning ClientError would stringify the cause.
+        match &self.0 {
+            FileReconstructionError::ClientError(error) => match error.as_ref() {
+                xet_client::ClientError::InternalError(source) => Some(source.as_ref()),
+                other => Some(other),
+            },
+            FileReconstructionError::IoError(source) => Some(source.as_ref()),
+            FileReconstructionError::TaskRuntimeError(source) => Some(source.as_ref()),
+            FileReconstructionError::TaskJoinError(source) => Some(source.as_ref()),
+            FileReconstructionError::RuntimeError(source) => Some(source.as_ref()),
+            other => Some(other),
+        }
+    }
+}
+
 impl ReadError {
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+
+    pub fn availability(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Availability {
+            source: Box::new(error),
+        }
     }
 }
 

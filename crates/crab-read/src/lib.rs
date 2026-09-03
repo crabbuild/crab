@@ -11,11 +11,11 @@ mod store_client;
 mod term_resolver;
 mod upload_pack;
 
-pub use error::{ReadError, Result};
+pub use error::{ReadError, ReconstructionError, Result};
 pub use fetch_admission::{
     FetchAdmissionPolicy, FetchAdmissionReject, FetchWant, validate_fetch_wants_with_manifest,
 };
-pub use hydrator::{ReadStoreLayout, ShardHydrator, fixed_hydrate_concurrency};
+pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ShardHydrator};
 pub use integrity::verify_origin_recipe;
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, manifest_ref_advertisement,
@@ -27,7 +27,7 @@ pub use selection::{
     ReadinessProbeStats, ReadyReadReplica, check_read_replica_readiness, select_read_replicas,
     select_read_store_choice, select_ready_read_replica,
 };
-pub use store_client::{SharedShardHints, StoreClient};
+pub use store_client::{ReadMetrics, StoreClient, XorbAvailability};
 pub use term_resolver::TermResolver;
 pub use upload_pack::{
     PackPlan, UploadPackFilter, UploadPackFilterError, UploadPackObjectType, UploadPackRequest,

@@ -9,7 +9,16 @@ meta:
 
 # Local Cache
 
-Every time Crab downloads chunks from cloud storage (during hydration or fetch), it stores them in a local cache. The next time you need those chunks — re-hydrating the same file, switching branches, or a teammate hydrating shared content on a shared machine — the data is served from local disk instead of the network.
+Crab keeps several disposable local accelerators: decoded xorb ranges, complete
+xorbs and shards, and persistent metadata indexes. Fetch, explicit hydrate,
+filter smudge, mount, and worktree prefetch share the decoded-range cache. Complete objects are
+also reused when a workflow has deliberately installed them.
+
+The shared read runtime attaches this cache using the object cache's root and
+budget; unsafe or unavailable cache storage is bypassed. Warm payload reuse
+does not guarantee fully offline access: metadata and authorization may still
+need the network. Cross-process and provider qualification remains tracked in
+[Plan 017](https://github.com/crab-build/crab/blob/main/plans/017-local-cache-read-hardening.md).
 
 ## How the Cache Works
 
@@ -23,19 +32,19 @@ flowchart LR
     C --> F["Reconstruct file"]
 ```
 
-The cache is a content-addressed store — chunks are identified by their blake3 hash. This means:
+Cached xorbs and shards are content-addressed and verified before use. Decoded
+ranges are keyed by xorb identity and chunk-index range. This means:
 
-- **Cross-file sharing** — If two files share chunks (common in dataset versions), the cache serves both from a single copy.
-- **Cross-branch sharing** — Switching branches and re-hydrating reuses cached chunks from the previous branch.
-- **Idempotent** — Fetching the same chunk twice is a no-op; it's already cached.
+- **Cross-file sharing** — Files that reference the same xorb ranges can reuse one cached range.
+- **Cross-branch sharing** — Checkout and mount reads reuse ranges cached by earlier compatible read paths.
+- **Verified fallback** — Corrupt content-addressed bodies are rejected and fetched again from the remote.
 
 ## Cache Location
 
 | Priority | Source | Default Path |
 |----------|--------|-------------|
 | 1 | `$CRAB_CACHE_DIR` environment variable | Custom path |
-| 2 | `[cache].chunk_cache_dir` | Custom xet range-cache path |
-| 3 | Platform default | `~/.cache/crab/` (range cache under `chunks/`) |
+| 2 | Default | `~/.cache/crab/` (range cache under `chunks/`) |
 
 To use a fast NVMe drive for the cache:
 
@@ -45,13 +54,18 @@ export CRAB_CACHE_DIR=/mnt/nvme/crab-cache
 
 ## Cache Size Management
 
-The cache grows as you hydrate files. You can set a maximum size:
+The configured cache budget defaults to 10 GiB. Configure it in bytes:
 
-The xet range-cache byte ceiling uses Crab's `chunk_cache_bytes` configuration;
-the shard object cache uses `shard_cache_bytes` when configured. `crab prune`
-applies those byte budgets.
+```toml
+[cache]
+max_bytes = 10737418240
+```
 
-When the cache exceeds this limit, least-recently-used chunks are evicted. Eviction is lazy — it happens during the next cache write, not in the background.
+Range and object caches receive this budget. Unified admission, all-family
+accounting, and automatic maintenance are still being completed in Plan 017;
+do not treat it as a proven hard limit on total disk usage yet. The old
+`chunk_cache_bytes`, `shard_cache_bytes`, and `[cache].chunk_cache_dir` fields
+are no longer supported.
 
 ## Inspecting the Cache
 
@@ -59,13 +73,15 @@ When the cache exceeds this limit, least-recently-used chunks are evicted. Evict
 crab cache stats
 ```
 
-Shows the read-only xet range-cache snapshot and the Crab object-cache counts
-and bytes. Stats never initializes, repairs, or deletes cache entries.
+Shows the xet range-cache limit and usage plus Crab object-cache counts and
+bytes. The current command opens the xet cache before scanning it and does not
+include every SQLite/index/hint file in its total. It does not repair or delete
+entries.
 
 ## Cleaning the Cache
 
 ```bash
-# Remove everything (re-download on next hydrate)
+# Remove eligible cached payloads (re-download on next hydrate)
 crab cache clean
 
 # Evict oldest cache objects until configured budgets are satisfied
@@ -73,30 +89,51 @@ crab prune
 ```
 
 `crab prune` is usually preferred when you want to keep the cache but trim it
-back to budget. Use `crab cache clean` when you want a completely fresh cache.
+back to budget. Use `crab cache clean` to remove eligible payloads.
+
+Cleanup preserves unknown subtrees, maintenance workspaces, mirror repositories,
+retained profiles, databases and their side files, and unpublished temporaries.
+It skips active readers and concurrent publishers, and reports retained, busy,
+and unsafe entries separately from actual removed files and bytes. It does not
+wipe the cache root. Object/range pruning and verification now use the same
+private payload boundary and retain unknown and busy entries. SQLite/root
+ownership, full reservation protection, and complete resource accounting remain
+part of Plan 017; these payload safeguards do not close those gaps.
+
+Clean, verify, and prune reject cache roots that resolve to the filesystem root,
+home directory, current directory, or its ancestors, including relative paths.
+Their `crab optimize cache` equivalents share the same checks. A missing cache
+is a no-op, not a reason to create directories during maintenance.
 
 ## Pre-warming the Cache
 
-If you know you'll need certain files later (going offline, preparing for a demo), pre-warm the cache:
+To pre-warm selected ranges for hydration, checkout, mount, or worktree reads:
 
 ```bash
 crab fetch --include '*.safetensors'
 ```
 
-This downloads chunks without hydrating files. Later hydration can reuse the cached data instead of fetching those chunks from the remote again.
+This verifies each selected file into a discard sink without changing the
+worktree. Do not rely on it for offline explicit `crab hydrate` until Plan 017's
+cross-command reuse gate is delivered.
 
 ## When to Clean vs. Prune
 
 | Situation | Action |
 |-----------|--------|
 | Running low on disk space | `crab prune` (LRU eviction to budget) |
-| Switching to a different project | `crab cache clean` (fresh start) |
-| Suspected cache corruption | `crab cache clean` (nuclear option) |
+| Removing reusable payloads | `crab cache clean` (retained state survives) |
+| Suspected payload corruption | `crab cache clean` (eligible payloads only) |
 | Want to trim cache to budget | `crab prune` |
 
 ## Remote Cache Service
 
 The local cache is per-machine — each developer and CI runner maintains their own. For teams, Crab offers an optional **remote cache service** (`crab-cache-server`) that shares cached objects across all machines in your organization.
+
+Local cache files can reconstruct private repository content. Keep the cache
+root private to one operating-system user; do not share it through permissive
+filesystem permissions. Use the authenticated remote cache service for team
+reuse.
 
 When configured, the lookup order is: local cache → remote cache → cloud storage. The first fetch from any team member warms the remote cache, and subsequent fetches from anyone else are served at network-local speed instead of cloud latency.
 

@@ -12,6 +12,8 @@ pub mod provider_options;
 pub mod provider_store;
 pub mod retry;
 pub mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cas::{
     DEFAULT_MAX_ATTEMPTS, MAX_CAS_OBJECT_BYTES, cas_update, cas_update_bounded, cas_update_default,

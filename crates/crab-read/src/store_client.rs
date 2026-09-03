@@ -29,7 +29,18 @@ use crate::{ReadError, Result};
 
 type StoreLayout = crab_storage::StoreLayout<crab_storage::Store>;
 
-pub type SharedShardHints = Arc<RwLock<HashMap<MerkleHash, MerkleHash>>>;
+type SharedShardHints = Arc<RwLock<HashMap<MerkleHash, MerkleHash>>>;
+
+/// Invocation-local observations emitted by the canonical read adapter.
+pub trait ReadMetrics: Send + Sync {
+    fn shard_hint_hit(&self);
+    fn shard_hint_miss(&self);
+}
+
+#[async_trait::async_trait]
+pub trait XorbAvailability: Send + Sync {
+    async fn ensure_available(&self, path: &object_store::path::Path) -> Result<()>;
+}
 
 const XORB_URL_PREFIX: &str = "crab-xorb://";
 
@@ -40,6 +51,8 @@ pub struct StoreClient {
     concurrency: Arc<AdaptiveConcurrencyController>,
     file_index_lookup: Option<SharedFileIndexLookup>,
     shard_hints: SharedShardHints,
+    metrics: Option<Arc<dyn ReadMetrics>>,
+    availability: Option<Arc<dyn XorbAvailability>>,
 }
 
 impl StoreClient {
@@ -55,6 +68,8 @@ impl StoreClient {
             concurrency,
             file_index_lookup: None,
             shard_hints: Arc::new(RwLock::new(HashMap::new())),
+            metrics: None,
+            availability: None,
         }
     }
 
@@ -65,14 +80,30 @@ impl StoreClient {
     }
 
     #[must_use]
-    pub fn with_shard_hint(self, file_hash: MerkleHash, shard_hash: MerkleHash) -> Self {
-        self.insert_shard_hint(file_hash, shard_hash);
+    pub fn with_metrics<M>(mut self, metrics: Arc<M>) -> Self
+    where
+        M: ReadMetrics + 'static,
+    {
+        self.metrics = Some(metrics);
         self
     }
 
     #[must_use]
-    pub fn shared_shard_hints(&self) -> SharedShardHints {
-        Arc::clone(&self.shard_hints)
+    pub fn with_dyn_metrics(mut self, metrics: Arc<dyn ReadMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    #[must_use]
+    pub fn with_availability(mut self, availability: Arc<dyn XorbAvailability>) -> Self {
+        self.availability = Some(availability);
+        self
+    }
+
+    #[must_use]
+    pub fn with_shard_hint(self, file_hash: MerkleHash, shard_hash: MerkleHash) -> Self {
+        self.insert_shard_hint(file_hash, shard_hash);
+        self
     }
 
     fn insert_shard_hint(&self, file_hash: MerkleHash, shard_hash: MerkleHash) {
@@ -103,6 +134,9 @@ impl StoreClient {
                         shard_hash = %hint_hash.hex(),
                         "read store_client: shard-hint hit"
                     );
+                    if let Some(metrics) = &self.metrics {
+                        metrics.shard_hint_hit();
+                    }
                     return Ok(Some((shard, hint_hash)));
                 }
                 Ok(_) => {
@@ -120,6 +154,9 @@ impl StoreClient {
                         "read store_client: shard-hint fetch failed, falling back to file-index"
                     );
                 }
+            }
+            if let Some(metrics) = &self.metrics {
+                metrics.shard_hint_miss();
             }
         }
 
@@ -174,11 +211,10 @@ impl StoreClient {
         let hit = match &self.file_index_lookup {
             Some(lookup) => lookup.lookup(file_hash).await?,
             None => {
-                let session = FileIndexLookupSession::open_for_storage(
-                    self.store.origin(),
-                    self.router.repo_prefix(),
-                )
-                .await?;
+                let storage = self.store.cache_aware_storage();
+                let session =
+                    FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix())
+                        .await?;
                 let result = session.lookup(file_hash).await;
                 if let Err(close_error) = session.close().await {
                     warn!(error = %close_error, "read store_client: file-index lookup close failed");
@@ -203,11 +239,9 @@ impl StoreClient {
             return lookup.lookup_batch(file_hashes).await.map_err(Into::into);
         }
 
-        let session = FileIndexLookupSession::open_for_storage(
-            self.store.origin(),
-            self.router.repo_prefix(),
-        )
-        .await?;
+        let storage = self.store.cache_aware_storage();
+        let session =
+            FileIndexLookupSession::open_for_storage(&storage, self.router.repo_prefix()).await?;
         let result = session.lookup_batch(file_hashes).await;
         if let Err(close_err) = session.close().await {
             warn!(
@@ -219,25 +253,11 @@ impl StoreClient {
     }
 
     async fn load_shard(&self, shard_hash: &MerkleHash) -> Result<ShardReader> {
-        let key = CacheKey::Shard(*shard_hash);
-        let origin = self.store.origin().clone();
         let path = self.router.shard_path(shard_hash);
-        let hash = *shard_hash;
-
-        let data = self
+        debug!(shard_hash = %shard_hash.hex(), "read store_client: downloading shard");
+        let (data, _) = self
             .store
-            .local_cache()
-            .get_or_fetch_with(&key, || {
-                let origin = origin;
-                let path = path;
-                async move {
-                    debug!(shard_hash = %hash.hex(), "read store_client: downloading shard");
-                    let (data, _) = origin
-                        .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
-                        .await?;
-                    Ok::<_, ReadError>(data)
-                }
-            })
+            .get_with_etag_bounded(&path, MAX_SHARD_SIZE_BYTES as u64)
             .await?;
 
         Ok(ShardReader::from_bytes(data, *shard_hash))
@@ -287,7 +307,7 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
 }
 
 fn map_read_error(e: ReadError) -> ClientError {
-    ClientError::Other(e.to_string())
+    ClientError::internal(e)
 }
 
 fn build_response_v2(
@@ -495,12 +515,18 @@ impl Client for StoreClient {
         let (xorb_hash, chunk_ranges) = parse_xorb_url(&url)?;
 
         let xorb_path = self.router.xorb_path(&xorb_hash);
+        if let Some(availability) = &self.availability {
+            availability
+                .ensure_available(&xorb_path)
+                .await
+                .map_err(map_read_error)?;
+        }
         let ranges = chunk_ranges
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
         self.store
-            .get_xorb_chunks(&xorb_path, &xorb_hash, &ranges)
+            .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
             .await
             .map_err(ReadError::from)
             .map_err(map_read_error)

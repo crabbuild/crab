@@ -4207,7 +4207,6 @@ mod tests {
     #[tokio::test]
     async fn push_dispatch_with_staged_pointer_hydrates_uploaded_content() {
         use crate::cache::LocalCache;
-        use crate::cmd::hydrate::ShardHydrator;
         use crate::core::config::CacheConfig;
         use crate::metadata::manifest::Manifest;
         use crate::storage::store::Store;
@@ -4318,8 +4317,12 @@ mod tests {
             hydrate_cache,
         )
         .expect("caching store");
-        let hydrator =
-            ShardHydrator::new_from_cli_layout(caching_store, router).expect("shard hydrator");
+        let hydrator = crate::read::build_cli_hydrator(
+            caching_store,
+            router,
+            &crate::core::config::Config::default(),
+        )
+        .expect("hydration runtime");
         let hydrated = hydrator
             .reconstruct_from_pointer(&pointer_bytes)
             .await

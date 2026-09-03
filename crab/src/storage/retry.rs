@@ -55,6 +55,7 @@ pub enum RetryClass {
 )]
 pub fn retry_class(err: &CrabError) -> RetryClass {
     match err {
+        CrabError::Read(error) => error.retry_class(),
         CrabError::NetworkTransient(_) => RetryClass::Transient,
         CrabError::Throttled { retry_after } => RetryClass::Throttled {
             retry_after: *retry_after,
@@ -121,6 +122,9 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         // Cache service errors are non-retryable at the store level;
         // the CachingStore handles fallback to origin.
         CrabError::CacheService { .. } => RetryClass::Fatal,
+        // The read boundary already exhausted cache repair and origin transport
+        // retries. Repeating it would only redownload the same invalid object.
+        CrabError::OriginIntegrity { .. } => RetryClass::Fatal,
         // Incomplete shard reconstruction signals a bug in the push
         // pipeline — the placement map doesn't cover every chunk.
         // Retrying the same push will hit the same gap.

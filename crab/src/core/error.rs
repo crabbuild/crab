@@ -9,9 +9,15 @@ use std::time::Duration;
 
 use crab_types::error::ErrorCategory;
 
+mod read_failure;
+pub use read_failure::ReadFailure;
+
 /// Crate-wide error type returned by every fallible public API.
 #[derive(thiserror::Error, Debug)]
 pub enum CrabError {
+    #[error("{0}")]
+    Read(#[source] ReadFailure),
+
     // Transient — retry-worthy.
     #[error("network transient error [CRAB-E0001]: {0}")]
     NetworkTransient(#[source] object_store::Error),
@@ -58,6 +64,12 @@ pub enum CrabError {
     // validation, with a typed payload so dependency causes stay inspectable.
     #[error("corrupt Git pack evidence [CRAB-E0020]: {0}")]
     GitPackCorrupt(#[source] crab_git::pack_locator::PackLocatorError),
+    #[error("origin object at {path} failed integrity verification [CRAB-E0020]: {source}")]
+    OriginIntegrity {
+        path: String,
+        #[source]
+        source: crab_cache::CacheError,
+    },
 
     #[error("chunk not found [CRAB-E0021]: {hash}")]
     ChunkNotFound { hash: String },
@@ -995,6 +1007,10 @@ impl From<crab_cache::CacheError> for CrabError {
         match error {
             crab_cache::CacheError::Cancelled => Self::Cancelled,
             crab_cache::CacheError::Io(source) => Self::Io(source),
+            error @ crab_cache::CacheError::UnsafeRoot { .. } => Self::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                error,
+            )),
             crab_cache::CacheError::HashMismatch { requested, actual } => {
                 Self::HashMismatch { requested, actual }
             }
@@ -1036,6 +1052,9 @@ impl From<crab_cache_store::CacheStoreError> for CrabError {
         match error {
             crab_cache_store::CacheStoreError::Cache(source) => Self::from(source),
             crab_cache_store::CacheStoreError::Storage(source) => Self::from(source),
+            crab_cache_store::CacheStoreError::OriginIntegrity { path, source } => {
+                Self::OriginIntegrity { path, source }
+            }
         }
     }
 }
@@ -1074,6 +1093,9 @@ impl From<crab_read::ReadError> for CrabError {
                 example_chunk_index,
             },
             crab_read::ReadError::Cancelled => Self::Cancelled,
+            error @ (crab_read::ReadError::Availability { .. }
+            | crab_read::ReadError::Runtime(_)
+            | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
@@ -2119,6 +2141,7 @@ impl CrabError {
     /// 9 internal, 10 cancelled.
     pub fn exit_code(&self) -> u8 {
         match self {
+            Self::Read(error) => error.exit_code(),
             Self::NonFastForward { .. } => 2,
 
             Self::CasConflict { .. }
@@ -2134,6 +2157,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
             | Self::CrcMismatch { .. }
@@ -2319,13 +2343,14 @@ impl CrabError {
     /// is a compile error.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Read(error) => error.code(),
             Self::NetworkTransient(_) => "CRAB-E0001",
             Self::Throttled { .. } => "CRAB-E0002",
             Self::CasConflict { .. } => "CRAB-E0010",
             Self::RefAlreadyExists { .. } => "CRAB-E0011",
             Self::PushLockHeld { .. } => "CRAB-E0012",
             Self::NonFastForward { .. } => "CRAB-E0017",
-            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) => "CRAB-E0020",
+            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) | Self::OriginIntegrity { .. } => "CRAB-E0020",
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",
@@ -2493,6 +2518,7 @@ impl CrabError {
     )]
     pub fn category(&self) -> ErrorCategory {
         match self {
+            Self::Read(error) => error.category(),
             Self::ManagedRepository { diagnostic } => match diagnostic {
                 crab_auth_store::ManagedRepositoryDiagnostic::ServiceUnavailable { .. } => {
                     ErrorCategory::Transient
@@ -2528,6 +2554,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
             | Self::CrcMismatch { .. }
@@ -2715,6 +2742,7 @@ impl CrabError {
     /// decision about retry semantics.
     pub fn is_retryable(&self) -> bool {
         match self {
+            Self::Read(error) => error.is_retryable(),
             Self::ManagedRepository { diagnostic } => matches!(
                 diagnostic,
                 crab_auth_store::ManagedRepositoryDiagnostic::ServiceUnavailable { .. }
@@ -2740,6 +2768,7 @@ impl CrabError {
             | Self::FileChangedDuringStaging { .. }
             | Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::NotFound { .. }
             | Self::Forbidden { .. }
@@ -2881,6 +2910,7 @@ impl CrabError {
     /// Returns `Value::Null` for variants with no meaningful structured data.
     pub fn details_json(&self) -> serde_json::Value {
         match self {
+            Self::Read(error) => error.details_json(),
             Self::NetworkTransient(err) | Self::Storage(err) => {
                 serde_json::json!({ "source": err.to_string() })
             }
@@ -2930,6 +2960,11 @@ impl CrabError {
                 })
             }
             Self::GitPackCorrupt(source) => serde_json::json!({ "source": source.to_string() }),
+            Self::OriginIntegrity { path, source } => serde_json::json!({
+                "path": path,
+                "reason": source.to_string(),
+                "origin": "object-store",
+            }),
             Self::ChunkNotFound { hash } => {
                 serde_json::json!({ "hash": hash })
             }
@@ -3662,6 +3697,7 @@ impl CrabError {
     /// Human-readable remediation hint for CLI display.
     pub fn hint(&self) -> Option<&'static str> {
         match self {
+            Self::Read(error) => error.hint(),
             Self::NotFound { .. } => Some(
                 "Check the requested path and remote. For a new repository, run `crab configure <REMOTE>`; otherwise run `crab doctor`.",
             ),
@@ -3690,6 +3726,7 @@ impl CrabError {
     /// Docs-site path and optional anchor for deep-linking.
     pub fn docs_anchor(&self) -> Option<&'static str> {
         match self {
+            Self::Read(error) => error.docs_anchor(),
             Self::NotFound { .. } => Some("cli/diagnostics/error-codes"),
             Self::Forbidden { .. }
             | Self::NoCredentials
@@ -3727,6 +3764,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn availability_preserves_product_diagnostics() {
+        use std::error::Error;
+
+        for source in [
+            CrabError::NoCredentials,
+            CrabError::AuthExpired {
+                path: "xorbs/archive".into(),
+            },
+            CrabError::Throttled {
+                retry_after: Some(Duration::from_secs(3)),
+            },
+            CrabError::Cancelled,
+        ] {
+            let code = source.code();
+            let category = source.category();
+            let exit_code = source.exit_code();
+            let retry = crate::storage::retry::retry_class(&source);
+            let details = source.details_json();
+            let message = source.to_string();
+            let error = CrabError::from(crab_read::ReadError::availability(source));
+            assert_eq!(error.code(), code);
+            assert_eq!(crate::core::error_catalog::error_code(&error), code);
+            assert_eq!(error.category(), category);
+            assert_eq!(error.exit_code(), exit_code);
+            assert_eq!(crate::storage::retry::retry_class(&error), retry);
+            assert_eq!(error.details_json(), details);
+            assert_eq!(error.to_string(), message);
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source())
+                    .any(|source| source.is::<CrabError>())
+            );
+        }
+    }
+
+    #[test]
+    fn origin_integrity_keeps_typed_source_and_terminal_classification() {
+        use std::error::Error as _;
+
+        let error = CrabError::from(crab_read::ReadError::from(
+            crab_cache_store::CacheStoreError::OriginIntegrity {
+                path: "xorbs/bad".into(),
+                source: crab_cache::CacheError::HashMismatch {
+                    requested: "expected".into(),
+                    actual: "corrupt".into(),
+                },
+            },
+        ));
+        assert!(error.source().unwrap().is::<crab_cache::CacheError>());
+        assert_eq!(error.code(), "CRAB-E0020");
+        assert_eq!(error.code(), crate::core::error_catalog::error_code(&error));
+        assert_eq!(error.exit_code(), 4);
+        assert_eq!(error.category(), ErrorCategory::Integrity);
+        assert!(!error.is_retryable());
+        assert_eq!(error.details_json()["origin"], "object-store");
+        assert_eq!(
+            crate::storage::retry::retry_class(&error),
+            crate::storage::retry::RetryClass::Fatal
+        );
+    }
+
+    #[test]
+    fn unsafe_cache_path_keeps_the_original_source() {
+        let error = CrabError::from(crab_cache::CacheError::UnsafeRoot {
+            path: "cache/chunks".into(),
+            reason: "unsafe permissions".into(),
+        });
+        let CrabError::Io(source) = error else {
+            panic!("unsafe cache access must be a permission error");
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(source.get_ref().unwrap().is::<crab_cache::CacheError>());
+    }
+
+    #[test]
     fn exit_code_non_fast_forward() {
         let err = CrabError::NonFastForward {
             ref_name: "refs/heads/main".into(),
@@ -3760,6 +3871,13 @@ mod tests {
                 reason: "r".into(),
             },
             CrabError::ChunkNotFound { hash: "h".into() },
+            CrabError::OriginIntegrity {
+                path: "p".into(),
+                source: crab_cache::CacheError::CorruptObject {
+                    path: "p".into(),
+                    reason: "r".into(),
+                },
+            },
             CrabError::HashMismatch {
                 requested: "a".into(),
                 actual: "b".into(),
@@ -4410,6 +4528,14 @@ mod tests {
     /// Helper: one instance of every `CrabError` variant for exhaustive tests.
     fn all_variants() -> Vec<CrabError> {
         vec![
+            CrabError::from(crab_read::ReadError::availability(CrabError::NoCredentials)),
+            CrabError::OriginIntegrity {
+                path: "p".into(),
+                source: crab_cache::CacheError::CorruptObject {
+                    path: "p".into(),
+                    reason: "r".into(),
+                },
+            },
             CrabError::NetworkTransient(object_store::Error::Generic {
                 store: "test",
                 source: "net".into(),

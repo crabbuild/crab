@@ -27,7 +27,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::cache::ChunkCache;
 use crate::core::config::Config;
 use crate::core::context::AppContext;
 use crate::core::cow_clone;
@@ -49,8 +48,6 @@ use crate::git::worktree_hydration::{
 use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_types::pointer::{MAX_POINTER_SIZE, Pointer};
 use crab_xet::hash::MerkleHash;
-use crab_xet::shard::FileDataSequenceEntry;
-use crab_xet::xorb::format::MAX_XORB_SIZE;
 
 mod execute;
 
@@ -455,13 +452,6 @@ impl SmudgeSessionHydrator {
             session: SmudgeSession::new(ctx),
         }
     }
-
-    /// Create a hydrator with a shared chunk cache.
-    pub fn with_chunk_cache(ctx: AppContext, cache: Arc<ChunkCache>) -> Self {
-        Self {
-            session: SmudgeSession::with_chunk_cache(ctx, cache),
-        }
-    }
 }
 
 impl Hydrator for SmudgeSessionHydrator {
@@ -571,60 +561,44 @@ impl Hydrator for SmudgeSessionHydrator {
 /// lookups and cached shard downloads. Shares the unified `LocalCache`
 /// with push and diff so shards downloaded by any command are
 /// immediately available to all others.
-pub struct ShardHydrator {
+pub struct HydrationRuntime {
+    canonical: crab_read::ShardHydrator,
     store: crab_cache_store::CachingStore,
     router: HydrateStoreLayout,
-    /// In-memory cache of downloaded xorb bytes, keyed by xorb hash.
-    /// Used by the delta-reconstruction path (`try_delta_reconstruct`)
-    /// which fetches xorbs directly rather than via `FileReconstructor`.
-    xorb_cache: tokio::sync::Mutex<std::collections::HashMap<MerkleHash, bytes::Bytes>>,
-    /// Tracks the total body bytes held by `xorb_cache`. This is updated only
-    /// while the cache mutex is held, so the atomic avoids a second lock for
-    /// the accounting field without allowing the cache to grow unbounded.
-    xorb_cache_bytes: AtomicU64,
     /// Optional perf counters. When set, shard-hint hit/miss events are recorded.
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
-    /// Shared concurrency controller used by [`FileReconstructor`] to
-    /// bound in-flight xorb downloads. Held as an [`Arc`] so prefetch
-    /// and smudge can share the same controller for global throttling.
-    concurrency: Arc<xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController>,
-    /// Shared byte-denominated bound for decompressed reconstruction buffers.
-    buffer_semaphore: Arc<xet_runtime::utils::adjustable_semaphore::AdjustableSemaphore>,
     /// Maximum number of files reconstructed concurrently in one batch.
     file_concurrency: usize,
-    /// Optional xet-core xorb-range chunk cache. When set, every
-    /// [`FileReconstructor`] spun up by this hydrator shares the same
-    /// on-disk cache with the prefetch queue and filter-process smudge.
-    chunk_cache: Option<Arc<dyn xet_client::chunk_cache::ChunkCache>>,
-    /// Restore coordinator used when a direct xorb fetch finds an
-    /// archive-class object.
-    restore_orchestrator: Option<Arc<crate::tier::restore::RestoreOrchestrator>>,
-    /// Effective restore behavior for this hydrator.
-    auto_restore: bool,
+}
+
+struct RestoreAvailability {
+    origin: crate::storage::Store,
+    orchestrator: Arc<crate::tier::restore::RestoreOrchestrator>,
+}
+
+#[async_trait::async_trait]
+impl crab_read::XorbAvailability for RestoreAvailability {
+    async fn ensure_available(&self, path: &object_store::path::Path) -> crab_read::Result<()> {
+        crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
+            &self.origin,
+            path,
+            Some(&self.orchestrator),
+            true,
+        )
+        .await
+        .map(|_| ())
+        .map_err(crab_read::ReadError::availability)
+    }
 }
 
 /// Tag for the hydrate-path concurrency controller. `'static` because
 /// `AdaptiveConcurrencyController` stores the tag for logging.
-const HYDRATE_CONCURRENCY_TAG: &str = "crab-hydrate";
 const MAX_HYDRATE_FILE_CONCURRENCY: usize = 4;
 const MAX_PREFETCH_CANDIDATES: usize = 1_000_000;
 const MAX_GIT_INVENTORY_BYTES: usize = 512 * 1024 * 1024;
-const MAX_HYDRATE_SHARD_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_HYDRATE_XORB_CACHE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_HYDRATE_XORB_CACHE_ENTRIES: usize = 4_096;
 
 fn hydrate_file_concurrency(download_concurrency: usize) -> usize {
     download_concurrency.clamp(1, MAX_HYDRATE_FILE_CONCURRENCY)
-}
-
-fn hydrate_buffer_semaphore(
-    budget_bytes: u64,
-) -> Arc<xet_runtime::utils::adjustable_semaphore::AdjustableSemaphore> {
-    let budget_bytes = budget_bytes.max(1);
-    xet_runtime::utils::adjustable_semaphore::AdjustableSemaphore::new(
-        budget_bytes,
-        (budget_bytes, budget_bytes),
-    )
 }
 
 /// Storage-domain path router used by the hydrator Implementation.
@@ -641,65 +615,7 @@ fn hydrate_layout_from_cli(
     )
 }
 
-impl ShardHydrator {
-    /// Create a new shard hydrator with a `StoreLayout` for path routing.
-    ///
-    /// Uses the default hydrate concurrency bound
-    /// ([`HydrateConfig::download_concurrency`] default: 4). For an
-    /// explicit bound, chain [`with_concurrency`](Self::with_concurrency)
-    /// or construct via [`with_config`](Self::with_config).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the xet runtime context for the download
-    /// concurrency controller cannot be created.
-    pub fn new(store: crab_cache_store::CachingStore, router: HydrateStoreLayout) -> Result<Self> {
-        let concurrency = fixed_hydrate_concurrency(
-            crate::core::config::HydrateConfig::default().download_concurrency,
-        )?;
-        Ok(Self::with_concurrency(store, router, concurrency))
-    }
-
-    /// Create a new shard hydrator from the legacy CLI storage layout Adapter.
-    ///
-    /// This keeps current CLI/SDK read-selection callers compiling while the
-    /// hydrator Implementation uses the storage-domain layout internally.
-    pub fn new_from_cli_layout(
-        store: crab_cache_store::CachingStore,
-        router: crate::storage::StoreLayout,
-    ) -> Result<Self> {
-        let router = hydrate_layout_from_cli(&store, &router);
-        Self::new(store, router)
-    }
-
-    /// Create a new shard hydrator with an explicit concurrency
-    /// controller. The controller bounds in-flight xorb downloads for
-    /// the `FileReconstructor` path and is shared with the prefetch
-    /// queue and filter-process smudge when those paths are active.
-    #[must_use]
-    pub fn with_concurrency(
-        store: crab_cache_store::CachingStore,
-        router: HydrateStoreLayout,
-        concurrency: Arc<
-            xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController,
-        >,
-    ) -> Self {
-        let hydrate = crate::core::config::HydrateConfig::default();
-        Self {
-            store,
-            router,
-            xorb_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            xorb_cache_bytes: AtomicU64::new(0),
-            metrics: None,
-            concurrency,
-            buffer_semaphore: hydrate_buffer_semaphore(hydrate.prefetch_budget),
-            file_concurrency: hydrate_file_concurrency(hydrate.download_concurrency),
-            chunk_cache: None,
-            restore_orchestrator: None,
-            auto_restore: false,
-        }
-    }
-
+impl HydrationRuntime {
     /// Create a new shard hydrator honoring the hydrate section of
     /// [`Config`]. This is the preferred constructor for CLI entry
     /// points that already have a parsed config in hand.
@@ -713,17 +629,23 @@ impl ShardHydrator {
         router: HydrateStoreLayout,
         config: &Config,
     ) -> Result<Self> {
-        let concurrency = fixed_hydrate_concurrency(config.hydrate.download_concurrency)?;
-        let mut hydrator = Self::with_concurrency(store, router, concurrency);
-        hydrator.buffer_semaphore = hydrate_buffer_semaphore(config.hydrate.prefetch_budget);
-        hydrator.file_concurrency = hydrate_file_concurrency(config.hydrate.download_concurrency);
-        Ok(hydrator)
+        let canonical = crab_read::ReadRuntimeBuilder::new(
+            store.clone(),
+            router.clone(),
+            config.hydrate.download_concurrency,
+        )
+        .with_buffer_budget(config.hydrate.prefetch_budget)
+        .build()?;
+        Ok(Self {
+            canonical,
+            store,
+            router,
+            metrics: None,
+            file_concurrency: hydrate_file_concurrency(config.hydrate.download_concurrency),
+        })
     }
 
-    /// Create a config-backed hydrator from the legacy CLI storage layout Adapter.
-    ///
-    /// New callers that already own a `crab_storage::Store` should use
-    /// [`Self::with_config`] with [`HydrateStoreLayout`] directly.
+    /// Map the CLI storage layout into the shared read runtime.
     pub fn with_config_from_cli_layout(
         store: crab_cache_store::CachingStore,
         router: crate::storage::StoreLayout,
@@ -738,23 +660,8 @@ impl ShardHydrator {
     /// on any fallback to the file-index path.
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.canonical = self.canonical.with_metrics(Arc::clone(&metrics));
         self.metrics = Some(metrics);
-        self
-    }
-
-    /// Attach the shared xet-core xorb-range chunk cache. Every
-    /// [`FileReconstructor`] created by [`reconstruct_file`] will be
-    /// chained with `.with_chunk_cache()`, so warm entries populated
-    /// by prefetch or previous hydrations are served locally.
-    ///
-    /// The cache is optional: passing `None` (by not calling this
-    /// builder) preserves the legacy cold-fetch behavior.
-    #[must_use]
-    pub fn with_xet_chunk_cache(
-        mut self,
-        cache: Arc<dyn xet_client::chunk_cache::ChunkCache>,
-    ) -> Self {
-        self.chunk_cache = Some(cache);
         self
     }
 
@@ -764,35 +671,13 @@ impl ShardHydrator {
     #[must_use]
     pub fn prefetch_queue(
         &self,
-        config: &Config,
         cancel: tokio_util::sync::CancellationToken,
         handle: tokio::runtime::Handle,
     ) -> crate::git::prefetch::PrefetchQueue {
         let file_index_lookup = self.shared_file_index_lookup();
-        let client = crate::git::store_client::StoreClient::new(
-            self.store.clone(),
-            self.router.clone(),
-            self.concurrency.clone(),
-        )
-        .with_file_index_lookup(file_index_lookup.clone());
-        let client = match self.metrics.clone() {
-            Some(metrics) => client.with_metrics(metrics),
-            None => client,
-        };
-        let shard_hints = client.shared_shard_hints();
-        let client: Arc<dyn xet_client::cas_client::Client> = Arc::new(client);
-        let queue = crate::git::prefetch::PrefetchQueue::new(
-            client,
-            config.hydrate.prefetch_budget,
-            cancel,
-            handle,
-        )
-        .with_file_index_lookup(file_index_lookup)
-        .with_shard_hints(shard_hints);
-        let queue = match self.chunk_cache.clone() {
-            Some(cache) => queue.with_chunk_cache(cache),
-            None => queue,
-        };
+        let queue =
+            crate::git::prefetch::PrefetchQueue::new(self.canonical.clone(), cancel, handle)
+                .with_file_index_lookup(file_index_lookup);
         match self.metrics.clone() {
             Some(metrics) => queue.with_metrics(metrics),
             None => queue,
@@ -861,293 +746,19 @@ impl ShardHydrator {
         orchestrator: Option<Arc<crate::tier::restore::RestoreOrchestrator>>,
         auto_restore: bool,
     ) -> Self {
-        self.restore_orchestrator = orchestrator;
-        self.auto_restore = auto_restore;
+        if auto_restore && let Some(orchestrator) = orchestrator.clone() {
+            let availability = Arc::new(RestoreAvailability {
+                origin: crate::storage::Store::from_storage(self.store.origin().clone()),
+                orchestrator,
+            });
+            self.canonical = self.canonical.with_availability(availability);
+        }
         self
     }
 
     fn shared_file_index_lookup(&self) -> SharedFileIndexLookup {
-        SharedFileIndexLookup::new_for_storage(
-            self.store.origin(),
-            self.router.repo_prefix().to_owned(),
-        )
-    }
-
-    fn store_client_for_pointer(
-        &self,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-        ptr: &Pointer,
-    ) -> Arc<dyn xet_client::cas_client::Client> {
-        let file_hash = MerkleHash::from(ptr.file_hash);
-        let shard_hint = ptr
-            .shard_hint
-            .map(|hint| (file_hash, MerkleHash::from(hint)));
-        Arc::new(self.store_client_adapter(file_index_lookup, shard_hint))
-    }
-
-    fn store_client_adapter(
-        &self,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-        shard_hint: Option<(MerkleHash, MerkleHash)>,
-    ) -> crate::git::store_client::StoreClient {
-        let client = crate::git::store_client::StoreClient::new(
-            self.store.clone(),
-            self.router.clone(),
-            self.concurrency.clone(),
-        );
-        let client = match self.metrics.clone() {
-            Some(metrics) => client.with_metrics(metrics),
-            None => client,
-        };
-        let client = match file_index_lookup {
-            Some(lookup) => client.with_file_index_lookup(lookup.clone()),
-            None => client,
-        };
-        match shard_hint {
-            Some((file_hash, shard_hash)) => client.with_shard_hint(file_hash, shard_hash),
-            None => client,
-        }
-    }
-
-    /// Resolve `file_hash → shard_hash` via the per-repo `file_index_db`.
-    ///
-    /// Uses the caller-provided shared lookup session when present;
-    /// otherwise falls back to the one-shot compatibility helper.
-    /// A miss is mapped to [`Error::ChunkNotFound`] with a file-index
-    /// marker so the caller surfaces a clear "pointer references a
-    /// file we've never seen" error rather than a silent empty
-    /// reconstruction.
-    async fn resolve_file_index(
-        &self,
-        file_hash: &MerkleHash,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-    ) -> Result<MerkleHash> {
-        let hit = match file_index_lookup {
-            Some(lookup) => lookup.lookup(file_hash).await?,
-            None => {
-                let storage = self.store.cache_aware_storage();
-                let session =
-                    crab_metadata::file_index_lookup::FileIndexLookupSession::open_for_storage(
-                        &storage,
-                        self.router.repo_prefix(),
-                    )
-                    .await?;
-                let result = session.lookup(file_hash).await;
-                if let Err(close_error) = session.close().await {
-                    warn!(error = %close_error, "hydrate file-index lookup close failed");
-                }
-                result?
-            }
-        };
-
-        match hit {
-            Some(shard_hash) => Ok(shard_hash),
-            None => Err(error::CrabError::ChunkNotFound {
-                hash: format!("file_index:{}", file_hash.hex()),
-            }),
-        }
-    }
-
-    /// Fetch an xorb by hash, returning cached bytes on repeat access.
-    ///
-    /// Consults `LocalCache` under [`CacheKey::Xorb`] before issuing an
-    /// S3 GET so xorbs warmed by `post_success_cleanup` (step 13 of the
-    /// push pipeline) are served from disk. The in-memory `xorb_cache`
-    /// still short-circuits repeat reads of the same xorb within a
-    /// single hydrate run.
-    async fn get_xorb(&self, hash: &MerkleHash) -> Result<bytes::Bytes> {
-        {
-            let cache = self.xorb_cache.lock().await;
-            if let Some(data) = cache.get(hash) {
-                return Ok(data.clone());
-            }
-        }
-        let origin = self.store.origin().clone();
-        let path = self.router.xorb_path(hash);
-        let hash_for_fetch = *hash;
-        let restore_orchestrator = self.restore_orchestrator.clone();
-        let auto_restore = self.auto_restore;
-        debug!(xorb_hash = %hash_for_fetch.hex(), "hydrate: downloading xorb");
-        let restore_origin = crate::storage::Store::from_storage(origin);
-        crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
-            &restore_origin,
-            &path,
-            restore_orchestrator.as_deref(),
-            auto_restore,
-        )
-        .await?;
-        // CachingStore owns the local and remote cache read-through order.
-        // Calling the origin directly here bypasses a warmed cache service.
-        let (data, _) = self
-            .store
-            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
-            .await?;
-        self.cache_xorb(*hash, &data).await?;
-        Ok(data)
-    }
-
-    async fn refetch_xorb_from_origin(&self, hash: &MerkleHash) -> Result<bytes::Bytes> {
-        let key = crate::cache::CacheKey::Xorb(*hash);
-        let path = self.router.xorb_path(hash);
-
-        self.store.local_cache().evict(&key).await?;
-
-        let origin = crate::storage::Store::from_storage(self.store.origin().clone());
-        crate::cmd::hydrate_restore::resolve_xorb_with_class_probe(
-            &origin,
-            &path,
-            self.restore_orchestrator.as_deref(),
-            self.auto_restore,
-        )
-        .await?;
-        let (data, _) = self
-            .store
-            .origin()
-            .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
-            .await?;
-
-        if let Err(e) = self.store.local_cache().put(&key, &data).await {
-            warn!(
-                xorb_hash = %hash.hex(),
-                error = %e,
-                "failed to rewrite repaired hydrate xorb cache entry"
-            );
-        }
-        self.cache_xorb(*hash, &data).await?;
-        Ok(data)
-    }
-
-    async fn cache_xorb(&self, hash: MerkleHash, data: &bytes::Bytes) -> Result<()> {
-        if data.len() > MAX_XORB_SIZE {
-            return Err(error::CrabError::CorruptObject {
-                path: self.router.xorb_path(&hash).to_string(),
-                reason: format!(
-                    "xorb body is {} bytes; the Xet format supports at most {MAX_XORB_SIZE} bytes",
-                    data.len()
-                ),
-            });
-        }
-
-        let mut cache = self.xorb_cache.lock().await;
-        let old_len = cache.get(&hash).map_or(0, bytes::Bytes::len) as u64;
-        let incoming_len = data.len() as u64;
-        let mut cached_bytes = self.xorb_cache_bytes.load(Relaxed).saturating_sub(old_len);
-        let replacing = cache.contains_key(&hash);
-        if (!replacing && cache.len() >= MAX_HYDRATE_XORB_CACHE_ENTRIES)
-            || cached_bytes.saturating_add(incoming_len) > MAX_HYDRATE_XORB_CACHE_BYTES
-        {
-            cache.clear();
-            cached_bytes = 0;
-        }
-        cache.insert(hash, data.clone());
-        self.xorb_cache_bytes
-            .store(cached_bytes.saturating_add(incoming_len), Relaxed);
-        Ok(())
-    }
-
-    async fn decode_xorb_with_cache_repair<T>(
-        &self,
-        hash: &MerkleHash,
-        mut decode: impl FnMut(bytes::Bytes) -> Result<T>,
-    ) -> Result<T> {
-        let data = self.get_xorb(hash).await?;
-        match decode(data) {
-            Ok(result) => Ok(result),
-            Err(cache_error) => {
-                warn!(
-                    xorb_hash = %hash.hex(),
-                    error = %cache_error,
-                    "cached xorb failed verification, evicting and retrying origin once"
-                );
-                let repaired = self.refetch_xorb_from_origin(hash).await?;
-                decode(repaired)
-            }
-        }
-    }
-
-    /// Download a shard via the unified `LocalCache`, or return a cached
-    /// copy. Hash verification is handled by `LocalCache::get_or_fetch`.
-    async fn get_or_download_shard(
-        &self,
-        hash: &MerkleHash,
-    ) -> Result<crab_xet::shard::ShardReader> {
-        let obj_path = self.router.shard_path(hash);
-        debug!(shard_hash = %hash.hex(), "downloading shard");
-        // Keep shard reads on the same cache-aware path as xorb reads so
-        // push-warmed immutable objects are reusable by new clones.
-        let (data, _) = self
-            .store
-            .get_with_etag_bounded(&obj_path, MAX_HYDRATE_SHARD_BYTES)
-            .await?;
-
-        Ok(crab_xet::shard::ShardReader::from_bytes(data, *hash))
-    }
-
-    /// Download a shard for a specific file, consulting the bloom
-    /// pre-filter first when the shard is not yet cached.
-    ///
-    /// The file-index points `file_hash → shard_hash`, but that mapping
-    /// can be stale (the shard has been repacked since the pointer was
-    /// written) or corrupt. A small Range-GET on the shard's v1 bloom
-    /// trailer can prove the file is absent before we pay for the full
-    /// shard body. A definitive-absent result surfaces as a
-    /// [`CrabError::CorruptObject`] so the caller can fall back to a
-    /// slower path or report the file as unreconstructable.
-    ///
-    /// Cached shards bypass the pre-filter entirely: disk reads are
-    /// already faster than any Range-GET round-trip.
-    async fn get_or_download_shard_for_file(
-        &self,
-        shard_hash: &MerkleHash,
-        file_hash: &MerkleHash,
-    ) -> Result<crab_xet::shard::ShardReader> {
-        // With a cache service configured, keep immutable shard reads behind
-        // that boundary instead of probing origin directly for the bloom
-        // trailer. Origin fallback still happens inside `CachingStore`.
-        if !self.store.has_cache_service()
-            && !self
-                .store
-                .local_cache()
-                .contains(&crate::cache::CacheKey::Shard(*shard_hash))
-                .await
-        {
-            let shard_path = self.router.shard_path(shard_hash);
-            match crab_metadata::bloom_prefilter::check_shard_file_bloom(
-                self.store.origin(),
-                &shard_path,
-                file_hash,
-            )
-            .await
-            {
-                Ok(crab_metadata::bloom_prefilter::BloomCheck::DefinitelyAbsent) => {
-                    debug!(
-                        file_hash = %file_hash.hex(),
-                        shard_hash = %shard_hash.hex(),
-                        "bloom pre-filter: file absent from shard, aborting download"
-                    );
-                    return Err(error::CrabError::CorruptObject {
-                        path: format!("file_index_db/{}", file_hash.hex()),
-                        reason: format!(
-                            "shard {} does not contain file (bloom reports definitely absent); \
-                             file_index_db entry is stale",
-                            shard_hash.hex()
-                        ),
-                    });
-                }
-                Ok(_) => {
-                    // PossiblyPresent or NoBloom — fall through.
-                }
-                Err(e) => {
-                    debug!(
-                        shard_hash = %shard_hash.hex(),
-                        error = %e,
-                        "bloom pre-filter failed, falling back to full shard download"
-                    );
-                }
-            }
-        }
-
-        self.get_or_download_shard(shard_hash).await
+        let storage = self.store.cache_aware_storage();
+        SharedFileIndexLookup::new_for_storage(&storage, self.router.repo_prefix().to_owned())
     }
 
     /// Reconstruct a single file from its pointer using xet-core's
@@ -1166,181 +777,10 @@ impl ShardHydrator {
     /// Parses the pointer, delegates to [`reconstruct_file`], and returns
     /// the byte-identical original content (blake3-verified).
     pub async fn reconstruct_from_pointer(&self, pointer_bytes: &[u8]) -> Result<Vec<u8>> {
-        let ptr = crab_types::pointer::Pointer::parse(pointer_bytes)?;
-        self.reconstruct_file(&ptr, None).await
-    }
-
-    /// Pre-flight check: ask the shard how many bytes its
-    /// reconstruction terms cover, and bail out early when that sum
-    /// is less than the pointer's declared size.
-    ///
-    /// Without this, an incomplete shard would let
-    /// [`xet_data::file_reconstruction::FileReconstructor`] silently
-    /// produce a short file that fails the trailing blake3 check
-    /// with a generic [`error::CrabError::HashMismatch`]. The mismatch
-    /// is real but the message buries the actual cause — the remote
-    /// is missing chunks, not corrupting them.
-    ///
-    /// A `None` from `get_file_reconstruction_info` (no file-index
-    /// entry, missing shard) is *not* a partial-coverage problem; we
-    /// let the downstream reconstructor surface its usual error so
-    /// the diagnosis stays accurate. Same for any error from the
-    /// adapter: better to attempt the reconstruction and let the
-    /// real error bubble up than to misclassify it as incomplete
-    /// coverage.
-    async fn preflight_shard_coverage(
-        &self,
-        client: &Arc<dyn xet_client::cas_client::Client>,
-        ptr: &Pointer,
-    ) -> Result<()> {
-        let file_hash = MerkleHash::from(ptr.file_hash);
-        // No reconstruction info available: let the downstream path
-        // produce its specific error (NotFound, etc.).
-        let Ok(Some((info, _))) = client.get_file_reconstruction_info(&file_hash).await else {
-            return Ok(());
-        };
-
-        let covered: u64 = info
-            .segments
-            .iter()
-            .map(|s| u64::from(s.unpacked_segment_bytes))
-            .sum();
-        if covered >= ptr.size {
-            return Ok(());
-        }
-
-        let total_chunks: u32 = info
-            .segments
-            .iter()
-            .map(|s| s.chunk_index_end - s.chunk_index_start)
-            .sum();
-        let example = info.segments.first().map_or_else(
-            || (0, String::new()),
-            |s| (s.chunk_index_start, s.xorb_hash.hex()),
-        );
-
-        tracing::error!(
-            file_hash = %file_hash.hex(),
-            expected_bytes = ptr.size,
-            covered_bytes = covered,
-            num_segments = info.segments.len(),
-            total_chunks,
-            "preflight: shard reconstruction terms do not cover the full file; \
-             remote is missing chunks (incomplete push). Try \
-             `crab hydrate --recover-from <path>` if you have the original file locally."
-        );
-
-        Err(error::CrabError::IncompleteShardReconstruction {
-            file_hash: file_hash.hex(),
-            path: None,
-            // Report the byte-shortfall translated into a chunk count
-            // estimate. We don't know which chunk indices the missing
-            // bytes correspond to — that lives with whichever push
-            // dropped them — so the example carries the first segment
-            // we *do* have, scoped by index 0 of the file's chunk list.
-            uncovered_chunks: 1,
-            example_chunk_hash: example.1,
-            example_chunk_index: example.0,
-        })
-    }
-
-    /// Pointer-carried shard hints are installed on the StoreClient
-    /// before xet-core asks for reconstruction terms. The adapter
-    /// verifies hinted shards contain the file and falls back to the
-    /// file-index on stale or unreadable hints.
-    async fn reconstruct_file(
-        &self,
-        ptr: &Pointer,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-    ) -> Result<Vec<u8>> {
-        let file_hash = MerkleHash::from(ptr.file_hash);
-
-        let client = self.store_client_for_pointer(file_index_lookup, ptr);
-
-        // Pre-flight: detect partial-coverage shards before we burn
-        // bandwidth fetching xorbs that won't add up to the full file.
-        self.preflight_shard_coverage(&client, ptr).await?;
-
-        // Reconstruct into an in-memory buffer. We hold the full bytes
-        // so the caller can blake3-verify and then hand them to the
-        // atomic-write path; streaming verification is a future knob.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "pointer size fits usize on all platforms crab runs on"
-        )]
-        let expected_size = ptr.size as usize;
-        let buffer: std::io::Cursor<Vec<u8>> =
-            std::io::Cursor::new(Vec::with_capacity(expected_size));
-        let shared = Arc::new(std::sync::Mutex::new(buffer));
-        let writer = SharedCursorWriter(shared.clone());
-
-        let xet_context = new_xet_context()?;
-        let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
-                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore));
-        // Chunk cache and prefetch share the same concurrency
-        // controller via `StoreClient::acquire_download_permit`. The
-        // cancellation token plumbing flows through
-        // `hydrate_batch` → `Hydrator`; we rely on the controller's
-        // permit acquisition being cancel-safe.
-        let reconstructor = match self.chunk_cache.clone() {
-            Some(cache) => reconstructor.with_chunk_cache(cache),
-            None => reconstructor,
-        };
-
-        reconstructor
-            .reconstruct_to_writer(writer)
+        self.canonical
+            .reconstruct_from_pointer(pointer_bytes)
             .await
-            .map_err(|e| {
-                error::CrabError::Internal(format!(
-                    "file reconstruction failed for {}: {e}",
-                    file_hash.hex()
-                ))
-            })?;
-
-        let content = {
-            let mut guard = shared.lock().map_err(|_| {
-                error::CrabError::Internal("reconstruction writer poisoned".to_string())
-            })?;
-            std::mem::take(guard.get_mut())
-        };
-
-        tracing::debug!(
-            file_hash = %file_hash.hex(),
-            reconstructed_bytes = content.len(),
-            expected_bytes = ptr.size,
-            "reconstruct: FileReconstructor returned content"
-        );
-
-        // Verify blake3 hash. The FileReconstructor does not perform
-        // this check internally — it is the caller's responsibility.
-        let actual_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-        if actual_hash != ptr.file_hash {
-            tracing::error!(
-                file_hash = %file_hash.hex(),
-                expected_hash = %crab_types::pointer::hex_encode(&ptr.file_hash),
-                actual_hash = %crab_types::pointer::hex_encode(&actual_hash),
-                reconstructed_bytes = content.len(),
-                expected_bytes = ptr.size,
-                "reconstruct: HASH MISMATCH — reconstructed content does not \
-                 match pointer. If reconstructed_bytes ≈ 2× expected_bytes, \
-                 this is likely the duplicate-staging bug (CRAB-E0082). \
-                 Re-push the file to regenerate the shard: \
-                 crab add <file> && git add <file> && git commit --amend \
-                 --no-edit && git push --force"
-            );
-            // Report hashes in the same raw-byte hex format as the pointer
-            // file on disk, so a user can grep-match the returned error
-            // against `git show :path`. `MerkleHash::hex()` uses a
-            // little-endian u64 rendering that does not match the pointer
-            // text format. See S1-P2-3.
-            return Err(error::CrabError::HashMismatch {
-                requested: crab_types::pointer::hex_encode(&ptr.file_hash),
-                actual: crab_types::pointer::hex_encode(&actual_hash),
-            });
-        }
-
-        Ok(content)
+            .map_err(Into::into)
     }
 
     /// Reconstruct a file from its pointer and stream the bytes
@@ -1414,74 +854,10 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
-        error::check_cancelled(cancel)?;
-        let file_hash = MerkleHash::from(ptr.file_hash);
-
-        let client = self.store_client_for_pointer(file_index_lookup, ptr);
-
-        self.preflight_shard_coverage(&client, ptr).await?;
-
-        let tap_state = Arc::new(std::sync::Mutex::new(GenericHasherTapState {
-            writer: Some(writer),
-            hasher: blake3::Hasher::new(),
-            bytes_written: 0,
-        }));
-        let writer = GenericHasherTap {
-            shared: tap_state.clone(),
-        };
-
-        let xet_context = new_xet_context()?;
-        // xet-data cancels its supplied token when an internal worker fails.
-        // Isolate that signal so the operation token still distinguishes a
-        // user cancellation from the reconstruction error returned below.
-        let reconstruction_cancel = cancel.child_token();
-        let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
-                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
-                .with_cancellation_token(reconstruction_cancel);
-        let reconstructor = match self.chunk_cache.clone() {
-            Some(cache) => reconstructor.with_chunk_cache(cache),
-            None => reconstructor,
-        };
-
-        if let Err(e) = reconstructor.reconstruct_to_writer(writer).await {
-            if cancel.is_cancelled() {
-                return Err(error::CrabError::Cancelled);
-            }
-            return Err(error::CrabError::Internal(format!(
-                "file reconstruction failed for {}: {e}",
-                file_hash.hex(),
-            )));
-        }
-
-        let (actual_hash, bytes_written) = {
-            let mut guard = tap_state
-                .lock()
-                .map_err(|_| error::CrabError::Internal("hasher tap poisoned".to_owned()))?;
-            if let Some(writer) = guard.writer.as_mut() {
-                writer.flush().map_err(error::CrabError::Io)?;
-            }
-            drop(guard.writer.take());
-            let hash: [u8; 32] = guard.hasher.finalize().into();
-            (hash, guard.bytes_written)
-        };
-
-        if actual_hash != ptr.file_hash {
-            return Err(error::CrabError::HashMismatch {
-                requested: crab_types::pointer::hex_encode(&ptr.file_hash),
-                actual: crab_types::pointer::hex_encode(&actual_hash),
-            });
-        }
-        if bytes_written != ptr.size {
-            return Err(error::CrabError::Internal(format!(
-                "file reconstruction size mismatch for {}: expected {}, got {}",
-                file_hash.hex(),
-                ptr.size,
-                bytes_written,
-            )));
-        }
-
-        Ok(bytes_written)
+        self.canonical
+            .reconstruct_to_writer_with_cancel(ptr, writer, file_index_lookup, cancel)
+            .await
+            .map_err(Into::into)
     }
 
     async fn reconstruct_to_path_with_progress(
@@ -1532,116 +908,28 @@ impl ShardHydrator {
         file_index_lookup: Option<&SharedFileIndexLookup>,
         cancel: CancellationToken,
     ) -> Result<u64> {
-        let file_hash = MerkleHash::from(ptr.file_hash);
-
-        let client = self.store_client_for_pointer(file_index_lookup, ptr);
-
-        // Pre-flight: detect partial-coverage shards before we open
-        // the destination file. Avoids creating an empty `dest` that
-        // we'd then have to clean up when the reconstruction can't
-        // possibly produce the full content.
-        self.preflight_shard_coverage(&client, ptr).await?;
-
-        // Open the destination synchronously — the reconstructor
-        // wants a `W: Write + Send + 'static`, and a `std::fs::File`
-        // is the cheapest thing that satisfies those bounds.
-        // `create` truncates any existing content, matching
-        // `tokio::fs::File::create` semantics the previous in-memory
-        // `download()` used.
         let dest_for_cleanup = cleanup_path.to_owned();
-
-        // Wrap the file in a tee writer that also feeds the
-        // blake3 hasher incrementally. The shared state holds both
-        // so the caller can extract the finalised hash after
-        // `reconstruct_to_writer` has moved and dropped the writer.
-        // `Arc<Mutex>` is the cheapest way to satisfy the
-        // `W: Send + 'static` bound while retaining post-call
-        // visibility into the hasher; any lock-free alternative
-        // trades safety for complexity we don't need here.
-        let tap_state = Arc::new(std::sync::Mutex::new(HasherTapState {
+        let tap_state = Arc::new(std::sync::Mutex::new(ProgressWriterState {
             file: Some(file),
-            hasher: blake3::Hasher::new(),
-            bytes_written: 0,
             progress,
         }));
-        let writer = HasherTap {
+        let writer = ProgressWriter {
             shared: tap_state.clone(),
         };
-
-        let xet_context = new_xet_context()?;
-        // Keep xet-data's error-triggered cancellation local to this file;
-        // otherwise one failed reconstruction poisons the whole hydrate batch.
-        let reconstruction_cancel = cancel.child_token();
-        let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
-                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
-                .with_cancellation_token(reconstruction_cancel);
-        let reconstructor = match self.chunk_cache.clone() {
-            Some(cache) => reconstructor.with_chunk_cache(cache),
-            None => reconstructor,
-        };
-
-        // Any failure below must delete `dest` so a caller that
-        // retries doesn't observe a half-written file at the target
-        // path. `remove_file` errors are swallowed — the
-        // reconstruction error is the load-bearing one, and a
-        // missing-destination cleanup failure is a strictly worse
-        // signal to surface.
         let cleanup = |err: error::CrabError| -> error::CrabError {
             let _ = std::fs::remove_file(&dest_for_cleanup);
             err
         };
-
-        if let Err(e) = reconstructor.reconstruct_to_writer(writer).await {
-            if cancel.is_cancelled() {
-                return Err(cleanup(error::CrabError::Cancelled));
-            }
-            return Err(cleanup(error::CrabError::Internal(format!(
-                "file reconstruction failed for {}: {e}",
-                file_hash.hex(),
-            ))));
-        }
-
-        // The writer dropped when `reconstruct_to_writer` returned —
-        // finalise the hasher and verify against the pointer.
-        let (actual_hash, bytes_written) = {
-            let mut guard = tap_state.lock().map_err(|_| {
-                cleanup(error::CrabError::Internal("hasher tap poisoned".to_owned()))
-            })?;
-            // Drop the file handle first so the kernel buffer is
-            // flushed before we finalise — ensures the `stat(dest)`
-            // a caller would do immediately after sees the full
-            // content, not a partial prefix.
+        let result = self
+            .canonical
+            .reconstruct_to_writer_with_cancel(ptr, writer, file_index_lookup, &cancel)
+            .await
+            .map_err(error::CrabError::from)
+            .map_err(cleanup);
+        if let Ok(mut guard) = tap_state.lock() {
             drop(guard.file.take());
-            let hash: [u8; 32] = guard.hasher.finalize().into();
-            (hash, guard.bytes_written)
-        };
-
-        if actual_hash != ptr.file_hash {
-            tracing::error!(
-                file_hash = %file_hash.hex(),
-                expected_hash = %crab_types::pointer::hex_encode(&ptr.file_hash),
-                actual_hash = %crab_types::pointer::hex_encode(&actual_hash),
-                reconstructed_bytes = bytes_written,
-                expected_bytes = ptr.size,
-                "reconstruct_to_path: HASH MISMATCH — streamed content \
-                 does not match pointer; destination removed",
-            );
-            return Err(cleanup(error::CrabError::HashMismatch {
-                requested: crab_types::pointer::hex_encode(&ptr.file_hash),
-                actual: crab_types::pointer::hex_encode(&actual_hash),
-            }));
         }
-
-        tracing::debug!(
-            file_hash = %file_hash.hex(),
-            bytes_written,
-            expected_bytes = ptr.size,
-            dest = %cleanup_path.display(),
-            "reconstruct_to_path: streamed reconstruction complete",
-        );
-
-        Ok(bytes_written)
+        result
     }
 
     /// Variant of [`Self::reconstruct_to_path`] that accepts raw
@@ -1690,295 +978,14 @@ impl ShardHydrator {
         start: u64,
         end: u64,
     ) -> Result<Vec<u8>> {
-        let ptr = crab_types::pointer::Pointer::parse(pointer_bytes)?;
-
-        if end < start {
-            return Err(error::CrabError::Internal(format!(
-                "reconstruct_range_from_pointer: end ({end}) < start ({start})"
-            )));
-        }
-
-        // Clamp against the declared file size. Reading past EOF
-        // simply returns fewer bytes; that matches `Read::read` on a
-        // std::fs::File and the Python file-object protocol.
-        let end = end.min(ptr.size);
-        let start = start.min(ptr.size);
-        if start >= end {
-            return Ok(Vec::new());
-        }
-
-        let file_hash = MerkleHash::from(ptr.file_hash);
-
-        let file_index_lookup = self.shared_file_index_lookup();
-        let client = self.store_client_for_pointer(Some(&file_index_lookup), &ptr);
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "range bounds fit usize on every platform crab runs on"
-        )]
-        let capacity = (end - start) as usize;
-        let buffer: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::with_capacity(capacity));
-        let shared = Arc::new(std::sync::Mutex::new(buffer));
-        let writer = SharedCursorWriter(shared.clone());
-
-        let range = xet_client::cas_types::FileRange::new(start, end);
-        let xet_context = new_xet_context()?;
-        let reconstructor =
-            xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
-                .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
-                .with_byte_range(range);
-        let reconstructor = match self.chunk_cache.clone() {
-            Some(cache) => reconstructor.with_chunk_cache(cache),
-            None => reconstructor,
-        };
-
-        let reconstruction_result =
-            reconstructor
-                .reconstruct_to_writer(writer)
-                .await
-                .map_err(|e| {
-                    error::CrabError::Internal(format!(
-                        "range reconstruction failed for {} [{start}..{end}]: {e}",
-                        file_hash.hex()
-                    ))
-                });
-
-        if let Err(e) = file_index_lookup.close().await {
-            warn!(err = %e, "range reconstruction file-index lookup session close failed");
-        }
-
-        reconstruction_result?;
-
-        let content = {
-            let mut guard = shared.lock().map_err(|_| {
-                error::CrabError::Internal("reconstruction writer poisoned".to_string())
-            })?;
-            std::mem::take(guard.get_mut())
-        };
-
-        Ok(content)
-    }
-
-    /// Attempt delta reconstruction using an existing file on disk as the
-    /// base version.
-    ///
-    /// Reads the current file at `path`, resolves its reconstruction terms
-    /// from the shard metadata, then uses [`reconstruct_from_delta`] to
-    /// build the target version by reusing unchanged chunks.
-    ///
-    /// Returns an error if:
-    /// - The file at `path` doesn't exist or isn't a hydrated file
-    /// - The base file's reconstruction terms can't be resolved
-    /// - The reuse ratio is too low to justify the delta path (<10%)
-    async fn try_delta_reconstruct(
-        &self,
-        path: &Path,
-        target_ptr: &Pointer,
-        file_index_lookup: Option<&SharedFileIndexLookup>,
-    ) -> Result<Vec<u8>> {
-        use crate::git::delta_reconstruct::{estimate_reuse_ratio, reconstruct_from_delta};
-
-        // Read the existing file on disk. If it's a pointer or doesn't
-        // exist, delta reconstruction isn't possible.
-        let base_content = tokio::fs::read(path).await.map_err(|e| {
-            error::CrabError::Internal(format!("cannot read base file for delta: {e}"))
-        })?;
-
-        // Don't try delta if the file is a pointer (not hydrated).
-        if is_working_tree_pointer(path).unwrap_or(false) {
-            return Err(error::CrabError::Internal(
-                "base file is a pointer, not hydrated".into(),
-            ));
-        }
-
-        // Compute the base file's hash to look up its reconstruction terms.
-        let base_hash_bytes: [u8; 32] = *blake3::hash(&base_content).as_bytes();
-        let base_hash = MerkleHash::from(base_hash_bytes);
-
-        // Resolve base file's shard and reconstruction terms.
-        let base_shard_hash = self
-            .resolve_file_index(&base_hash, file_index_lookup)
-            .await?;
-        let base_shard = self
-            .get_or_download_shard_for_file(&base_shard_hash, &base_hash)
-            .await?;
-        let base_file_info =
-            base_shard
-                .get_file_info(&base_hash)?
-                .ok_or_else(|| error::CrabError::NotFound {
-                    path: format!("base file-info {}", base_hash.hex()),
-                })?;
-
-        // Resolve target file's shard and reconstruction terms.
-        let target_hash = MerkleHash::from(target_ptr.file_hash);
-        let target_shard_hash = self
-            .resolve_file_index(&target_hash, file_index_lookup)
-            .await?;
-        let target_shard = self
-            .get_or_download_shard_for_file(&target_shard_hash, &target_hash)
-            .await?;
-        let target_file_info = target_shard.get_file_info(&target_hash)?.ok_or_else(|| {
-            error::CrabError::NotFound {
-                path: format!("target file-info {}", target_hash.hex()),
-            }
-        })?;
-
-        // Convert FileDataSequenceEntry segments to ReconstructionTerms.
-        // This requires resolving each segment's xorb to get chunk-level
-        // offsets. For the delta path, we use a simplified mapping where
-        // each segment maps to one ReconstructionTerm.
-        let base_terms = self.segments_to_terms(&base_file_info.segments).await?;
-        let target_terms = self.segments_to_terms(&target_file_info.segments).await?;
-
-        // Check if delta is worthwhile.
-        let reuse_ratio = estimate_reuse_ratio(&base_terms, &target_terms);
-        if reuse_ratio < 0.1 {
-            return Err(error::CrabError::Internal(format!(
-                "reuse ratio too low for delta: {:.1}%",
-                reuse_ratio * 100.0
-            )));
-        }
-
-        tracing::info!(
-            path = %path.display(),
-            reuse_ratio = format!("{:.1}%", reuse_ratio * 100.0),
-            base_segments = base_terms.len(),
-            target_segments = target_terms.len(),
-            "using delta reconstruction"
-        );
-
-        // Build a pre-populated fetcher with all target chunks that need
-        // fetching. We decompress them now so the delta engine can verify
-        // blake3 hashes directly.
-        let fetcher = self.build_delta_fetcher(&target_terms).await?;
-
-        let delta_result =
-            reconstruct_from_delta(&base_terms, &base_content, &target_terms, &fetcher, None)?;
-
-        // Verify the final content.
-        let actual_hash: [u8; 32] = *blake3::hash(&delta_result.content).as_bytes();
-        if actual_hash != target_ptr.file_hash {
-            // See S1-P2-3 — report hashes using raw byte hex for
-            // consistency with the pointer file on disk.
-            return Err(error::CrabError::HashMismatch {
-                requested: crab_types::pointer::hex_encode(&target_ptr.file_hash),
-                actual: crab_types::pointer::hex_encode(&actual_hash),
-            });
-        }
-
-        tracing::info!(
-            path = %path.display(),
-            reused_bytes = delta_result.reused_bytes,
-            fetched_bytes = delta_result.fetched_bytes,
-            "delta reconstruction complete"
-        );
-
-        Ok(delta_result.content)
-    }
-
-    /// Convert `FileDataSequenceEntry` segments into `ReconstructionTerm`s.
-    ///
-    /// Each segment references a range of chunks within an xorb. We fetch
-    /// the xorb and parse it to extract per-chunk byte offsets and hashes.
-    /// The `offset` and `length` in each term use synthetic values that
-    /// are consistent with what [`build_delta_fetcher`] pre-populates.
-    async fn segments_to_terms(
-        &self,
-        segments: &[FileDataSequenceEntry],
-    ) -> Result<Vec<crate::git::smudge::ReconstructionTerm>> {
-        use crab_xet::xorb::parser::XorbParser;
-
-        let mut terms = Vec::new();
-        for seg in segments {
-            let xorb_hash_bytes: [u8; 32] = seg.xorb_hash.into();
-            let segment_terms = self
-                .decode_xorb_with_cache_repair(&seg.xorb_hash, |xorb_data| {
-                    let parser = XorbParser::parse(xorb_data)?;
-                    let mut segment_terms = Vec::new();
-                    for idx in seg.chunk_index_start..seg.chunk_index_end {
-                        let chunk = parser.get_chunk(idx)?;
-                        let chunk_hash = *blake3::hash(&chunk.data).as_bytes();
-                        // Use chunk index as synthetic offset and uncompressed
-                        // length as the range length. The ShardHydratorXorbFetcher
-                        // is keyed by (xorb_hash, offset, length) using these
-                        // same values.
-                        segment_terms.push(crate::git::smudge::ReconstructionTerm {
-                            xorb_hash: xorb_hash_bytes,
-                            offset: u64::from(idx),
-                            length: chunk.data.len() as u64,
-                            chunk_hash,
-                        });
-                    }
-                    Ok(segment_terms)
-                })
-                .await?;
-            terms.extend(segment_terms);
-        }
-        Ok(terms)
-    }
-
-    /// Build a pre-populated [`ShardHydratorXorbFetcher`] containing
-    /// decompressed chunk data for all terms that the delta engine might
-    /// need to fetch.
-    async fn build_delta_fetcher(
-        &self,
-        terms: &[crate::git::smudge::ReconstructionTerm],
-    ) -> Result<ShardHydratorXorbFetcher> {
-        use crab_xet::xorb::parser::XorbParser;
-
-        let mut chunks = std::collections::HashMap::new();
-        // Group terms by xorb hash to avoid re-parsing the same xorb.
-        let mut by_xorb: std::collections::HashMap<
-            [u8; 32],
-            Vec<&crate::git::smudge::ReconstructionTerm>,
-        > = std::collections::HashMap::new();
-        for term in terms {
-            by_xorb.entry(term.xorb_hash).or_default().push(term);
-        }
-
-        for (xorb_hash_bytes, xorb_terms) in &by_xorb {
-            let merkle_hash = MerkleHash::from(*xorb_hash_bytes);
-            let xorb_chunks = self
-                .decode_xorb_with_cache_repair(&merkle_hash, |xorb_data| {
-                    let parser = XorbParser::parse(xorb_data)?;
-                    let mut xorb_chunks = Vec::new();
-                    for term in xorb_terms {
-                        // term.offset is the chunk index (synthetic, set by segments_to_terms).
-                        let chunk_idx = term.offset as u32;
-                        let chunk = parser.get_chunk(chunk_idx)?;
-                        let key = (*xorb_hash_bytes, term.offset, term.length);
-                        xorb_chunks.push((key, chunk.data.to_vec()));
-                    }
-                    Ok(xorb_chunks)
-                })
-                .await?;
-            chunks.extend(xorb_chunks);
-        }
-
-        Ok(ShardHydratorXorbFetcher { chunks })
+        self.canonical
+            .reconstruct_range_from_pointer(pointer_bytes, start, end)
+            .await
+            .map_err(Into::into)
     }
 }
 
-fn new_xet_context() -> Result<xet_runtime::core::XetContext> {
-    xet_runtime::core::XetContext::default().map_err(|error| {
-        error::CrabError::Internal(format!("failed to initialize xet context: {error}"))
-    })
-}
-
-fn fixed_hydrate_concurrency(
-    concurrency: usize,
-) -> Result<Arc<xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController>> {
-    let context = new_xet_context()?;
-    Ok(
-        xet_client::cas_client::adaptive_concurrency::AdaptiveConcurrencyController::new_fixed(
-            context,
-            HYDRATE_CONCURRENCY_TAG,
-            concurrency,
-        ),
-    )
-}
-
-impl ShardHydrator {
+impl HydrationRuntime {
     async fn hydrate_one(
         &self,
         path: &Path,
@@ -2017,31 +1024,15 @@ impl ShardHydrator {
             });
         }
 
-        let result = match self
-            .try_delta_reconstruct(path, ptr, Some(file_index_lookup))
-            .await
-        {
-            Ok(content) => {
-                let bytes = content.len() as u64;
-                atomic_write_with_progress(path, &content, progress)
-                    .map(|index_stat| VerifiedWrite { bytes, index_stat })
-            }
-            Err(e) => {
-                tracing::debug!(
-                    path = %path.display(),
-                    err = %e,
-                    "delta reconstruction unavailable, falling back to full"
-                );
-                self.reconstruct_to_atomic_path_with_cancel(
-                    ptr,
-                    path,
-                    progress.cloned(),
-                    Some(file_index_lookup),
-                    cancel.clone(),
-                )
-                .await
-            }
-        };
+        let result = self
+            .reconstruct_to_atomic_path_with_cancel(
+                ptr,
+                path,
+                progress.cloned(),
+                Some(file_index_lookup),
+                cancel.clone(),
+            )
+            .await;
         error::check_cancelled(cancel)?;
         let result = match result {
             Ok(bytes) => Ok(bytes),
@@ -2094,7 +1085,7 @@ struct HydrateOneResult {
     verified_path: Option<crate::cache::add_validation::VerifiedPath>,
 }
 
-impl Hydrator for ShardHydrator {
+impl Hydrator for HydrationRuntime {
     fn hydrate_batch<'a>(
         &'a self,
         items: &'a [(PathBuf, Pointer)],
@@ -2154,175 +1145,26 @@ impl Hydrator for ShardHydrator {
     }
 }
 
-/// Adapter that bridges [`ShardHydrator`]'s xorb cache to the
-/// synchronous [`XorbFetcher`] trait used by the delta reconstruction
-/// engine.
-///
-/// Pre-populates a map of `(xorb_hash_bytes, offset, length) → decompressed_data`
-/// so that `fetch_range` calls from the delta engine resolve locally
-/// without any async bridging.
-struct ShardHydratorXorbFetcher {
-    /// Pre-resolved chunk data keyed by `(xorb_hash, offset, length)`.
-    chunks: std::collections::HashMap<([u8; 32], u64, u64), Vec<u8>>,
-}
-
-/// A `'static + Send` writer that appends into a shared `Cursor<Vec<u8>>`.
-///
-/// xet-core's [`FileReconstructor::reconstruct_to_writer`] bounds the
-/// writer `W: Write + Send + 'static`, so we can't borrow a local
-/// buffer directly. Wrapping the cursor in `Arc<Mutex<_>>` and handing
-/// out one writer satisfies the bound while letting the caller pull
-/// bytes out after the reconstruction resolves.
-struct SharedCursorWriter(Arc<std::sync::Mutex<std::io::Cursor<Vec<u8>>>>);
-
-impl std::io::Write for SharedCursorWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("shared cursor mutex poisoned"))?
-            .write(buf)
-    }
-
-    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("shared cursor mutex poisoned"))?
-            .write_vectored(bufs)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| std::io::Error::other("shared cursor mutex poisoned"))?
-            .flush()
-    }
-}
-
-/// Writer state shared between [`HasherTap`] and
-/// [`ShardHydrator::reconstruct_to_path`].
-///
-/// Both sides need access to the destination file (for writing) and
-/// the blake3 hasher (for whole-file integrity verification). The
-/// file lives inside an `Option` so the caller can `.take()` it to
-/// drop the handle — releasing the fd and flushing the kernel buffer
-/// — before finalising the hasher.
-struct HasherTapState {
-    /// Destination file handle. `None` after the caller explicitly
-    /// drops it post-reconstruction.
+struct ProgressWriterState {
     file: Option<std::fs::File>,
-    /// Incremental blake3 hasher updated with every chunk the
-    /// reconstructor writes. Finalised after the writer is dropped
-    /// to compute the whole-file hash for integrity verification.
-    hasher: blake3::Hasher,
-    /// Running count of bytes successfully written to `file`. Equal
-    /// to `ptr.size` on a successful reconstruction.
-    bytes_written: u64,
-    /// Optional hydrate progress sink. Updated from the reconstructor's
-    /// writer thread so large single-file hydrations advance live.
     progress: Option<Arc<HydrateProgress>>,
 }
 
-struct GenericHasherTapState<W: Write> {
-    writer: Option<W>,
-    hasher: blake3::Hasher,
-    bytes_written: u64,
+struct ProgressWriter {
+    shared: Arc<std::sync::Mutex<ProgressWriterState>>,
 }
 
-struct GenericHasherTap<W: Write> {
-    shared: Arc<std::sync::Mutex<GenericHasherTapState<W>>>,
-}
-
-fn hash_vectored_prefix(
-    hasher: &mut blake3::Hasher,
-    bufs: &[std::io::IoSlice<'_>],
-    mut written: usize,
-) {
-    for buf in bufs {
-        if written == 0 {
-            break;
-        }
-        let take = written.min(buf.len());
-        hasher.update(&buf[..take]);
-        written -= take;
-    }
-}
-
-impl<W: Write> std::io::Write for GenericHasherTap<W> {
+impl std::io::Write for ProgressWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut guard = self
             .shared
             .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
-        let written = guard
-            .writer
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("hasher tap: writer already taken"))?
-            .write(buf)?;
-        guard.hasher.update(&buf[..written]);
-        guard.bytes_written = guard.bytes_written.saturating_add(written as u64);
-        Ok(written)
-    }
-
-    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        let mut guard = self
-            .shared
-            .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
-        let written = guard
-            .writer
-            .as_mut()
-            .ok_or_else(|| std::io::Error::other("hasher tap: writer already taken"))?
-            .write_vectored(bufs)?;
-        hash_vectored_prefix(&mut guard.hasher, bufs, written);
-        guard.bytes_written = guard.bytes_written.saturating_add(written as u64);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        let mut guard = self
-            .shared
-            .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
-        match guard.writer.as_mut() {
-            Some(writer) => writer.flush(),
-            None => Ok(()),
-        }
-    }
-}
-
-/// A `Write + Send + 'static` writer that fans every byte into both
-/// a destination file and an incremental blake3 hasher.
-///
-/// xet-core's [`xet_data::file_reconstruction::FileReconstructor::reconstruct_to_writer`]
-/// bounds the writer `W: Write + Send + 'static`, so we need owned
-/// access. A plain [`std::fs::File`] satisfies the bound but gives no
-/// hook for integrity verification — once the writer is moved and
-/// dropped by the reconstructor, there's no way to recover the bytes
-/// for hashing.
-///
-/// This adapter solves that: it owns an `Arc<Mutex<HasherTapState>>`
-/// that both the write path and the finalisation path hold. Writes
-/// feed the hasher inline so the memory footprint stays bounded
-/// (single write-buffer sized, not file sized), and the caller
-/// pulls the finalised hash out of the shared state after the
-/// reconstructor returns.
-struct HasherTap {
-    shared: Arc<std::sync::Mutex<HasherTapState>>,
-}
-
-impl std::io::Write for HasherTap {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut guard = self
-            .shared
-            .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
+            .map_err(|_| std::io::Error::other("progress writer mutex poisoned"))?;
         let written = guard
             .file
             .as_mut()
-            .ok_or_else(|| std::io::Error::other("hasher tap: destination file already taken"))?
+            .ok_or_else(|| std::io::Error::other("progress writer destination already taken"))?
             .write(buf)?;
-        guard.hasher.update(&buf[..written]);
-        guard.bytes_written = guard.bytes_written.saturating_add(written as u64);
         if let Some(progress) = &guard.progress {
             progress.add_bytes_done(written as u64);
         }
@@ -2333,14 +1175,12 @@ impl std::io::Write for HasherTap {
         let mut guard = self
             .shared
             .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
+            .map_err(|_| std::io::Error::other("progress writer mutex poisoned"))?;
         let written = guard
             .file
             .as_mut()
-            .ok_or_else(|| std::io::Error::other("hasher tap: destination file already taken"))?
+            .ok_or_else(|| std::io::Error::other("progress writer destination already taken"))?
             .write_vectored(bufs)?;
-        hash_vectored_prefix(&mut guard.hasher, bufs, written);
-        guard.bytes_written = guard.bytes_written.saturating_add(written as u64);
         if let Some(progress) = &guard.progress {
             progress.add_bytes_done(written as u64);
         }
@@ -2351,7 +1191,7 @@ impl std::io::Write for HasherTap {
         let mut guard = self
             .shared
             .lock()
-            .map_err(|_| std::io::Error::other("hasher tap mutex poisoned"))?;
+            .map_err(|_| std::io::Error::other("progress writer mutex poisoned"))?;
         match guard.file.as_mut() {
             Some(file) => file.flush(),
             // Dropped already — nothing to flush. Treat as success
@@ -2359,27 +1199,6 @@ impl std::io::Write for HasherTap {
             // shutdown path doesn't trip a spurious error.
             None => Ok(()),
         }
-    }
-}
-
-impl crate::git::smudge::XorbFetcher for ShardHydratorXorbFetcher {
-    fn fetch_range(
-        &self,
-        xorb_hash: &[u8; 32],
-        range: std::ops::Range<u64>,
-    ) -> crab_vfs::Result<Vec<u8>> {
-        let key = (*xorb_hash, range.start, range.end - range.start);
-        self.chunks
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| crab_vfs::VfsError::NotFound {
-                path: format!(
-                    "xorb {} range {}..{}",
-                    crab_types::pointer::hex_encode(xorb_hash),
-                    range.start,
-                    range.end,
-                ),
-            })
     }
 }
 
@@ -3262,10 +2081,8 @@ async fn configured_hydrator(
             debug!(replica = %name, "selected read replica for hydrate");
         }
         let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-        // Bulk hydrate already streams through the full-xorb cache. A decoded
-        // range cache here would add writes and eviction churn to one-pass reads.
         let mut hydrator =
-            ShardHydrator::with_config_from_cli_layout(caching_store, selection.router, config)?;
+            crate::read::build_cli_hydrator(caching_store, selection.router, config)?;
         let requested_restore = restore_flags.resolve_auto_restore(config.hydrate.auto_restore);
         if restore_flags.restore && !config.tier.enabled {
             return Err(error::CrabError::Configuration {
@@ -4783,62 +3600,6 @@ fn walk_and_parse_pointers(
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct PartialVectoredWriter {
-        bytes: Vec<u8>,
-    }
-
-    impl std::io::Write for PartialVectoredWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let written = buf.len().min(2);
-            self.bytes.extend_from_slice(&buf[..written]);
-            Ok(written)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-            let mut remaining = 5usize;
-            let mut written = 0usize;
-            for buf in bufs {
-                let take = remaining.min(buf.len());
-                self.bytes.extend_from_slice(&buf[..take]);
-                written += take;
-                remaining -= take;
-                if remaining == 0 {
-                    break;
-                }
-            }
-            Ok(written)
-        }
-    }
-
-    #[test]
-    fn generic_hasher_tap_hashes_only_partial_vectored_write() {
-        let state = Arc::new(std::sync::Mutex::new(GenericHasherTapState {
-            writer: Some(PartialVectoredWriter::default()),
-            hasher: blake3::Hasher::new(),
-            bytes_written: 0,
-        }));
-        let mut tap = GenericHasherTap {
-            shared: Arc::clone(&state),
-        };
-        let bufs = [
-            std::io::IoSlice::new(b"abc"),
-            std::io::IoSlice::new(b"defg"),
-        ];
-
-        let written = tap.write_vectored(&bufs).expect("vectored write");
-
-        assert_eq!(written, 5);
-        let state = state.lock().expect("tap state");
-        assert_eq!(state.bytes_written, 5);
-        assert_eq!(state.writer.as_ref().expect("writer").bytes, b"abcde");
-        assert_eq!(state.hasher.clone().finalize(), blake3::hash(b"abcde"));
-    }
-
     use std::future::Future;
     use std::io::{self, Write};
     use std::pin::Pin;
@@ -5332,15 +4093,6 @@ mod tests {
         assert_eq!(hydrate_file_concurrency(0), 1);
         assert_eq!(hydrate_file_concurrency(3), 3);
         assert_eq!(hydrate_file_concurrency(32), MAX_HYDRATE_FILE_CONCURRENCY);
-    }
-
-    #[test]
-    fn hydrate_buffer_semaphore_preserves_byte_budget() {
-        let budget = 384 * 1024 * 1024;
-        let semaphore = hydrate_buffer_semaphore(budget);
-
-        assert_eq!(semaphore.total_permits(), budget);
-        assert_eq!(semaphore.available_permits(), budget);
     }
 
     #[cfg(unix)]
@@ -6917,18 +5669,16 @@ mod tests {
     }
 
     #[test]
-    fn hasher_tap_reports_progress_before_file_completion() {
+    fn progress_writer_reports_progress_before_file_completion() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("streamed.bin");
         let file = std::fs::File::create(&dest).unwrap();
         let progress = Arc::new(HydrateProgress::new(1, 10));
-        let state = Arc::new(std::sync::Mutex::new(HasherTapState {
+        let state = Arc::new(std::sync::Mutex::new(ProgressWriterState {
             file: Some(file),
-            hasher: blake3::Hasher::new(),
-            bytes_written: 0,
             progress: Some(progress.clone()),
         }));
-        let mut tap = HasherTap { shared: state };
+        let mut tap = ProgressWriter { shared: state };
 
         tap.write_all(b"abcd").unwrap();
 
@@ -6976,10 +5726,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hydrate_preserves_failure_diagnostics_without_publishing() {
+        use object_store::ObjectStoreExt;
+        use std::error::Error;
+
+        struct ExpiredRestore;
+
+        #[async_trait::async_trait]
+        impl crab_read::XorbAvailability for ExpiredRestore {
+            async fn ensure_available(
+                &self,
+                path: &object_store::path::Path,
+            ) -> crab_read::Result<()> {
+                Err(crab_read::ReadError::availability(
+                    error::CrabError::AuthExpired {
+                        path: path.to_string(),
+                    },
+                ))
+            }
+        }
+
+        let git_guard = ScopedGitDir::acquire();
+        let cache_root = tempfile::tempdir().unwrap();
+        let _cache_guard = CacheDirGuard::new(&cache_root.path().join("push-cache"));
+        let fixture = GitFixture::new();
+        git_guard.set_git_dir(&fixture.git_dir());
+        let original = command_path_content();
+        let (chunks, file_hash) = chunk_and_hash(&original);
+        let pointer = Pointer {
+            file_hash,
+            size: original.len() as u64,
+            shard_hint: None,
+        };
+        let staging =
+            stage_command_path_file(fixture.work_tree(), file_hash, &chunks, pointer.size).await;
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(Arc::clone(&inner));
+        push_command_path_pointer(&fixture, store.clone(), staging, &pointer).await;
+        let local = Arc::new(crate::cache::LocalCache::new(
+            cache_root.path().join("read-cache"),
+        ));
+        let caching = crab_cache_store::CachingStore::new_with_local_cache(
+            store.clone(),
+            &crate::core::config::CacheConfig::default(),
+            local,
+        )
+        .unwrap();
+        let mut hydrator = crate::read::build_cli_hydrator(
+            caching,
+            StoreLayout::new(store, TEST_REPLICA_PREFIX.to_owned()),
+            &Config::default(),
+        )
+        .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let destination = output.path().join("model.bin");
+        let sentinel = pointer.serialize();
+        std::fs::write(&destination, &sentinel).unwrap();
+
+        let canonical = hydrator.canonical.clone();
+        hydrator.canonical = canonical
+            .clone()
+            .with_availability(Arc::new(ExpiredRestore));
+        let error = hydrator
+            .reconstruct_to_atomic_path_with_cancel(
+                &pointer,
+                &destination,
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "CRAB-E0043");
+        assert_eq!(error.exit_code(), 7);
+        assert_eq!(
+            error.category(),
+            crab_types::error::ErrorCategory::Permanent
+        );
+        assert!(error.hint().unwrap().contains("Refresh"));
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source()).any(|source| {
+                matches!(
+                    source.downcast_ref::<error::CrabError>(),
+                    Some(error::CrabError::AuthExpired { .. })
+                )
+            })
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 1);
+
+        hydrator.canonical = canonical;
+        let prefix = crab_storage::global_content_prefix(hydrator.router.global_prefix(), "xorbs");
+        let xorbs = hydrator.store.origin().list_prefix(&prefix).await.unwrap();
+        assert_eq!(xorbs.len(), 1);
+        let path = &xorbs[0].location;
+        let (original_xorb, _) = hydrator.store.origin().get_with_etag(path).await.unwrap();
+        let mut corrupt = original_xorb.to_vec();
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        // Inject damage below Store's immutable-object publication contract.
+        // The production writer correctly refuses replacement of this xorb.
+        inner
+            .put(path, bytes::Bytes::from(corrupt).into())
+            .await
+            .unwrap();
+        let error = hydrator
+            .reconstruct_to_atomic_path_with_cancel(
+                &pointer,
+                &destination,
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "CRAB-E0020");
+        assert_eq!(error.exit_code(), 4);
+        assert_eq!(
+            error.category(),
+            crab_types::error::ErrorCategory::Integrity
+        );
+        assert_eq!(error.details_json()["origin"], "object-store");
+        assert_eq!(crate::core::error_catalog::error_code(&error), error.code());
+        assert_eq!(
+            crate::storage::retry::retry_class(&error),
+            crate::storage::retry::RetryClass::Fatal
+        );
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source())
+                .any(|source| source.is::<crab_cache::CacheError>())
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 1);
+
+        inner.put(path, original_xorb.into()).await.unwrap();
+        let readonly = std::fs::File::open(&destination).unwrap();
+        let error = hydrator
+            .reconstruct_to_writer(&pointer, readonly)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "CRAB-E0070");
+        assert_eq!(error.exit_code(), 5);
+        assert!(
+            std::iter::successors(error.source(), |source| (*source).source())
+                .any(|source| source.is::<std::io::Error>())
+        );
+        assert_eq!(
+            crate::storage::retry::retry_class(&error),
+            crate::storage::retry::RetryClass::Fatal
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+    }
+
+    #[tokio::test]
     async fn hydrate_command_materializes_pointer_from_replica_backed_hydrator() {
+        use crab_storage::test_support::ObjectReadKind;
+
         let git_guard = ScopedGitDir::acquire();
         let cache_root = tempfile::tempdir().expect("cache root");
-        let _cache_guard = CacheDirGuard::new(cache_root.path());
+        let _cache_guard = CacheDirGuard::new(&cache_root.path().join("cache"));
         let fixture = GitFixture::new();
         git_guard.set_git_dir(&fixture.git_dir());
 
@@ -6993,15 +5897,20 @@ mod tests {
         let staging =
             stage_command_path_file(fixture.work_tree(), file_hash, &chunks, pointer.size).await;
 
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let memory = Arc::new(InMemory::new());
+        let counting_origin =
+            Arc::new(crab_storage::test_support::CountingObjectStore::new(memory));
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::clone(&counting_origin) as Arc<dyn object_store::ObjectStore>;
         let primary_store = Store::new(Arc::clone(&inner));
         push_command_path_pointer(&fixture, primary_store, staging, &pointer).await;
+        counting_origin.reset();
 
         {
             let direct_store = Store::new(Arc::clone(&inner));
             let direct_cache_dir = tempfile::tempdir().expect("direct hydrate cache");
             let direct_cache = Arc::new(crate::cache::LocalCache::new(
-                direct_cache_dir.path().to_path_buf(),
+                direct_cache_dir.path().join("cache"),
             ));
             let direct_caching_store = crab_cache_store::CachingStore::new_with_local_cache(
                 direct_store.clone(),
@@ -7009,11 +5918,12 @@ mod tests {
                 direct_cache,
             )
             .expect("build direct caching store");
-            let direct_hydrator = ShardHydrator::new_from_cli_layout(
+            let direct_hydrator = crate::read::build_cli_hydrator(
                 direct_caching_store,
                 StoreLayout::new(direct_store, TEST_REPLICA_PREFIX.to_owned()),
+                &Config::default(),
             )
-            .expect("build direct shard hydrator");
+            .expect("build configured direct hydrator");
             let cancelled_probe = fixture.work_tree().join("cancelled-probe.bin");
             let sentinel = pointer.serialize();
             std::fs::write(&cancelled_probe, &sentinel).expect("write cancellation sentinel");
@@ -7036,28 +5946,133 @@ mod tests {
                 "cancellation must leave the destination untouched"
             );
             std::fs::remove_file(&cancelled_probe).expect("remove cancellation probe");
-            let direct_probe = fixture.work_tree().join("direct-probe.bin");
+            let prefetched = direct_hydrator
+                .prefetch_batch(
+                    &[(PathBuf::from("model.bin"), pointer.clone())],
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect("prefetch warms decoded ranges");
+            assert_eq!(prefetched.prefetched, 1);
+            assert_eq!(prefetched.failed, 0);
+
+            let xorb_paths = counting_origin
+                .requests()
+                .into_iter()
+                .filter(|request| {
+                    request.kind != ObjectReadKind::Head
+                        && request.location.contains(".crab/xorbs/")
+                })
+                .map(|request| request.location)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                xorb_paths.len(),
+                1,
+                "cold hydrate should read one xorb body"
+            );
+            for path in &xorb_paths {
+                counting_origin.block_body_reads_for(&object_store::path::Path::from(path.clone()));
+            }
+            counting_origin.reset();
+
+            // Reopen both layers so an in-memory result cannot satisfy the
+            // warm read. Product assembly must discover the disk ranges.
+            drop(direct_hydrator);
+            let direct_store = Store::new(Arc::clone(&inner));
+            let direct_cache = Arc::new(crate::cache::LocalCache::new(
+                direct_cache_dir.path().join("cache"),
+            ));
+            let direct_caching_store = crab_cache_store::CachingStore::new_with_local_cache(
+                direct_store.clone(),
+                &crate::core::config::CacheConfig::default(),
+                direct_cache,
+            )
+            .expect("reopen direct caching store");
+            let direct_hydrator = crate::read::build_cli_hydrator(
+                direct_caching_store,
+                StoreLayout::new(direct_store, TEST_REPLICA_PREFIX.to_owned()),
+                &Config::default(),
+            )
+            .expect("reopen configured hydrator");
+
+            let cached_probe = fixture.work_tree().join("offline-hydrate-probe.bin");
             direct_hydrator
                 .reconstruct_to_atomic_path_with_cancel(
                     &pointer,
-                    &direct_probe,
+                    &cached_probe,
                     None,
                     None,
                     CancellationToken::new(),
                 )
                 .await
-                .expect("replica-backed hydrator reconstructs directly");
+                .expect("warm decoded ranges hydrate without origin xorb body");
             assert_eq!(
-                std::fs::read(&direct_probe).expect("read direct probe"),
+                std::fs::read(&cached_probe).expect("read cached probe"),
                 original
             );
-            std::fs::remove_file(&direct_probe).expect("remove direct probe");
+            assert!(
+                counting_origin.requests().iter().all(|request| {
+                    request.kind == ObjectReadKind::Head
+                        || !request.location.contains(".crab/xorbs/")
+                }),
+                "warm hydrate must not request an origin xorb body"
+            );
+            assert!(
+                crate::cache::xet_chunk_cache_stats(&direct_cache_dir.path().join("cache/chunks"))
+                    .await
+                    .expect("range stats")
+                    .entries
+                    > 0
+            );
+            assert!(
+                !direct_cache_dir.path().join("cache/xorbs").exists(),
+                "ordinary hydrate must not install a full xorb"
+            );
+
+            let queue = direct_hydrator
+                .prefetch_queue(CancellationToken::new(), tokio::runtime::Handle::current());
+            queue.submit("delayed.bin".into(), pointer.clone()).await;
+            let delayed = queue
+                .take_result("delayed.bin")
+                .await
+                .expect("delayed hydration");
+            assert_eq!(std::fs::read(delayed.path()).unwrap(), original);
+            let delayed_path = delayed.path().to_owned();
+            drop(delayed);
+            assert!(
+                !delayed_path.exists(),
+                "consuming delayed output releases its temporary"
+            );
+
+            let mut invalid_pointer = pointer.clone();
+            invalid_pointer.size += 1;
+            queue.submit("wrong-size.bin".into(), invalid_pointer).await;
+            assert!(
+                matches!(
+                    queue.take_result("wrong-size.bin").await,
+                    Err(error::CrabError::IncompleteShardReconstruction { .. })
+                ),
+                "delayed hydration must enforce the same pointer coverage as inline hydration"
+            );
+            queue.drain_for_shutdown().await;
+            assert!(
+                counting_origin.requests().iter().all(|request| {
+                    request.kind == ObjectReadKind::Head
+                        || !request.location.contains(".crab/xorbs/")
+                }),
+                "delayed hydration must also reuse warmed disk ranges"
+            );
+            std::fs::remove_file(&cached_probe).expect("remove cached probe");
+            for path in &xorb_paths {
+                counting_origin
+                    .unblock_body_reads_for(&object_store::path::Path::from(path.clone()));
+            }
         }
 
         let replica_store = Store::new(inner);
         let cache_dir = tempfile::tempdir().expect("hydrate cache");
         let cache = Arc::new(crate::cache::LocalCache::new(
-            cache_dir.path().to_path_buf(),
+            cache_dir.path().join("cache"),
         ));
         let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
             replica_store.clone(),
@@ -7065,9 +6080,10 @@ mod tests {
             cache,
         )
         .expect("build caching store");
-        let hydrator = ShardHydrator::new_from_cli_layout(
+        let hydrator = crate::read::build_cli_hydrator(
             caching_store,
             StoreLayout::new(replica_store, TEST_REPLICA_PREFIX.to_owned()),
+            &Config::default(),
         )
         .expect("build replica shard hydrator");
 
@@ -7089,72 +6105,6 @@ mod tests {
             Pointer::parse(&hydrated).is_err(),
             "hydrate must materialize content, not leave the pointer blob"
         );
-    }
-
-    #[tokio::test]
-    async fn delta_terms_repair_corrupt_xorb_cache_from_origin() {
-        use crab_xet::shard::FileDataSequenceEntry;
-        use crab_xet::xorb::format::Chunk;
-
-        use crab_xet::xorb::builder::{RunId, XorbBuilder};
-
-        let chunks = vec![
-            Bytes::from_static(b"base chunk payload"),
-            Bytes::from_static(b"target chunk payload"),
-        ];
-        let mut builder = XorbBuilder::new();
-        for chunk in &chunks {
-            builder.push(&Chunk::new(chunk.clone()), RunId(0)).unwrap();
-        }
-        let xorb = builder.finalize().unwrap().pop().expect("one xorb");
-
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let origin = Store::new(inner);
-        let caching_store = crab_cache_store::CachingStore::new(
-            origin.clone(),
-            &crate::core::config::CacheConfig::default(),
-        )
-        .expect("build caching store");
-        let store_cache = Arc::clone(caching_store.local_cache());
-        let router = StoreLayout::new(origin, TEST_REPLICA_PREFIX.to_owned());
-        caching_store
-            .origin()
-            .put(&router.xorb_path(&xorb.hash), xorb.bytes.clone())
-            .await
-            .expect("upload xorb");
-
-        let key = crate::cache::CacheKey::Xorb(xorb.hash);
-        store_cache
-            .put_unchecked_for_test(&key, b"not a valid xorb")
-            .await
-            .expect("seed corrupt store xorb");
-
-        let hydrator = ShardHydrator::new_from_cli_layout(caching_store, router)
-            .expect("build shard hydrator");
-        let segment = FileDataSequenceEntry::new(
-            xorb.hash,
-            chunks.iter().map(Bytes::len).sum::<usize>() as u32,
-            0u32,
-            chunks.len() as u32,
-        );
-        let terms = hydrator
-            .segments_to_terms(&[segment])
-            .await
-            .expect("corrupt cache should be repaired from origin");
-
-        assert_eq!(terms.len(), chunks.len());
-        for (term, chunk) in terms.iter().zip(&chunks) {
-            assert_eq!(term.chunk_hash, *blake3::hash(chunk).as_bytes());
-            assert_eq!(term.length, chunk.len() as u64);
-        }
-
-        let repaired = store_cache
-            .get_or_fetch(&key, || async {
-                panic!("repaired cache should be present")
-            })
-            .await
-            .expect("read repaired hydrate cache");
-        assert_eq!(repaired, xorb.bytes);
     }
 
     #[tokio::test]

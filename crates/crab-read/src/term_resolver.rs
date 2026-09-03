@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use object_store::path::Path as ObjectPath;
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
@@ -17,12 +16,10 @@ use crab_cache_store::CachingStore;
 use crab_diff::chunk_sequence::{ChunkOrigin, ChunkSequence, ChunkSpan};
 use crab_diff::types::ChunkSequenceSourceKind;
 use crab_metadata::file_index_lookup::FileIndexLookupSession;
-use crab_storage::Store;
-use crab_xet::hash::{MerkleHash, xorb_hash};
+use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 use crab_xet::shard::{FileDataSequenceEntry, XorbChunkSequenceEntry};
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
-use crab_xet::xorb::builder::{CHUNK_META_ENTRY_SIZE, FOOTER_SIZE, XORB_MAGIC};
 use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, ReadStoreLayout as StoreLayout};
@@ -687,213 +684,24 @@ async fn get_or_fetch_xorb_chunks(
 async fn fetch_xorb_chunks_from_object(
     store: &CachingStore,
     router: &StoreLayout,
-    xorb_hash_value: &MerkleHash,
+    xorb_hash: &MerkleHash,
 ) -> Result<Vec<XorbChunkSequenceEntry>> {
-    let path = router.xorb_path(xorb_hash_value);
-    match fetch_xorb_chunks_from_cached_ranges(store, &path, xorb_hash_value).await {
-        Ok(chunks) => Ok(chunks),
-        Err(e @ ReadError::CorruptObject { .. }) => {
-            warn!(
-                xorb_hash = %xorb_hash_value.hex(),
-                error = %e,
-                "cached xorb metadata failed verification, evicting and retrying origin once"
-            );
-            store
-                .local_cache()
-                .evict(&CacheKey::Xorb(*xorb_hash_value))
-                .await?;
-            fetch_xorb_chunks_from_origin_ranges(store.origin(), &path, xorb_hash_value).await
-        }
-        Err(e) => Err(e),
-    }
-}
-
-async fn fetch_xorb_chunks_from_cached_ranges(
-    store: &CachingStore,
-    path: &ObjectPath,
-    xorb_hash_value: &MerkleHash,
-) -> Result<Vec<XorbChunkSequenceEntry>> {
-    let meta = store.head(path).await?;
-    let object_len = meta.size;
-    let footer_len = u64::try_from(FOOTER_SIZE).unwrap_or(u64::MAX);
-    if object_len < footer_len {
-        return Err(ReadError::CorruptObject {
-            path: path.to_string(),
-            reason: "xorb too small for footer".to_owned(),
-        });
-    }
-
-    let footer = store
-        .range_get(path, object_len - footer_len..object_len)
-        .await?;
-    let layout = parse_xorb_metadata_layout(path.as_ref(), object_len, &footer)?;
-
-    let metadata = store
-        .range_get(
-            path,
-            layout.meta_offset..layout.meta_offset + layout.metadata_len,
-        )
-        .await?;
-    parse_xorb_metadata_entries(path.as_ref(), xorb_hash_value, layout.num_chunks, &metadata)
-}
-
-async fn fetch_xorb_chunks_from_origin_ranges(
-    store: &Store,
-    path: &ObjectPath,
-    xorb_hash_value: &MerkleHash,
-) -> Result<Vec<XorbChunkSequenceEntry>> {
-    let meta = store.head(path).await?;
-    let object_len = meta.size;
-    let footer_len = u64::try_from(FOOTER_SIZE).unwrap_or(u64::MAX);
-    if object_len < footer_len {
-        return Err(ReadError::CorruptObject {
-            path: path.to_string(),
-            reason: "xorb too small for footer".to_owned(),
-        });
-    }
-
-    let footer = store
-        .range_get(path, object_len - footer_len..object_len)
-        .await?;
-    let layout = parse_xorb_metadata_layout(path.as_ref(), object_len, &footer)?;
-    let metadata = store
-        .range_get(
-            path,
-            layout.meta_offset..layout.meta_offset + layout.metadata_len,
-        )
-        .await?;
-    parse_xorb_metadata_entries(path.as_ref(), xorb_hash_value, layout.num_chunks, &metadata)
-}
-
-struct XorbMetadataLayout {
-    num_chunks: u32,
-    meta_offset: u64,
-    metadata_len: u64,
-}
-
-fn parse_xorb_metadata_layout(
-    path: &str,
-    object_len: u64,
-    footer: &[u8],
-) -> Result<XorbMetadataLayout> {
-    let footer_len = u64::try_from(FOOTER_SIZE).unwrap_or(u64::MAX);
-    if footer.len() != FOOTER_SIZE || &footer[FOOTER_SIZE - XORB_MAGIC.len()..] != XORB_MAGIC {
-        return Err(ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: "invalid xorb footer".to_owned(),
-        });
-    }
-
-    let num_chunks =
-        u32::from_le_bytes(
-            footer[0..4]
-                .try_into()
-                .map_err(|_| ReadError::CorruptObject {
-                    path: path.to_owned(),
-                    reason: "bad xorb chunk count".to_owned(),
-                })?,
-        );
-    let meta_offset =
-        u64::from_le_bytes(
-            footer[4..12]
-                .try_into()
-                .map_err(|_| ReadError::CorruptObject {
-                    path: path.to_owned(),
-                    reason: "bad xorb metadata offset".to_owned(),
-                })?,
-        );
-    let metadata_len = u64::from(num_chunks)
-        .checked_mul(u64::try_from(CHUNK_META_ENTRY_SIZE).unwrap_or(u64::MAX))
-        .ok_or_else(|| ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: "xorb metadata length overflow".to_owned(),
-        })?;
-    if meta_offset
-        .checked_add(metadata_len)
-        .and_then(|value| value.checked_add(footer_len))
-        != Some(object_len)
-    {
-        return Err(ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: "xorb metadata region size mismatch".to_owned(),
-        });
-    }
-
-    Ok(XorbMetadataLayout {
-        num_chunks,
-        meta_offset,
-        metadata_len,
-    })
-}
-
-fn parse_xorb_metadata_entries(
-    path: &str,
-    expected_xorb_hash: &MerkleHash,
-    num_chunks: u32,
-    metadata: &[u8],
-) -> Result<Vec<XorbChunkSequenceEntry>> {
-    let expected_len = usize::try_from(num_chunks)
-        .ok()
-        .and_then(|count| count.checked_mul(CHUNK_META_ENTRY_SIZE))
-        .ok_or_else(|| ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: "xorb metadata length overflow".to_owned(),
-        })?;
-    if metadata.len() != expected_len {
-        return Err(ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: "xorb metadata range length mismatch".to_owned(),
-        });
-    }
-
-    let mut entries = Vec::with_capacity(num_chunks as usize);
-    let mut hash_pairs = Vec::with_capacity(num_chunks as usize);
-    let mut offset = 0usize;
-    let mut uncompressed_offset = 0u32;
-    for _ in 0..num_chunks {
-        let chunk_hash = MerkleHash::from(
-            <[u8; 32]>::try_from(&metadata[offset..offset + 32]).map_err(|_| {
+    let path = router.xorb_path(xorb_hash);
+    let chunks = store.xorb_chunk_metadata(&path, xorb_hash).await?;
+    let mut offset = 0u32;
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let entry = XorbChunkSequenceEntry::new(chunk.hash, chunk.uncompressed_len, offset);
+            offset = offset.checked_add(chunk.uncompressed_len).ok_or_else(|| {
                 ReadError::CorruptObject {
-                    path: path.to_owned(),
-                    reason: "bad xorb chunk hash".to_owned(),
+                    path: path.to_string(),
+                    reason: "uncompressed xorb offsets exceed u32".to_owned(),
                 }
-            })?,
-        );
-        offset += 32;
-        offset += 4; // compressed data offset
-        offset += 4; // compressed byte length
-        let uncompressed_len =
-            u32::from_le_bytes(metadata[offset..offset + 4].try_into().map_err(|_| {
-                ReadError::CorruptObject {
-                    path: path.to_owned(),
-                    reason: "bad xorb uncompressed chunk length".to_owned(),
-                }
-            })?);
-        offset += 4;
-        offset += 1; // compression scheme
-
-        entries.push(XorbChunkSequenceEntry::new(
-            chunk_hash,
-            uncompressed_len,
-            uncompressed_offset,
-        ));
-        hash_pairs.push((chunk_hash, u64::from(uncompressed_len)));
-        uncompressed_offset = uncompressed_offset.saturating_add(uncompressed_len);
-    }
-
-    let actual_xorb_hash = xorb_hash(&hash_pairs);
-    if actual_xorb_hash != *expected_xorb_hash {
-        return Err(ReadError::CorruptObject {
-            path: path.to_owned(),
-            reason: format!(
-                "xorb metadata hash mismatch: expected {}, got {}",
-                expected_xorb_hash.hex(),
-                actual_xorb_hash.hex()
-            ),
-        });
-    }
-
-    Ok(entries)
+            })?;
+            Ok(entry)
+        })
+        .collect()
 }
 
 /// Get a shard reader, checking the in-memory dedup map first, then the
@@ -947,96 +755,12 @@ async fn get_or_download_shard(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::sync::{Mutex as StdMutex, MutexGuard};
-
     use super::*;
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
 
-    static CACHE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
-
-    struct CacheDirGuard {
-        _lock: MutexGuard<'static, ()>,
-        previous: Option<String>,
-    }
-
-    impl CacheDirGuard {
-        fn new(path: &Path) -> Self {
-            let lock = CACHE_ENV_LOCK.lock().unwrap();
-            let previous = std::env::var("CRAB_CACHE_DIR").ok();
-            // SAFETY: tests that mutate CRAB_CACHE_DIR hold CACHE_ENV_LOCK.
-            unsafe { std::env::set_var("CRAB_CACHE_DIR", path) };
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for CacheDirGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => {
-                    // SAFETY: CACHE_ENV_LOCK is held for the lifetime of this guard.
-                    unsafe { std::env::set_var("CRAB_CACHE_DIR", value) };
-                }
-                None => {
-                    // SAFETY: CACHE_ENV_LOCK is held for the lifetime of this guard.
-                    unsafe { std::env::remove_var("CRAB_CACHE_DIR") };
-                }
-            }
-        }
-    }
-
     fn chunk(seed: u8, size: usize) -> Chunk {
         Chunk::new(bytes::Bytes::from(vec![seed; size]))
-    }
-
-    fn metadata_slice(xorb: &crab_xet::xorb::builder::XorbResult) -> (u32, &[u8]) {
-        let len = xorb.bytes.len();
-        let footer = &xorb.bytes[len - FOOTER_SIZE..];
-        let num_chunks = u32::from_le_bytes(footer[0..4].try_into().unwrap());
-        let meta_offset = u64::from_le_bytes(footer[4..12].try_into().unwrap()) as usize;
-        (num_chunks, &xorb.bytes[meta_offset..len - FOOTER_SIZE])
-    }
-
-    #[test]
-    fn parses_ordered_xorb_footer_metadata() {
-        let mut builder = XorbBuilder::new();
-        let first = chunk(1, 1024);
-        let second = chunk(2, 2048);
-        builder.push(&first, RunId(0)).unwrap();
-        builder.push(&second, RunId(0)).unwrap();
-        let xorb = builder.finalize().unwrap().remove(0);
-        let (num_chunks, metadata) = metadata_slice(&xorb);
-
-        let entries = parse_xorb_metadata_entries("xorb", &xorb.hash, num_chunks, metadata)
-            .expect("parse xorb metadata");
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].chunk_hash, first.hash);
-        assert_eq!(entries[0].unpacked_segment_bytes, 1024);
-        assert_eq!(entries[1].chunk_hash, second.hash);
-        assert_eq!(entries[1].unpacked_segment_bytes, 2048);
-    }
-
-    #[test]
-    fn xorb_footer_metadata_rejects_wrong_hash() {
-        let mut builder = XorbBuilder::new();
-        builder.push(&chunk(1, 1024), RunId(0)).unwrap();
-        let xorb = builder.finalize().unwrap().remove(0);
-        let (num_chunks, metadata) = metadata_slice(&xorb);
-
-        let err = parse_xorb_metadata_entries(
-            "xorb",
-            &MerkleHash::from([0xFE; 32]),
-            num_chunks,
-            metadata,
-        )
-        .expect_err("hash mismatch");
-
-        assert!(matches!(err, ReadError::CorruptObject { .. }));
     }
 
     #[tokio::test]
@@ -1049,7 +773,6 @@ mod tests {
         use crab_storage::{Store, StoreLayout};
 
         let cache_root = tempfile::tempdir().expect("cache root");
-        let _cache_guard = CacheDirGuard::new(cache_root.path());
 
         let mut builder = XorbBuilder::new();
         let first = chunk(1, 1024);
@@ -1060,7 +783,9 @@ mod tests {
 
         let origin = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(origin.clone(), "org/repo".to_owned());
-        let store = CachingStore::new(origin, &CacheConfig::default()).unwrap();
+        let local = Arc::new(crab_cache::LocalCache::new(cache_root.path().join("cache")));
+        let store =
+            CachingStore::new_with_local_cache(origin, CacheConfig::default(), local).unwrap();
         let path = router.xorb_path(&xorb.hash);
         store.origin().put(&path, xorb.bytes.clone()).await.unwrap();
 

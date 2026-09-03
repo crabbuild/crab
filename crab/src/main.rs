@@ -1197,7 +1197,7 @@ enum OptimizeCacheCmd {
     Stats,
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
-    /// Clear the local cache.
+    /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean,
     /// Evict local cache objects until configured budgets are satisfied.
     Prune {
@@ -1896,7 +1896,7 @@ enum CacheCmd {
     Stats,
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
-    /// Clear the local cache.
+    /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean,
 }
 
@@ -5703,7 +5703,7 @@ async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<
         }
         CacheCmd::Clean => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_clean_with_cancel(false, mode, cancel)?;
+            crab::cmd::cache::run_cache_clean(false, mode, cancel).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -5935,7 +5935,7 @@ async fn create_cli_caching_store(
 
 #[derive(Default)]
 struct FilterProcessRemoteSmudge {
-    hydrator: Option<Arc<crab::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crab::cmd::hydrate::HydrationRuntime>>,
     prefetch: Option<Arc<crab::git::prefetch::PrefetchQueue>>,
 }
 
@@ -5989,11 +5989,7 @@ async fn build_filter_process_remote_smudge(
             return FilterProcessRemoteSmudge::default();
         }
     };
-    let mut hydrator = match crab::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        selection.router,
-        config,
-    ) {
+    let hydrator = match crab::read::build_cli_hydrator(caching_store, selection.router, config) {
         Ok(hydrator) => hydrator,
         Err(e) => {
             tracing::debug!(error = %e, "filter-process: failed to build ShardHydrator, smudge will defer to hydrate");
@@ -6001,20 +5997,8 @@ async fn build_filter_process_remote_smudge(
         }
     };
 
-    match crab::cache::xet_chunk_cache_from_config(config) {
-        Ok(handle) => {
-            hydrator = hydrator.with_xet_chunk_cache(handle.cache);
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "filter-process: failed to open xet-core chunk cache, continuing without it");
-        }
-    }
-
-    let prefetch = Arc::new(hydrator.prefetch_queue(
-        config,
-        cancel.clone(),
-        tokio::runtime::Handle::current(),
-    ));
+    let prefetch =
+        Arc::new(hydrator.prefetch_queue(cancel.clone(), tokio::runtime::Handle::current()));
     tracing::debug!("filter-process: ShardHydrator and delayed-smudge PrefetchQueue wired");
     FilterProcessRemoteSmudge {
         hydrator: Some(Arc::new(hydrator)),

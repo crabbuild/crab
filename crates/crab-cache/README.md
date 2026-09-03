@@ -29,6 +29,91 @@ origin object store
 on read and write, and atomically renames completed files. Manifest entries
 use ETags rather than a content hash.
 
+`clean_cache` is the shared explicit cleanup boundary. It streams recognized
+payload layouts through pinned private directories, retaining unknown subtrees,
+SQLite databases and side files, profiles, and unpublished temporaries. Active
+read descriptors and concurrent publishers are skipped using nonblocking locks.
+Reports count actual removals (or eligible files in a dry run) and separately
+count retained, busy, and unsafe entries. It does not create missing roots.
+Unix parent-directory locks coordinate payload publication and deletion; native
+Windows support, SQLite ownership, and reservation protection across all
+maintenance entry points remain open.
+
+Decoded-range stats, prune, and verify now use pinned private directories and
+the same fixed range-layout ownership policy as cleanup. Unknown files,
+database files, live subtrees, and unpublished temporaries are retained.
+Prune previews and applied removals both skip active readers. Verification
+holds the parent mutation lock and an exclusive payload lease while streaming
+one descriptor, and removes only entries it successfully checked as corrupt.
+It checks CRC/offsets and also Blake3 identity for the `crab-chunk` namespace;
+xorb-range keys are not decoded-content hashes. Busy entries are not checked
+or reported as valid. Dropping an async scan cancels its blocking worker via a
+child token. This does not qualify catalog reservation protection, database
+ownership, complete physical accounting, or bounded-time LRU reconciliation.
+
+Object-cache stats, prune, targeted eviction, and verification use that same
+private boundary. The three eviction loops are consolidated, and stats/verify
+stream recognized objects instead of collecting an inventory first. Object
+stats include chunks, shards, xorbs, stages, and manifest counts; decoded
+ranges remain a separate report. Unknown filenames no longer become corrupt
+objects merely because they appear beneath a hash-prefix directory. Stages
+and manifests retain their logical-key semantics and are not hash-verified.
+
+Full-file xorb checks share one descriptor-owning worker implementation with
+maintenance. They validate aggregate identity, compressed chunks, and the
+footer's serialized-payload digest; metadata-only reads remain metadata-only.
+Operational read failures do not authorize maintenance deletion. Xorb index
+row cleanup now uses the descriptor-bound database owner below, but can still
+wait for its busy timeout. Complete payload/database root correlation and
+cancellation authority are not established by connection pinning alone.
+
+Catalog eviction uses the same payload ownership and deletion boundary. Its
+final lease/reservation check and row removal share an immediate SQLite writer
+transaction. One pinned root covers the maintenance lock, metadata-only
+inventory, and payload deletion. Inventory does not open SQLite files and aborts
+reconciliation on unsafe entries. Dropping an owner does not create a missing
+catalog.
+
+Catalog reads, writes, and owner cleanup plus the local xorb index now share
+a crate-private descriptor-bound SQLite owner on Linux/macOS. It checks the
+cache-owned chain and existing file metadata without extra database opens,
+rejects non-private files/links without permission repair, and creates new
+databases as `0600`. A connection-specific, non-default VFS retains the parent
+for main/journal/WAL/SHM/temp operations and unregisters only after close.
+Namespace changes use short directory locks; database/WAL coordination uses
+SQLite's standard byte ranges with open-file-description locks. Simultaneous
+in-process connections must all use this owner; native SQLite interoperability
+is tested across processes, not mixed owners on one inode in one process.
+
+Maintenance acquires its writer before reading owner rows, avoiding SQLite's
+non-waiting read-to-write upgrade race with reservation writers. Native macOS
+tests cover root swaps, WAL mappings, cross-process writers, and killed-writer
+recovery. Catalog maintenance, fill publication, and lease/reservation cleanup
+now retain the original root and open SQLite relative to it;
+maintenance scans and deletes through that same root. A replacement directory
+does not receive old owner-row removal or inventory writes.
+
+Reserved byte and file-backed fills use that captured root through temporary
+creation, publication, registration, and release. They retain a shared payload
+lease through the rename-to-registration interval; clean, object/range prune,
+verify, and targeted object eviction skip the active payload. Directory
+operations reopen independent descriptors so their namespace locks exclude
+each other; payload descriptor clones intentionally retain one shared lease.
+
+Main-database replacement within the retained directory, remaining index caller
+ownership, non-mutating WAL inspection, complete temporary-byte accounting,
+bounded cancellation, and other native-platform qualification remain open.
+Read-only main connections may still update WAL/SHM bookkeeping.
+
+Admission includes the incoming file and other active reservations when making
+space, even below the current-usage high watermark. The final capacity check
+and reservation insertion share a writer transaction. Object, file-backed
+xorb, and decoded-range writers keep the reservation until the completed entry
+is registered; active owners are not eviction candidates. An entry that cannot
+fit is not cached. SQLite database/side-file access, complete accounting,
+bounded reconciliation, and command/background lifecycle still need hardening;
+this is not the complete budget/lifecycle contract.
+
 The remote client is intentionally optional. The service contracts describe
 auth modes, cache/dedup modes, limits, health, and known chunks without making
 every local consumer depend on `reqwest`.

@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Cursor, Write};
+use std::io::{BufRead, BufReader, BufWriter, Cursor, Write};
 use std::path::{Component, Path};
 use std::process::Command;
 use std::sync::Arc;
@@ -672,7 +672,7 @@ fn lfs_pointer_for_content(
     Ok(pointer.serialize())
 }
 
-fn resolve_crab_hydrator(operation: &str) -> Result<crate::cmd::hydrate::ShardHydrator> {
+fn resolve_crab_hydrator(operation: &str) -> Result<crate::cmd::hydrate::HydrationRuntime> {
     let remote_url = crate::cmd::lfs::store_setup::read_repo_remote_url()?;
     let config = crate::core::config::Config::resolve_local().unwrap_or_default();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -687,16 +687,45 @@ fn resolve_crab_hydrator(operation: &str) -> Result<crate::cmd::hydrate::ShardHy
     })?;
     let caching_store = crab_cache_store::CachingStore::new(layout.store().clone(), &config.cache)
         .map_err(CrabError::from)?;
-    crate::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(caching_store, layout, &config)
+    crate::read::build_cli_hydrator(caching_store, layout, &config)
 }
 
-fn resolve_crab_content(
+fn lfs_pointer_for_crab_content(
     pointer_bytes: &[u8],
-    hydrator: &crate::cmd::hydrate::ShardHydrator,
+    hydrator: &crate::cmd::hydrate::HydrationRuntime,
+    remote_store: Option<&Arc<LfsObjectStore>>,
+    lfs_dir: &Path,
 ) -> Result<Vec<u8>> {
+    let pointer = Pointer::parse(pointer_bytes)?;
+    let temp_dir = lfs_dir.join("tmp");
+    std::fs::create_dir_all(&temp_dir)?;
+    let temp = tempfile::Builder::new()
+        .prefix("crab-lfs-migrate-")
+        .tempfile_in(temp_dir)?;
+    let writer = BufWriter::new(temp.as_file().try_clone()?);
     crate::cmd::lfs::block_on_runtime(async {
-        hydrator.reconstruct_from_pointer(pointer_bytes).await
-    })
+        hydrator.reconstruct_to_writer(&pointer, writer).await
+    })?;
+    temp.as_file().sync_all()?;
+
+    // Only verified Crab bytes become an LFS upload or installed object.
+    // The temporary-file owner removes partial output on every early return.
+    let staged = crate::lfs::cache::StagedObject::from_temp(temp)?;
+    let lfs_pointer = LfsPointer {
+        oid: *staged.oid(),
+        size: staged.size(),
+        extensions: Vec::new(),
+    };
+    if let Some(store) = remote_store {
+        crate::cmd::lfs::block_on_runtime(async {
+            store
+                .put_stream_with_size(staged.oid(), Some(staged.size()), staged.path())
+                .await
+                .map_err(CrabError::from)
+        })?;
+    }
+    staged.install(lfs_dir)?;
+    Ok(lfs_pointer.serialize())
 }
 
 fn open_migrate_staging() -> Result<StagingArea> {
@@ -1478,8 +1507,10 @@ fn migrate_import_with_store_options(
         return Ok(());
     }
 
-    let crab_hydrator = if options.from_crab {
-        Some(resolve_crab_hydrator("migrate-import-from-crab")?)
+    let crab_source = if options.from_crab {
+        let hydrator = resolve_crab_hydrator("migrate-import-from-crab")?;
+        let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(&repo_root)?;
+        Some((hydrator, lfs_dir))
     } else {
         None
     };
@@ -1492,16 +1523,15 @@ fn migrate_import_with_store_options(
             continue;
         }
 
-        let content = if let Some(hydrator) = crab_hydrator.as_ref() {
-            resolve_crab_content(&blob.data, hydrator)?
+        blob.data = if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
+            lfs_pointer_for_crab_content(&blob.data, hydrator, remote_store.as_ref(), lfs_dir)?
         } else {
-            blob.data.clone()
+            lfs_pointer_for_content(
+                &blob.data,
+                remote_store.as_ref(),
+                &format!("blob (mark :{})", blob.mark),
+            )?
         };
-        blob.data = lfs_pointer_for_content(
-            &content,
-            remote_store.as_ref(),
-            &format!("blob (mark :{})", blob.mark),
-        )?;
         converted_count += 1;
     }
 
@@ -1518,16 +1548,15 @@ fn migrate_import_with_store_options(
                     fixup_matcher.as_ref(),
                 )
             {
-                let content = if let Some(hydrator) = crab_hydrator.as_ref() {
-                    resolve_crab_content(data, hydrator)?
+                *data = if let Some((hydrator, lfs_dir)) = crab_source.as_ref() {
+                    lfs_pointer_for_crab_content(data, hydrator, remote_store.as_ref(), lfs_dir)?
                 } else {
-                    data.clone()
+                    lfs_pointer_for_content(
+                        data,
+                        remote_store.as_ref(),
+                        &format!("inline blob for {path}"),
+                    )?
                 };
-                *data = lfs_pointer_for_content(
-                    &content,
-                    remote_store.as_ref(),
-                    &format!("inline blob for {path}"),
-                )?;
                 if !options.fixup {
                     add_tracking_pattern(&mut tracking_patterns, options.include, path);
                 }
@@ -3011,6 +3040,92 @@ fn legacy_glob_factory(pattern: &str) -> Box<dyn Fn(&str) -> bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crab_to_lfs_streams_verified_content_to_local_and_remote_objects() {
+        let content = bytes::Bytes::from(vec![42; 13 * 1024 * 1024]);
+        for upload in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (hydrator, pointer, _) =
+                crate::cmd::lfs::block_on_runtime(crate::read::test_support::stored_file(
+                    &root.path().join("cache"),
+                    content.clone(),
+                    false,
+                ))
+                .unwrap();
+            let remote = Arc::new(LfsObjectStore::new(
+                crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "lfs-migration",
+            ));
+            let lfs_dir = root.path().join("lfs");
+            let remote_store = upload.then_some(&remote);
+            let bytes = lfs_pointer_for_crab_content(
+                &pointer.serialize(),
+                &hydrator,
+                remote_store,
+                &lfs_dir,
+            )
+            .unwrap();
+            let lfs_pointer = LfsPointer::parse(&bytes).unwrap();
+            assert_eq!(lfs_pointer.oid, <[u8; 32]>::from(Sha256::digest(&content)));
+            assert_eq!(lfs_pointer.size, content.len() as u64);
+            assert_eq!(
+                crate::lfs::cache::read_pointer(&lfs_dir, &lfs_pointer)
+                    .unwrap()
+                    .unwrap(),
+                content,
+            );
+            assert_eq!(std::fs::read_dir(lfs_dir.join("tmp")).unwrap().count(), 0);
+            if upload {
+                let uploaded = crate::cmd::lfs::block_on_runtime(async {
+                    remote.get(&lfs_pointer.oid).await.map_err(CrabError::from)
+                })
+                .unwrap();
+                assert_eq!(uploaded, content);
+            }
+        }
+    }
+
+    #[test]
+    fn crab_to_lfs_rejects_invalid_content_without_publication() {
+        for corrupt_origin in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (hydrator, mut pointer, _) =
+                crate::cmd::lfs::block_on_runtime(crate::read::test_support::stored_file(
+                    &root.path().join("cache"),
+                    bytes::Bytes::from_static(b"source bytes"),
+                    corrupt_origin,
+                ))
+                .unwrap();
+            if !corrupt_origin {
+                pointer.size -= 1;
+            }
+            let remote = Arc::new(LfsObjectStore::new(
+                crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "lfs-migration",
+            ));
+            let lfs_dir = root.path().join("lfs");
+            let error = lfs_pointer_for_crab_content(
+                &pointer.serialize(),
+                &hydrator,
+                Some(&remote),
+                &lfs_dir,
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "CRAB-E0020");
+            assert!(!lfs_dir.join("objects").exists());
+            assert_eq!(std::fs::read_dir(lfs_dir.join("tmp")).unwrap().count(), 0);
+            let published = crate::cmd::lfs::block_on_runtime(async {
+                remote
+                    .store()
+                    .list_prefix(&object_store::path::Path::from("lfs-migration/"))
+                    .await
+                    .map_err(CrabError::from)
+            })
+            .unwrap();
+            assert!(published.is_empty());
+        }
+    }
 
     #[test]
     fn parse_size_threshold_none_returns_zero() {

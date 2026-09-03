@@ -5,7 +5,6 @@ use std::process::{Command, Output};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crab::cache::LocalCache;
-use crab::cmd::hydrate::ShardHydrator;
 use crab::core::config::CacheConfig;
 use crab::git::push::{PushConfig, RefPushOutcome, run_push_batch};
 use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
@@ -524,8 +523,12 @@ fn assert_push_hydrates(repo: &Path, scratch: &Path, refs: &[&str], files: &[(&[
             hydrate_cache,
         )
         .expect("caching store");
-        let hydrator =
-            ShardHydrator::new_from_cli_layout(caching_store, router).expect("shard hydrator");
+        let hydrator = crab::read::build_cli_hydrator(
+            caching_store,
+            router,
+            &crab::core::config::Config::default(),
+        )
+        .expect("shard hydrator");
         for (pointer_bytes, expected) in files {
             let hydrated = hydrator
                 .reconstruct_from_pointer(pointer_bytes)

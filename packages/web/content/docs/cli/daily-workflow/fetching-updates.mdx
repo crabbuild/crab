@@ -9,7 +9,10 @@ meta:
 
 # Fetching Updates
 
-Fetching is how you download objects from cloud storage into your local cache without immediately hydrating files. Think of it as "download now, use later" — you can fetch objects while on a fast connection, then hydrate files later when offline or on a slower link.
+Fetching verifies selected Crab files into a discard sink and retains decoded
+xorb ranges and metadata without changing the worktree. Those ranges warm
+explicit hydrate, filter smudge, mount, and worktree-prefetch reads. Fetch followed by
+offline explicit `crab hydrate` is not yet a supported guarantee.
 
 ## Why Fetch Separately?
 
@@ -17,21 +20,24 @@ Hydration downloads chunks on demand — when you ask for a specific file, Crab 
 
 Fetching decouples the download from the reconstruction:
 
-- **Pre-warm before going offline** — Fetch everything while on fast WiFi, hydrate later on a plane.
-- **Speed up hydration** — If chunks are already in the local cache, hydration is purely local I/O.
+- **Pre-warm checkout or mount reads** — Download selected ranges on a fast connection before those compatible paths need them.
+- **Avoid worktree changes** — Verify remote content without replacing pointer files.
 - **CI optimization** — Fetch objects once at the start of a pipeline, then hydrate selectively in each job.
-- **Shared cache** — On shared machines, fetch once and all users benefit from the warm cache.
+- **Warm dedup metadata** — Synchronize the persistent local chunk index after fetch unless disabled.
 
 ## How It Works
 
 When you fetch, Crab:
 
-1. Connects to the remote object store (S3, GCS, or Azure).
-2. Lists the shards and xorbs under the repository prefix.
-3. Checks each object against the local cache — already-cached objects are skipped.
-4. Downloads missing objects and writes them to the cache directory.
+1. Resolves Crab pointer blobs from HEAD/index, or local refs with `--all`.
+2. Applies include/exclude patterns to repository paths.
+3. Selects the configured primary or replica.
+4. Reconstructs each selected file through the verified shard/xorb read path,
+   discarding output after hash and size validation.
+5. Synchronizes the persistent local chunk index unless
+   `--no-sync-chunk-index` is set.
 
-The local cache lives at `~/.cache/crab/` by default (configurable via `$CRAB_CACHE_DIR` or `.crab/local.toml`).
+The local cache lives at `~/.cache/crab/` by default; `$CRAB_CACHE_DIR` overrides its root.
 
 ## Selective Fetching
 
@@ -48,45 +54,45 @@ crab fetch --exclude 'data/train/*'
 crab fetch --all
 ```
 
-## The Fetch → Hydrate Pattern
+## Fetch and Later Reads
 
-The most common pattern is fetching before hydrating:
+Fetch can warm compatible checkout and mount reads:
 
 ```bash
 # Download objects while on fast network
 crab fetch --include 'models/**'
 
-# Later hydration can reuse the local cache
-crab hydrate 'models/**'
+# A later checkout or mount read can reuse decoded ranges
+git checkout feature/model-update
 ```
 
-In CI pipelines:
-
-```bash
-# Fetch at pipeline start
-crab fetch --include 'tests/fixtures/**'
-
-# Each test job hydrates from warm cache
-crab hydrate 'tests/fixtures/**'
-pytest tests/
-```
+Explicit `crab hydrate` now uses the same cache policy. Warm payload reads may
+still require metadata or authorization requests; do not infer fully offline
+access from cached ranges alone. Cross-process and provider qualification is tracked in
+[Plan 017](https://github.com/crab-build/crab/blob/main/plans/017-local-cache-read-hardening.md).
 
 ## Cache Management
 
 The fetch cache persists across operations and repositories. Over time it can grow large. Manage it with:
 
-- `crab cache stats` — See cache size and hit rate
+- `crab cache stats` — See the reported range/object cache sizes and counts
 - `crab prune` — Evict oldest cache objects until cache budgets are satisfied
 - `crab cache clean` — Clear the entire cache
 
-You can also set a maximum cache size in `.crab/local.toml`:
+Configure the cache budget in `.crab/local.toml`:
 
 ```toml
 [cache]
-max_size = "50GB"
+max_bytes = 10737418240
 ```
 
-When the cache exceeds this limit, least-recently-used objects are evicted.
+The default is 10 GiB. Unified accounting and maintenance remain Plan 017 work,
+so this setting does not yet prove a total disk ceiling across all families.
+Unknown `[cache]` keys such as `max_size` are rejected.
+
+Local cache data can reconstruct private repository content. Keep it private
+to one operating-system user; use the authenticated remote cache service for
+team reuse.
 
 ## Fetch vs. Pull
 

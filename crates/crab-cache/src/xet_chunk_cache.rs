@@ -5,21 +5,296 @@
 //! resolved directory and byte budget; owner-specific config stays above this
 //! Module.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use base64::Engine as _;
+use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-use xet_client::chunk_cache::{CacheConfig, ChunkCache, get_cache};
-use xet_runtime::config::XetConfig;
+use tracing::{debug, warn};
+use xet_client::cas_types::{ChunkRange, Key};
+use xet_client::chunk_cache::error::ChunkCacheError;
+use xet_client::chunk_cache::{CacheRange, ChunkCache};
 
+use crate::private_fs::{PinnedRoot, check_cancelled, with_pinned_root};
 use crate::{CacheError, Result};
 
 const MAX_XET_CHUNK_CACHE_ENTRIES: usize = 1_000_000;
+const RANGE_ITEM_NAME_BYTES: usize = 20;
+const MAX_DECODED_RANGE_BYTES: u64 = 256 * 1024 * 1024;
+static RANGE_CACHE_HANDLES: OnceLock<Mutex<HashMap<PathBuf, Weak<CrabRangeCache>>>> =
+    OnceLock::new();
+
+/// Namespace for one-chunk entries whose key is the decoded content's Blake3 hash.
+pub const CHUNK_HASH_PREFIX: &str = "crab-chunk";
+
+struct CrabRangeCache {
+    root: PathBuf,
+    capacity: u64,
+    catalog: crate::catalog::CacheCatalog,
+}
+
+impl CrabRangeCache {
+    fn key_directory(&self, key: &Key) -> PathBuf {
+        let mut bytes = Vec::with_capacity(key.hash.as_bytes().len() + key.prefix.len());
+        bytes.extend_from_slice(key.hash.as_bytes());
+        bytes.extend_from_slice(key.prefix.as_bytes());
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        self.root.join(&encoded[..2]).join(encoded)
+    }
+
+    async fn remove_bad_entry(&self, path: &Path, error: impl std::fmt::Display) {
+        warn!(
+            family = "decoded-range",
+            operation = "read",
+            path = %path.display(),
+            recovery = "evict-and-use-origin",
+            %error,
+            "local cache read failed"
+        );
+        let _ = crate::private_fs::remove_file(self.catalog.root(), path).await;
+    }
+
+    async fn read_entry(
+        &self,
+        path: &Path,
+        item_start: u32,
+        item_end: u32,
+        expected_len: u64,
+        expected_crc: u32,
+        requested: &ChunkRange,
+    ) -> std::result::Result<CacheRange, ChunkCacheError> {
+        if item_start >= item_end
+            || requested.start < item_start
+            || requested.end > item_end
+            || expected_len > self.capacity.min(MAX_DECODED_RANGE_BYTES)
+        {
+            return Err(ChunkCacheError::InvalidArguments);
+        }
+        let file = crate::private_fs::open_read(self.catalog.root(), path)
+            .await
+            .map_err(ChunkCacheError::general)?;
+        let metadata = file.metadata().await?;
+        if metadata.len() != expected_len {
+            return Err(ChunkCacheError::Parse(
+                "decoded-range length mismatch".into(),
+            ));
+        }
+        let mut body = Vec::new();
+        file.take(expected_len.saturating_add(1))
+            .read_to_end(&mut body)
+            .await?;
+        if body.len() as u64 != expected_len || crc32fast::hash(&body) != expected_crc {
+            return Err(ChunkCacheError::Parse(
+                "decoded-range checksum mismatch".into(),
+            ));
+        }
+        let count = usize::try_from(u64::from(item_end) - u64::from(item_start) + 1)
+            .map_err(ChunkCacheError::parse)?;
+        let header_len = 4usize
+            .checked_add(
+                count
+                    .checked_mul(4)
+                    .ok_or(ChunkCacheError::InvalidArguments)?,
+            )
+            .ok_or(ChunkCacheError::InvalidArguments)?;
+        if body.len() < header_len {
+            return Err(ChunkCacheError::Parse(
+                "decoded-range header truncated".into(),
+            ));
+        }
+        let stored_count =
+            u32::from_le_bytes(body[..4].try_into().map_err(ChunkCacheError::parse)?);
+        if usize::try_from(stored_count).map_err(ChunkCacheError::parse)? != count {
+            return Err(ChunkCacheError::Parse(
+                "decoded-range offset count mismatch".into(),
+            ));
+        }
+        let mut offsets = Vec::with_capacity(count);
+        for bytes in body[4..header_len].as_chunks::<4>().0 {
+            offsets.push(u32::from_le_bytes(*bytes));
+        }
+        if offsets.first() != Some(&0)
+            || offsets
+                .windows(2)
+                .any(|pair| pair.first().is_none_or(|first| *first >= pair[1]))
+            || offsets.last().copied().map(u64::from) != Some((body.len() - header_len) as u64)
+        {
+            return Err(ChunkCacheError::Parse(
+                "decoded-range offsets invalid".into(),
+            ));
+        }
+        let first =
+            usize::try_from(requested.start - item_start).map_err(ChunkCacheError::parse)?;
+        let last = usize::try_from(requested.end - item_start).map_err(ChunkCacheError::parse)?;
+        let data_start = usize::try_from(offsets[first]).map_err(ChunkCacheError::parse)?;
+        let data_end = usize::try_from(offsets[last]).map_err(ChunkCacheError::parse)?;
+        let data = body[header_len + data_start..header_len + data_end].to_vec();
+        let base = offsets[first];
+        let selected_offsets = offsets[first..=last]
+            .iter()
+            .map(|offset| offset - base)
+            .collect();
+        Ok(CacheRange {
+            offsets: selected_offsets,
+            data,
+            range: *requested,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ChunkCache for CrabRangeCache {
+    async fn get(
+        &self,
+        key: &Key,
+        range: &ChunkRange,
+    ) -> std::result::Result<Option<CacheRange>, ChunkCacheError> {
+        if range.start >= range.end
+            || (key.prefix == CHUNK_HASH_PREFIX && (range.start != 0 || range.end != 1))
+        {
+            return Err(ChunkCacheError::InvalidArguments);
+        }
+        let key_directory = self.key_directory(key);
+        let entries = match crate::private_fs::entry_names(
+            self.catalog.root(),
+            &key_directory,
+            4_096,
+        )
+        .await
+        {
+            Ok(entries) => entries,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => {
+                warn!(family = "decoded-range", operation = "read-dir", %error, "cache miss");
+                return Ok(None);
+            }
+        };
+        for name in entries {
+            let Some((start, end, len, crc)) = decode_range_item_name(&name) else {
+                continue;
+            };
+            if start > range.start || end < range.end {
+                continue;
+            }
+            let path = key_directory.join(name);
+            match self.read_entry(&path, start, end, len, crc, range).await {
+                Ok(hit) => {
+                    // This tagged namespace carries a chunk hash, unlike xorb
+                    // range keys. CRC proves record consistency, not identity;
+                    // discard a wrong chunk here so later fills can repair it.
+                    if key.prefix == CHUNK_HASH_PREFIX
+                        && blake3::hash(&hit.data).as_bytes() != key.hash.as_bytes()
+                    {
+                        self.remove_bad_entry(&path, "decoded chunk identity mismatch")
+                            .await;
+                        continue;
+                    }
+                    crate::private_fs::touch(self.catalog.root(), &path).await;
+                    return Ok(Some(hit));
+                }
+                Err(error) => self.remove_bad_entry(&path, error).await,
+            }
+        }
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        key: &Key,
+        range: &ChunkRange,
+        chunk_byte_indices: &[u32],
+        data: &[u8],
+    ) -> std::result::Result<(), ChunkCacheError> {
+        if range.start >= range.end
+            || chunk_byte_indices.len() as u64 != u64::from(range.end) - u64::from(range.start) + 1
+            || chunk_byte_indices.first() != Some(&0)
+            || chunk_byte_indices.last().copied().map(u64::from) != Some(data.len() as u64)
+            || chunk_byte_indices.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ChunkCacheError::InvalidArguments);
+        }
+        let body_len = (chunk_byte_indices.len() as u64)
+            .checked_mul(4)
+            .and_then(|len| len.checked_add(4))
+            .and_then(|len| len.checked_add(data.len() as u64))
+            .ok_or(ChunkCacheError::InvalidArguments)?;
+        if body_len > self.capacity.min(MAX_DECODED_RANGE_BYTES) {
+            return Ok(());
+        }
+        if self.get(key, range).await?.is_some() {
+            return Ok(());
+        }
+        let mut body =
+            Vec::with_capacity(usize::try_from(body_len).map_err(ChunkCacheError::parse)?);
+        body.extend_from_slice(&(chunk_byte_indices.len() as u32).to_le_bytes());
+        for offset in chunk_byte_indices {
+            body.extend_from_slice(&offset.to_le_bytes());
+        }
+        body.extend_from_slice(data);
+        let name = encode_range_item_name(range, body.len() as u64, crc32fast::hash(&body));
+        let directory = self.key_directory(key);
+        let final_path = directory.join(name);
+        let Some(reservation) = self
+            .catalog
+            .reserve(&final_path, body.len() as u64)
+            .await
+            .map_err(ChunkCacheError::general)?
+        else {
+            return Ok(());
+        };
+        let reservation = reservation
+            .write(&body)
+            .await
+            .map_err(ChunkCacheError::general)?;
+        if let Err(error) = self
+            .catalog
+            .record_and_maintain(
+                "decoded-range",
+                format!("{}:{}-{}", key.hash, range.start, range.end),
+                body.len() as u64,
+                reservation,
+            )
+            .await
+        {
+            warn!(
+                family = "decoded-range",
+                operation = "record-and-maintain",
+                recovery = "retain-entry-and-continue",
+                %error,
+                "cache maintenance failed"
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn decode_range_item_name(name: &std::ffi::OsStr) -> Option<(u32, u32, u64, u32)> {
+    let encoded = base64::engine::general_purpose::URL_SAFE
+        .decode(name.to_str()?)
+        .ok()?;
+    let bytes: [u8; RANGE_ITEM_NAME_BYTES] = encoded.try_into().ok()?;
+    Some((
+        u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+        u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+        u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+        u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+    ))
+}
+
+fn encode_range_item_name(range: &ChunkRange, len: u64, crc: u32) -> String {
+    let mut bytes = Vec::with_capacity(RANGE_ITEM_NAME_BYTES);
+    bytes.extend_from_slice(&range.start.to_le_bytes());
+    bytes.extend_from_slice(&range.end.to_le_bytes());
+    bytes.extend_from_slice(&len.to_le_bytes());
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    base64::engine::general_purpose::URL_SAFE.encode(bytes)
+}
 
 /// Resolved handle over the xet-core chunk cache.
 ///
@@ -49,7 +324,7 @@ impl std::fmt::Debug for XetChunkCacheHandle {
 /// Produced by [`XetChunkCacheHandle::stats`]. Re-scans the directory, so
 /// callers should treat this as an end-of-command summary rather than a hot-path
 /// counter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct XetChunkCacheStats {
     /// Total number of cached xorb-range entries.
     pub entries: usize,
@@ -74,40 +349,46 @@ pub struct XetChunkCacheVerifyStats {
 }
 
 impl XetChunkCacheHandle {
-    /// Opens the shared xet-core chunk cache at `directory` with `size_bytes`.
-    ///
-    /// Uses xet-core's cache manager so a process has one `DiskCache` per
-    /// directory even when hydrate, prefetch, and filter-process all open a
-    /// handle.
+    /// Opens Crab's decoded-range cache at `directory` with `size_bytes`.
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError::Io`] when the directory cannot be created and
-    /// [`CacheError::XetChunkCache`] when xet-core cannot initialize the cache.
+    /// Returns [`CacheError::Io`] when the directory cannot be created.
     pub fn open(directory: impl Into<PathBuf>, size_bytes: u64) -> Result<Self> {
         let directory = directory.into();
-        std::fs::create_dir_all(&directory)?;
-
-        let cache_config = CacheConfig {
-            cache_directory: directory.clone(),
-            cache_size: size_bytes,
-        };
-
-        let xet_config = XetConfig::new();
-        let cache =
-            get_cache(&xet_config, &cache_config).map_err(|source| CacheError::XetChunkCache {
-                path: directory.display().to_string(),
-                source: Box::new(source),
-            })?;
+        if let Some(cache_root) = directory.parent() {
+            crate::root::ensure_private_cache_directory(cache_root)?;
+        }
+        crate::root::ensure_private_cache_directory(&directory)?;
+        let directory = directory.canonicalize()?;
+        let handles = RANGE_CACHE_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut handles = handles
+            .lock()
+            .map_err(|_| CacheError::Internal("range-cache handle registry poisoned".into()))?;
+        let cache = handles
+            .get(&directory)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let cache_root = directory
+                    .parent()
+                    .map_or_else(|| directory.clone(), Path::to_path_buf);
+                let cache = Arc::new(CrabRangeCache {
+                    root: directory.clone(),
+                    capacity: size_bytes,
+                    catalog: crate::catalog::CacheCatalog::new(cache_root, size_bytes),
+                });
+                handles.insert(directory.clone(), Arc::downgrade(&cache));
+                cache
+            });
 
         debug!(
             directory = %directory.display(),
             size_bytes,
-            "opened xet-core chunk cache"
+            "opened Crab decoded-range cache"
         );
 
         Ok(Self {
-            cache,
+            cache: cache as Arc<dyn ChunkCache>,
             directory,
             size_bytes,
         })
@@ -119,8 +400,9 @@ impl XetChunkCacheHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError::Io`] when an existing cache directory cannot be
-    /// read. A missing directory is an empty cache.
+    /// Returns [`CacheError::Io`] for filesystem failures or
+    /// [`CacheError::UnsafeRoot`] for unsafe recognized paths. A missing
+    /// directory is an empty cache; unknown paths are not traversed.
     pub async fn stats(&self) -> Result<XetChunkCacheStats> {
         xet_chunk_cache_stats(&self.directory).await
     }
@@ -144,12 +426,12 @@ pub async fn xet_chunk_cache_stats_with_cancel(
     directory: &std::path::Path,
     cancel: &CancellationToken,
 ) -> Result<XetChunkCacheStats> {
-    run_blocking_cache_scan(directory, cancel, |directory, cancel| {
+    with_pinned_root(directory, cancel, |root, cancel| {
         let mut stats = XetChunkCacheStats {
             entries: 0,
             total_bytes: 0,
         };
-        visit_xet_chunk_cache_entries(directory, cancel, |entry| {
+        visit_xet_chunk_cache_entries(root, cancel, |entry| {
             stats.entries = stats.entries.saturating_add(1);
             stats.total_bytes = stats.total_bytes.saturating_add(entry.bytes);
             Ok(())
@@ -159,7 +441,7 @@ pub async fn xet_chunk_cache_stats_with_cancel(
     .await
 }
 
-/// Evict oldest xet-core range files until `max_bytes` is satisfied.
+/// Evict eligible oldest range files toward `max_bytes`, skipping busy entries.
 pub async fn prune_xet_chunk_cache(
     directory: &Path,
     max_bytes: u64,
@@ -184,8 +466,9 @@ pub async fn prune_xet_chunk_cache_with_cancel(
     record_paths: bool,
     cancel: &CancellationToken,
 ) -> Result<XetChunkCachePruneStats> {
-    run_blocking_cache_scan(directory, cancel, move |directory, cancel| {
-        let mut entries = collect_xet_chunk_cache_entries(directory, cancel)?;
+    let report_directory = directory.to_owned();
+    with_pinned_root(directory, cancel, move |root, cancel| {
+        let mut entries = collect_xet_chunk_cache_entries(root, cancel)?;
         let total = entries
             .iter()
             .fold(0u64, |total, entry| total.saturating_add(entry.bytes));
@@ -200,17 +483,29 @@ pub async fn prune_xet_chunk_cache_with_cancel(
             if stats.bytes_freed >= target {
                 break;
             }
-            if !dry_run {
-                match fs::remove_file(&entry.path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
+            let removed = root.remove_file_if(&entry.path, dry_run, &mut |_| {
+                check_cancelled(cancel)?;
+                Ok(true)
+            });
+            let bytes = match removed {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(CacheError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
                 }
-            }
+                Err(error) => return Err(error),
+            };
             stats.entries_evicted = stats.entries_evicted.saturating_add(1);
-            stats.bytes_freed = stats.bytes_freed.saturating_add(entry.bytes);
+            stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
             if record_paths {
-                stats.entries.push((entry.path, entry.bytes));
+                stats
+                    .entries
+                    .push((report_directory.join(entry.path), bytes));
             }
         }
         Ok(stats)
@@ -218,7 +513,9 @@ pub async fn prune_xet_chunk_cache_with_cancel(
     .await
 }
 
-/// Validate xet-core range-cache filenames, lengths, headers, and CRCs.
+/// Validate private range records and chunk identities, evicting corrupt entries.
+///
+/// Unknown paths and busy entries are retained and excluded from checked totals.
 pub async fn verify_xet_chunk_cache(directory: &Path) -> Result<XetChunkCacheVerifyStats> {
     verify_xet_chunk_cache_with_cancel(directory, &CancellationToken::new()).await
 }
@@ -228,96 +525,57 @@ pub async fn verify_xet_chunk_cache_with_cancel(
     directory: &Path,
     cancel: &CancellationToken,
 ) -> Result<XetChunkCacheVerifyStats> {
-    run_blocking_cache_scan(directory, cancel, |directory, cancel| {
+    with_pinned_root(directory, cancel, |root, cancel| {
         let mut stats = XetChunkCacheVerifyStats::default();
-        visit_xet_chunk_cache_entries(directory, cancel, |entry| {
-            let valid = match verify_xet_chunk_cache_entry(&entry.path, entry.bytes, cancel) {
-                Ok(valid) => valid,
-                Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+        visit_xet_chunk_cache_entries(root, cancel, |entry| {
+            let result = root.remove_file_if(&entry.path, false, &mut |file| {
+                let valid = verify_xet_chunk_cache_entry(file, &entry.path, cancel)?;
+                check_cancelled(cancel)?;
+                Ok(!valid)
+            });
+            let corrupt = match result {
+                Ok(removed) => removed.is_some(),
+                Err(CacheError::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
                     return Ok(());
                 }
                 Err(error) => return Err(error),
             };
             stats.total = stats.total.saturating_add(1);
-            if valid {
+            if corrupt {
+                stats.corrupt = stats.corrupt.saturating_add(1);
+            } else {
                 stats.valid = stats.valid.saturating_add(1);
-                return Ok(());
             }
-            stats.corrupt = stats.corrupt.saturating_add(1);
-            check_cancelled(cancel)?;
-            match fs::remove_file(&entry.path) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.into()),
-            }
+            Ok(())
         })?;
         Ok(stats)
     })
     .await
 }
 
-async fn run_blocking_cache_scan<T, F>(
-    directory: &Path,
-    cancel: &CancellationToken,
-    scan: F,
-) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&Path, &CancellationToken) -> Result<T> + Send + 'static,
-{
-    let directory = directory.to_owned();
-    let cancel = cancel.clone();
-    tokio::task::spawn_blocking(move || {
-        check_cancelled(&cancel)?;
-        scan(&directory, &cancel)
-    })
-    .await
-    .map_err(|error| CacheError::Internal(format!("xet cache scan task failed: {error}")))?
-}
-
-fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
-    if cancel.is_cancelled() {
-        return Err(CacheError::Cancelled);
-    }
-    Ok(())
-}
-
 fn verify_xet_chunk_cache_entry(
+    file: &mut fs::File,
     path: &Path,
-    bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<bool> {
     check_cancelled(cancel)?;
-    const ITEM_NAME_BYTES: usize = 20;
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    let Some((start, end, expected_bytes, expected_crc)) =
+        path.file_name().and_then(decode_range_item_name)
+    else {
         return Ok(false);
     };
-    let Ok(encoded) = base64::engine::general_purpose::URL_SAFE.decode(name) else {
-        return Ok(false);
-    };
-    let Ok(encoded): std::result::Result<[u8; ITEM_NAME_BYTES], _> = encoded.try_into() else {
-        return Ok(false);
-    };
-    let start = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-    let end = u32::from_le_bytes([encoded[4], encoded[5], encoded[6], encoded[7]]);
-    let expected_bytes = u64::from_le_bytes([
-        encoded[8],
-        encoded[9],
-        encoded[10],
-        encoded[11],
-        encoded[12],
-        encoded[13],
-        encoded[14],
-        encoded[15],
-    ]);
-    let expected_crc = u32::from_le_bytes([encoded[16], encoded[17], encoded[18], encoded[19]]);
+    let bytes = file.metadata()?.len();
     if start >= end || expected_bytes != bytes || bytes < 8 {
         return Ok(false);
     }
 
-    let mut file = fs::File::open(path)?;
     let mut count_bytes = [0u8; 4];
-    if !read_exact_or_corrupt(&mut file, &mut count_bytes)? {
+    if !read_exact_or_corrupt(file, &mut count_bytes)? {
         return Ok(false);
     }
     let count = u32::from_le_bytes(count_bytes);
@@ -331,11 +589,14 @@ fn verify_xet_chunk_cache_entry(
     }
     let mut previous = None;
     let mut offset_bytes = [0u8; 4];
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(&count_bytes);
     for _ in 0..count {
         check_cancelled(cancel)?;
-        if !read_exact_or_corrupt(&mut file, &mut offset_bytes)? {
+        if !read_exact_or_corrupt(file, &mut offset_bytes)? {
             return Ok(false);
         }
+        crc.update(&offset_bytes);
         let offset = u32::from_le_bytes(offset_bytes);
         if previous.is_none() && offset != 0 || previous.is_some_and(|previous| previous >= offset)
         {
@@ -347,8 +608,8 @@ fn verify_xet_chunk_cache_entry(
         return Ok(false);
     }
 
-    let mut file = fs::File::open(path)?;
-    let mut hasher = crc32fast::Hasher::new();
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = bytes - header_bytes;
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         check_cancelled(cancel)?;
@@ -356,9 +617,25 @@ fn verify_xet_chunk_cache_entry(
         if read == 0 {
             break;
         }
+        let Some(rest) = remaining.checked_sub(read as u64) else {
+            return Ok(false);
+        };
+        remaining = rest;
+        crc.update(&buffer[..read]);
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher.finalize() == expected_crc)
+    if remaining != 0 || crc.finalize() != expected_crc {
+        return Ok(false);
+    }
+    let key = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .and_then(|name| base64::engine::general_purpose::URL_SAFE.decode(name).ok());
+    if let Some(key) = key.filter(|key| key.get(32..) == Some(CHUNK_HASH_PREFIX.as_bytes())) {
+        return Ok(start == 0 && end == 1 && key[..32] == hasher.finalize().as_bytes()[..]);
+    }
+    Ok(true)
 }
 
 fn read_exact_or_corrupt(file: &mut fs::File, buffer: &mut [u8]) -> Result<bool> {
@@ -372,15 +649,15 @@ fn read_exact_or_corrupt(file: &mut fs::File, buffer: &mut [u8]) -> Result<bool>
 struct XetChunkCacheEntry {
     path: PathBuf,
     bytes: u64,
-    modified: SystemTime,
+    modified: u64,
 }
 
 fn collect_xet_chunk_cache_entries(
-    directory: &Path,
+    root: &PinnedRoot,
     cancel: &CancellationToken,
 ) -> Result<Vec<XetChunkCacheEntry>> {
     let mut entries = Vec::new();
-    visit_xet_chunk_cache_entries(directory, cancel, |entry| {
+    visit_xet_chunk_cache_entries(root, cancel, |entry| {
         if entries.len() >= MAX_XET_CHUNK_CACHE_ENTRIES {
             return Err(CacheError::Internal(format!(
                 "xet chunk cache contains more than {MAX_XET_CHUNK_CACHE_ENTRIES} entries; refusing an unbounded LRU scan"
@@ -393,102 +670,56 @@ fn collect_xet_chunk_cache_entries(
 }
 
 fn visit_xet_chunk_cache_entries(
-    directory: &Path,
+    root: &PinnedRoot,
     cancel: &CancellationToken,
     mut visit: impl FnMut(XetChunkCacheEntry) -> Result<()>,
 ) -> Result<()> {
     check_cancelled(cancel)?;
-    let prefixes = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for prefix in prefixes {
-        check_cancelled(cancel)?;
-        let prefix = match prefix {
-            Ok(prefix) => prefix,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let Some(prefix_name) = prefix.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let prefix_type = match prefix.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if prefix_name.len() != 2 || !prefix_name.is_ascii() || !prefix_type.is_dir() {
-            continue;
-        }
-        let keys = match fs::read_dir(prefix.path()) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        for key in keys {
+    root.visit_selected_files(
+        &|relative| {
             check_cancelled(cancel)?;
-            let key = match key {
-                Ok(key) => key,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let Some(key_name) = key.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            let key_type = match key.file_type() {
-                Ok(file_type) => file_type,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            if !key_name
-                .as_bytes()
-                .get(..2)
-                .is_some_and(|key_prefix| key_prefix.eq_ignore_ascii_case(prefix_name.as_bytes()))
-                || !key_type.is_dir()
-            {
-                continue;
-            }
-            let items = match fs::read_dir(key.path()) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            for item in items {
-                check_cancelled(cancel)?;
-                let item = match item {
-                    Ok(item) => item,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                let item_type = match item.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if !item_type.is_file() {
-                    continue;
-                }
-                let metadata = match item.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
-                };
+            Ok(!matches!(
+                range_entry_kind(relative),
+                crate::clean::EntryKind::Retain
+            ))
+        },
+        &mut |relative, metadata| {
+            if matches!(range_entry_kind(relative), crate::clean::EntryKind::Payload) {
                 visit(XetChunkCacheEntry {
-                    path: item.path(),
-                    bytes: metadata.len(),
-                    modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    path: relative.to_owned(),
+                    bytes: metadata.size,
+                    modified: metadata.modified_ns,
                 })?;
             }
-        }
-    }
-    Ok(())
+            Ok(())
+        },
+    )
+}
+
+fn range_entry_kind(relative: &Path) -> crate::clean::EntryKind {
+    let Some(parts) = std::iter::once(Some("chunks"))
+        .chain(relative.iter().map(|part| part.to_str()))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return crate::clean::EntryKind::Retain;
+    };
+    crate::clean::range_entry_kind(&parts)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod maintenance;
+
+    fn test_key() -> Key {
+        Key {
+            prefix: "repo".to_owned(),
+            hash: Default::default(),
+        }
+    }
 
     async fn write_xet_range(cache_dir: &Path, payload: &[u8]) -> PathBuf {
         let mut body = Vec::new();
@@ -502,26 +733,248 @@ mod tests {
         name.extend_from_slice(&u64::try_from(body.len()).unwrap().to_le_bytes());
         name.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         let name = base64::engine::general_purpose::URL_SAFE.encode(name);
-        let dir = cache_dir.join("ab").join("ab-key");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dir = cache_dir
+            .join("AA")
+            .join(base64::engine::general_purpose::URL_SAFE.encode([0u8; 32]));
         let path = dir.join(name);
-        tokio::fs::write(&path, body).await.unwrap();
+        crate::private_fs::atomic_write(cache_dir, &path, &body)
+            .await
+            .unwrap();
         path
     }
 
     #[tokio::test]
     async fn open_reads_empty_cache_stats() {
         let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("chunks");
+        let cache_dir = tmp.path().join("cache").join("chunks");
         let handle =
             XetChunkCacheHandle::open(cache_dir.clone(), 64 * 1024).expect("should open cache");
 
-        assert_eq!(handle.directory, cache_dir);
+        assert_eq!(handle.directory, std::fs::canonicalize(cache_dir).unwrap());
         assert_eq!(handle.size_bytes, 64 * 1024);
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.entries, 0);
         assert_eq!(stats.total_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn range_publication_lease_survives_all_range_maintenance() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("cache");
+        let ranges = root.join("chunks");
+        let path = write_xet_range(&ranges, b"range payload").await;
+        let body = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let catalog = crate::catalog::CacheCatalog::new(root.clone(), 1024 * 1024);
+        let reservation = catalog
+            .reserve(&path, body.len() as u64)
+            .await
+            .unwrap()
+            .unwrap();
+        let reservation = reservation.write(&body).await.unwrap();
+        for dry_run in [false, true] {
+            let pruned = prune_xet_chunk_cache(&ranges, 0, dry_run, true)
+                .await
+                .unwrap();
+            assert_eq!(pruned.entries_evicted, 0);
+            let clean = crate::clean_cache(&root, dry_run, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(clean.files_removed, 0);
+            assert_eq!(clean.busy_entries, 1);
+        }
+        assert_eq!(verify_xet_chunk_cache(&ranges).await.unwrap().total, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        drop(reservation);
+        assert_eq!(verify_xet_chunk_cache(&ranges).await.unwrap().valid, 1);
+        assert_eq!(
+            prune_xet_chunk_cache(&ranges, 0, false, false)
+                .await
+                .unwrap()
+                .entries_evicted,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn crab_range_cache_serves_exact_and_contained_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle =
+            XetChunkCacheHandle::open(tmp.path().join("cache").join("chunks"), 64 * 1024).unwrap();
+        let key = test_key();
+        let stored = ChunkRange::new(2, 5);
+        handle
+            .cache
+            .put(&key, &stored, &[0, 3, 7, 9], b"abcdefghi")
+            .await
+            .unwrap();
+
+        let exact = handle.cache.get(&key, &stored).await.unwrap().unwrap();
+        assert_eq!(exact.data, b"abcdefghi");
+        assert_eq!(exact.offsets, vec![0, 3, 7, 9]);
+
+        let contained = handle
+            .cache
+            .get(&key, &ChunkRange::new(3, 5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(contained.data, b"defghi");
+        assert_eq!(contained.offsets, vec![0, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn chunk_identity_checks_do_not_change_xorb_ranges_or_evict_on_bad_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = XetChunkCacheHandle::open(tmp.path().join("cache/chunks"), 64 * 1024).unwrap();
+        let content = b"chunk bytes";
+        let chunk = Key {
+            prefix: CHUNK_HASH_PREFIX.into(),
+            hash: (*blake3::hash(content).as_bytes()).into(),
+        };
+        let whole = ChunkRange::new(0, 1);
+        handle
+            .cache
+            .put(&chunk, &whole, &[0, 11], content)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            handle.cache.get(&chunk, &ChunkRange::new(0, 2)).await,
+            Err(ChunkCacheError::InvalidArguments)
+        ));
+        assert_eq!(
+            handle
+                .cache
+                .get(&chunk, &whole)
+                .await
+                .unwrap()
+                .unwrap()
+                .data,
+            content
+        );
+
+        // An xorb key is not the hash of its decoded bytes. The same bytes
+        // under another namespace retain the normal partial-range contract.
+        let xorb = test_key();
+        handle
+            .cache
+            .put(&xorb, &whole, &[0, 11], content)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.cache.get(&xorb, &whole).await.unwrap().unwrap().data,
+            content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn range_cache_rechecks_product_root_privacy_on_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let handle = XetChunkCacheHandle::open(root.join("chunks"), 64 * 1024).unwrap();
+        let range = ChunkRange::new(0, 1);
+        handle
+            .cache
+            .put(&test_key(), &range, &[0, 7], b"payload")
+            .await
+            .unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            handle
+                .cache
+                .get(&test_key(), &range)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn range_filename_cannot_authorize_an_unbounded_allocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        crate::root::ensure_private_cache_directory(&root).unwrap();
+        let range_root = root.join("chunks");
+        crate::root::ensure_private_cache_directory(&range_root).unwrap();
+        let cache = CrabRangeCache {
+            root: range_root,
+            capacity: 64 * 1024,
+            catalog: crate::catalog::CacheCatalog::new(root.clone(), 64 * 1024),
+        };
+        let range = ChunkRange::new(0, u32::MAX);
+        let path = cache
+            .key_directory(&test_key())
+            .join(encode_range_item_name(&range, u64::MAX, 0));
+        crate::private_fs::atomic_write(&root, &path, b"invalid")
+            .await
+            .unwrap();
+        assert!(
+            cache
+                .get(&test_key(), &ChunkRange::new(0, 1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn range_cache_creates_private_roots_and_files() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache").join("chunks");
+        let handle = XetChunkCacheHandle::open(&cache_dir, 64 * 1024).unwrap();
+        handle
+            .cache
+            .put(&test_key(), &ChunkRange::new(0, 1), &[0, 7], b"payload")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::symlink_metadata(&cache_dir).unwrap().mode() & 0o777,
+            0o700
+        );
+        let mut prefix_dirs = std::fs::read_dir(&cache_dir).unwrap();
+        let prefix = prefix_dirs.next().unwrap().unwrap().path();
+        let key_dir = std::fs::read_dir(prefix)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let entry = std::fs::read_dir(key_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::symlink_metadata(entry).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn range_cache_rejects_unsafe_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache").join("chunks");
+        crate::root::ensure_private_cache_directory(cache_dir.parent().unwrap()).unwrap();
+        std::fs::create_dir(&cache_dir).unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(
+            XetChunkCacheHandle::open(cache_dir, 64 * 1024),
+            Err(CacheError::UnsafeRoot { .. })
+        ));
     }
 
     #[tokio::test]
@@ -539,7 +992,7 @@ mod tests {
     #[tokio::test]
     async fn cache_manager_returns_singleton_arc() {
         let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("chunks");
+        let cache_dir = tmp.path().join("cache").join("chunks");
 
         let first = XetChunkCacheHandle::open(cache_dir.clone(), 64 * 1024).unwrap();
         let second = XetChunkCacheHandle::open(cache_dir, 64 * 1024).unwrap();
@@ -551,11 +1004,7 @@ mod tests {
     async fn stats_is_read_only_and_counts_range_files() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("chunks");
-        let item_dir = cache_dir.join("ab").join("ab-key");
-        tokio::fs::create_dir_all(&item_dir).await.unwrap();
-        tokio::fs::write(item_dir.join("range"), b"12345")
-            .await
-            .unwrap();
+        let path = write_xet_range(&cache_dir, b"12345").await;
         tokio::fs::write(cache_dir.join("unknown"), b"ignored")
             .await
             .unwrap();
@@ -563,7 +1012,8 @@ mod tests {
         let stats = xet_chunk_cache_stats(&cache_dir).await.unwrap();
 
         assert_eq!(stats.entries, 1);
-        assert_eq!(stats.total_bytes, 5);
+        assert_eq!(stats.total_bytes, 17);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 17);
         assert!(cache_dir.join("unknown").exists());
     }
 
@@ -595,24 +1045,22 @@ mod tests {
     async fn prune_dry_run_and_apply_cover_xet_range_files() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("chunks");
-        let item_dir = cache_dir.join("ab").join("ab-key");
-        tokio::fs::create_dir_all(&item_dir).await.unwrap();
-        tokio::fs::write(item_dir.join("old"), vec![1u8; 8])
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        tokio::fs::write(item_dir.join("new"), vec![2u8; 8])
-            .await
+        let old = write_xet_range(&cache_dir, &[1u8; 8]).await;
+        write_xet_range(&cache_dir, &[2u8; 8]).await;
+        fs::File::open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .unwrap();
 
-        let plan = prune_xet_chunk_cache(&cache_dir, 8, true, true)
+        let plan = prune_xet_chunk_cache(&cache_dir, 20, true, true)
             .await
             .unwrap();
         assert_eq!(plan.entries_evicted, 1);
-        assert_eq!(plan.bytes_freed, 8);
+        assert_eq!(plan.entries, [(old, 20)]);
+        assert_eq!(plan.bytes_freed, 20);
         assert_eq!(xet_chunk_cache_stats(&cache_dir).await.unwrap().entries, 2);
 
-        let applied = prune_xet_chunk_cache(&cache_dir, 8, false, true)
+        let applied = prune_xet_chunk_cache(&cache_dir, 20, false, true)
             .await
             .unwrap();
         assert_eq!(applied.entries, plan.entries);
@@ -669,10 +1117,13 @@ mod tests {
         name.extend_from_slice(&u64::try_from(body.len()).unwrap().to_le_bytes());
         name.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         let name = base64::engine::general_purpose::URL_SAFE.encode(name);
-        let dir = cache_dir.join("ab").join("ab-key");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let dir = cache_dir
+            .join("AA")
+            .join(base64::engine::general_purpose::URL_SAFE.encode([0u8; 32]));
         let path = dir.join(name);
-        tokio::fs::write(&path, &body).await.unwrap();
+        crate::private_fs::atomic_write(&cache_dir, &path, &body)
+            .await
+            .unwrap();
 
         let report = verify_xet_chunk_cache(&cache_dir).await.unwrap();
         assert_eq!(report.valid, 1);

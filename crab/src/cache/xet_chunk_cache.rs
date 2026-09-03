@@ -16,6 +16,6 @@ pub use crab_cache::{
 pub fn xet_chunk_cache_from_config(config: &Config) -> Result<XetChunkCacheHandle> {
     Ok(XetChunkCacheHandle::open(
         config.effective_chunk_cache_dir(),
-        config.chunk_cache_bytes,
+        config.cache.max_bytes,
     )?)
 }

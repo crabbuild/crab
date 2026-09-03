@@ -12,9 +12,10 @@
 //! caching without per-callsite changes because `CachingStore` mirrors
 //! the [`Store`] interface.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(feature = "remote-client")]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,18 +42,17 @@ use crab_cache::{
 };
 use crab_storage::{ETag, StorageError, Store};
 use crab_xet::hash::MerkleHash;
-use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
-use crab_xet::xorb::parser::{
-    decode_chunk_range_bytes, xorb_chunks_from_metadata, xorb_metadata_region,
-};
+use crab_xet::xorb::format::MAX_XORB_SIZE;
+
+mod xorb_read;
+use xorb_read::XorbReadState;
 
 /// Result alias for cache/storage adapter operations.
 pub type Result<T> = std::result::Result<T, CacheStoreError>;
 
 #[cfg(feature = "remote-client")]
 const DEDUP_QUERY_MAX_UNIQUE_HASHES: usize = 50_000;
-const XORB_READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
-const XORB_READ_LOCK_STRIPES: usize = 256;
+const DEFAULT_LOCAL_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Errors raised by the read-through cache/storage adapter.
 #[derive(Debug, thiserror::Error)]
@@ -63,11 +63,20 @@ pub enum CacheStoreError {
     /// Origin object-store behavior failed.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    /// Origin bytes were readable but failed data-plane integrity checks.
+    #[error("origin object at {path} failed integrity verification: {source}")]
+    OriginIntegrity {
+        path: String,
+        #[source]
+        source: CacheError,
+    },
 }
 
 /// Cache-service options needed by [`CachingStore`].
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Product-wide byte budget for disposable local cache state.
+    pub max_bytes: u64,
     /// Cache service URL.
     pub service_url: Option<String>,
     /// Service mode: cache, dedup, or both.
@@ -87,6 +96,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: None,
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,
@@ -140,10 +150,15 @@ impl CachingStore {
         S: Into<Store>,
         C: Into<CacheConfig>,
     {
+        let cache_config = cache_config.into();
         Self::new_with_local_cache(
             origin,
-            cache_config,
-            Arc::new(LocalCache::new(default_cache_root())),
+            cache_config.clone(),
+            Arc::new(LocalCache::with_limits(
+                default_cache_root(),
+                cache_config.max_bytes,
+                Some(cache_config.max_bytes),
+            )),
         )
     }
 
@@ -279,319 +294,6 @@ impl CachingStore {
     /// Borrow the local disk cache.
     pub fn local_cache(&self) -> &Arc<LocalCache> {
         &self.local_cache
-    }
-
-    /// Read and verify ordered xorb chunk ranges without forcing a full-object read.
-    ///
-    /// Selective requests coalesce each contiguous chunk range into one payload
-    /// read. Requests covering at least half the serialized payload install and
-    /// reuse the complete xorb instead. Raw chunks remain zero-copy slices.
-    pub async fn get_xorb_chunks(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        ranges: &[(u32, u32)],
-    ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_install_policy(path, xorb_hash, ranges, true)
-            .await
-    }
-
-    /// Read verified chunks from one complete xorb body without installing it.
-    ///
-    /// Hydration consumes complete files, so one full-object request avoids the
-    /// HEAD/footer/metadata/payload round trips of selective reads. Existing
-    /// complete local xorbs are still used when present.
-    pub async fn get_xorb_chunks_without_install(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        ranges: &[(u32, u32)],
-    ) -> Result<(Bytes, Vec<u32>)> {
-        self.get_xorb_chunks_with_install_policy(path, xorb_hash, ranges, false)
-            .await
-    }
-
-    async fn get_xorb_chunks_with_install_policy(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        ranges: &[(u32, u32)],
-        install_full_xorb: bool,
-    ) -> Result<(Bytes, Vec<u32>)> {
-        let read_key = XorbReadKey {
-            xorb_hash: *xorb_hash,
-            ranges: ranges.to_vec(),
-            install_full_xorb,
-        };
-        if let Some(result) = self.xorb_reads.get(&read_key) {
-            return Ok(result);
-        }
-
-        let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
-        if let Some(result) = self.xorb_reads.get(&read_key) {
-            return Ok(result);
-        }
-
-        let result = match self
-            .get_xorb_chunks_once(path, xorb_hash, ranges, false, install_full_xorb)
-            .await
-        {
-            Ok(result) => result,
-            Err(CacheStoreError::Cache(cache_error)) => {
-                tracing::warn!(
-                    xorb_hash = %xorb_hash.hex(),
-                    error = %cache_error,
-                    "cached xorb read failed verification, retrying origin once"
-                );
-                self.xorb_reads.evict(xorb_hash);
-                self.local_cache.evict(&CacheKey::Xorb(*xorb_hash)).await?;
-                // A corrupt complete cache entry is exceptional. Repair it with
-                // one verified full origin read even when the caller otherwise
-                // requested a non-installing read, so later reads cannot
-                // rediscover damage.
-                self.get_xorb_chunks_once(path, xorb_hash, ranges, true, true)
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
-        self.xorb_reads.insert(read_key, result.clone());
-        Ok(result)
-    }
-
-    async fn get_xorb_chunks_once(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        ranges: &[(u32, u32)],
-        origin_only: bool,
-        install_full_xorb: bool,
-    ) -> Result<(Bytes, Vec<u32>)> {
-        if ranges.is_empty() {
-            return Ok((Bytes::new(), vec![0]));
-        }
-
-        if !install_full_xorb {
-            let data = match self.local_cache.get_read_xorb_if_present(xorb_hash).await? {
-                Some(data) => data,
-                None => self.complete_xorb_without_install(path).await?,
-            };
-            let parser =
-                crab_xet::xorb::parser::XorbParser::parse(data).map_err(CacheError::from)?;
-            let actual_hash = parser.hash();
-            if actual_hash != *xorb_hash {
-                return Err(CacheError::HashMismatch {
-                    requested: xorb_hash.hex(),
-                    actual: actual_hash.hex(),
-                }
-                .into());
-            }
-            return collect_full_xorb_ranges(&parser, ranges);
-        }
-
-        let plan = self.xorb_read_plan(path, xorb_hash, origin_only).await?;
-        let requested_payload_bytes = requested_payload_bytes(&plan.chunks, ranges)?;
-        if install_full_xorb
-            && (ranges_cover_all_chunks(plan.chunks.len(), ranges)
-                || requested_payload_bytes.saturating_mul(2) >= plan.payload_len)
-        {
-            let data = self.complete_xorb(path, xorb_hash, origin_only).await?;
-            let parser =
-                crab_xet::xorb::parser::XorbParser::parse(data).map_err(CacheError::from)?;
-            return collect_full_xorb_ranges(&parser, ranges);
-        }
-
-        let mut decoded = Vec::with_capacity(ranges.len());
-        for &(start, end) in ranges {
-            let metas = chunk_meta_range(&plan.chunks, start, end)?;
-            if metas.is_empty() {
-                decoded.push((Bytes::new(), vec![0]));
-                continue;
-            }
-            let payload_start = u64::from(metas[0].offset);
-            let last = metas.last().ok_or_else(|| CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: "non-empty xorb chunk range has no final chunk".to_owned(),
-            })?;
-            let payload_end = u64::from(last.offset) + u64::from(last.compressed_len);
-            let payload = self
-                .xorb_range_get(path, payload_start..payload_end, origin_only)
-                .await?;
-            decoded.push(decode_chunk_range_bytes(metas, payload).map_err(CacheError::from)?);
-        }
-        concatenate_decoded_ranges(decoded)
-    }
-
-    async fn xorb_read_plan(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        origin_only: bool,
-    ) -> Result<XorbReadPlan> {
-        if !origin_only
-            && let Some((chunks, payload_len)) = self
-                .local_cache
-                .get_xorb_metadata_if_present(xorb_hash)
-                .await?
-        {
-            return Ok(XorbReadPlan {
-                chunks,
-                payload_len,
-            });
-        }
-        let object_len = if origin_only {
-            self.origin.head(path).await?.size
-        } else {
-            self.head(path).await?.size
-        };
-        if object_len > MAX_XORB_SIZE as u64 {
-            return Err(CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "xorb is {object_len} bytes; format limit is {MAX_XORB_SIZE} bytes"
-                ),
-            }
-            .into());
-        }
-        let footer_len = FOOTER_SIZE as u64;
-        if object_len < footer_len {
-            return Err(CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: "xorb too small for footer".to_owned(),
-            }
-            .into());
-        }
-        let footer = self
-            .xorb_range_get(path, object_len - footer_len..object_len, origin_only)
-            .await?;
-        let object_len_usize =
-            usize::try_from(object_len).map_err(|_| CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: "xorb length does not fit usize".to_owned(),
-            })?;
-        let metadata_region =
-            xorb_metadata_region(object_len_usize, &footer).map_err(CacheError::from)?;
-        let metadata_start = metadata_region.offset as u64;
-        let metadata_end = metadata_start + metadata_region.len as u64;
-        let metadata = self
-            .xorb_range_get(path, metadata_start..metadata_end, origin_only)
-            .await?;
-        let (chunks, actual_hash) = xorb_chunks_from_metadata(object_len_usize, &footer, &metadata)
-            .map_err(CacheError::from)?;
-        if actual_hash != *xorb_hash {
-            return Err(CacheError::HashMismatch {
-                requested: xorb_hash.hex(),
-                actual: actual_hash.hex(),
-            }
-            .into());
-        }
-        Ok(XorbReadPlan {
-            chunks,
-            payload_len: metadata_region.offset as u64,
-        })
-    }
-
-    async fn xorb_range_get(
-        &self,
-        path: &Path,
-        range: Range<u64>,
-        origin_only: bool,
-    ) -> Result<Bytes> {
-        if origin_only {
-            return Ok(self.origin.range_get(path, range).await?);
-        }
-        self.range_get(path, range).await
-    }
-
-    async fn complete_xorb(
-        &self,
-        path: &Path,
-        xorb_hash: &MerkleHash,
-        origin_only: bool,
-    ) -> Result<Bytes> {
-        let key = CacheKey::Xorb(*xorb_hash);
-        if !origin_only {
-            let origin = self.origin.clone();
-            let path = path.clone();
-            return self
-                .local_cache
-                .get_or_fetch_read_xorb_with(xorb_hash, || async move {
-                    let (data, _) = origin
-                        .get_with_etag_bounded(&path, MAX_XORB_SIZE as u64)
-                        .await?;
-                    Ok::<_, CacheStoreError>(data)
-                })
-                .await;
-        }
-
-        let (data, _) = self
-            .origin
-            .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
-            .await?;
-        LocalCache::validate_bytes(&key, &data)?;
-        if let Err(error) = self.local_cache.put_bytes(&key, data.clone()).await {
-            tracing::warn!(
-                xorb_hash = %xorb_hash.hex(),
-                error = %error,
-                "failed to rewrite repaired xorb cache entry"
-            );
-        }
-        Ok(data)
-    }
-
-    async fn complete_xorb_without_install(&self, path: &Path) -> Result<Bytes> {
-        match self.get_cache_service_xorb_bounded(path).await {
-            Ok(Some(data)) => Ok(data),
-            Ok(None) => Ok(self
-                .origin
-                .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
-                .await?
-                .0),
-            Err(error) => {
-                tracing::warn!(
-                    path = %path,
-                    error = %error,
-                    "cache service xorb read failed, falling back to origin",
-                );
-                Ok(self
-                    .origin
-                    .get_with_etag_bounded(path, MAX_XORB_SIZE as u64)
-                    .await?
-                    .0)
-            }
-        }
-    }
-
-    async fn get_cache_service_xorb_bounded(&self, path: &Path) -> Result<Option<Bytes>> {
-        let Some(head) = self.head_cache_service_object(path).await? else {
-            return Ok(None);
-        };
-        if head.size > MAX_XORB_SIZE as u64 {
-            return Err(CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "cache-service xorb is {} bytes; format limit is {MAX_XORB_SIZE} bytes",
-                    head.size
-                ),
-            }
-            .into());
-        }
-        let Some(data) = self
-            .get_cache_service_object_without_install_limit(path, Some(MAX_XORB_SIZE as u64))
-            .await?
-        else {
-            return Ok(None);
-        };
-        if data.len() as u64 > MAX_XORB_SIZE as u64 {
-            return Err(CacheError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "cache-service xorb body is {} bytes; format limit is {MAX_XORB_SIZE} bytes",
-                    data.len()
-                ),
-            }
-            .into());
-        }
-        Ok(Some(data))
     }
 
     /// Whether a cache service is configured (regardless of mode).
@@ -742,17 +444,6 @@ impl CachingStore {
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
         if is_immutable && let Some(key) = cache_key_for_path(path.as_ref()) {
-            if let Some(size) = self.local_cache.cached_size(&key).await?
-                && size > max_bytes
-            {
-                return Err(CacheError::CorruptObject {
-                    path: path.to_string(),
-                    reason: format!(
-                        "cached object is {size} bytes; bounded read supports at most {max_bytes} bytes"
-                    ),
-                }
-                .into());
-            }
             if let Ok(data) = self
                 .local_cache
                 .get_or_fetch_bounded_with(&key, max_bytes, || async {
@@ -764,16 +455,6 @@ impl CachingStore {
                 })
                 .await
             {
-                if data.len() as u64 > max_bytes {
-                    return Err(CacheError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!(
-                            "cached object body is {} bytes; bounded read supports at most {max_bytes} bytes",
-                            data.len()
-                        ),
-                    }
-                    .into());
-                }
                 return Ok((
                     data,
                     ETag {
@@ -783,49 +464,26 @@ impl CachingStore {
                 ));
             }
 
-            match self.head_cache_service_object(path).await {
-                Ok(Some(head)) if head.size > max_bytes => {
-                    return Err(CacheError::CorruptObject {
-                        path: path.to_string(),
-                        reason: format!(
-                            "cache-service object is {} bytes; bounded read supports at most {max_bytes} bytes",
-                            head.size
-                        ),
-                    }
-                    .into());
+            // The HTTP client bounds both advertised and streamed body bytes.
+            // Size rejection is a cache failure, so it must reach origin fallback.
+            match self.get_cache_service_object_bounded(path, max_bytes).await {
+                Ok(Some(data)) => {
+                    return Ok((
+                        data,
+                        ETag {
+                            e_tag: None,
+                            version: None,
+                        },
+                    ));
                 }
-                Ok(Some(_)) => match self.get_cache_service_object_bounded(path, max_bytes).await {
-                    Ok(Some(data)) => {
-                        if data.len() as u64 > max_bytes {
-                            return Err(CacheError::CorruptObject {
-                                path: path.to_string(),
-                                reason: format!(
-                                    "cache-service object body is {} bytes; bounded read supports at most {max_bytes} bytes",
-                                    data.len()
-                                ),
-                            }
-                            .into());
-                        }
-                        return Ok((
-                            data,
-                            ETag {
-                                e_tag: None,
-                                version: None,
-                            },
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(error) => tracing::warn!(
-                        path = %path,
-                        error = %error,
-                        "cache service bounded read failed, falling back to origin"
-                    ),
-                },
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
+                    family = "remote-object",
+                    operation = "bounded-read",
                     path = %path,
+                    recovery = "use-bounded-origin",
                     error = %error,
-                    "cache service bounded HEAD failed, falling back to origin"
+                    "cache service bounded read failed"
                 ),
             }
         }
@@ -1478,240 +1136,6 @@ impl CachingStore {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct XorbReadKey {
-    xorb_hash: MerkleHash,
-    ranges: Vec<(u32, u32)>,
-    install_full_xorb: bool,
-}
-
-#[derive(Clone)]
-struct CachedXorbRead {
-    data: Bytes,
-    offsets: Vec<u32>,
-    charge: usize,
-}
-
-struct XorbReadCache {
-    entries: HashMap<XorbReadKey, CachedXorbRead>,
-    insertion_order: VecDeque<XorbReadKey>,
-    charged_bytes: usize,
-}
-
-struct XorbReadState {
-    cache: std::sync::Mutex<XorbReadCache>,
-    fill_locks: Box<[tokio::sync::Mutex<()>]>,
-}
-
-impl XorbReadState {
-    fn new() -> Self {
-        Self {
-            cache: std::sync::Mutex::new(XorbReadCache {
-                entries: HashMap::new(),
-                insertion_order: VecDeque::new(),
-                charged_bytes: 0,
-            }),
-            fill_locks: std::iter::repeat_with(|| tokio::sync::Mutex::new(()))
-                .take(XORB_READ_LOCK_STRIPES)
-                .collect(),
-        }
-    }
-
-    fn get(&self, key: &XorbReadKey) -> Option<(Bytes, Vec<u32>)> {
-        let cache = self.cache_guard();
-        let entry = cache.entries.get(key)?;
-        Some((entry.data.clone(), entry.offsets.clone()))
-    }
-
-    fn insert(&self, key: XorbReadKey, value: (Bytes, Vec<u32>)) {
-        let charge = value
-            .0
-            .len()
-            .saturating_add(value.1.len().saturating_mul(std::mem::size_of::<u32>()));
-        if charge > XORB_READ_CACHE_MAX_BYTES {
-            return;
-        }
-
-        let mut cache = self.cache_guard();
-        if cache.entries.contains_key(&key) {
-            return;
-        }
-        while cache.charged_bytes.saturating_add(charge) > XORB_READ_CACHE_MAX_BYTES {
-            let Some(oldest) = cache.insertion_order.pop_front() else {
-                break;
-            };
-            if let Some(removed) = cache.entries.remove(&oldest) {
-                cache.charged_bytes = cache.charged_bytes.saturating_sub(removed.charge);
-            }
-        }
-        cache.charged_bytes = cache.charged_bytes.saturating_add(charge);
-        cache.insertion_order.push_back(key.clone());
-        cache.entries.insert(
-            key,
-            CachedXorbRead {
-                data: value.0,
-                offsets: value.1,
-                charge,
-            },
-        );
-    }
-
-    fn evict(&self, xorb_hash: &MerkleHash) {
-        let mut cache = self.cache_guard();
-        let keys = cache
-            .entries
-            .keys()
-            .filter(|key| key.xorb_hash == *xorb_hash)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(removed) = cache.entries.remove(&key) {
-                cache.charged_bytes = cache.charged_bytes.saturating_sub(removed.charge);
-            }
-        }
-        cache
-            .insertion_order
-            .retain(|key| key.xorb_hash != *xorb_hash);
-    }
-
-    async fn lock(&self, xorb_hash: &MerkleHash) -> tokio::sync::MutexGuard<'_, ()> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        xorb_hash.hash(&mut hasher);
-        let index = hasher.finish() as usize % self.fill_locks.len();
-        self.fill_locks[index].lock().await
-    }
-
-    fn cache_guard(&self) -> std::sync::MutexGuard<'_, XorbReadCache> {
-        match self.cache.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-}
-
-struct XorbReadPlan {
-    chunks: Vec<ChunkMeta>,
-    payload_len: u64,
-}
-
-fn requested_payload_bytes(chunks: &[ChunkMeta], ranges: &[(u32, u32)]) -> Result<u64> {
-    let mut bytes = 0u64;
-    for &(start, end) in ranges {
-        for meta in chunk_meta_range(chunks, start, end)? {
-            bytes = bytes
-                .checked_add(u64::from(meta.compressed_len))
-                .ok_or_else(|| CacheError::CorruptObject {
-                    path: "xorb".to_owned(),
-                    reason: "requested xorb payload length overflow".to_owned(),
-                })?;
-        }
-    }
-    Ok(bytes)
-}
-
-fn ranges_cover_all_chunks(chunk_count: usize, ranges: &[(u32, u32)]) -> bool {
-    let Ok(chunk_count) = u32::try_from(chunk_count) else {
-        return false;
-    };
-    let mut ranges = ranges.to_vec();
-    ranges.sort_unstable();
-
-    let mut covered_until = 0;
-    for (start, end) in ranges {
-        if start > covered_until {
-            return false;
-        }
-        covered_until = covered_until.max(end);
-        if covered_until >= chunk_count {
-            return true;
-        }
-    }
-    chunk_count == 0
-}
-
-fn chunk_meta_range(chunks: &[ChunkMeta], start: u32, end: u32) -> Result<&[ChunkMeta]> {
-    if start > end {
-        return Err(CacheError::CorruptObject {
-            path: "xorb".to_owned(),
-            reason: format!("invalid chunk range [{start}, {end})"),
-        }
-        .into());
-    }
-    let start = usize::try_from(start).map_err(|_| CacheError::CorruptObject {
-        path: "xorb".to_owned(),
-        reason: "chunk-range start does not fit usize".to_owned(),
-    })?;
-    let end = usize::try_from(end).map_err(|_| CacheError::CorruptObject {
-        path: "xorb".to_owned(),
-        reason: "chunk-range end does not fit usize".to_owned(),
-    })?;
-    chunks.get(start..end).ok_or_else(|| {
-        CacheError::CorruptObject {
-            path: "xorb".to_owned(),
-            reason: format!(
-                "chunk range [{start}, {end}) exceeds {} chunks",
-                chunks.len()
-            ),
-        }
-        .into()
-    })
-}
-
-fn collect_full_xorb_ranges(
-    parser: &crab_xet::xorb::parser::XorbParser,
-    ranges: &[(u32, u32)],
-) -> Result<(Bytes, Vec<u32>)> {
-    let mut decoded = Vec::with_capacity(ranges.len());
-    for &(start, end) in ranges {
-        decoded.push(
-            parser
-                .get_chunk_range_bytes(start, end)
-                .map_err(CacheError::from)?,
-        );
-    }
-    concatenate_decoded_ranges(decoded)
-}
-
-fn concatenate_decoded_ranges(decoded: Vec<(Bytes, Vec<u32>)>) -> Result<(Bytes, Vec<u32>)> {
-    if let [single] = decoded.as_slice() {
-        return Ok(single.clone());
-    }
-
-    let total_bytes: usize = decoded.iter().map(|(data, _)| data.len()).sum();
-    let total_chunks: usize = decoded
-        .iter()
-        .map(|(_, offsets)| offsets.len().saturating_sub(1))
-        .sum();
-    let mut data = Vec::with_capacity(total_bytes);
-    let mut offsets = Vec::with_capacity(total_chunks + 1);
-    for (range_data, range_offsets) in decoded {
-        let base = u32::try_from(data.len()).map_err(|_| CacheError::CorruptObject {
-            path: "xorb".to_owned(),
-            reason: "decoded xorb range exceeds u32 offset space".to_owned(),
-        })?;
-        for offset in range_offsets
-            .iter()
-            .take(range_offsets.len().saturating_sub(1))
-        {
-            offsets.push(
-                base.checked_add(*offset)
-                    .ok_or_else(|| CacheError::CorruptObject {
-                        path: "xorb".to_owned(),
-                        reason: "decoded xorb range offset overflow".to_owned(),
-                    })?,
-            );
-        }
-        data.extend_from_slice(&range_data);
-    }
-    offsets.push(
-        u32::try_from(data.len()).map_err(|_| CacheError::CorruptObject {
-            path: "xorb".to_owned(),
-            reason: "decoded xorb ranges exceed u32 offset space".to_owned(),
-        })?,
-    );
-    Ok((Bytes::from(data), offsets))
-}
-
 #[derive(Clone)]
 struct CacheAwareObjectStore {
     store: CachingStore,
@@ -2080,6 +1504,7 @@ mod tests {
     #[cfg(feature = "remote-client")]
     use crab_cache_server::state::{AppState, DedupIndexRebuildStats, build_router};
     use crab_storage::Store;
+    use crab_storage::test_support::{CountingObjectStore, ObjectReadCounts, ObjectReadKind};
     use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression, RunId, XorbBuilder};
     use crab_xet::xorb::format::{Chunk, CompressionScheme};
     use crab_xet::xorb::parser::XorbParser;
@@ -2274,6 +1699,7 @@ mod tests {
 
     fn no_cache_config() -> CacheConfig {
         CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: None,
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,
@@ -2293,7 +1719,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
 
         let error = store.get_with_etag_bounded(&path, 8).await.unwrap_err();
@@ -2311,9 +1737,229 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn bounded_read_repairs_oversized_local_entry_from_origin() {
+        let good_body = Bytes::from_static(b"verified shard body");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let key = CacheKey::Shard(hash);
+        cache
+            .put_unchecked_for_test(&key, &[0x55; 256])
+            .await
+            .unwrap();
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert_eq!(
+            cache.cached_size(&key).await.unwrap(),
+            Some(good_body.len() as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_read_repairs_wrong_hash_local_entry_from_origin() {
+        let good_body = Bytes::from_static(b"verified shard body");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let key = CacheKey::Shard(hash);
+        cache
+            .put_unchecked_for_test(&key, b"wrong shard body")
+            .await
+            .unwrap();
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert!(cache.contains_verified(&key).await);
+    }
+
+    #[tokio::test]
+    async fn leased_cache_working_set_does_not_block_valid_origin() {
+        const MIB: usize = 1024 * 1024;
+        let good_body = Bytes::from(vec![2; 3 * MIB]);
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let cache = Arc::new(LocalCache::with_limits(root.clone(), 10 * MIB as u64, None));
+        let old_body = Bytes::from(vec![1; 8 * MIB]);
+        let old_hash = crab_xet::hash::compute_data_hash(&old_body);
+        let old_key = CacheKey::Shard(old_hash);
+        cache.put(&old_key, &old_body).await.unwrap();
+        let old_hex = old_hash.hex();
+        let old_path = root.join("shards").join(&old_hex[..2]).join(old_hex);
+        let catalog = crab_cache::CacheCatalog::new(root, cache.max_bytes());
+        let lease = catalog.lease(&old_path).await.unwrap();
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert!(!cache.contains(&CacheKey::Shard(hash)).await);
+        assert!(cache.contains_verified(&old_key).await);
+        drop(lease);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unwritable_cache_root_does_not_block_valid_origin() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let good_body = Bytes::from_static(b"origin survives local write failure");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("cache");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let cache = Arc::new(LocalCache::new(root));
+        let key = CacheKey::Shard(hash);
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert!(!cache.contains(&key).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsafe_root_after_construction_does_not_block_valid_origin() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let good_body = Bytes::from_static(b"origin survives unsafe root");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let origin = Store::new(inner as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("cache");
+        let cache = Arc::new(LocalCache::new(root.clone()));
+        let key = CacheKey::Shard(hash);
+        cache
+            .put_unchecked_for_test(&key, b"stale local body")
+            .await
+            .unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_cache_entry_is_not_consumed() {
+        use std::os::unix::fs::symlink;
+
+        let good_body = Bytes::from_static(b"verified origin shard");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let origin = Store::new(inner as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path().join("cache");
+        let cache = Arc::new(LocalCache::new(root.clone()));
+        let key = CacheKey::Shard(hash);
+        cache
+            .put_unchecked_for_test(&key, b"temporary fixture")
+            .await
+            .unwrap();
+        let entry = root.join("shards").join(&hash.hex()[..2]).join(hash.hex());
+        tokio::fs::remove_file(&entry).await.unwrap();
+        let outside = tempdir.path().join("outside");
+        tokio::fs::write(&outside, b"attacker-controlled bytes")
+            .await
+            .unwrap();
+        symlink(&outside, &entry).unwrap();
+        let store = CachingStore::new_with_local_cache(origin, no_cache_config(), cache).unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert!(!entry.is_symlink());
+    }
+
     #[cfg(feature = "remote-client")]
     fn cache_service_config(addr: SocketAddr) -> CacheConfig {
         CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -2555,15 +2201,24 @@ mod tests {
     }
 
     #[cfg(feature = "remote-client")]
-    async fn start_malformed_object_server(body: &'static [u8]) -> MalformedObjectServer {
+    async fn start_malformed_object_server(
+        body: &'static [u8],
+        stream_body: bool,
+    ) -> MalformedObjectServer {
         let router = axum::Router::new().route(
             "/v1/{*path}",
             axum::routing::get(move || async move {
-                (
-                    axum::http::StatusCode::OK,
-                    [(axum::http::header::CONTENT_LENGTH, body.len().to_string())],
-                    Bytes::from_static(body),
-                )
+                let response_body = if stream_body {
+                    axum::body::Body::from_stream(futures_util::stream::iter([Ok::<
+                        _,
+                        std::convert::Infallible,
+                    >(
+                        Bytes::from_static(body),
+                    )]))
+                } else {
+                    axum::body::Body::from(body)
+                };
+                axum::http::Response::new(response_body)
             }),
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2592,7 +2247,7 @@ mod tests {
         let body = Bytes::from_static(b"xorb data");
         origin.put(&path, body.clone()).await.unwrap();
 
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (got, _etag) = cs.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
     }
@@ -3129,6 +2784,7 @@ mod tests {
         });
 
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -3309,6 +2965,7 @@ mod tests {
         });
 
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -3351,8 +3008,60 @@ mod tests {
 
     #[cfg(feature = "remote-client")]
     #[tokio::test]
+    async fn bounded_read_bypasses_oversized_cache_service_and_still_verifies_origin() {
+        let good = Bytes::from_static(b"valid");
+        let hash = crab_xet::hash::compute_data_hash(&good);
+        let key = CacheKey::Shard(hash);
+        let path = content_path("shards", &hash.hex());
+
+        for stream_body in [false, true] {
+            let server =
+                start_malformed_object_server(b"oversized cache service body", stream_body).await;
+            // Storage retries its own bounded-size corruption once; body-hash
+            // validation runs above storage and must not add an origin retry.
+            for (name, origin_body, origin_gets) in [
+                ("healthy", good.clone(), 1),
+                ("wrong-hash", Bytes::from_static(b"wrong"), 1),
+                ("oversized", Bytes::from_static(b"oversized origin body"), 2),
+            ] {
+                let inner = Arc::new(InMemory::new());
+                inner
+                    .put(&path, PutPayload::from_bytes(origin_body.clone()))
+                    .await
+                    .unwrap();
+                let counting = Arc::new(CountingObjectStore::new(inner));
+                let origin = Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>);
+                let tempdir = tempfile::tempdir().unwrap();
+                let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+                let store = CachingStore::new_with_local_cache(
+                    origin,
+                    cache_service_config(server.addr),
+                    Arc::clone(&cache),
+                )
+                .unwrap();
+
+                let result = store.get_with_etag_bounded(&path, good.len() as u64).await;
+
+                assert_eq!(
+                    counting.counts().full,
+                    origin_gets,
+                    "{name}: origin requests"
+                );
+                if origin_body == good {
+                    assert_eq!(result.unwrap().0, good);
+                    assert!(cache.contains_verified(&key).await);
+                } else {
+                    assert!(result.is_err(), "{name}: invalid origin must fail");
+                    assert!(!cache.contains(&key).await, "{name}: no invalid cache fill");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
     async fn get_with_etag_rejects_bad_hash_verified_cache_service_body() {
-        let server = start_malformed_object_server(b"bad shard body").await;
+        let server = start_malformed_object_server(b"bad shard body", false).await;
         let good_body = Bytes::from_static(b"correct shard body");
         let hash = crab_xet::hash::compute_data_hash(&good_body);
         let path = content_path("shards", &hash.hex());
@@ -3362,7 +3071,7 @@ mod tests {
         let cache = Arc::new(LocalCache::new(tempdir.path().join("client-cache")));
         let store = CachingStore::new_with_local_cache(
             origin,
-            &cache_service_config(server.addr),
+            cache_service_config(server.addr),
             Arc::clone(&cache),
         )
         .unwrap();
@@ -3382,7 +3091,7 @@ mod tests {
     #[cfg(feature = "remote-client")]
     #[tokio::test]
     async fn get_with_etag_rejects_bad_xorb_cache_service_body() {
-        let server = start_malformed_object_server(b"bad xorb body").await;
+        let server = start_malformed_object_server(b"bad xorb body", false).await;
         let (good_body, hash_hex) = test_xorb(b"correct xorb body");
         let hash = MerkleHash::from_hex(&hash_hex).unwrap();
         let path = content_path("xorbs", &hash_hex);
@@ -3392,7 +3101,7 @@ mod tests {
         let cache = Arc::new(LocalCache::new(tempdir.path().join("client-cache")));
         let store = CachingStore::new_with_local_cache(
             origin,
-            &cache_service_config(server.addr),
+            cache_service_config(server.addr),
             Arc::clone(&cache),
         )
         .unwrap();
@@ -3559,7 +3268,7 @@ mod tests {
         let body = Bytes::from_static(b"0123456789");
         origin.put(&path, body).await.unwrap();
 
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let slice = cs.range_get(&path, 2..7).await.unwrap();
         assert_eq!(slice.as_ref(), b"23456");
     }
@@ -3579,7 +3288,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
 
         let (data, offsets) = store
@@ -3616,7 +3325,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
 
         let (data, offsets) = store
@@ -3658,15 +3367,12 @@ mod tests {
             .put(&path, PutPayload::from_bytes(xorb))
             .await
             .unwrap();
-        let get_count = Arc::new(AtomicUsize::new(0));
-        let origin = Store::new(Arc::new(CountingStore {
-            inner,
-            get_count: Arc::clone(&get_count),
-        }));
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
 
         let (data, offsets) = store
@@ -3680,7 +3386,21 @@ mod tests {
             !cache.contains(&CacheKey::Xorb(hash)).await,
             "hydrate reads must not write a second full copy before output"
         );
-        assert_eq!(get_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            counting_origin.counts(),
+            ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 1,
+            }
+        );
+        assert_eq!(
+            counting_origin.requests(),
+            vec![crab_storage::test_support::ObjectReadRequest {
+                location: path.to_string(),
+                kind: ObjectReadKind::Full,
+            }]
+        );
     }
 
     #[cfg(feature = "remote-client")]
@@ -3705,7 +3425,7 @@ mod tests {
 
         let warmer = CachingStore::new_with_local_cache(
             Store::new(Arc::clone(&server.origin) as Arc<dyn ObjectStore>),
-            &cache_service_push_warming_config(server.addr),
+            cache_service_push_warming_config(server.addr),
             Arc::new(LocalCache::new(
                 server._tempdir.path().join("noninstalling-warmer"),
             )),
@@ -3718,7 +3438,7 @@ mod tests {
         ));
         let reader = CachingStore::new_with_local_cache(
             Store::new(Arc::clone(&server.origin) as Arc<dyn ObjectStore>),
-            &cache_service_config(server.addr),
+            cache_service_config(server.addr),
             Arc::clone(&reader_cache),
         )
         .unwrap();
@@ -3734,35 +3454,362 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noninstalling_read_rejects_corrupt_requested_chunk() {
+    async fn corrupt_origin_xorb_fails_once_with_origin_provenance() {
+        use crab_xet::xorb::format::FOOTER_SIZE;
+        use std::error::Error as _;
+
         let payloads = [
             Bytes::from(vec![0x11; 32 * 1024]),
             Bytes::from(vec![0x22; 32 * 1024]),
+            Bytes::from(vec![0x33; 32 * 1024]),
+            Bytes::from(vec![0x44; 32 * 1024]),
         ];
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let mut corrupt = xorb.to_vec();
-        corrupt[0] ^= 0xff;
         let path = content_path("xorbs", &hash.hex());
-        let origin = origin_store();
-        origin.put(&path, Bytes::from(corrupt)).await.unwrap();
+        let footer_start = xorb.len() - FOOTER_SIZE;
+        let metadata_start = u64::from_le_bytes(
+            xorb[footer_start + 4..footer_start + 12]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        for corruption in ["footer", "metadata", "payload", "truncated"] {
+            for mode in ["noninstalling", "full", "selective", "metadata"] {
+                if mode == "metadata" && corruption == "payload" {
+                    continue; // Metadata reads deliberately do not fetch payload.
+                }
+                let mut corrupt = xorb.to_vec();
+                match corruption {
+                    "footer" => *corrupt.last_mut().unwrap() ^= 0xff,
+                    "metadata" => corrupt[metadata_start] ^= 0xff,
+                    "payload" => corrupt[32 * 1024] ^= 0xff,
+                    "truncated" => {
+                        corrupt.pop();
+                    }
+                    _ => unreachable!(),
+                }
+                let inner = Arc::new(InMemory::new());
+                inner
+                    .put(&path, PutPayload::from_bytes(Bytes::from(corrupt)))
+                    .await
+                    .unwrap();
+                let counting = Arc::new(CountingObjectStore::new(inner));
+                let origin = Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>);
+                let tempdir = tempfile::tempdir().unwrap();
+                let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+                let store = CachingStore::new_with_local_cache(
+                    origin,
+                    no_cache_config(),
+                    Arc::clone(&cache),
+                )
+                .unwrap();
+                let error = match mode {
+                    "noninstalling" => store
+                        .get_xorb_chunks_without_install(&path, &hash, &[(0, 4)])
+                        .await
+                        .unwrap_err(),
+                    "full" => store
+                        .get_xorb_chunks(&path, &hash, &[(0, 4)])
+                        .await
+                        .unwrap_err(),
+                    "selective" => store
+                        .get_xorb_chunks(&path, &hash, &[(1, 2)])
+                        .await
+                        .unwrap_err(),
+                    "metadata" => store.xorb_chunk_metadata(&path, &hash).await.unwrap_err(),
+                    _ => unreachable!(),
+                };
+                assert!(
+                    matches!(&error, CacheStoreError::OriginIntegrity { path: failed_path, .. } if failed_path == path.as_ref()),
+                    "{mode}/{corruption}: {error:?}"
+                );
+                assert!(error.source().unwrap().is::<CacheError>());
+                assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
+                let expected = if mode == "noninstalling" {
+                    ObjectReadCounts {
+                        heads: 0,
+                        ranges: 0,
+                        full: 1,
+                    }
+                } else {
+                    ObjectReadCounts {
+                        heads: 1,
+                        ranges: if matches!(corruption, "footer" | "truncated") {
+                            1
+                        } else if mode == "selective" && corruption == "payload" {
+                            3
+                        } else {
+                            2
+                        },
+                        full: usize::from(mode == "full" && corruption == "payload"),
+                    }
+                };
+                assert_eq!(
+                    counting.counts(),
+                    expected,
+                    "{mode}/{corruption}: no cache-repair retry of origin"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repair_preserves_read_policy_when_cache_eviction_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let payloads = [
+            Bytes::from(vec![0x11; 32 * 1024]),
+            Bytes::from(vec![0x22; 32 * 1024]),
+            Bytes::from(vec![0x33; 32 * 1024]),
+            Bytes::from(vec![0x44; 32 * 1024]),
+        ];
+        let expected = payloads
+            .iter()
+            .flat_map(|data| data.iter().copied())
+            .collect::<Vec<_>>();
+        let (xorb, hash) = test_raw_xorb(&payloads);
+        let path = content_path("xorbs", &hash.hex());
+        for removal_allowed in [true, false] {
+            for mode in ["noninstalling", "full", "selective", "metadata"] {
+                let inner = Arc::new(InMemory::new());
+                inner
+                    .put(&path, PutPayload::from_bytes(xorb.clone()))
+                    .await
+                    .unwrap();
+                let counting = Arc::new(CountingObjectStore::new(inner));
+                let origin = Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>);
+                let tempdir = tempfile::tempdir().unwrap();
+                let root = tempdir.path().join("cache");
+                let cache = Arc::new(LocalCache::new(root.clone()));
+                let mut corrupt = xorb.to_vec();
+                if mode == "metadata" {
+                    *corrupt.last_mut().unwrap() ^= 0xff;
+                } else {
+                    corrupt[32 * 1024] ^= 0xff;
+                }
+                cache
+                    .put_unchecked_for_test(&CacheKey::Xorb(hash), &corrupt)
+                    .await
+                    .unwrap();
+                let entry = root.join("xorbs").join(&hash.hex()[..2]).join(hash.hex());
+                let parent = entry.parent().unwrap();
+                if !removal_allowed {
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))
+                        .unwrap();
+                }
+                let store = CachingStore::new_with_local_cache(
+                    origin,
+                    no_cache_config(),
+                    Arc::clone(&cache),
+                )
+                .unwrap();
+                let result = match mode {
+                    "noninstalling" => store
+                        .get_xorb_chunks_without_install(&path, &hash, &[(0, 4)])
+                        .await
+                        .map(|(data, _)| data == expected),
+                    "full" => store
+                        .get_xorb_chunks(&path, &hash, &[(0, 4)])
+                        .await
+                        .map(|(data, _)| data == expected),
+                    "selective" => store
+                        .get_xorb_chunks(&path, &hash, &[(1, 2)])
+                        .await
+                        .map(|(data, _)| data == payloads[1]),
+                    "metadata" => store
+                        .xorb_chunk_metadata(&path, &hash)
+                        .await
+                        .map(|chunks| chunks.len() == 4 && chunks[1].uncompressed_len == 32 * 1024),
+                    _ => unreachable!(),
+                };
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+                assert!(result.unwrap(), "{mode}: repaired bytes/metadata");
+                let expected_reads = match mode {
+                    "noninstalling" => ObjectReadCounts {
+                        heads: 0,
+                        ranges: 0,
+                        full: 1,
+                    },
+                    "full" => ObjectReadCounts {
+                        heads: 1,
+                        ranges: 2,
+                        full: 1,
+                    },
+                    "selective" => ObjectReadCounts {
+                        heads: 1,
+                        ranges: 3,
+                        full: 0,
+                    },
+                    "metadata" => ObjectReadCounts {
+                        heads: 1,
+                        ranges: 2,
+                        full: 0,
+                    },
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    counting.counts(),
+                    expected_reads,
+                    "{mode}: origin request shape"
+                );
+                if !removal_allowed {
+                    assert_eq!(
+                        std::fs::read(entry).unwrap(),
+                        corrupt,
+                        "{mode}: bypass unwritable cache"
+                    );
+                } else if mode == "full" {
+                    assert!(cache.contains_verified(&CacheKey::Xorb(hash)).await);
+                } else {
+                    assert!(!entry.exists(), "{mode}: do not install a full xorb");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_chunk_ranges_leave_verified_local_xorb_intact() {
+        let payload = Bytes::from(vec![0x71; 32 * 1024]);
+        let (xorb, hash) = test_raw_xorb(std::slice::from_ref(&payload));
+        let path = content_path("xorbs", &hash.hex());
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
-        let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+        cache.put_read_xorb(&hash, xorb).await.unwrap();
+        let counting = Arc::new(CountingObjectStore::new(Arc::new(InMemory::new())));
+        let store = CachingStore::new_with_local_cache(
+            Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>),
+            no_cache_config(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+
+        for range in [(0, 2), (1, 0)] {
+            for install in [false, true] {
+                let result = if install {
+                    store.get_xorb_chunks(&path, &hash, &[range]).await
+                } else {
+                    store
+                        .get_xorb_chunks_without_install(&path, &hash, &[range])
+                        .await
+                };
+                assert!(matches!(
+                    result,
+                    Err(CacheStoreError::Cache(CacheError::ChunkNotFound { .. }))
+                ));
+                assert!(cache.contains_verified(&CacheKey::Xorb(hash)).await);
+            }
+        }
+        assert_eq!(counting.counts(), ObjectReadCounts::default());
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn corrupt_cache_service_xorb_does_not_poison_origin_or_install_policy() {
+        let server = start_malformed_object_server(b"bad xorb body", false).await;
+        let payload = Bytes::from(vec![0x71; 32 * 1024]);
+        let (xorb, hash) = test_raw_xorb(std::slice::from_ref(&payload));
+        let path = content_path("xorbs", &hash.hex());
+        for corrupt_origin in [false, true] {
+            let origin_body = if corrupt_origin {
+                Bytes::from_static(b"bad origin")
+            } else {
+                xorb.clone()
+            };
+            let inner = Arc::new(InMemory::new());
+            inner
+                .put(&path, PutPayload::from_bytes(origin_body))
+                .await
                 .unwrap();
-
-        let error = store
-            .get_xorb_chunks_without_install(&path, &hash, &[(0, 2)])
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            CacheStoreError::Cache(
-                CacheError::CorruptObject { .. } | CacheError::HashMismatch { .. }
+            let counting = Arc::new(CountingObjectStore::new(inner));
+            let tempdir = tempfile::tempdir().unwrap();
+            let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+            let store = CachingStore::new_with_local_cache(
+                Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>),
+                cache_service_config(server.addr),
+                Arc::clone(&cache),
             )
-        ));
-        assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
+            .unwrap();
+            let result = store
+                .get_xorb_chunks_without_install(&path, &hash, &[(0, 1)])
+                .await;
+            if corrupt_origin {
+                assert!(matches!(
+                    result,
+                    Err(CacheStoreError::OriginIntegrity { .. })
+                ));
+            } else {
+                assert_eq!(result.unwrap().0, payload);
+            }
+            assert_eq!(
+                counting.counts(),
+                ObjectReadCounts {
+                    heads: 0,
+                    ranges: 0,
+                    full: 1
+                }
+            );
+            assert!(!cache.contains(&CacheKey::Xorb(hash)).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_sparse_result_owns_only_the_requested_bytes() {
+        let (xorb, hash) = test_raw_xorb(&[
+            Bytes::from(vec![1; 4 * 1024 * 1024]),
+            Bytes::from_static(b"xyz"),
+        ]);
+        let path = content_path("xorbs", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(xorb))
+            .await
+            .unwrap();
+        let counting = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting) as Arc<dyn ObjectStore>);
+        let tmp = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalCache::new(tmp.path().join("cache")));
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), local.clone()).unwrap();
+
+        let cold = store
+            .get_xorb_chunks_without_install(&path, &hash, &[(1, 2)])
+            .await
+            .unwrap();
+        let before = counting.counts();
+        let warm = store
+            .get_xorb_chunks_without_install(&path, &hash, &[(1, 2)])
+            .await
+            .unwrap();
+
+        assert_eq!(warm, (Bytes::from_static(b"xyz"), vec![0, 3]));
+        assert_eq!(cold, warm);
+        assert_ne!(cold.0.as_ptr(), warm.0.as_ptr());
+        assert_eq!(counting.counts(), before);
+        assert!(!local.contains(&CacheKey::Xorb(hash)).await);
+    }
+
+    #[tokio::test]
+    async fn retained_results_preserve_range_order_and_multiplicity() {
+        let (xorb, hash) = test_raw_xorb(&[Bytes::from_static(b"ab"), Bytes::from_static(b"cde")]);
+        let path = content_path("xorbs", &hash.hex());
+        let origin = origin_store();
+        origin.put(&path, xorb).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalCache::new(tmp.path().join("cache")));
+        let store = CachingStore::new_with_local_cache(origin, no_cache_config(), local).unwrap();
+        let ranges = [(1, 2), (0, 2), (1, 2)];
+
+        for _ in 0..2 {
+            let result = store
+                .get_xorb_chunks_without_install(&path, &hash, &ranges)
+                .await
+                .unwrap();
+            assert_eq!(
+                result,
+                (Bytes::from_static(b"cdeabcdecde"), vec![0, 3, 5, 8, 11])
+            );
+        }
     }
 
     #[tokio::test]
@@ -3788,7 +3835,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let store =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
 
         let (left, right) = tokio::join!(
@@ -3824,7 +3871,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
         let warmer =
-            CachingStore::new_with_local_cache(origin, &no_cache_config(), Arc::clone(&cache))
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
                 .unwrap();
         warmer
             .get_xorb_chunks(&path, &hash, &[(0, 4)])
@@ -3832,7 +3879,7 @@ mod tests {
             .unwrap();
         let warm_reader = CachingStore::new_with_local_cache(
             origin_store(),
-            &no_cache_config(),
+            no_cache_config(),
             Arc::clone(&cache),
         )
         .unwrap();
@@ -3849,7 +3896,7 @@ mod tests {
     #[tokio::test]
     async fn put_writes_to_origin_when_no_cache() {
         let origin = origin_store();
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
 
         let path = Path::from(".crab/xorbs/def456");
         let body = Bytes::from_static(b"new xorb");
@@ -3863,7 +3910,7 @@ mod tests {
     async fn put_rejects_bad_content_addressed_xorb_before_origin_write() {
         let origin = origin_store();
         let origin_probe = origin.clone();
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (_good_body, hash_hex) = test_xorb(b"expected xorb body");
         let path = Path::from(format!(".crab/xorbs/{}/{hash_hex}", &hash_hex[..2]));
 
@@ -3887,7 +3934,7 @@ mod tests {
     #[tokio::test]
     async fn dedup_query_returns_all_unknown_when_no_cache() {
         let origin = origin_store();
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
 
         let hashes = vec![[0u8; 32], [1u8; 32]];
         let result = cs.dedup_query("org/repo", &hashes).await.unwrap();
@@ -3900,6 +3947,7 @@ mod tests {
     async fn dedup_query_caps_unique_hashes_per_request() {
         let mut server = start_batched_dedup_server(None).await;
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::Dedup,
             push_warming: false,
@@ -3929,6 +3977,7 @@ mod tests {
     async fn dedup_query_preserves_successful_batches_and_duplicate_order() {
         let mut server = start_batched_dedup_server(Some(1)).await;
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::Dedup,
             push_warming: false,
@@ -3966,7 +4015,7 @@ mod tests {
         let body = Bytes::from_static(b"ref data");
         origin.put(&path, body.clone()).await.unwrap();
 
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let meta = cs.head(&path).await.unwrap();
         assert_eq!(meta.size, body.len() as u64);
     }
@@ -3977,7 +4026,7 @@ mod tests {
         let path = Path::from(".crab/xorbs/todelete");
         origin.put(&path, Bytes::from_static(b"bye")).await.unwrap();
 
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         cs.delete(&path).await.unwrap();
 
         let err = cs.head(&path).await;
@@ -3993,7 +4042,7 @@ mod tests {
         let body = Bytes::from_static(b"ref content");
         origin.put(&path, body.clone()).await.unwrap();
 
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (got, _) = cs.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
     }
@@ -4001,7 +4050,7 @@ mod tests {
     #[tokio::test]
     async fn query_known_chunks_returns_empty_when_no_cache() {
         let origin = origin_store();
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
 
         let hashes = vec![MerkleHash::from([0u8; 32]), MerkleHash::from([1u8; 32])];
         let known = cs.query_known_chunks("org/repo", &hashes).await;
@@ -4013,6 +4062,7 @@ mod tests {
     async fn query_known_chunks_ignores_out_of_range_service_indexes() {
         let server = start_malformed_dedup_server().await;
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -4032,7 +4082,7 @@ mod tests {
     #[tokio::test]
     async fn warm_remote_only_is_noop_when_no_cache_client() {
         let origin = origin_store();
-        let cs = CachingStore::new(origin, &no_cache_config()).unwrap();
+        let cs = CachingStore::new(origin, no_cache_config()).unwrap();
 
         let path = Path::from(".crab/xorbs/abc123");
         let body = Bytes::from_static(b"xorb data");
@@ -4068,6 +4118,7 @@ mod tests {
         });
 
         let config = CacheConfig {
+            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,
@@ -4109,6 +4160,6 @@ mod tests {
     #[test]
     fn slice_cached_range_rejects_inverted_range() {
         let data = Bytes::from_static(b"0123456789");
-        assert!(slice_cached_range(&data, &(7..2)).is_none());
+        assert!(slice_cached_range(&data, &Range { start: 7, end: 2 }).is_none());
     }
 }

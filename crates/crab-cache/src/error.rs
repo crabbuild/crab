@@ -14,6 +14,10 @@ pub enum CacheError {
     #[error("cache I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Cache path ownership, type, or permissions are unsafe for private data.
+    #[error("unsafe cache path {path}: {reason}")]
+    UnsafeRoot { path: String, reason: String },
+
     /// The cache service returned an invalid or unsupported response.
     #[error("cache service error: {reason}")]
     Service { reason: String },
@@ -109,7 +113,7 @@ pub enum CacheError {
     CorruptObject { path: String, reason: String },
 
     /// The local cache index could not be opened, queried, or updated.
-    #[cfg(feature = "local-cache")]
+    #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
     #[error("cache index error at {path}: {source}")]
     Index {
         path: String,

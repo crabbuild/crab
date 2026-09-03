@@ -264,19 +264,7 @@ impl Coordinator {
 
         // Step 4: Initialize shared chunk cache.
         let cache_dir = config.cache_dir();
-        fs::create_dir_all(&cache_dir).map_err(|e| {
-            CrabError::Internal(format!(
-                "failed to create cache directory {}: {e}",
-                cache_dir.display()
-            ))
-        })?;
-
-        let chunk_cache = Arc::new(
-            ChunkCache::open(cache_dir, Some(config.cache_max_bytes)).map_err(|e| {
-                error!(error = %e, "failed to open shared chunk cache");
-                e
-            })?,
-        );
+        let chunk_cache = Arc::new(ChunkCache::open(cache_dir, Some(config.cache_max_bytes))?);
         info!(
             max_bytes = config.cache_max_bytes,
             "shared chunk cache initialized"
@@ -1208,6 +1196,23 @@ mod tests {
 
         assert!(!tmp.path().join("daemon.pid").exists());
         assert!(!tmp.path().join("daemon.lock").exists());
+    }
+
+    #[test]
+    fn unavailable_cache_does_not_strand_coordinator_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("cache");
+        fs::write(&cache_path, b"retain cache sentinel").unwrap();
+
+        for _ in 0..2 {
+            let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
+            let coordinator = Coordinator::start(config).unwrap();
+            assert!(tmp.path().join("daemon.pid").exists());
+            drop(coordinator);
+            assert!(!tmp.path().join("daemon.pid").exists());
+            assert!(!tmp.path().join("daemon.lock").exists());
+        }
+        assert_eq!(fs::read(cache_path).unwrap(), b"retain cache sentinel");
     }
 
     #[test]

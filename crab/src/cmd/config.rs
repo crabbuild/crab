@@ -68,7 +68,7 @@ const INTERNAL_KEYS: &[&str] = &[
     "cache.service_url",
     "cache.service_mode",
     "cache.push_warming",
-    "cache.chunk_cache_dir",
+    "cache.max_bytes",
     "cache.service_auth",
     "cache.service_token_path",
     "cache.service_ca_cert",
@@ -518,6 +518,7 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         | "staging.segment_hard_cap_bytes"
         | "staging.fd_pool_size"
         | "staging.retention_hours"
+        | "cache.max_bytes"
         | "perf.fastpath_min_size" => {
             let n: i64 = value.parse().map_err(|_| CrabError::Configuration {
                 key: format!("{key}: expected integer, got \"{value}\""),
@@ -561,7 +562,6 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         "remote.url"
         | "auth.aws_profile"
         | "cache.service_url"
-        | "cache.chunk_cache_dir"
         | "cache.service_token_path"
         | "cache.service_ca_cert"
         | "cache.service_client_cert"
@@ -803,7 +803,7 @@ mod tests {
         run_internal_config_set("cache.service_url", "https://cache.internal:8443", &path).unwrap();
         run_internal_config_set("cache.service_mode", "CACHE+DEDUP", &path).unwrap();
         run_internal_config_set("cache.push_warming", "true", &path).unwrap();
-        run_internal_config_set("cache.chunk_cache_dir", "/var/cache/crab/chunks", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "536870912", &path).unwrap();
         run_internal_config_set("cache.service_auth", "PSK", &path).unwrap();
         run_internal_config_set("cache.service_auth", "mTLS", &path).unwrap();
         run_internal_config_set(
@@ -837,8 +837,8 @@ mod tests {
         );
         assert_eq!(table["cache"]["push_warming"], toml::Value::Boolean(true));
         assert_eq!(
-            table["cache"]["chunk_cache_dir"],
-            toml::Value::String("/var/cache/crab/chunks".into())
+            table["cache"]["max_bytes"],
+            toml::Value::Integer(536_870_912)
         );
         assert_eq!(
             table["cache"]["service_auth"],

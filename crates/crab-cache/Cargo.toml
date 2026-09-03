@@ -13,11 +13,16 @@ path = "src/lib.rs"
 [features]
 default = []
 active-probe = ["dep:reqwest"]
-local-cache = ["dep:filetime", "dep:fs4", "dep:rusqlite", "dep:tokio", "dep:tokio-util"]
+local-cache = ["dep:errno", "dep:filetime", "dep:fs4", "dep:libc", "dep:rusqlite", "dep:tokio", "dep:tokio-util"]
 remote-client = ["active-probe", "dep:futures-util", "dep:tokio"]
 xet-chunk-cache = [
+    "dep:async-trait",
     "dep:base64",
     "dep:crc32fast",
+    "dep:errno",
+    "dep:fs4",
+    "dep:libc",
+    "dep:rusqlite",
     "dep:tokio",
     "dep:tokio-util",
     "dep:xet-client",
@@ -25,14 +30,17 @@ xet-chunk-cache = [
 ]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, features = ["rayon"] }
 base64 = { version = "0.22", optional = true }
 bytes = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
 crc32fast = { version = "1", optional = true }
+errno = { version = "0.3", optional = true }
 filetime = { version = "0.2", optional = true }
 fs4 = { version = "0.13", optional = true }
+libc = { version = "0.2", optional = true }
 futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"], optional = true }
 rusqlite = { workspace = true, optional = true }
