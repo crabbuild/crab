@@ -61,13 +61,15 @@ Status: PARTIAL. Draft PR #147 is an implementation checkpoint, not phase
 acceptance or permission to merge unfinished work. Retained local results are
 below; provider, native mount, resource, and full lifecycle gates remain open.
 
-**Newly reproduced Phase 3 failure, 2026-09-03:** explicit prune leaves deleted
+**Retained Phase 3 failure and repair, 2026-09-03:** explicit prune left deleted
 payloads charged in the catalog. A fresh, fully private installed RustFS run at
 `863911c` removed 268,374,371 bytes, but stats still reported 268,796,148 catalog
 bytes against 462,761 observed linked logical bytes. Both inventories were
 complete and error-free. The earlier 63-check workflow did not assert catalog
-reconciliation and does not close this gate. See the Phase 3 deletion-lifecycle
-execution slice below.
+reconciliation and does not close this gate. Installed revision `767f4eb` now
+passes the original assertion plus exact remaining-payload reconciliation:
+202,403,212 bytes removed, four catalog entries / 421,777 bytes remaining.
+See the Phase 3 deletion-lifecycle execution slice for proof and open gates.
 
 ### Installed RustFS command checkpoint, 2026-09-03
 
@@ -1540,7 +1542,8 @@ assertion fails and remains recorded as a failure, not a passed qualification.
 Harness SHA-256:
 `72d96279b1be503f868008dfb7534230e214a87ec05ef8325e2950004200bfe1`.
 
-**Evidence map.** `crab/src/cmd/prune.rs::run_prune_with_cancel` invokes separate
+**Failure-checkpoint evidence map.** At `863911c`,
+`crab/src/cmd/prune.rs::run_prune_with_cancel` invokes separate
 object and range pruning. `local_cache/maintenance.rs` and `xet_chunk_cache.rs`
 delete through `PinnedRoot::remove_file_if` without deleting catalog rows.
 Explicit clean's `private_fs/platform/cleanup.rs` similarly removes payloads
@@ -1597,9 +1600,58 @@ failing tests pass unchanged. New tests cover sibling row retirement, failed/
 declined operation rollback, writer exclusion until commit, missing/corrupt/busy
 catalogs, and root/database replacement. All 265 cache tests and strict cache
 Clippy pass; the seven local-only and eight range-only removal tests also pass.
-Installed requalification of this implementation is pending. Filesystem unlink
-and SQLite commit are not jointly crash-atomic: a failed commit warns and may
-retain an overcharge, while a later generation/transaction error stops removal.
+The malformed-schema fixture also removes `cache_entries`; the fixed cleanup
+statements recognize SQLite's exact `SQLITE_ERROR` alongside corrupt/not-a-
+database results. They do not treat all unmapped errors as schema corruption;
+generation and I/O failures still stop the transaction path. All 265 cache
+tests, both feature-isolated removal sets, strict all-target Clippy, and workspace
+formatting were repeated successfully at `767f4eb`.
+
+**Installed prune proof, 2026-09-03.** A stable-source `make install` rebuilt
+revision `767f4eb2839c8823efcb30f101afb4654d6d2938`; CLI SHA-256:
+`66a50fb21f239d2ab9f494f61b8d6fad1e2ef4a4bc130273597366e4dd893c58`.
+Run `prune-accounting-767f4eb.C5rAMC/report.json` passes eight checks / seven
+commands against the retained qualified RustFS remote with a new private clone
+and cache. Six decoded ranges / 202,403,212 bytes are removed. Catalog totals
+fall from ten entries / 202,824,989 bytes to four entries / 421,777 bytes,
+exactly matching remaining payload-family files and bytes. The complete linked
+inventory is 462,761 logical / 479,232 allocated bytes, including the retained
+catalog files. All four independent file hashes remain unchanged. The original
+failed run is retained; it is not relabeled as passing. Probe SHA-256:
+`06ae12d4521939f90dfb554ae9342eb7a222dc8d3e52d859c69acdab564d0261`.
+**Installed full-workflow repeat.** The same installed binary passes 63 checks /
+53 commands with 1,555 gateway requests in `generation-767f4eb.Kf5lnY/report.json`.
+Its fresh remote is
+`crab://crabbuild/cache-qualification/cache-f410.E7nt8I/generation-767f4eb.Kf5lnY`.
+Three initial 128 MiB files (including a duplicate and one-MiB variant) create
+four xorbs totaling 135,495,185 bytes. An added exact duplicate creates no new
+xorb; the subsequent one-MiB edit creates one 1,244,605-byte xorb. Independent
+hashes and clean Git state pass after real add/commit/push, lazy clone, hydration,
+range corruption recovery, clean/prune, and unsafe/unbound-cache bypass. Cold
+hydrate uses 16 xorb GETs; cold fetch uses 17. Both warm hydrate and fetch-then-
+hydrate succeed with origin xorb bodies denied and zero attempted xorb GETs.
+Denied cold reads fail with every pointer unchanged; restored origin and fsck
+succeed. No command times out and no prior or newly created remote xorb is
+removed. RustFS uses the image recorded above and the user-supplied local
+credentials, without recording credential values. The Make install also builds
+the cache server from the unrelated dirty evidence files; this qualification
+claims the committed CLI/read/cache source, not an exact-head cache-server build.
+
+The same binary's diagnostic extension passes 33 checks / 12 commands in
+`generation-767f4eb.Kf5lnY/catalog-diagnostics-yefkl5av/report.json`. Negative
+reservation sizes and a malformed maintenance marker cause both stats spellings
+to report catalog unavailability while preserving independent shard counts.
+Doctor reports the issue. Each inspection preserves tree names, identities,
+modes, sizes, mtimes, and bytes; restoring SQL fixture values restores baseline
+totals. The deliberately retained non-private sentinel warning is preserved,
+not repaired to force successful stats exits.
+
+These runs qualify the deletion repair and exercised command correctness, not
+all phase criteria. Cold-read amplification persists; generated fixtures and
+concurrent range selection differ from earlier runs, so their request-count
+difference is not a controlled performance comparison. Filesystem unlink and
+SQLite commit are not jointly crash-atomic: a failed commit warns and may retain
+an overcharge, while a later generation/transaction error stops removal.
 Crash recovery, bounded verification lock tenure, stale read-decision races,
 old stale-row reconciliation, and full physical-budget acceptance remain open.
 
