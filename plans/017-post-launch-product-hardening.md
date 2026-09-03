@@ -5572,6 +5572,70 @@ Supported Git/OS/provider coverage, capability negotiation, delayed-transfer
 failure/retry qualification and controlled performance remain separate gates;
 this checkpoint does not close the original Phase 2 acceptance criteria.
 
+### LFS checkout hashing cost, 2026-09-03 UTC
+
+**Context / measured gap.** The emitted-byte integrity fix adds a second
+SHA-256 pass; the original cache-validation pass is still required for remote
+repair of an already-corrupt cache. A paired diagnostic on Apple ARM64 using
+256 MiB objects and eight alternating-order pairs per route found median
+candidate/baseline wall-time ratios of 1.789 (native filter), 1.791 (LFS filter)
+and 1.587 (standalone smudge). Every checkout was byte-identical. The retained
+report `phase2-lfs-checkout-paired-358499f-c838e5d-20260903/report.json` binds
+the independently rebuilt pre-integrity baseline `358499f` to SHA-256
+`f0b2b1e37673e4e0e068f5a4e75e4e604ea6374b420a3fca0bb76cfacfbb4cc0`
+and candidate `c838e5d` to
+`363e41ec34a07c326a194942099c2f58b05c82ea8f7245afd6919fae127d1752`.
+This shared-desktop diagnostic is explicitly not release performance proof;
+the substantial observed regression must not be hidden by byte-correctness.
+
+**Phase A — accelerate the existing integrity owner.** Crab's direct `sha2`
+0.10 dependency selects software SHA-256 on AArch64 without its optional
+assembly feature. Upgrade that direct dependency to the already-resolved
+0.11.0 package. Its default backend uses hardware SHA-256 on supported ARM/x86
+processors, with upstream software dispatch for unsupported processors. No
+forced CPU features, custom cryptography, cache trust receipts, new config or
+weakened output verification. See the versioned
+[upstream backend contract](https://github.com/RustCrypto/hashes/blob/sha2-v0.11.0/sha2/README.md)
+and [migration notes](https://github.com/RustCrypto/hashes/blob/sha2-v0.11.0/sha2/CHANGELOG.md).
+
+The lockfile change switches only Crab's dependency edge; package versions,
+checksums and dependency edges for other crates are unchanged. Shared-crate
+upload/auth consumers keep their existing version. Product consumers use
+one-shot or incremental private hashers and exchange fixed byte arrays, not
+digest-library types. Upgrade download and LFS fsck switch removed digest
+formatting traits to the existing 32-byte lowercase hex encoder, preserving
+the release-checksum and LFS OID representations.
+
+Is this the best fix rather than merely plausible? Keeping integrity in the
+existing streaming owner avoids another cache format, a platform-specific
+snapshot path, or losing corrupt-cache repair. An upstream backend upgrade
+addresses the measured CPU cost without changing the verified-byte contract.
+It still needs measurement and cross-platform proof, not an assumed speedup.
+
+**Phase B — executable acceptance.**
+
+- [x] Fixed published SHA-256 vectors pass through cache staging and streamed
+      output, including empty, short and million-byte multi-block input.
+- [x] The real HTTP download checksum keeps the exact 64-character lowercase
+      representation. Focused upgrade, PKCE, LFS and filter tests pass:
+      7 cache, 9 upgrade, 25 OIDC, 8 LFS fsck, 52 filter, 54 clean,
+      6 extension and 5 LFS command tests (166 total).
+- [ ] Build a release and rerun the unchanged cache-mutation and framing
+      drivers. Healthy bytes must remain exact; mutation and invalid framing
+      must still fail normally, not time out or succeed partially.
+- [ ] Rerun `run_lfs_checkout_comparison.py --baseline <358499f-release>
+      --candidate <new-release> --root <workspace-qualification-root>
+      --run-id <new-id> --size-mib 256 --pairs 8`; retain all command logs,
+      alternating paired samples, independent output hashes and binary hashes.
+      No performance-pass classification on the shared desktop.
+
+**Phase C — release qualification.** Repeat on isolated supported ARM/x86
+hosts with cold/warm cache, provider-backed transfer, memory and tail latency,
+then repeat the final-candidate large-repository RustFS lifecycle. Supported
+machines without SHA acceleration still perform both integrity passes; this
+change alone does not establish no-regression there. The original Phase 2
+acceptance rows and dedicated-host performance gate remain open.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression

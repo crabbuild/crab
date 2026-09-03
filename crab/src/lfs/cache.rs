@@ -294,6 +294,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_hashing_matches_published_sha256_vectors() {
+        // Fixed external digests keep the writer and verifier from agreeing
+        // on the same hashing regression after a dependency/backend change.
+        for (content, expected) in [
+            (
+                Vec::new(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".to_vec(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                vec![b'a'; 1_000_000],
+                "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer = ObjectWriter::new(dir.path()).unwrap();
+            for chunk in content.chunks(63) {
+                writer.write_all(chunk).unwrap();
+            }
+            let staged = writer.finish().unwrap();
+            assert_eq!(hex_encode(staged.oid()), expected);
+            let oid = *staged.oid();
+            let path = staged.install(dir.path()).unwrap();
+            let mut output = Vec::new();
+            stream_verified(&path, &oid, content.len() as u64, |bytes| {
+                output.extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(output, content);
+        }
+    }
+
+    #[test]
     fn streamed_bytes_remain_tentative_until_digest_verification() {
         let dir = tempfile::tempdir().unwrap();
         let content = vec![0x5a; 3 * 64 * 1024];

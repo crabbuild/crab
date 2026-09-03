@@ -272,7 +272,8 @@ async fn download_bounded(
         digest.update(&chunk);
     }
     output.sync_all().map_err(CrabError::Io)?;
-    Ok((written, format!("{:x}", digest.finalize())))
+    let digest: [u8; 32] = digest.finalize().into();
+    Ok((written, crab_git::lfs_pointer::hex_encode(&digest)))
 }
 
 fn parse_release_manifest(bytes: &[u8], target: &'static PublishedTarget) -> Result<ReleasePlan> {
@@ -709,6 +710,49 @@ fn internal(message: String) -> CrabError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn downloaded_archive_digest_preserves_sha256_hex_encoding() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(connection.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc")
+                .await
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("archive");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let result = download_bounded(
+            &client,
+            &format!("http://{address}/archive"),
+            &destination,
+            3,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            result,
+            (
+                3,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned()
+            )
+        );
+    }
 
     fn manifest(version: &str) -> ReleaseManifest {
         ReleaseManifest {
