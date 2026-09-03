@@ -5619,15 +5619,44 @@ It still needs measurement and cross-platform proof, not an assumed speedup.
 - [x] The real HTTP download checksum keeps the exact 64-character lowercase
       representation. Focused upgrade, PKCE, LFS and filter tests pass:
       7 cache, 9 upgrade, 25 OIDC, 8 LFS fsck, 52 filter, 54 clean,
-      6 extension and 5 LFS command tests (166 total).
-- [ ] Build a release and rerun the unchanged cache-mutation and framing
+      6 extension, 5 LFS command, 9 dedup, 6 merge-driver, 1 conversion and
+      16 prune tests (198 total). New vector/checksum tests add coverage;
+      no existing expectation is weakened.
+- [x] Build a release and rerun the unchanged cache-mutation and framing
       drivers. Healthy bytes must remain exact; mutation and invalid framing
       must still fail normally, not time out or succeed partially.
-- [ ] Rerun `run_lfs_checkout_comparison.py --baseline <358499f-release>
+- [x] Rerun `run_lfs_checkout_comparison.py --baseline <358499f-release>
       --candidate <new-release> --root <workspace-qualification-root>
       --run-id <new-id> --size-mib 256 --pairs 8`; retain all command logs,
       alternating paired samples, independent output hashes and binary hashes.
       No performance-pass classification on the shared desktop.
+
+Release `620aaa7` builds successfully, binary SHA-256
+`0cb85cdc9f22cfd573bfe18f6adc6fbdd24e27497c05de0490b7bcf0bf0d771a`.
+`phase2-cache-mutation-sha2-620aaa7-20260903/report.json` passes 35 commands
+and seven checks; all three healthy routes produce exact bytes and all three
+mid-stream truncations make real Git exit 128 and remove partial worktree
+output. `phase2-filter-framing-sha2-620aaa7-20260903/report.json` passes all
+31 checks, including normal nonzero exits for malformed/unsupported input.
+
+`phase2-lfs-checkout-paired-358499f-620aaa7-20260903/report.json` retains 132
+commands and 54 exact-byte checkouts (48 measured, six warmups), using the
+same 256 MiB fixture and unchanged comparison driver as the first diagnostic.
+Eight alternating-order pairs per route give these median wall times:
+
+| Route | Baseline `358499f` | Candidate `620aaa7` | Candidate / baseline |
+| --- | ---: | ---: | ---: |
+| Native filter | 0.5770 s | 0.2849 s | 0.494 |
+| LFS filter | 0.5754 s | 0.2861 s | 0.497 |
+| Standalone smudge | 0.6325 s | 0.2779 s | 0.439 |
+
+CPU ratios are 0.503, 0.509 and 0.448 respectively. This supports removing
+the observed ARM warm-checkout regression while retaining both integrity
+checks. The report deliberately remains `valid_for_comparison: false` and
+`performance_verdict: not_qualified`: shared desktop, warm cache only, no
+provider transfer, memory ceiling or tail-latency qualification. The build
+retains only the previously disclosed unrelated GC test/web generated changes;
+it is not a clean-checkout CI attestation. Formatting and diff checks pass.
 
 **Phase C — release qualification.** Repeat on isolated supported ARM/x86
 hosts with cold/warm cache, provider-backed transfer, memory and tail latency,
@@ -5635,6 +5664,16 @@ then repeat the final-candidate large-repository RustFS lifecycle. Supported
 machines without SHA acceleration still perform both integrity passes; this
 change alone does not establish no-regression there. The original Phase 2
 acceptance rows and dedicated-host performance gate remain open.
+
+The separate hosted S3/RustFS run
+[33817022239](https://github.com/crabbuild/crab/actions/runs/33817022239),
+pinned to earlier `a196e73`, has passed its provider-contract step; its release
+canary remains in progress at this checkpoint and does not qualify `620aaa7`.
+Protocol run [33816446418](https://github.com/crabbuild/crab/actions/runs/33816446418)
+fails at the existing new pull diagnostic assertion (`could` versus Git's
+preserved `Could`); its dependent Git matrix/RustFS jobs are skipped. That
+assertion remains unchanged pending approval. Local RustFS still refuses
+connections and there is no registered dedicated large-repository runner.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
