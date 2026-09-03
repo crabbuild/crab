@@ -1,6 +1,8 @@
 use super::*;
 use sha2::Digest;
 
+mod all;
+
 fn oid(byte: u8) -> String {
     format!("{byte:02x}").repeat(32)
 }

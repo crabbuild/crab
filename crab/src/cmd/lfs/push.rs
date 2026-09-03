@@ -12,8 +12,9 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::MAX_CAPTURE_BYTES;
 use crate::lfs::batch::BatchResolver;
 use crate::lfs::discovery::{
-    GitObjectAccess, all_ref_names, collect_pointers_from_range_in_with_base_refs, pointer_memory,
-    spend_scan_budget, visit_lfs_pointers_in_tree,
+    GitObjectAccess, HistoryOperation, collect_pointers_from_history_in,
+    collect_pointers_from_range_in_with_base_refs, pointer_memory, spend_scan_budget,
+    visit_lfs_pointers_in_tree,
 };
 use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
@@ -43,7 +44,7 @@ struct ResolvedPushArgs {
 /// Run `crab lfs push`.
 ///
 /// Uploads missing LFS objects to the remote store. Supports `--all`
-/// to upload every locally-known object, `--object-id` to upload a
+/// to upload history reachable from local branches/tags, `--object-id` to upload a
 /// single object by OID, and `--dry-run` to preview what would be pushed.
 pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
@@ -71,7 +72,7 @@ pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Resu
 
     let ctx =
         resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
-    let pointers = collect_push_pointers(options.all, &resolved.refs, cancel)?;
+    let pointers = collect_push_pointers(Path::new("."), options.all, &resolved.refs, cancel)?;
 
     if pointers.is_empty() {
         eprintln!("push: no LFS objects to push");
@@ -342,51 +343,52 @@ fn pre_push_revisions(updates: &[PrePushUpdate]) -> (Vec<String>, Vec<String>) {
     (local_shas, remote_shas)
 }
 
-/// Collect LFS pointers from HEAD (or all refs for `--all`).
 fn collect_push_pointers(
+    repo_dir: &Path,
     all: bool,
     refs: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<LfsPointer>> {
-    let ref_names = if all {
-        if refs.is_empty() {
-            all_ref_names(Path::new("."), cancel)?
-        } else {
-            refs.to_vec()
-        }
-    } else if refs.is_empty() {
-        vec!["HEAD".to_owned()]
-    } else {
-        refs.to_vec()
-    };
-
+    check_cancelled(cancel)?;
     let mut pointers = Vec::new();
     let mut seen = std::collections::HashMap::new();
     let mut remaining = MAX_CAPTURE_BYTES;
-    for ref_name in ref_names {
-        visit_lfs_pointers_in_tree(
-            Path::new("."),
-            &ref_name,
-            GitObjectAccess::LocalOnly,
-            cancel,
-            |_, pointer| {
-                if let Some(size) = seen.get(&pointer.oid) {
-                    if *size != pointer.size {
-                        return Err(CrabError::LfsObjectCorrupt {
-                            oid: hex_encode(&pointer.oid),
-                        });
-                    }
-                } else {
-                    spend_scan_budget(
-                        &mut remaining,
-                        pointer_memory("", &pointer) + std::mem::size_of::<([u8; 32], u64)>(),
-                    )?;
-                    seen.insert(pointer.oid, pointer.size);
-                    pointers.push(pointer);
-                }
-                Ok(())
-            },
-        )?;
+    let mut retain = |_: String, pointer: LfsPointer| {
+        if let Some(size) = seen.get(&pointer.oid) {
+            if *size != pointer.size {
+                return Err(CrabError::LfsObjectCorrupt {
+                    oid: hex_encode(&pointer.oid),
+                });
+            }
+        } else {
+            spend_scan_budget(
+                &mut remaining,
+                pointer_memory("", &pointer) + std::mem::size_of::<([u8; 32], u64)>(),
+            )?;
+            seen.insert(pointer.oid, pointer.size);
+            pointers.push(pointer);
+        }
+        Ok(())
+    };
+    if all {
+        for (path, pointer) in
+            collect_pointers_from_history_in(repo_dir, refs, HistoryOperation::Push, cancel)?
+        {
+            check_cancelled(cancel)?;
+            retain(path, pointer)?;
+        }
+    } else {
+        let head = ["HEAD".to_owned()];
+        let refs = if refs.is_empty() { &head } else { refs };
+        for ref_name in refs {
+            visit_lfs_pointers_in_tree(
+                repo_dir,
+                ref_name,
+                GitObjectAccess::LocalOnly,
+                cancel,
+                &mut retain,
+            )?;
+        }
     }
     Ok(pointers)
 }

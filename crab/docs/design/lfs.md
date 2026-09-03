@@ -670,7 +670,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.pruneverifyremotealways` | false | Verify prune candidates remotely unless the CLI overrides it |
 | `lfs.pruneverifyunreachablealways` | false | Also verify unreachable prune candidates unless the CLI overrides it |
 
-### Complete History Fetch
+### Complete History Transfers
 
 `crab lfs fetch --all <remote> [refs...]` inventories all objects reachable
 from the selected refs, including versions replaced or deleted before their
@@ -690,8 +690,19 @@ not narrow it. Default/recent fetch and pull retain path-preserving tree scans.
 Malformed/truncated records, missing or corrupt objects, exhausted inventory
 budgets and conflicting pointer sizes fail before LFS payload transfers.
 
-The standalone `crab lfs push --all` still scans tips and needs a separately
-qualified history-selection fix; this fetch change does not certify it.
+`crab lfs push --all <remote> [refs...]` shares the history traversal and
+verified batch reader, with local-only Git object access. With no explicit
+refs, upload roots are local branches and tags (`--branches --tags`), not
+fetch's broader `--all` scope. Remote-only and detached histories require
+explicit operands. Replaced and deleted versions are included; missing
+promised blobs fail without fetching from a source remote. The operation
+owns both root selection and access policy, preventing upload from inheriting
+fetch's transport permission. A bounded OID/size inventory rejects conflicting
+payload declarations before upload. No new discovery parser or fallback.
+
+This does not certify normal (non-`--all`) standalone push's introduced-history
+selection, object-ID/stdin admission or pre-push path-alias lock coverage.
+Those remain separate qualification gaps.
 
 ### Recent Commit Selection
 

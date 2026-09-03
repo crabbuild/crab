@@ -459,7 +459,12 @@ fn collect_lfs_pointers(
 ) -> Result<Vec<(String, LfsPointer)>> {
     check_cancelled(cancel)?;
     if all {
-        return crate::lfs::discovery::collect_all_pointers_for_fetch_in(repo_dir, refs, cancel);
+        return crate::lfs::discovery::collect_pointers_from_history_in(
+            repo_dir,
+            refs,
+            crate::lfs::discovery::HistoryOperation::Fetch,
+            cancel,
+        );
     }
     let mut selected = if refs.is_empty() {
         let repository = gix::discover(repo_dir).map_err(io::Error::other)?;

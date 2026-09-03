@@ -3199,17 +3199,101 @@ uses `rev-list --objects --stdin` for selected histories and `--all` for
 all-ref history. Git documents [object-name limitations](https://git-scm.com/docs/git-rev-list)
 and [safe single-operand verification](https://git-scm.com/docs/git-rev-parse).
 
+### Complete bulk LFS upload history: 2026-09-03 UTC
+
+**Context and failure proof.** Standalone `crab lfs push --all` used ref-tip
+trees, including in tagged `v1.0.1`. A one-branch replacement/deletion test
+returned an empty inventory before the fix. Optimized `82bfebc` reported a
+successful standalone upload while omitting an older reachable payload:
+the dedicated RustFS driver failed its first historical object read after
+18 commands, before any native Git or Git LFS push could fill the omission.
+Retain `phase2-lfs-bulk-push-before-82bfebc-20260903/report.json`.
+
+**Design and ownership.** Generalize the existing bulk-fetch history owner
+into a direction-aware traversal. Fetch retains all-ref/promisor access;
+push selects only local branches/tags by default and uses local-only access.
+Explicit roots resolve individually before bounded IDs enter owned stdin.
+Reuse supervised processes, record framing, checksums and batch budgets.
+Remove the old tip enumeration helper; no compatibility alias or second
+parser. Deduplicate upload OIDs only after validating declared sizes.
+The production delta is five net lines; most additions are behavioral tests.
+
+**Executable acceptance.**
+
+1. Replaced/deleted versions survive both omitted-root and explicit-root
+   scans without old-tip refs. Omitted roots include branch/tag history but
+   exclude remote-only and detached history; explicit selection includes
+   precisely the requested reachable history.
+2. Unborn bulk upload is empty. Invalid/missing operands, revision options,
+   ranges and newline injection fail. Pre-cancellation avoids repository
+   access. SHA-1/SHA-256 corruption and conflicting LFS sizes fail closed.
+3. Bulk upload from a real blobless clone fails on missing pointer blobs;
+   omitted and explicit root scans leave its missing-object inventory intact.
+4. Build the exact optimized candidate. Run `qualify_bulk_push_lfs.py` in the
+   dedicated qualification workspace with four 65 MiB payload versions over
+   two commits and two paths. Run standalone upload first, then independently
+   read and SHA-256/size-check all four remote objects before native Git/LFS
+   publication. Preserve the original clone/fetch/checkout/fsck checks.
+5. Rerun the bulk-fetch and native-Git/mirror RustFS suites with the same
+   candidate; retain identity/digests. Require exact-candidate CI separately.
+
+**Source checkpoint.** All 116 selected LFS push/fetch/discovery/recent/prune,
+publication, mirror-command and process-owner tests pass, including five new
+bulk-upload tests. Production-library correctness/suspicious Clippy passes.
+Optimized build, candidate live verification and cross-platform CI remain
+required. These tests do not certify normal standalone push, object-ID/stdin
+admission, lock alias coverage or prune safety; those owners are unchanged.
+
+**Contract evidence.** The [Git LFS push manual](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-push.adoc)
+requires full reachable history and explicitly distinguishes omitted upload
+roots from bulk fetch. Upstream [`LocalRefs`](https://github.com/git-lfs/git-lfs/blob/main/git/git.go)
+accepts local branches and tags, excluding remote refs and detached HEAD.
+The shipped tip-only implementation is not retained as an alternate mode.
+
+**Prior candidate proof, not this candidate.** Optimized `82bfebc` passed
+bulk-fetch qualification (57 commands, 27 checks) and native-Git/mirror
+qualification (464 commands, 133 checks). Reports are
+`phase2-lfs-all-82bfebc-20260903/report.json` and
+`phase2-protocol-mirror-82bfebc-20260903/artifacts/report.json`.
+Its SHA-256 `e3852d7e573e7b8160c552f38d7f076a9d11685ed37e30d8c4bb823f2bd80cac`
+remained unchanged. These are functional-only concurrent-host results.
+Protocol CI 33747451500 is separate and was still in progress at this source
+checkpoint. Prior run 33745743645 for `2411cb3` was cancelled after its unit
+job passed, not a complete CI pass.
+
 ### Original Kubernetes replay remains incomplete: 2026-09-03 UTC
 
 The pinned `56d336a` frozen-preparation replay reached push 918 and failed
-closed with `CRAB-E0086`: a historical 581,598,168-byte pointer lacked local
-staged chunks and remote payload. This is not a 1,000-push pass. Its early
-preparation had independently verified both original payload identities and
-18,080 staged chunks; that does not prove those entries survived intermediate
-push cleanup. Investigate the staging lifecycle before another long replay;
-do not relax dependency admission or silently substitute another history.
+closed with `CRAB-E0086`: a historical 581,598,168-byte pointer had no
+publishable local recipe or remote payload. This is not a 1,000-push pass.
+Follow-up inspection disproved the initial cleanup hypothesis: the closed
+staging database was byte-identical to the preparation snapshot, with both
+files and 18,080 chunk occurrences retained. Both batches remained open,
+with no canonical path heads. Preparation used `crab add --skip-git-add`,
+which intentionally does not publish the recipe ownership required by push.
+Do not weaken `published_recipe_for_file` admission to accept open batches.
 Retain `phase2-kubernetes-frozen-prepared-56d336a-20260903/artifacts/report.json`
 and the push-918 error log. Original external source remains read-only.
+
+The focused `82bfebc` probe instead uses normal `crab add` on verified
+recovered payloads, validates published batch/path-head joins, then restores
+only the disposable writer's original Git index. The historical push now
+passes, uploading 1,646,511 Git objects; a fresh lazy Crab clone and strict
+Git fsck also pass. Hydration still fails, so the probe is **failed**, not a
+replacement for the full replay. Retain
+`phase2-kubernetes-published-probe-82bfebc-20260903/artifacts/report.json`
+(34 commands, 22 recorded checks).
+
+The clone has a valid Git `remote.origin.url` but no committed `crab.toml`.
+`Config::resolve_local` does not derive its remote from Git config;
+`main::resolve_hydrate_remote_url` consequently returns none. CLI hydration
+selects `SmudgeSessionHydrator`, whose default resolvers are no-ops, instead
+of the cloud-backed `ShardHydrator`. The resulting file-index miss is not
+proof that the uploaded payload is absent. Qualify remote selection across
+explicit hydrate, eager clone, filter-process, pull and profile hydration
+before changing ownership. Both historical payloads must hydrate to their
+original bytes before restarting the long replay. No history substitution,
+success-marker relaxation or source-checkout edits.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

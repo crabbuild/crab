@@ -17,6 +17,12 @@ pub(crate) enum GitObjectAccess {
     PromisorAllowed,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum HistoryOperation {
+    Fetch,
+    Push,
+}
+
 pub(crate) fn collect_pointers_for_fetch_in(
     repo_dir: &Path,
     refs: &[String],
@@ -74,18 +80,23 @@ pub(crate) fn is_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-pub(crate) fn collect_all_pointers_for_fetch_in(
+pub(crate) fn collect_pointers_from_history_in(
     repo_dir: &Path,
     refs: &[String],
+    operation: HistoryOperation,
     cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
     check_cancelled(cancel)?;
+    let access = match operation {
+        HistoryOperation::Fetch => GitObjectAccess::PromisorAllowed,
+        HistoryOperation::Push => GitObjectAccess::LocalOnly,
+    };
     let mut roots = Vec::new();
     let mut remaining = MAX_CAPTURE_BYTES;
     for revision in refs {
         // Resolve one operand before feeding stdin: revision options, ranges
         // and embedded newlines must not alter the selected graph.
-        let mut resolve = git_command_in(repo_dir, GitObjectAccess::PromisorAllowed);
+        let mut resolve = git_command_in(repo_dir, access);
         resolve.args(["rev-parse", "--verify", "--end-of-options"]);
         resolve.arg(format!("{revision}^{{object}}"));
         let output = process::run(
@@ -109,10 +120,16 @@ pub(crate) fn collect_all_pointers_for_fetch_in(
         spend_scan_budget(&mut remaining, std::mem::size_of::<String>() + oid.len())?;
         roots.push(oid.to_owned());
     }
-    let mut command = git_command_in(repo_dir, GitObjectAccess::PromisorAllowed);
+    let mut command = git_command_in(repo_dir, access);
     command.args(["rev-list", "--objects", "--stdin"]);
     if refs.is_empty() {
-        command.arg("--all");
+        // Bulk upload covers local branches/tags, unlike fetch's all-ref
+        // backup scope. Remote-only and detached history requires explicit
+        // upload selection; inspecting it must never hydrate a source.
+        match operation {
+            HistoryOperation::Fetch => command.arg("--all"),
+            HistoryOperation::Push => command.args(["--branches", "--tags"]),
+        };
     }
     command.arg("--");
     let output = process::run(
@@ -131,7 +148,7 @@ pub(crate) fn collect_all_pointers_for_fetch_in(
                 stdout,
                 b'\n',
                 parse_reachable_object,
-                GitObjectAccess::PromisorAllowed,
+                access,
                 cancel,
             )?;
             Ok(pointers)
@@ -149,7 +166,7 @@ fn parse_reachable_object(record: &[u8], _state: &mut ()) -> Result<Option<(Stri
             io::Error::new(io::ErrorKind::InvalidData, "invalid reachable object ID").into(),
         );
     }
-    // Bulk fetch has no path policy. Git's name is only a display hint, not
+    // Bulk transfer has no path policy. Git's name is only a display hint, not
     // a complete alias inventory; unnamed blobs (e.g. tagged blobs) count too.
     Ok(Some((oid.to_owned(), name.to_owned())))
 }
@@ -646,25 +663,6 @@ fn parse_ls_tree_record(
         parts[2].to_owned(),
         String::from_utf8_lossy(path).into_owned(),
     )))
-}
-
-pub(crate) fn all_ref_names(repo_dir: &Path, cancel: &CancellationToken) -> Result<Vec<String>> {
-    let mut command = git_command_in(repo_dir, GitObjectAccess::LocalOnly);
-    command.args(["rev-parse", "--all"]);
-    let output = process::run(
-        command,
-        cancel,
-        None::<fn(ChildStdin) -> Result<()>>,
-        |stdout| Ok(process::capture_output(stdout, MAX_CAPTURE_BYTES)?),
-    )?;
-    let stdout = successful_git("rev-parse", output)?;
-    Ok(String::from_utf8_lossy(&stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            (!line.is_empty()).then(|| line.to_owned())
-        })
-        .collect())
 }
 
 fn git_command_in(repo_dir: &Path, access: GitObjectAccess) -> Command {

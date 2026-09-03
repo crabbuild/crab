@@ -67,9 +67,13 @@ fn all_fetch_includes_a_pointer_referenced_only_by_a_blob_tag() {
         .unwrap();
     assert!(output.status.success());
     for refs in [vec![], vec!["refs/tags/blob".to_owned()]] {
-        let entries =
-            collect_all_pointers_for_fetch_in(dir.path(), &refs, &CancellationToken::new())
-                .unwrap();
+        let entries = collect_pointers_from_history_in(
+            dir.path(),
+            &refs,
+            HistoryOperation::Fetch,
+            &CancellationToken::new(),
+        )
+        .unwrap();
         assert_eq!(
             entries.into_iter().map(|(_, p)| p).collect::<Vec<_>>(),
             [pointer.clone()]
