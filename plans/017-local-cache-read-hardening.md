@@ -1822,6 +1822,70 @@ LRU touch identity, catalog-generation changes during reads, external in-place
 mutation, cancellation/resource/platform qualification, and outstanding approval
 boundaries remain open; this checkpoint does not complete Phase 2.
 
+### Reproduced cancellation-source loss and newly reachable broad tests
+
+**Observed failure, 2026-09-03.** Protocol job
+`33806870453/100819337217` at `6682fce` passes 86 shared-read tests but fails
+`source_reported_cancellation_does_not_become_internal_failure`. Its original
+assertion does not print the returned error. Retaining that assertion and
+current-thread runtime, the test now repeats 256 reconstructions and prints
+the failing attempt plus complete error. An initial local pass is followed by
+a failing bounded repeat run: attempt 9 in one repetition returns
+`Reconstruction { source: ReconstructionError(InternalWriterError("Data sender
+was dropped before sending data.")), .. }` instead of `ReadError::Cancelled`.
+The repeat command exits nonzero immediately; this is retained failure evidence,
+not a passing stress qualification. No production error-conversion change has
+been made in this checkpoint.
+
+**Dependency evidence and repair boundary.** Pinned `xet-data 1.6.0`,
+`file_reconstruction/data_writer/sequential_writer.rs::set_next_term_data_source`,
+moves its oneshot sender into an inner async block. `data_future.await?` can
+return an error and drop that sender before the outer block calls
+`run_state.set_error`. Meanwhile `SyncWriterThread::next_write` observes the
+closed channel, checks an as-yet empty run state, and returns the observed
+internal writer error. The background writer also calls `set_error`; RunState
+retains only the first error. This ordering explains how the meaningful source
+can be replaced by the secondary channel failure. Source-chain traversal in
+Crab cannot recover a cause that Xet did not return.
+
+Preferred repair boundary: make the dependency publish its error before
+dropping the sender. Dependency patch/update approval has been requested, not
+assumed. Do not match this diagnostic string in production, clone away typed
+errors, or substitute the hydrator's last error across operations. Any
+alternative Crab-owned error retention needs operation isolation and explicit
+proof that it cannot mask genuine writer errors. Acceptance still requires
+memory/writer/range failures to preserve origin/availability types, source
+cancellation to remain cancellation, writer I/O attribution to survive, and
+failed/cancelled operations to release resources. Keep the strengthened
+regression and repeat it after the actual fix; a later green repetition alone
+does not close this gate.
+
+**Broad CI now reaches execution.** Rust quality job
+`33806870467/100820027538` at `6682fce` completes compilation and runs CLI tests:
+3,846 pass, eight fail, two are ignored. The preceding disk exhaustion no
+longer prevents that execution in this run, but the full workspace and later
+OpenAPI gates are not proven. Failures:
+
+- `clone_shard_sync_uses_selected_replica_store` and
+  `sync_downloads_and_installs_shard`: expected cached shards are absent.
+- `existing_shard_check_ignores_cache_only_shard`,
+  `lookup_staging_rejects_cache_only_shard_for_remote_pointer`, and
+  `remote_file_index_verification_rejects_cache_only_shard`: fixture preload
+  explicitly returns `UnsafeRoot` for an ordinary temporary directory.
+- `publish_origin_proof_reuses_unchanged_cached_payload_proof` and
+  `verify_remote_xorb_refs_reuses_persistent_remote_proof_across_pipelines`:
+  observed range GET count is six rather than three. Their fixture cache also
+  uses the temporary directory itself; complete causal qualification remains.
+- `candidate_writer_warming_preserves_origin_commit`: the previously recorded
+  503/outage expectation conflicts with suppression; its pending assertion-
+  contract decision is not waived by this new run.
+
+Private-cache fixture updates (private child directories, unchanged assertions
+and production rejection policy) have been requested for approval. None of
+these eight fixtures or the protected inventories were changed. These are
+delivery blockers; neither recency-unit proof nor the installed RustFS workflow
+establishes that the failing scenarios work.
+
 ### Read-recency identity execution slice
 
 **Context.** Object and decoded-range readers previously consumed their
@@ -1866,6 +1930,38 @@ actual local-cache/test callers. Installed RustFS and hosted results are
 recorded after execution. The latest pre-change protocol CI run still fails
 `source_reported_cancellation_does_not_become_internal_failure`; passing local
 tests does not resolve that intermittent error-attribution gate.
+
+**Installed qualification.** `make -C crab install` with this checkout's
+external target directory installed the FUSE-enabled helper, FUSE-free CLI,
+cache-server binary, and Git remote-helper link. The qualified CLI reports
+`crab 1.0.1 (46054ab)`, built 2026-09-03 21:30:33 UTC; SHA-256
+`4ee21e4fd43a46a0b20f19066489b299efe6790e3efd13621fb2fc265ec59d60`.
+The separate cache-server artifact includes unrelated local evidence work and
+is not claimed as a clean qualified artifact.
+
+Retained report `cache-f410.E7nt8I/generation-46054ab.1Z4UgV/report.json`
+passes 63 checks across 53 commands and records 1,566 gateway requests. The
+existing RustFS image remains
+`sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21`.
+Its credentials were privately checked against the requested values; `crabbuild`
+was accessible. Three initial 128 MiB files (original, duplicate, one-MiB
+variant) store 135,485,287 new xorb bytes. A later exact duplicate creates no
+xorbs; another one-MiB edit creates 1,183,793 bytes. All versions are independently
+SHA-256 checked through add/commit/push/clone/hydrate. Cold hydrate makes 21
+xorb GETs and cold fetch 17; warm hydrate and fetch-then-hydrate make zero under
+enforced xorb denial. Corrupt decoded ranges, unsafe roots, unbound catalogs,
+clean, and one-MiB prune recover correct bytes. Cold origin denial exits 7
+without replacing pointers; restored origin succeeds. Sentinels survive and
+final Git state/fsck are clean. No service objects or older artifacts were
+deleted. This proves the exercised behavior, not controlled cold-read
+amplification, resource bounds, native platform coverage, or the timestamp
+interleaving itself (proved separately by the deterministic regression).
+
+The unchanged external prototype harnesses are `qualify_generation.py`, SHA-256
+`bc9fd4676cc20c16a9e950cc919ed3241805d4963a5bd403bf89198156d09696`,
+and `verify_cache.py`, SHA-256
+`0a81de08ed10b052ec9d99ff85ab0d972d7e11035055fa819ed478488cd443a6`.
+They remain outside the maintained repository qualification tooling.
 
 **Remaining work.** This closes the pathname-reopening recency gap, not Phase 2
 or Phase 3. All-family LRU semantics (including manifest pairing), batched

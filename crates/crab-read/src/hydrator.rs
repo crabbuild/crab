@@ -953,11 +953,16 @@ mod tests {
             reports_cancelled: true,
         });
         let hydrator = hydrator.with_availability(availability);
-        let error = hydrator
-            .reconstruct_from_pointer(&pointer.serialize())
-            .await
-            .unwrap_err();
-        assert!(matches!(error, crate::ReadError::Cancelled));
+        for attempt in 0..256 {
+            let error = hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, crate::ReadError::Cancelled),
+                "attempt {attempt} lost source-reported cancellation: {error:#?}"
+            );
+        }
     }
 
     fn runtime(root: &std::path::Path, max_bytes: u64) -> super::ShardHydrator {
