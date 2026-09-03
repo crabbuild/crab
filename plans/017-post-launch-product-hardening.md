@@ -4965,10 +4965,45 @@ inside `ReceiveWriterFences`, not a new client-side repository lease.
 then cancel with no LFS upload, unchanged refs and all acquired push/admission
 leases released. Existing LFS publication, bounded pack/cancellation and
 mirror tests must pass. Both sweep cases now pass, including unchanged refs
-and lease release; the focused 80-test run passes. Qualify the committed release with the installed
+and lease release; the focused 80-test run passes. Qualify the committed
+release with the installed
 mixed-ref hook and protocol/mirror workflows, including fresh-clone pointer
 and LFS bytes. A passing admission fixture is not the full publication
 lifetime gate.
+
+**Release evidence.** Candidate `802dec8` builds successfully; binary SHA-256
+`f4f4e188d69061fae573cf0a47b39ba82ed30b3281fc2a083eeb0fa4a5d82411`.
+`phase2-protocol-mirror-lfs-admission-802dec8-20260903/artifacts/report.json`
+passes 481 commands/139 checks, including native ref lifecycle, accepted
+partial/shallow operations, exact pointer/LFS bytes, mirror checks and
+plan/apply/replay, mixed installed-hook publication, deletion safety, and
+the tagged v1.0.1 rollback case. This is macOS/local RustFS functional
+evidence, not a controlled performance comparison or other provider/OS proof.
+
+`phase2-k8s-lifecycle-lfs-admission-802dec8-20260903/artifacts/report.json`
+passes 63 commands/48 checks on read-only Kubernetes input
+`160bd16d98b7f688ce4f3b5ab0c5e4c045f36233`. Both Crab-command and native-Git
+workflows publish their new commit, clone into fresh caches, and hydrate,
+dehydrate and rehydrate two identical 64 MiB managed files. Hydrated SHA-256
+matches source bytes in each case: Crab-command
+`448586b3d21144bc3f919fa6e49e382e072bf45a95062036ed18bf9bca9fb2a1`;
+native-Git `99c0f275dea2c89f3eeb02da90c193487116b63f3f3d31490a37d3368c01341a`.
+Original input and selected binary remain unchanged. Both retained clones
+contain 140,778 reachable commits and pass offline
+`git --no-replace-objects -c protocol.allow=never fsck --full` with lazy fetch
+disabled, plus `crab fsck --json` with zero errors, repairs or repair failures.
+Bucket-global object-count deltas are not attributed deduplication evidence.
+
+`phase2-k8s-raw-bytes-lfs-admission-802dec8-20260903/artifacts/report.json`
+separately passes 12 commands/five checks using the canonical qualification
+runner's deterministic 1,000-object sample and raw batch-stream digest. In
+both workflows, source/clone metadata and complete 28,169,810-byte streams
+match, SHA-256
+`5168883b61da07077b6a4214f7e354241e0f61b2c19342a9e722bcfb3fd29572`.
+The slice binds the lifecycle report and unchanged candidate binary; it does
+not rewrite earlier evidence or substitute sampling for exhaustive Git or
+managed-payload verification. Performance comparison remains explicitly
+invalid on this shared development host.
 
 **Explicit follow-up.** Pointer/deduplication classification still precedes
 writer admission; its reused dependencies require revalidation under the
