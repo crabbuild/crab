@@ -764,6 +764,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloaded_shard_survives_unavailable_disk_cache_and_remains_reusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalCache::new(temp.path().join("cache")));
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = crab_storage::StoreLayout::new(origin.clone(), "org/repo".into());
+        let store = CachingStore::new_with_local_cache(
+            origin.clone(),
+            crab_cache_store::CacheConfig::default(),
+            local.clone(),
+        )
+        .unwrap();
+        // Replace the root only after normal composition. The verified origin
+        // response must survive a failed cache publication, not just startup.
+        std::fs::write(local.root(), b"retain this file").unwrap();
+        let (bytes, hash) = crab_xet::shard::ShardWriter::new().finalize().unwrap();
+        origin
+            .put(&router.shard_path(&hash), bytes.clone().into())
+            .await
+            .unwrap();
+        let readers = Mutex::new(HashMap::new());
+        let first = get_or_download_shard(&local, &store, &router, &readers, &hash)
+            .await
+            .unwrap();
+        assert_eq!(first.data().as_ref(), bytes);
+        first.shard_info_public().unwrap();
+        origin.delete(&router.shard_path(&hash)).await.unwrap();
+        let second = get_or_download_shard(&local, &store, &router, &readers, &hash)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(std::fs::read(local.root()).unwrap(), b"retain this file");
+    }
+
+    #[tokio::test]
     async fn fetch_xorb_chunks_repairs_corrupt_cached_range_from_origin() {
         use std::sync::Arc;
 

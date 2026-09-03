@@ -29,6 +29,13 @@ origin object store
 on read and write, and atomically renames completed files. Manifest entries
 use ETags rather than a content hash.
 
+Read-through fetches return validated origin bytes even if local reservation,
+creation, or publication fails. Fetch errors and size/hash/xorb validation
+failures still propagate; an optional cache write never causes a second fetch.
+Explicit `put` and `put_bytes` calls remain fallible. Logical stage/manifest
+content validation remains caller-owned, and separate manifest body/ETag
+publication is not an atomic pair.
+
 `clean_cache` is the shared explicit cleanup boundary. It streams recognized
 payload layouts through pinned private directories, retaining unknown subtrees,
 SQLite databases and side files, profiles, and unpublished temporaries. Active

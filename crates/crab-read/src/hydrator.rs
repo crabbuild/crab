@@ -666,7 +666,8 @@ mod tests {
             .reconstruct_from_pointer(&pointer.serialize())
             .await
             .unwrap_err();
-        let source = source_of::<RestoreDenied>(&error).unwrap();
+        let source = source_of::<RestoreDenied>(&error)
+            .unwrap_or_else(|| panic!("missing availability source in {error:#?}"));
         assert!(source.path.contains("/xorbs/"));
         assert_eq!(
             availability.calls.load(std::sync::atomic::Ordering::SeqCst),

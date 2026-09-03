@@ -244,8 +244,8 @@ impl LocalCache {
     ///
     /// # Errors
     ///
-    /// Returns the fetch closure's error on remote failure, or
-    /// [`CacheError::Io`] on local write failure.
+    /// Returns the fetch closure's error or a size/integrity validation error.
+    /// Cache storage failures are logged without discarding verified fetch data.
     pub async fn get_or_fetch<F, Fut>(&self, key: &CacheKey, fetch: F) -> Result<Bytes>
     where
         F: FnOnce() -> Fut,
@@ -303,58 +303,28 @@ impl LocalCache {
             return Ok(data);
         }
 
-        let fill_path = match key {
-            CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
-            _ => self.hash_path(key),
-        };
+        let fill_path = self.hash_path(key);
         let _fill_guard = self.fill_lock(&fill_path).lock().await;
         if let Some(data) = self.try_read_key_limited(key, max_bytes).await {
             return Ok(data);
         }
 
-        match key {
-            CacheKey::Chunk(hash) | CacheKey::Shard(hash) => {
-                let path = self.hash_path(key);
-                let data = fetch().await?;
-                enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
-                verify_data_hash(&data, hash).map_err(E::from)?;
-                self.atomic_write(&path, &data).await.map_err(E::from)?;
-                Ok(data)
-            }
-            CacheKey::Xorb(hash) => {
-                let path = self.hash_path(key);
-                let data = fetch().await?;
-                enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
-                verify_xorb_payload(&data, hash).map_err(E::from)?;
-                self.atomic_write(&path, &data).await.map_err(E::from)?;
-                Ok(data)
-            }
-            CacheKey::Stage(_) => {
-                // Stage entries are keyed by the `StageHash` of their
-                // inputs, not a hash of the entry bytes. Integrity is
-                // enforced by `workflow::cache` via JSON deserialization.
-                let path = self.hash_path(key);
-                let data = fetch().await?;
-                enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
-                self.atomic_write(&path, &data).await.map_err(E::from)?;
-                Ok(data)
-            }
-            CacheKey::Manifest { name, etag } => {
-                let data_path = self.manifest_data_path(name);
-                let etag_path = self.manifest_etag_path(name);
-                let data = fetch().await?;
-                enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
-                self.atomic_write(&data_path, &data)
-                    .await
-                    .map_err(E::from)?;
-                if let Some(tag) = etag {
-                    self.atomic_write(&etag_path, tag.as_bytes())
-                        .await
-                        .map_err(E::from)?;
-                }
-                Ok(data)
-            }
+        let data = fetch().await?;
+        enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
+        Self::validate_bytes(key, &data).map_err(E::from)?;
+        // Validation above owns fetch integrity. Everything below is optional
+        // cache storage; its failure must not discard or retry a valid fetch.
+        if let Err(error) = self.write_validated(key, &data).await {
+            warn!(
+                family = cache_family_for_path(&self.root, &fill_path),
+                operation = "store-fetched",
+                path = %fill_path.display(),
+                recovery = "return-verified-bytes",
+                %error,
+                "local cache write failed"
+            );
         }
+        Ok(data)
     }
 
     /// Cache a committed remote xorb after verifying its identity and serialized digest.
@@ -458,22 +428,7 @@ impl LocalCache {
     /// Returns [`CacheError::Io`] on write failure.
     pub async fn put(&self, key: &CacheKey, data: &[u8]) -> Result<()> {
         Self::validate(key, data)?;
-        match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                let path = self.hash_path(key);
-                self.atomic_write(&path, data).await?;
-                Ok(())
-            }
-            CacheKey::Manifest { name, etag } => {
-                let data_path = self.manifest_data_path(name);
-                self.atomic_write(&data_path, data).await?;
-                if let Some(tag) = etag {
-                    let etag_path = self.manifest_etag_path(name);
-                    self.atomic_write(&etag_path, tag.as_bytes()).await?;
-                }
-                Ok(())
-            }
-        }
+        self.write_validated(key, data).await
     }
 
     /// Put an object into the cache without copying an existing [`Bytes`] body.
@@ -484,22 +439,21 @@ impl LocalCache {
     /// [`CacheError::Io`] on write failure.
     pub async fn put_bytes(&self, key: &CacheKey, data: Bytes) -> Result<()> {
         Self::validate_bytes(key, &data)?;
-        match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                let path = self.hash_path(key);
-                self.atomic_write(&path, &data).await?;
-                Ok(())
-            }
-            CacheKey::Manifest { name, etag } => {
-                let data_path = self.manifest_data_path(name);
-                self.atomic_write(&data_path, &data).await?;
-                if let Some(tag) = etag {
-                    let etag_path = self.manifest_etag_path(name);
-                    self.atomic_write(&etag_path, tag.as_bytes()).await?;
-                }
-                Ok(())
-            }
+        self.write_validated(key, &data).await
+    }
+
+    async fn write_validated(&self, key: &CacheKey, data: &[u8]) -> Result<()> {
+        let path = self.hash_path(key);
+        self.atomic_write(&path, data).await?;
+        if let CacheKey::Manifest {
+            name,
+            etag: Some(tag),
+        } = key
+        {
+            self.atomic_write(&self.manifest_etag_path(name), tag.as_bytes())
+                .await?;
         }
+        Ok(())
     }
 
     /// Put an existing xorb file into the cache without loading it whole.
@@ -1724,6 +1678,7 @@ mod tests {
     mod maintenance;
     #[cfg(unix)]
     mod read_repair;
+    mod read_through;
 
     fn temp_cache() -> (tempfile::TempDir, LocalCache) {
         let dir = tempfile::tempdir().unwrap();

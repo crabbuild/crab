@@ -1460,6 +1460,65 @@ the distinction between passing boundary tests and open end-to-end acceptance.
 **STOP if** an error cannot be attributed to cache versus origin, or if repair
 would require deleting authoritative staging/user data.
 
+### Direct read-through publication execution slice
+
+**Context and evidence map, 2026-09-03.** `LocalCache::get_or_fetch_with_limit`
+at `3d09e88` returns a cache-publication error after successfully fetching and
+validating origin bytes. Both `crates/crab-read/src/term_resolver.rs` and
+`crab/src/hydrate/batch.rs` call this boundary directly for shards, with bounded
+origin reads. Their batch memory maps cannot help the first failed download.
+Cache-store's callers instead use it as a cache-only probe whose fetch closure
+returns NotFound, then separately implement optional origin caching. Shard-sync
+also uses a probe; neither probe starts publishing with this change. The
+current-main/tagged v1.0.1 local-write error behavior is deliberately changed
+by Phase 2 work item 2, not retained as a fallback contract.
+
+**Design.** Fetch once under the existing process-local fill lock; validate
+the requested bound and key integrity before attempting optional storage.
+Return the same fetched Bytes on storage failure, with structured family,
+operation, path, and recovery diagnostics. Share publication with explicit
+`put`/`put_bytes`, which continue propagating storage errors. No data copy,
+second fetch, configuration, format, or dependency change is introduced.
+Stage/manifest keys still require caller-owned content/schema validation.
+Manifest body and ETag remain separately published; atomic pairing remains
+open rather than being implied by the shared writer.
+
+**Acceptance.** Each key family returns unchanged valid fetched bytes despite
+unavailable local storage; the closure runs once and existing unsafe state is
+unchanged. Explicit writes remain fallible. Fetch cancellation, wrong hashes,
+and oversized origin bodies remain errors. The actual shared-read shard caller
+must parse and retain its downloaded shard for reuse after origin disappears.
+Repeat installed add/commit/push/clone/hydrate, independent byte checks,
+duplicate/delta accounting, denied-origin warm reuse, and a family-local write
+fault before claiming installed coverage.
+
+**Focused evidence.** The new all-family test failed before the refactor at the
+first fetched Chunk with `UnsafeRoot`; it passes after the refactor. All 274
+cache tests, 86 shared-read tests, and 41 default-feature cache-store tests pass.
+All-feature cache-store tests (63), local-only read-through tests (three), and
+minimal cache compilation pass. Strict all-target Clippy passes for cache and
+cache-store; shared-read library Clippy passes. Forty local repeats of the 26
+hydrator tests pass, without resolving the failed CI result below. Formatting
+and whitespace checks pass; shared publication removes 45 net production lines.
+The shard integration fixture exercises the real caller, serialized/parsed
+ShardWriter output, unavailable disk, deletion of its in-memory test origin,
+and reuse of the same reader Arc. These are local boundary/integration results,
+not full-disk, native-platform, or installed-artifact qualification.
+
+**CI finding, not waived.** At `3d09e88`, protocol run `33803798152`, job
+`100809312649`, fails `reconstruction_preserves_availability_source`: the
+returned error has no typed RestoreDenied source. An isolated local repeat
+passes 100 times; this does not resolve the failure. Pinned Xet 1.6.0
+`SequentialWriter::set_next_term_data_source` can drop its oneshot sender while
+unwinding a failed data future before calling `RunState::set_error`; its blocking
+reader checks the error state after observing channel closure. Whether this
+ordering explains the CI result is not yet proven. The unchanged assertion now
+prints the returned error on failure to make the next occurrence actionable;
+no dependency patch, retry, sleep, suppression, or acceptance relaxation is
+included. All-target shared-read Clippy also reports the unchanged
+`upload_pack.rs:2343` cloned-reference lint. Both findings remain explicit
+delivery gates, alongside the unapproved architecture inventories.
+
 ### Decoded-range read/repair identity execution slice
 
 **Context and evidence map.** At `bc0fe3b`, `CrabRangeCache::get` calls
