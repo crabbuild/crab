@@ -3664,6 +3664,19 @@ not timeout or generic index failure. Existing healthy, malformed, and busy
 database health tests remain unchanged, and whole-tree before/after snapshots
 continue proving that inspection does not mutate database or side files.
 
+**Exact-head installed proof.** Source `69bf18df535be25420e740b2ca757cf74a2c080b`
+was installed through `make install` as `crab 1.0.1 (69bf18d)`, CLI SHA-256
+`4cd2e43773409947ebec97d510246bc1cbc64d8acdea30a8046e42e416f677c3`.
+Retained RustFS run `generation-69bf18d.2MjbeI` used unique remote
+`crab://crabbuild/cache-qualification/cache-f410.E7nt8I/generation-69bf18d.2MjbeI`
+and passed 63 checks across 53 commands and 1,569 recorded gateway requests.
+The workflow proved add/commit/push, exact-duplicate zero-upload reuse, a
+one-MiB delta upload below four MiB, lazy clone, cold and origin-denied warm
+hydration, fetch-to-hydrate reuse, corrupt-range recovery, unbound/unsafe cache
+bypass, one-MiB pruning, fsck, clean Git state, and independent byte identity.
+It retained prior objects and every new remote object; no shared-bucket cleanup
+or bucket-wide GC ran.
+
 **Remaining work.** Five seconds bounds this one shard-hint database scan; it
 does not yet impose a single deadline across the complete filesystem/catalog
 health operation, inspect other index families, or bound repair, startup, and
