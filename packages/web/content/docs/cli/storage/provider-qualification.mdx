@@ -36,7 +36,10 @@ Every provider must independently prove:
 
 - create-only and stale-token conflict behavior;
 - match-token writes and usable ETag or version identity;
-- multipart completion, abort, and file-backed staged upload;
+- multipart completion, abort, file-backed upload, and interruption/resume
+  through the same provider upload ID;
+- exclusion of concurrent resume owners plus post-completion size and Blake3
+  read-back verification;
 - exact range reads and paginated listing without gaps or duplicates;
 - retry/error mapping and cancellation without a visible object;
 - a canonical v1 origin receipt bound to the durable payload identity;
@@ -45,6 +48,27 @@ Every provider must independently prove:
 The retained report records provider/service identity, region or emulator,
 dependency version, Crab commit, workflow identity, commands, request and byte
 metrics, per-row duration, and results. It never records credential values.
+
+Run the opt-in interruption checks only against disposable scratch buckets:
+
+```bash
+CRAB_MULTIPART_LIVE_S3=1 \
+CRAB_MULTIPART_LIVE_S3_BUCKET=crab-scratch-bucket \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-qualification \
+cargo test -p crab --test multipart_resume_live \
+  live_s3_interrupted_multipart_resumes_and_verifies -- --ignored
+
+CRAB_MULTIPART_LIVE_GCS=1 \
+CRAB_MULTIPART_LIVE_GCS_BUCKET=crab-scratch-bucket \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-qualification \
+cargo test -p crab --test multipart_resume_live \
+  live_gcs_interrupted_multipart_resumes_and_verifies -- --ignored
+```
+
+The provider's normal ambient credential variables must also be configured.
+Each run uses a unique key beneath `.crab/e2e/multipart-resume/` and removes it
+after verification; provider lifecycle cleanup remains required for process or
+host failures that prevent the harness cleanup from running.
 
 ## Canonical v1 boundary
 

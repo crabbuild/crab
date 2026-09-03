@@ -21,7 +21,10 @@ crab fsck [OPTIONS]
 
 `crab fsck` performs a deep integrity check of the repository: verifying that
 all pointer blobs reference valid chunks, all chunks are present in the remote
-store, and all hashes match their content.
+store, and all hashes match their content. It also reports expired resumable
+multipart sessions recorded in the shared staging journal. `--repair` aborts
+such a session only after reacquiring its lease and matching its exact provider
+endpoint, container, and object key.
 
 For conceptual background, see [Integrity Check](/docs/cli/diagnostics/integrity-check).
 

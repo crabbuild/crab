@@ -7,6 +7,7 @@ pub mod external;
 pub mod head_batch;
 pub mod identity;
 pub mod layout;
+pub mod multipart;
 pub mod provider_options;
 pub mod provider_store;
 pub mod retry;

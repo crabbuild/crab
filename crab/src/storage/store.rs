@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,6 +18,307 @@ use crate::core::error::{CrabError, Result};
 
 pub use crate::git::url::Cloud;
 pub use crab_storage::{BucketIdentity, ETag, StagedWrite};
+
+/// Composition adapter between local staging durability and storage transport.
+pub struct MultipartJournal(Arc<Mutex<crab_staging::MultipartRegistry>>);
+
+impl MultipartJournal {
+    #[must_use]
+    pub fn new(registry: crab_staging::MultipartRegistry) -> Self {
+        Self(Arc::new(Mutex::new(registry)))
+    }
+
+    async fn call<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut crab_staging::MultipartRegistry) -> crab_staging::Result<T> + Send + 'static,
+    {
+        let registry = Arc::clone(&self.0);
+        // SQLite FULL commits and lock waits must not stall the async workers
+        // responsible for provider I/O and lease heartbeats.
+        tokio::task::spawn_blocking(move || {
+            let mut registry = registry.lock().map_err(|_| {
+                crab_staging::StagingError::Internal("multipart journal lock poisoned".into())
+            })?;
+            f(&mut registry)
+        })
+        .await
+        .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+        .map_err(CrabError::from)
+    }
+
+    pub async fn find_abandoned(
+        &self,
+        now: std::time::SystemTime,
+        grace: Duration,
+    ) -> crate::core::error::Result<Vec<crab_staging::AbandonedUpload>> {
+        self.call(move |registry| registry.find_abandoned(now, grace))
+            .await
+    }
+
+    pub async fn claim_abandoned(
+        &self,
+        entry_id: &str,
+        expected_revision: i64,
+        owner_token: &str,
+        now: i64,
+        lease_duration: Duration,
+    ) -> crate::core::error::Result<Option<crab_staging::AbandonedClaim>> {
+        let entry_id = entry_id.to_owned();
+        let owner_token = owner_token.to_owned();
+        self.call(move |registry| {
+            registry.claim_abandoned(
+                &entry_id,
+                expected_revision,
+                &owner_token,
+                now,
+                lease_duration,
+            )
+        })
+        .await
+    }
+
+    pub async fn renew_repair(
+        &self,
+        lease: &crab_staging::MultipartLease,
+        now: i64,
+        lease_duration: Duration,
+    ) -> crate::core::error::Result<bool> {
+        let lease = lease.clone();
+        self.call(move |registry| registry.renew(&lease, now, lease_duration))
+            .await
+    }
+
+    pub async fn abandon_repair(
+        &self,
+        lease: &crab_staging::MultipartLease,
+        now: i64,
+    ) -> crate::core::error::Result<bool> {
+        let lease = lease.clone();
+        self.call(move |registry| registry.abandon_owned(&lease, now))
+            .await
+    }
+
+    pub async fn release_repair(
+        &self,
+        lease: &crab_staging::MultipartLease,
+        now: i64,
+    ) -> crate::core::error::Result<bool> {
+        let lease = lease.clone();
+        self.call(move |registry| registry.release_owned(&lease, now))
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl crab_storage::multipart::MultipartJournal for MultipartJournal {
+    async fn claim(
+        &self,
+        target: &crab_storage::multipart::MultipartTarget,
+        payload_hash: &[u8],
+        expected_hash: &[u8; 32],
+        size: u64,
+        part_size: usize,
+        owner_token: &str,
+        now_unix_seconds: i64,
+        lease_duration: Duration,
+    ) -> crab_storage::multipart::JournalResult<crab_storage::multipart::JournalClaimOutcome> {
+        let target = crab_staging::MultipartTarget {
+            provider: target.provider.clone(),
+            host: target.host.clone(),
+            container: target.container.clone(),
+            key: target.key.clone(),
+        };
+        let payload_hash = payload_hash.to_vec();
+        let expected_hash = *expected_hash;
+        let owner_token = owner_token.to_owned();
+        let outcome = self
+            .call(move |registry| {
+                registry.claim(
+                    &target,
+                    &payload_hash,
+                    &expected_hash,
+                    size,
+                    part_size,
+                    &owner_token,
+                    now_unix_seconds,
+                    lease_duration,
+                )
+            })
+            .await
+            .map_err(journal_error)?;
+        match outcome {
+            crab_staging::ClaimOutcome::Busy => {
+                Ok(crab_storage::multipart::JournalClaimOutcome::Busy)
+            }
+            crab_staging::ClaimOutcome::Acquired(claim) => {
+                let parts = claim
+                    .completed_parts
+                    .into_iter()
+                    .map(|part| {
+                        Ok(crab_storage::multipart::JournalPart {
+                            part_idx: usize::try_from(part.part_number).map_err(|_| {
+                                Box::new(crab_staging::StagingError::Internal(
+                                    "multipart part index is negative".to_owned(),
+                                ))
+                                    as crab_storage::multipart::JournalError
+                            })?,
+                            content_id: part.etag,
+                            size: u64::try_from(part.size).map_err(|_| {
+                                Box::new(crab_staging::StagingError::Internal(
+                                    "multipart part size is negative".to_owned(),
+                                ))
+                                    as crab_storage::multipart::JournalError
+                            })?,
+                        })
+                    })
+                    .collect::<crab_storage::multipart::JournalResult<Vec<_>>>()?;
+                Ok(crab_storage::multipart::JournalClaimOutcome::Acquired(
+                    crab_storage::multipart::JournalClaim {
+                        lease: crab_storage::multipart::JournalLease {
+                            entry_id: claim.lease.entry_id,
+                            owner_token: claim.lease.owner_token,
+                        },
+                        upload_id: claim.upload_id,
+                        payload_hash: claim.payload_hash,
+                        expected_hash: claim.expected_hash,
+                        size: claim.size,
+                        part_size: claim.part_size,
+                        parts,
+                    },
+                ))
+            }
+        }
+    }
+
+    async fn bind_upload(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        upload_id: &str,
+        now_unix_seconds: i64,
+        lease_duration: Duration,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        let upload_id = upload_id.to_owned();
+        self.call(move |registry| {
+            registry.bind_upload(&lease, &upload_id, now_unix_seconds, lease_duration)
+        })
+        .await
+        .map_err(journal_error)
+    }
+
+    async fn renew(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        now_unix_seconds: i64,
+        lease_duration: Duration,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        self.call(move |registry| registry.renew(&lease, now_unix_seconds, lease_duration))
+            .await
+            .map_err(journal_error)
+    }
+
+    async fn record_part(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        part: &crab_storage::multipart::JournalPart,
+        now_unix_seconds: i64,
+        lease_duration: Duration,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let part = crab_staging::CompletedPart {
+            part_number: i64::try_from(part.part_idx).map_err(|_| {
+                Box::new(crab_staging::StagingError::Internal(
+                    "multipart part index exceeds SQLite range".to_owned(),
+                )) as crab_storage::multipart::JournalError
+            })?,
+            etag: part.content_id.clone(),
+            size: i64::try_from(part.size).map_err(|_| {
+                Box::new(crab_staging::StagingError::Internal(
+                    "multipart part size exceeds SQLite range".to_owned(),
+                )) as crab_storage::multipart::JournalError
+            })?,
+        };
+        let lease = staging_lease(lease);
+        self.call(move |registry| {
+            registry.record_part(&lease, &part, now_unix_seconds, lease_duration)
+        })
+        .await
+        .map_err(journal_error)
+    }
+
+    async fn reset_owned(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        payload_hash: &[u8],
+        expected_hash: &[u8; 32],
+        size: u64,
+        part_size: usize,
+        now_unix_seconds: i64,
+        lease_duration: Duration,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        let payload_hash = payload_hash.to_vec();
+        let expected_hash = *expected_hash;
+        self.call(move |registry| {
+            registry.reset_owned(
+                &lease,
+                &payload_hash,
+                &expected_hash,
+                size,
+                part_size,
+                now_unix_seconds,
+                lease_duration,
+            )
+        })
+        .await
+        .map_err(journal_error)
+    }
+
+    async fn complete_owned(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        now_unix_seconds: i64,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        self.call(move |registry| registry.complete_owned(&lease, now_unix_seconds))
+            .await
+            .map_err(journal_error)
+    }
+
+    async fn abandon_owned(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        now_unix_seconds: i64,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        self.call(move |registry| registry.abandon_owned(&lease, now_unix_seconds))
+            .await
+            .map_err(journal_error)
+    }
+
+    async fn release_owned(
+        &self,
+        lease: &crab_storage::multipart::JournalLease,
+        now_unix_seconds: i64,
+    ) -> crab_storage::multipart::JournalResult<bool> {
+        let lease = staging_lease(lease);
+        self.call(move |registry| registry.release_owned(&lease, now_unix_seconds))
+            .await
+            .map_err(journal_error)
+    }
+}
+
+fn journal_error(error: CrabError) -> crab_storage::multipart::JournalError {
+    Box::new(error)
+}
+
+fn staging_lease(lease: &crab_storage::multipart::JournalLease) -> crab_staging::MultipartLease {
+    crab_staging::MultipartLease {
+        entry_id: lease.entry_id.clone(),
+        owner_token: lease.owner_token.clone(),
+    }
+}
 
 /// CAS-aware facade over an `object_store::ObjectStore`.
 #[derive(Clone)]
@@ -70,6 +372,21 @@ impl Store {
     pub fn with_signer(mut self, signer: Arc<dyn object_store::signer::Signer>) -> Self {
         self.inner = self.inner.with_signer(signer);
         self
+    }
+
+    #[must_use]
+    pub fn with_multipart(
+        mut self,
+        multipart: Arc<dyn object_store::multipart::MultipartStore>,
+        identity: BucketIdentity,
+    ) -> Self {
+        self.inner = self.inner.with_multipart(multipart, identity);
+        self
+    }
+
+    #[must_use]
+    pub fn has_resumable_multipart(&self) -> bool {
+        self.inner.has_resumable_multipart()
     }
 
     #[must_use]
@@ -246,6 +563,18 @@ impl Store {
             .map_err(CrabError::from)
     }
 
+    pub async fn verify_written_size_and_hash(
+        &self,
+        path: &Path,
+        expected_size: u64,
+        expected_hash: &[u8; 32],
+    ) -> Result<()> {
+        self.inner
+            .verify_written_size_and_hash(path, expected_size, expected_hash)
+            .await
+            .map_err(CrabError::from)
+    }
+
     pub async fn head(&self, path: &Path) -> Result<ObjectMeta> {
         self.inner.head(path).await.map_err(CrabError::from)
     }
@@ -373,6 +702,50 @@ impl Store {
                 cancel,
                 on_part_done,
             )
+            .await
+            .map_err(CrabError::from)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_multipart_file_resumable(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        payload_hash: &[u8],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+        journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
+    ) -> Result<crab_storage::multipart::ResumableUploadOutcome> {
+        self.inner
+            .put_multipart_file_resumable(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                payload_hash,
+                part_size,
+                cancel,
+                on_part_done,
+                journal,
+            )
+            .await
+            .map_err(CrabError::from)
+    }
+
+    #[must_use]
+    pub fn multipart_target(
+        &self,
+        path: &Path,
+    ) -> Option<crab_storage::multipart::MultipartTarget> {
+        self.inner.multipart_target(path)
+    }
+
+    pub async fn abort_explicit_multipart(&self, path: &Path, upload_id: &str) -> Result<()> {
+        self.inner
+            .abort_explicit_multipart(path, upload_id)
             .await
             .map_err(CrabError::from)
     }

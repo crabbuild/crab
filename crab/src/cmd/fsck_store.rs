@@ -20,7 +20,7 @@ use crate::metadata::manifest::{
     Manifest, read_bulk_pack_list, read_manifest, read_repository_snapshot,
 };
 use crate::storage::StoreLayout;
-use crate::storage::store::Store;
+use crate::storage::store::{MultipartJournal, Store};
 #[cfg(test)]
 use crab_coordination::push_lock_path;
 use crab_coordination::{PushLock, PushLockPayload};
@@ -38,6 +38,7 @@ pub struct StoreChecker {
     store: Store,
     prefix: String,
     router: StoreLayout,
+    multipart_journal: Option<Arc<MultipartJournal>>,
 }
 
 impl StoreChecker {
@@ -47,7 +48,14 @@ impl StoreChecker {
             store,
             prefix,
             router,
+            multipart_journal: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_multipart_journal(mut self, journal: Option<Arc<MultipartJournal>>) -> Self {
+        self.multipart_journal = journal;
+        self
     }
 
     /// Load the current pack list from the compacted manifest and journal.
@@ -533,17 +541,34 @@ impl FsckChecker for StoreChecker {
 
     fn check_multipart_uploads(
         &self,
-        _now: SystemTime,
-        _grace: Duration,
+        now: SystemTime,
+        grace: Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<MultipartMeta>>> + Send + '_>>
     {
         Box::pin(async move {
-            // Multipart uploads are tracked in the local SQLite registry,
-            // not in object storage. The CLI caller should query the
-            // MultipartRegistry directly if available. For the store-only
-            // checker, return an empty list — the local registry check
-            // is handled at the CLI layer when the staging DB is present.
-            Ok(Vec::new())
+            let Some(journal) = &self.multipart_journal else {
+                return Ok(Vec::new());
+            };
+            journal
+                .find_abandoned(now, grace)
+                .await?
+                .into_iter()
+                .map(|upload| {
+                    let updated_seconds = u64::try_from(upload.updated_at).map_err(|_| {
+                        CrabError::Internal("multipart journal has a negative update time".into())
+                    })?;
+                    Ok(MultipartMeta {
+                        entry_id: upload.entry_id,
+                        revision: upload.revision,
+                        upload_id: upload.upload_id,
+                        provider: upload.target.provider,
+                        host: upload.target.host,
+                        container: upload.target.container,
+                        key: upload.target.key,
+                        last_updated: UNIX_EPOCH + Duration::from_secs(updated_seconds),
+                    })
+                })
+                .collect()
         })
     }
 
@@ -591,6 +616,7 @@ pub struct StoreRepairer {
     store: Store,
     prefix: String,
     router: StoreLayout,
+    multipart_journal: Option<Arc<MultipartJournal>>,
 }
 
 impl StoreRepairer {
@@ -603,7 +629,14 @@ impl StoreRepairer {
             store,
             prefix,
             router,
+            multipart_journal: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_multipart_journal(mut self, journal: Option<Arc<MultipartJournal>>) -> Self {
+        self.multipart_journal = journal;
+        self
     }
 
     async fn file_index_target_has_file(&self, file_hash: &MerkleHash) -> Result<bool> {
@@ -711,20 +744,97 @@ impl FsckRepairer for StoreRepairer {
 
     fn abort_multipart(
         &self,
-        _upload_id: &str,
-        _key: &str,
+        upload: MultipartMeta,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         Box::pin(async move {
-            // Multipart abort requires the S3 AbortMultipartUpload API,
-            // which is not exposed through the `object_store` crate's
-            // generic interface. The local MultipartRegistry handles
-            // abort_stale for locally-tracked uploads. For remote-only
-            // abandoned uploads, this is a no-op until we add direct S3
-            // API support.
-            debug!("multipart abort not yet supported via generic object store");
-            Ok(false)
+            const REPAIR_LEASE: Duration = Duration::from_secs(60);
+            const REPAIR_HEARTBEAT: Duration = Duration::from_secs(10);
+
+            let Some(journal) = &self.multipart_journal else {
+                return Ok(false);
+            };
+            let now = unix_now();
+            let owner_token = uuid::Uuid::now_v7().simple().to_string();
+            let Some(claim) = journal
+                .claim_abandoned(
+                    &upload.entry_id,
+                    upload.revision,
+                    &owner_token,
+                    now,
+                    REPAIR_LEASE,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            let path = Path::from(claim.target.key.as_str());
+            let Some(target) = self.store.multipart_target(&path) else {
+                let _ = journal.release_repair(&claim.lease, unix_now()).await;
+                return Ok(false);
+            };
+            if target.provider != claim.target.provider
+                || target.host != claim.target.host
+                || target.container != claim.target.container
+                || target.key != claim.target.key
+            {
+                let _ = journal.release_repair(&claim.lease, unix_now()).await;
+                warn!(
+                    entry_id = %upload.entry_id,
+                    provider = %claim.target.provider,
+                    host = %claim.target.host,
+                    container = %claim.target.container,
+                    "multipart repair skipped because the configured destination differs from the journal"
+                );
+                return Ok(false);
+            }
+
+            if let Some(upload_id) = claim.upload_id.as_deref() {
+                let abort = self.store.abort_explicit_multipart(&path, upload_id);
+                tokio::pin!(abort);
+                let start = tokio::time::Instant::now() + REPAIR_HEARTBEAT;
+                let mut heartbeat = tokio::time::interval_at(start, REPAIR_HEARTBEAT);
+                loop {
+                    tokio::select! {
+                        result = &mut abort => {
+                            if let Err(error) = result {
+                                let _ = journal.release_repair(&claim.lease, unix_now()).await;
+                                return Err(error);
+                            }
+                            break;
+                        }
+                        _ = heartbeat.tick() => {
+                            if !journal.renew_repair(
+                                &claim.lease,
+                                unix_now(),
+                                REPAIR_LEASE,
+                            ).await? {
+                                return Err(CrabError::CasConflict {
+                                    path: claim.target.key,
+                                    expected_etag: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if journal.abandon_repair(&claim.lease, unix_now()).await? {
+                Ok(true)
+            } else {
+                Err(CrabError::CasConflict {
+                    path: claim.target.key,
+                    expected_etag: None,
+                })
+            }
         })
     }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -743,6 +853,7 @@ mod tests {
         XorbChunkSequenceEntry, XorbChunkSequenceHeader,
     };
     use object_store::memory::InMemory;
+    use object_store::multipart::MultipartStore as _;
     use std::sync::Arc;
 
     fn test_store() -> (Store, String) {
@@ -1365,5 +1476,275 @@ mod tests {
         let repairer = StoreRepairer::new(store, prefix);
         let result = repairer.repair_push_lock("nonexistent/lock").await.unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn checker_and_repairer_abort_exact_journal_destination() {
+        let inner = Arc::new(InMemory::new());
+        let object_store: Arc<dyn object_store::ObjectStore> = inner.clone();
+        let multipart: Arc<dyn object_store::multipart::MultipartStore> = inner.clone();
+        let identity = crab_storage::BucketIdentity::new(
+            crab_storage::StorageProviderKind::S3,
+            "s3.example.test",
+            "bucket-a",
+        );
+        let store = Store::new(object_store)
+            .with_bucket_identity(identity.clone())
+            .with_multipart(multipart, identity);
+        let key = "repo/xorbs/ab/payload";
+        let path = Path::from(key);
+        let target = store.multipart_target(&path).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry =
+            crab_staging::MultipartRegistry::open(&dir.path().join("multipart-uploads.sqlite3"))
+                .unwrap();
+        let claim = match registry
+            .claim(
+                &crab_staging::MultipartTarget {
+                    provider: target.provider,
+                    host: target.host,
+                    container: target.container,
+                    key: target.key,
+                },
+                &[1; 32],
+                &[1; 32],
+                8,
+                8,
+                "push-owner",
+                100,
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        {
+            crab_staging::ClaimOutcome::Acquired(claim) => claim,
+            crab_staging::ClaimOutcome::Busy => panic!("new upload must be claimable"),
+        };
+        let upload_id = inner.create_multipart(&path).await.unwrap();
+        assert!(
+            registry
+                .bind_upload(
+                    &claim.lease,
+                    upload_id.as_ref(),
+                    100,
+                    Duration::from_secs(60)
+                )
+                .unwrap()
+        );
+        assert!(registry.release_owned(&claim.lease, 100).unwrap());
+        let journal = Arc::new(MultipartJournal::new(registry));
+        let checker = StoreChecker::new(store.clone(), "repo".to_owned())
+            .with_multipart_journal(Some(Arc::clone(&journal)));
+        let uploads = checker
+            .check_multipart_uploads(SystemTime::now(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(uploads.len(), 1);
+
+        let repairer = StoreRepairer::new(store, "repo".to_owned())
+            .with_multipart_journal(Some(Arc::clone(&journal)));
+        assert!(repairer.abort_multipart(uploads[0].clone()).await.unwrap());
+        assert!(
+            checker
+                .check_multipart_uploads(SystemTime::now(), Duration::ZERO)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_repair_preserves_row_when_configured_endpoint_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry =
+            crab_staging::MultipartRegistry::open(&dir.path().join("multipart-uploads.sqlite3"))
+                .unwrap();
+        let claim = match registry
+            .claim(
+                &crab_staging::MultipartTarget {
+                    provider: "s3".to_owned(),
+                    host: "old-s3.example.test".to_owned(),
+                    container: "shared-bucket".to_owned(),
+                    key: "repo/xorbs/old".to_owned(),
+                },
+                &[2; 32],
+                &[2; 32],
+                8,
+                8,
+                "push-owner",
+                100,
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        {
+            crab_staging::ClaimOutcome::Acquired(claim) => claim,
+            crab_staging::ClaimOutcome::Busy => panic!("new upload must be claimable"),
+        };
+        assert!(registry.release_owned(&claim.lease, 100).unwrap());
+        let journal = Arc::new(MultipartJournal::new(registry));
+        let inner = Arc::new(InMemory::new());
+        let object_store: Arc<dyn object_store::ObjectStore> = inner.clone();
+        let multipart: Arc<dyn object_store::multipart::MultipartStore> = inner;
+        let identity = crab_storage::BucketIdentity::new(
+            crab_storage::StorageProviderKind::S3,
+            "new-s3.example.test",
+            "shared-bucket",
+        );
+        let store = Store::new(object_store)
+            .with_bucket_identity(identity.clone())
+            .with_multipart(multipart, identity);
+        let checker = StoreChecker::new(store.clone(), "repo".to_owned())
+            .with_multipart_journal(Some(Arc::clone(&journal)));
+        let upload = checker
+            .check_multipart_uploads(SystemTime::now(), Duration::ZERO)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let repairer = StoreRepairer::new(store, "repo".to_owned())
+            .with_multipart_journal(Some(Arc::clone(&journal)));
+
+        assert!(!repairer.abort_multipart(upload).await.unwrap());
+        assert_eq!(
+            checker
+                .check_multipart_uploads(
+                    SystemTime::now() + Duration::from_secs(1),
+                    Duration::ZERO,
+                )
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_repair_refuses_row_replaced_after_check() {
+        let inner = Arc::new(InMemory::new());
+        let object_store: Arc<dyn object_store::ObjectStore> = inner.clone();
+        let multipart: Arc<dyn object_store::multipart::MultipartStore> = inner.clone();
+        let identity = crab_storage::BucketIdentity::new(
+            crab_storage::StorageProviderKind::S3,
+            "s3.example.test",
+            "bucket-a",
+        );
+        let store = Store::new(object_store)
+            .with_bucket_identity(identity.clone())
+            .with_multipart(multipart, identity);
+        let key = "repo/xorbs/ab/payload";
+        let path = Path::from(key);
+        let target = store.multipart_target(&path).unwrap();
+        let staging_target = crab_staging::MultipartTarget {
+            provider: target.provider.clone(),
+            host: target.host.clone(),
+            container: target.container.clone(),
+            key: target.key.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry =
+            crab_staging::MultipartRegistry::open(&dir.path().join("multipart-uploads.sqlite3"))
+                .unwrap();
+        let first = match registry
+            .claim(
+                &staging_target,
+                &[1; 32],
+                &[1; 32],
+                8,
+                8,
+                "push-1",
+                100,
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        {
+            crab_staging::ClaimOutcome::Acquired(claim) => claim,
+            crab_staging::ClaimOutcome::Busy => panic!("new upload must be claimable"),
+        };
+        let old_upload_id = inner.create_multipart(&path).await.unwrap();
+        assert!(
+            registry
+                .bind_upload(
+                    &first.lease,
+                    old_upload_id.as_ref(),
+                    100,
+                    Duration::from_secs(60),
+                )
+                .unwrap()
+        );
+        assert!(registry.release_owned(&first.lease, 100).unwrap());
+        let observed = registry
+            .find_abandoned(UNIX_EPOCH + Duration::from_secs(101), Duration::ZERO)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let resumed = match registry
+            .claim(
+                &staging_target,
+                &[2; 32],
+                &[2; 32],
+                8,
+                8,
+                "push-2",
+                101,
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        {
+            crab_staging::ClaimOutcome::Acquired(claim) => claim,
+            crab_staging::ClaimOutcome::Busy => panic!("expired upload must be claimable"),
+        };
+        inner.abort_multipart(&path, &old_upload_id).await.unwrap();
+        assert!(
+            registry
+                .reset_owned(
+                    &resumed.lease,
+                    &[2; 32],
+                    &[2; 32],
+                    8,
+                    8,
+                    101,
+                    Duration::from_secs(60),
+                )
+                .unwrap()
+        );
+        let replacement_id = inner.create_multipart(&path).await.unwrap();
+        assert!(
+            registry
+                .bind_upload(
+                    &resumed.lease,
+                    replacement_id.as_ref(),
+                    101,
+                    Duration::from_secs(60),
+                )
+                .unwrap()
+        );
+        assert!(registry.release_owned(&resumed.lease, 101).unwrap());
+        let journal = Arc::new(MultipartJournal::new(registry));
+        let repairer =
+            StoreRepairer::new(store, "repo".to_owned()).with_multipart_journal(Some(journal));
+        let repaired = repairer
+            .abort_multipart(MultipartMeta {
+                entry_id: observed.entry_id,
+                revision: observed.revision,
+                upload_id: observed.upload_id,
+                provider: observed.target.provider,
+                host: observed.target.host,
+                container: observed.target.container,
+                key: observed.target.key,
+                last_updated: UNIX_EPOCH + Duration::from_secs(100),
+            })
+            .await
+            .unwrap();
+
+        assert!(!repaired);
+        inner
+            .put_part(
+                &path,
+                &replacement_id,
+                0,
+                Bytes::from_static(b"survives").into(),
+            )
+            .await
+            .expect("replacement provider session must remain active");
     }
 }

@@ -15,6 +15,7 @@
 //!   coordination pointers, and `update` uses `PutMode::Update(etag)`.
 //!   Callers never hand-build `PutOptions`.
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -70,6 +71,17 @@ pub struct Store {
     /// `inner` because `ObjectStore` does not expose `as_any`, so we
     /// cannot downcast after the fact.
     signer: Option<Arc<dyn object_store::signer::Signer>>,
+    /// Low-level provider handle with stable explicit upload IDs.
+    ///
+    /// Present for S3 and GCS, including refreshing wrappers. Azure and
+    /// generic `ObjectStore` implementations stay on whole-upload retry.
+    multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
+    /// Exact physical destination identity for explicit multipart sessions.
+    ///
+    /// This is deliberately separate from `identity`: bucket identity drives
+    /// cross-scheme equality and provider SDK selection, while resumable
+    /// sessions must also distinguish custom endpoints.
+    multipart_identity: Option<BucketIdentity>,
     storage_scope: Option<StorageScope>,
     read_routes: Option<Arc<Vec<ReadRoute>>>,
     staging_writes: Option<Arc<StagingWriteState>>,
@@ -123,6 +135,8 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             signer: None,
+            multipart: None,
+            multipart_identity: None,
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
@@ -143,6 +157,8 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             signer: None,
+            multipart: None,
+            multipart_identity: None,
             storage_scope: None,
             read_routes: None,
             staging_writes: None,
@@ -173,6 +189,28 @@ impl Store {
     pub fn with_signer(mut self, signer: Arc<dyn object_store::signer::Signer>) -> Self {
         self.signer = Some(signer);
         self
+    }
+
+    /// Attaches the provider's explicit multipart API.
+    ///
+    /// The handle must address the same physical store as `inner`; otherwise
+    /// journal identity and provider sessions would diverge.
+    #[must_use]
+    pub fn with_multipart(
+        mut self,
+        multipart: Arc<dyn object_store::multipart::MultipartStore>,
+        identity: BucketIdentity,
+    ) -> Self {
+        self.multipart = Some(multipart);
+        self.multipart_identity = Some(identity);
+        self
+    }
+
+    #[must_use]
+    pub fn has_resumable_multipart(&self) -> bool {
+        self.multipart.is_some()
+            && self.multipart_identity.is_some()
+            && self.staging_writes.is_none()
     }
 
     #[must_use]
@@ -1056,24 +1094,64 @@ impl Store {
         expected_size: u64,
         expected_hash: &[u8; 32],
     ) -> Result<()> {
-        let meta = self.head(path).await?;
-        if meta.size != expected_size {
-            return Err(StorageError::CorruptObject {
-                path: path.to_string(),
-                reason: format!("expected {expected_size} bytes, found {}", meta.size),
-            });
-        }
-        if Self::matches_in_streaming(&self.read_inner_for(path), path, expected_hash).await? {
-            Ok(())
-        } else {
-            Err(StorageError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "Blake3 content hash did not match {}",
-                    hex_lower(expected_hash)
-                ),
-            })
-        }
+        retry(&self.retry, || async {
+            let meta = self.head(path).await?;
+            if meta.size != expected_size {
+                return Err(StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!("expected {expected_size} bytes, found {}", meta.size),
+                });
+            }
+            if Self::matches_in_streaming(&self.read_inner_for(path), path, expected_hash).await? {
+                Ok(())
+            } else {
+                Err(StorageError::CorruptObject {
+                    path: path.to_string(),
+                    reason: format!(
+                        "Blake3 content hash did not match {}",
+                        hex_lower(expected_hash)
+                    ),
+                })
+            }
+        })
+        .await
+    }
+
+    /// Streams the physical destination selected for a write and verifies it.
+    ///
+    /// Protected pushes write beneath an unpublished staging prefix, so a
+    /// canonical read cannot prove those bytes before publication.
+    pub async fn verify_written_size_and_hash(
+        &self,
+        path: &Path,
+        expected_size: u64,
+        expected_hash: &[u8; 32],
+    ) -> Result<()> {
+        let (write_path, write_inner, _) = self.exact_write_target(path);
+        retry(&self.retry, || async {
+            let meta = write_inner
+                .head(&write_path)
+                .await
+                .map_err(|error| map_object_store_error(error, write_path.as_ref()))?;
+            if meta.size != expected_size {
+                return Err(StorageError::CorruptObject {
+                    path: write_path.to_string(),
+                    reason: format!("expected {expected_size} bytes, found {}", meta.size),
+                });
+            }
+            if Self::matches_in_streaming(&write_inner, &write_path, expected_hash).await? {
+                Ok(())
+            } else {
+                Err(StorageError::CorruptObject {
+                    path: write_path.to_string(),
+                    reason: format!(
+                        "Blake3 content hash did not match {}",
+                        hex_lower(expected_hash)
+                    ),
+                })
+            }
+        })
+        .await
     }
 
     /// Fetches the metadata for `path` without reading its body.
@@ -1224,20 +1302,22 @@ impl Store {
         expected_hash: &[u8; 32],
         expected_size: u64,
     ) -> Result<bool> {
-        match self.head(canonical).await {
-            Ok(meta) if meta.size == expected_size => {
-                Self::matches_in_streaming(&self.inner, canonical, expected_hash).await
+        retry(&self.retry, || async {
+            match self.head(canonical).await {
+                Ok(meta) if meta.size == expected_size => {
+                    Self::matches_in_streaming(
+                        &self.read_inner_for(canonical),
+                        canonical,
+                        expected_hash,
+                    )
+                    .await
+                }
+                Ok(_) => Ok(false),
+                Err(StorageError::NotFound { .. }) => Ok(false),
+                Err(e) => Err(e),
             }
-            Ok(meta) => Err(StorageError::CorruptObject {
-                path: canonical.to_string(),
-                reason: format!(
-                    "canonical object size {} does not match expected {}",
-                    meta.size, expected_size
-                ),
-            }),
-            Err(StorageError::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e),
-        }
+        })
+        .await
     }
 
     /// Begin a multipart upload for `path`.
@@ -1426,6 +1506,622 @@ impl Store {
             self.record_staged_write(path, &write_path, &expected_hash, size);
         }
         result
+    }
+
+    /// Uploads a content-addressed file with exclusive, durable part resume.
+    ///
+    /// The source is fully size/hash-verified before a provider session is
+    /// claimed. An active owner is waited out rather than bypassed, every part
+    /// mutation renews and checks the lease, and the completed remote body is
+    /// streamed back through Blake3 verification before the journal row is
+    /// removed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn put_multipart_file_resumable(
+        &self,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        payload_hash: &[u8],
+        part_size: usize,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+        journal: Option<&dyn crate::multipart::MultipartJournal>,
+    ) -> Result<crate::multipart::ResumableUploadOutcome> {
+        if part_size == 0 {
+            return Err(StorageError::Internal(
+                "multipart part size must be greater than zero".to_owned(),
+            ));
+        }
+        Self::verify_local_file(file_path, size, &expected_hash, cancel).await?;
+
+        let (Some(multipart), Some(journal), Some(target)) = (
+            self.multipart.as_ref(),
+            journal,
+            self.multipart_target(path),
+        ) else {
+            self.put_multipart_file_retry(
+                path,
+                file_path,
+                size,
+                expected_hash,
+                part_size,
+                cancel,
+                on_part_done,
+            )
+            .await?;
+            self.verify_written_size_and_hash(path, size, &expected_hash)
+                .await?;
+            return Ok(crate::multipart::ResumableUploadOutcome::Uploaded);
+        };
+        if self.canonical_matches(path, &expected_hash, size).await? {
+            return Ok(crate::multipart::ResumableUploadOutcome::AlreadyPresent);
+        }
+
+        let owner_token = random_owner_token();
+        let mut repair_attempt = 0_u8;
+        let mut credited_parts = HashSet::new();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(StorageError::Cancelled);
+            }
+            let claim = loop {
+                match journal_call(
+                    "claim",
+                    journal
+                        .claim(
+                            &target,
+                            payload_hash,
+                            &expected_hash,
+                            size,
+                            part_size,
+                            &owner_token,
+                            unix_now(),
+                            MULTIPART_LEASE_DURATION,
+                        )
+                        .await,
+                )? {
+                    crate::multipart::JournalClaimOutcome::Acquired(claim) => break claim,
+                    crate::multipart::JournalClaimOutcome::Busy => {
+                        tokio::select! {
+                            () = tokio::time::sleep(MULTIPART_CLAIM_POLL) => {}
+                            () = cancel.cancelled() => return Err(StorageError::Cancelled),
+                        }
+                    }
+                }
+            };
+
+            let canonical_matches = await_with_heartbeat(
+                journal,
+                &claim.lease,
+                cancel,
+                self.canonical_matches(path, &expected_hash, size),
+            )
+            .await?;
+            let canonical_matches = match canonical_matches {
+                Ok(matches) => matches,
+                Err(error) => {
+                    release_journal(journal, &claim.lease).await;
+                    return Err(error);
+                }
+            };
+            if canonical_matches {
+                let provider_state_released = match claim.upload_id.as_deref() {
+                    Some(upload_id) => match await_with_heartbeat(
+                        journal,
+                        &claim.lease,
+                        cancel,
+                        self.abort_explicit_multipart(path, upload_id),
+                    )
+                    .await?
+                    {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %path,
+                                error = %error,
+                                "canonical object is complete but stale multipart cleanup failed"
+                            );
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                if provider_state_released {
+                    require_journal_owner(
+                        path,
+                        "complete already-present upload",
+                        journal.complete_owned(&claim.lease, unix_now()).await,
+                    )?;
+                } else {
+                    release_journal(journal, &claim.lease).await;
+                }
+                return Ok(crate::multipart::ResumableUploadOutcome::AlreadyPresent);
+            }
+
+            let plan_matches = claim.payload_hash == payload_hash
+                && claim.expected_hash == expected_hash
+                && crate::multipart::compatible_parts(&claim, size, part_size).is_some()
+                && (claim.upload_id.is_some() || claim.parts.is_empty());
+            let mut claim = claim;
+            if !plan_matches {
+                if let Some(upload_id) = claim.upload_id.as_deref()
+                    && let Err(error) = await_with_heartbeat(
+                        journal,
+                        &claim.lease,
+                        cancel,
+                        self.abort_explicit_multipart(path, upload_id),
+                    )
+                    .await?
+                {
+                    release_journal(journal, &claim.lease).await;
+                    return Err(error);
+                }
+                require_journal_owner(
+                    path,
+                    "reset",
+                    journal
+                        .reset_owned(
+                            &claim.lease,
+                            payload_hash,
+                            &expected_hash,
+                            size,
+                            part_size,
+                            unix_now(),
+                            MULTIPART_LEASE_DURATION,
+                        )
+                        .await,
+                )?;
+                claim.upload_id = None;
+                claim.payload_hash = payload_hash.to_vec();
+                claim.expected_hash = expected_hash;
+                claim.size = size;
+                claim.part_size = part_size;
+                claim.parts.clear();
+            }
+
+            let resumed = claim.upload_id.is_some();
+            let upload_id = match claim.upload_id.clone() {
+                Some(upload_id) => upload_id,
+                None => {
+                    let created = await_with_heartbeat(
+                        journal,
+                        &claim.lease,
+                        cancel,
+                        multipart.create_multipart(path),
+                    )
+                    .await?;
+                    let upload_id = match created {
+                        Ok(upload_id) => upload_id,
+                        Err(error) => {
+                            release_journal(journal, &claim.lease).await;
+                            return Err(map_object_store_error(error, path.as_ref()));
+                        }
+                    };
+                    if let Err(error) = require_journal_owner(
+                        path,
+                        "bind upload",
+                        journal
+                            .bind_upload(
+                                &claim.lease,
+                                upload_id.as_ref(),
+                                unix_now(),
+                                MULTIPART_LEASE_DURATION,
+                            )
+                            .await,
+                    ) {
+                        if let Err(abort_error) = self
+                            .abort_explicit_multipart(path, upload_id.as_ref())
+                            .await
+                        {
+                            tracing::warn!(
+                                path = %path,
+                                error = %abort_error,
+                                "failed to abort multipart session after journal bind failure"
+                            );
+                        }
+                        release_journal(journal, &claim.lease).await;
+                        return Err(error);
+                    }
+                    upload_id.to_string()
+                }
+            };
+
+            let slots =
+                crate::multipart::compatible_parts(&claim, size, part_size).ok_or_else(|| {
+                    StorageError::Internal("multipart plan changed after reset".into())
+                })?;
+            let uploaded = await_with_heartbeat(
+                journal,
+                &claim.lease,
+                cancel,
+                self.upload_missing_parts(
+                    multipart,
+                    journal,
+                    &claim.lease,
+                    path,
+                    file_path,
+                    size,
+                    expected_hash,
+                    part_size,
+                    &upload_id,
+                    slots,
+                    &mut credited_parts,
+                    cancel,
+                    on_part_done,
+                ),
+            )
+            .await?;
+            match uploaded {
+                Ok(parts) => {
+                    let provider_parts = parts
+                        .iter()
+                        .map(|part| object_store::multipart::PartId {
+                            content_id: part.content_id.clone(),
+                        })
+                        .collect();
+                    let completed = await_with_heartbeat(
+                        journal,
+                        &claim.lease,
+                        cancel,
+                        multipart.complete_multipart(
+                            path,
+                            &object_store::MultipartId::from(upload_id.as_str()),
+                            provider_parts,
+                        ),
+                    )
+                    .await?;
+                    if let Err(provider_error) = completed {
+                        if await_with_heartbeat(
+                            journal,
+                            &claim.lease,
+                            cancel,
+                            self.verify_size_and_hash(path, size, &expected_hash),
+                        )
+                        .await?
+                        .is_ok()
+                        {
+                            require_journal_owner(
+                                path,
+                                "complete after uncertain provider response",
+                                journal.complete_owned(&claim.lease, unix_now()).await,
+                            )?;
+                            return Ok(if resumed {
+                                crate::multipart::ResumableUploadOutcome::Resumed
+                            } else {
+                                crate::multipart::ResumableUploadOutcome::Uploaded
+                            });
+                        }
+                        if matches!(provider_error, object_store::Error::NotFound { .. }) {
+                            require_journal_owner(
+                                path,
+                                "drop missing provider session",
+                                journal.abandon_owned(&claim.lease, unix_now()).await,
+                            )?;
+                            if repair_attempt == 0 {
+                                repair_attempt += 1;
+                                continue;
+                            }
+                        } else {
+                            release_journal(journal, &claim.lease).await;
+                        }
+                        return Err(map_object_store_error(provider_error, path.as_ref()));
+                    }
+
+                    match await_with_heartbeat(
+                        journal,
+                        &claim.lease,
+                        cancel,
+                        self.verify_size_and_hash(path, size, &expected_hash),
+                    )
+                    .await?
+                    {
+                        Ok(()) => {
+                            require_journal_owner(
+                                path,
+                                "complete",
+                                journal.complete_owned(&claim.lease, unix_now()).await,
+                            )?;
+                            return Ok(if resumed {
+                                crate::multipart::ResumableUploadOutcome::Resumed
+                            } else {
+                                crate::multipart::ResumableUploadOutcome::Uploaded
+                            });
+                        }
+                        Err(error) => {
+                            require_journal_owner(
+                                path,
+                                "drop corrupt completed session",
+                                journal.abandon_owned(&claim.lease, unix_now()).await,
+                            )?;
+                            if repair_attempt == 0 {
+                                repair_attempt += 1;
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    if matches!(error, StorageError::NotFound { .. }) {
+                        // Providers return NotFound when a recorded upload ID
+                        // was expired or externally aborted. Drop that exact
+                        // owned row so it cannot trap every future retry.
+                        require_journal_owner(
+                            path,
+                            "drop missing provider session",
+                            journal.abandon_owned(&claim.lease, unix_now()).await,
+                        )?;
+                        if repair_attempt == 0 {
+                            repair_attempt += 1;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if matches!(
+                        error,
+                        StorageError::CorruptObject { .. } | StorageError::Io { .. }
+                    ) {
+                        match await_with_heartbeat(
+                            journal,
+                            &claim.lease,
+                            cancel,
+                            self.abort_explicit_multipart(path, &upload_id),
+                        )
+                        .await?
+                        {
+                            Ok(()) => require_journal_owner(
+                                path,
+                                "abandon changed local source",
+                                journal.abandon_owned(&claim.lease, unix_now()).await,
+                            )?,
+                            Err(abort_error) => {
+                                release_journal(journal, &claim.lease).await;
+                                tracing::warn!(
+                                    path = %path,
+                                    error = %abort_error,
+                                    "failed to abort multipart session after local source changed"
+                                );
+                            }
+                        }
+                        return Err(error);
+                    }
+                    release_journal(journal, &claim.lease).await;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_missing_parts(
+        &self,
+        multipart: &Arc<dyn object_store::multipart::MultipartStore>,
+        journal: &dyn crate::multipart::MultipartJournal,
+        lease: &crate::multipart::JournalLease,
+        path: &Path,
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: [u8; 32],
+        part_size: usize,
+        upload_id: &str,
+        mut slots: Vec<Option<crate::multipart::JournalPart>>,
+        credited_parts: &mut HashSet<usize>,
+        cancel: &tokio_util::sync::CancellationToken,
+        on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
+    ) -> Result<Vec<crate::multipart::JournalPart>> {
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+
+        const IN_FLIGHT_PARTS: usize = 4;
+
+        let mut file = tokio::fs::File::open(file_path).await?;
+        let mut hasher = blake3::Hasher::new();
+        let mut remaining = size;
+        let mut part_idx = 0_usize;
+        let mut pending = FuturesUnordered::new();
+        while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(StorageError::Cancelled);
+            }
+            while pending.len() >= IN_FLIGHT_PARTS {
+                let completed = pending.next().await;
+                let (idx, bytes, result) = completed.ok_or_else(|| {
+                    StorageError::Internal("multipart part queue ended while non-empty".into())
+                })?;
+                let provider_part: object_store::multipart::PartId = result?;
+                let part = crate::multipart::JournalPart {
+                    part_idx: idx,
+                    content_id: provider_part.content_id,
+                    size: bytes,
+                };
+                require_journal_owner(
+                    path,
+                    "record part",
+                    journal
+                        .record_part(lease, &part, unix_now(), MULTIPART_LEASE_DURATION)
+                        .await,
+                )?;
+                if let Some(callback) = on_part_done
+                    && credited_parts.insert(idx)
+                {
+                    callback(bytes);
+                }
+                slots[idx] = Some(part);
+            }
+
+            let want = remaining.min(part_size as u64) as usize;
+            let mut buffer = vec![0_u8; want];
+            file.read_exact(&mut buffer).await?;
+            hasher.update(&buffer);
+            if let Some(part) = &slots[part_idx] {
+                if let Some(callback) = on_part_done
+                    && credited_parts.insert(part_idx)
+                {
+                    callback(part.size);
+                }
+            } else {
+                let multipart = Arc::clone(multipart);
+                let retry_policy = self.retry;
+                let path = path.clone();
+                let upload_id = object_store::MultipartId::from(upload_id);
+                let payload: object_store::PutPayload = bytes::Bytes::from(buffer).into();
+                let bytes = want as u64;
+                pending.push(async move {
+                    let result = retry(&retry_policy, || {
+                        let multipart = Arc::clone(&multipart);
+                        let path = path.clone();
+                        let upload_id = upload_id.clone();
+                        let payload = payload.clone();
+                        async move {
+                            multipart
+                                .put_part(&path, &upload_id, part_idx, payload)
+                                .await
+                                .map_err(|error| map_object_store_error(error, path.as_ref()))
+                        }
+                    })
+                    .await;
+                    (part_idx, bytes, result)
+                });
+            }
+            remaining -= want as u64;
+            part_idx += 1;
+        }
+
+        while !pending.is_empty() {
+            let completed = pending.next().await;
+            let (idx, bytes, result) = completed.ok_or_else(|| {
+                StorageError::Internal("multipart part queue ended while non-empty".into())
+            })?;
+            let provider_part: object_store::multipart::PartId = result?;
+            let part = crate::multipart::JournalPart {
+                part_idx: idx,
+                content_id: provider_part.content_id,
+                size: bytes,
+            };
+            require_journal_owner(
+                path,
+                "record part",
+                journal
+                    .record_part(lease, &part, unix_now(), MULTIPART_LEASE_DURATION)
+                    .await,
+            )?;
+            if let Some(callback) = on_part_done
+                && credited_parts.insert(idx)
+            {
+                callback(bytes);
+            }
+            slots[idx] = Some(part);
+        }
+
+        let actual_hash = *hasher.finalize().as_bytes();
+        if actual_hash != expected_hash {
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local blake3 hash {} does not match expected {}",
+                    hex_lower(&actual_hash),
+                    hex_lower(&expected_hash)
+                ),
+            });
+        }
+        if file.metadata().await?.len() != size {
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: "local file size changed during multipart upload".to_owned(),
+            });
+        }
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(idx, part)| {
+                part.ok_or_else(|| {
+                    StorageError::Internal(format!(
+                        "multipart plan is missing completed part {idx}"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    async fn verify_local_file(
+        file_path: &std::path::Path,
+        size: u64,
+        expected_hash: &[u8; 32],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let mut file = tokio::fs::File::open(file_path).await?;
+        let actual_size = file.metadata().await?.len();
+        if actual_size != size {
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!("local file has {actual_size} bytes; upload expects {size}"),
+            });
+        }
+        let mut remaining = size;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        let mut hasher = blake3::Hasher::new();
+        while remaining > 0 {
+            if cancel.is_cancelled() {
+                return Err(StorageError::Cancelled);
+            }
+            let want = remaining.min(buffer.len() as u64) as usize;
+            file.read_exact(&mut buffer[..want]).await?;
+            hasher.update(&buffer[..want]);
+            remaining -= want as u64;
+        }
+        let actual_hash = *hasher.finalize().as_bytes();
+        if actual_hash != *expected_hash {
+            return Err(StorageError::CorruptObject {
+                path: file_path.display().to_string(),
+                reason: format!(
+                    "local blake3 hash {} does not match expected {}",
+                    hex_lower(&actual_hash),
+                    hex_lower(expected_hash)
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn multipart_target(&self, path: &Path) -> Option<crate::multipart::MultipartTarget> {
+        if self.multipart.is_none() || self.staging_writes.is_some() {
+            return None;
+        }
+        let identity = self.multipart_identity.as_ref()?;
+        let provider = match identity.cloud {
+            crate::identity::StorageProviderKind::S3 => "s3",
+            crate::identity::StorageProviderKind::Gcs => "gcs",
+            crate::identity::StorageProviderKind::Azure => "azure",
+            crate::identity::StorageProviderKind::Local => "local",
+        };
+        Some(crate::multipart::MultipartTarget {
+            provider: provider.to_owned(),
+            host: identity.host.clone(),
+            container: identity.container.clone(),
+            key: path.to_string(),
+        })
+    }
+
+    pub async fn abort_explicit_multipart(&self, path: &Path, upload_id: &str) -> Result<()> {
+        let multipart = self
+            .multipart
+            .as_ref()
+            .ok_or_else(|| StorageError::NotSupported {
+                source: object_store::Error::NotSupported {
+                    source: "store has no stable multipart upload-id API".into(),
+                },
+            })?;
+        retry(&self.retry, || async {
+            match multipart
+                .abort_multipart(path, &object_store::MultipartId::from(upload_id))
+                .await
+            {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+                Err(error) => Err(map_object_store_error(error, path.as_ref())),
+            }
+        })
+        .await
     }
 
     /// One full multipart-upload attempt: create, write parts with bounded
@@ -1788,6 +2484,120 @@ impl Store {
     }
 }
 
+const MULTIPART_LEASE_DURATION: std::time::Duration = std::time::Duration::from_secs(60);
+const MULTIPART_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const MULTIPART_CLAIM_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn await_with_heartbeat<F, T>(
+    journal: &dyn crate::multipart::MultipartJournal,
+    lease: &crate::multipart::JournalLease,
+    cancel: &tokio_util::sync::CancellationToken,
+    future: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    if cancel.is_cancelled() {
+        release_journal(journal, lease).await;
+        return Err(StorageError::Cancelled);
+    }
+    // A disk read or a paused process can outlive its lease between phases.
+    // Revalidate before polling a provider future, not only on a later tick.
+    if let Err(error) = require_journal_owner(
+        &Path::from(lease.entry_id.as_str()),
+        "renew lease",
+        journal
+            .renew(lease, unix_now(), MULTIPART_LEASE_DURATION)
+            .await,
+    ) {
+        release_journal(journal, lease).await;
+        return Err(error);
+    }
+    let result = {
+        tokio::pin!(future);
+        let start = tokio::time::Instant::now() + MULTIPART_HEARTBEAT_INTERVAL;
+        let mut heartbeat = tokio::time::interval_at(start, MULTIPART_HEARTBEAT_INTERVAL);
+        loop {
+            tokio::select! {
+                output = &mut future => break Ok(output),
+                () = cancel.cancelled() => break Err(StorageError::Cancelled),
+                _ = heartbeat.tick() => {
+                    if let Err(error) = require_journal_owner(
+                        &Path::from(lease.entry_id.as_str()),
+                        "renew lease",
+                        journal.renew(
+                            lease,
+                            unix_now(),
+                            MULTIPART_LEASE_DURATION,
+                        )
+                        .await,
+                    ) {
+                        break Err(error);
+                    }
+                }
+            }
+        }
+    };
+    if result.is_err() {
+        // Drop the transport future before another process can acquire the
+        // released lease and start using the recorded provider upload ID.
+        release_journal(journal, lease).await;
+    }
+    result
+}
+
+fn journal_call<T>(
+    operation: &'static str,
+    result: crate::multipart::JournalResult<T>,
+) -> Result<T> {
+    result.map_err(|source| StorageError::MultipartJournal { operation, source })
+}
+
+fn require_journal_owner(
+    path: &Path,
+    operation: &'static str,
+    result: crate::multipart::JournalResult<bool>,
+) -> Result<()> {
+    if journal_call(operation, result)? {
+        Ok(())
+    } else {
+        Err(StorageError::StateConflict {
+            path: path.to_string(),
+        })
+    }
+}
+
+async fn release_journal(
+    journal: &dyn crate::multipart::MultipartJournal,
+    lease: &crate::multipart::JournalLease,
+) {
+    match journal.release_owned(lease, unix_now()).await {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(
+            entry_id = %lease.entry_id,
+            "multipart lease already changed while releasing"
+        ),
+        Err(error) => tracing::warn!(
+            entry_id = %lease.entry_id,
+            error = %error,
+            "failed to release multipart lease"
+        ),
+    }
+}
+
+fn random_owner_token() -> String {
+    use rand::Rng as _;
+    format!("{:032x}", rand::rng().random::<u128>())
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 fn ensure_complete_body(path: &Path, expected: u64, actual: u64) -> Result<()> {
     if actual == expected {
         return Ok(());
@@ -1830,9 +2640,426 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
 mod tests {
     use super::*;
     use crate::identity::StorageProviderKind;
-    use futures_util::TryStreamExt as _;
+    use futures_util::{TryStreamExt as _, stream::BoxStream};
     use object_store::memory::InMemory;
+    use object_store::multipart::{MultipartStore, PartId};
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartId, PutMultipartOptions,
+        PutOptions, PutPayload, PutResult,
+    };
+    use std::fmt;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct TestJournal {
+        row: std::sync::Mutex<Option<TestJournalRow>>,
+        claims: AtomicU64,
+        renewals: AtomicU64,
+    }
+
+    struct TestJournalRow {
+        target: crate::multipart::MultipartTarget,
+        claim: crate::multipart::JournalClaim,
+        expires_at: i64,
+    }
+
+    impl TestJournal {
+        fn owned_mut<'a>(
+            row: &'a mut Option<TestJournalRow>,
+            lease: &crate::multipart::JournalLease,
+            now: i64,
+        ) -> Option<&'a mut TestJournalRow> {
+            row.as_mut()
+                .filter(|row| row.claim.lease == *lease && row.expires_at > now)
+        }
+
+        fn deadline(now: i64, duration: Duration) -> i64 {
+            now.saturating_add(i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::multipart::MultipartJournal for TestJournal {
+        async fn claim(
+            &self,
+            target: &crate::multipart::MultipartTarget,
+            payload_hash: &[u8],
+            expected_hash: &[u8; 32],
+            size: u64,
+            part_size: usize,
+            owner_token: &str,
+            now: i64,
+            lease_duration: Duration,
+        ) -> crate::multipart::JournalResult<crate::multipart::JournalClaimOutcome> {
+            self.claims.fetch_add(1, Ordering::Relaxed);
+            let mut row = self.row.lock().unwrap();
+            if let Some(existing) = row.as_mut() {
+                assert_eq!(&existing.target, target);
+                if existing.expires_at > now && existing.claim.lease.owner_token != owner_token {
+                    return Ok(crate::multipart::JournalClaimOutcome::Busy);
+                }
+                existing.claim.lease.owner_token = owner_token.to_owned();
+                existing.expires_at = Self::deadline(now, lease_duration);
+                return Ok(crate::multipart::JournalClaimOutcome::Acquired(
+                    existing.claim.clone(),
+                ));
+            }
+            let claim = crate::multipart::JournalClaim {
+                lease: crate::multipart::JournalLease {
+                    entry_id: "entry".to_owned(),
+                    owner_token: owner_token.to_owned(),
+                },
+                upload_id: None,
+                payload_hash: payload_hash.to_vec(),
+                expected_hash: *expected_hash,
+                size,
+                part_size,
+                parts: Vec::new(),
+            };
+            *row = Some(TestJournalRow {
+                target: target.clone(),
+                claim: claim.clone(),
+                expires_at: Self::deadline(now, lease_duration),
+            });
+            Ok(crate::multipart::JournalClaimOutcome::Acquired(claim))
+        }
+
+        async fn bind_upload(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            upload_id: &str,
+            now: i64,
+            lease_duration: Duration,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            let Some(row) = Self::owned_mut(&mut row, lease, now) else {
+                return Ok(false);
+            };
+            row.claim.upload_id = Some(upload_id.to_owned());
+            row.expires_at = Self::deadline(now, lease_duration);
+            Ok(true)
+        }
+
+        async fn renew(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            now: i64,
+            lease_duration: Duration,
+        ) -> crate::multipart::JournalResult<bool> {
+            self.renewals.fetch_add(1, Ordering::Relaxed);
+            let mut row = self.row.lock().unwrap();
+            let Some(row) = Self::owned_mut(&mut row, lease, now) else {
+                return Ok(false);
+            };
+            row.expires_at = Self::deadline(now, lease_duration);
+            Ok(true)
+        }
+
+        async fn record_part(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            part: &crate::multipart::JournalPart,
+            now: i64,
+            lease_duration: Duration,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            let Some(row) = Self::owned_mut(&mut row, lease, now) else {
+                return Ok(false);
+            };
+            row.claim
+                .parts
+                .retain(|saved| saved.part_idx != part.part_idx);
+            row.claim.parts.push(part.clone());
+            row.expires_at = Self::deadline(now, lease_duration);
+            Ok(true)
+        }
+
+        async fn reset_owned(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            payload_hash: &[u8],
+            expected_hash: &[u8; 32],
+            size: u64,
+            part_size: usize,
+            now: i64,
+            lease_duration: Duration,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            let Some(row) = Self::owned_mut(&mut row, lease, now) else {
+                return Ok(false);
+            };
+            row.claim.upload_id = None;
+            row.claim.payload_hash = payload_hash.to_vec();
+            row.claim.expected_hash = *expected_hash;
+            row.claim.size = size;
+            row.claim.part_size = part_size;
+            row.claim.parts.clear();
+            row.expires_at = Self::deadline(now, lease_duration);
+            Ok(true)
+        }
+
+        async fn complete_owned(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            now: i64,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            if Self::owned_mut(&mut row, lease, now).is_none() {
+                return Ok(false);
+            }
+            *row = None;
+            Ok(true)
+        }
+
+        async fn abandon_owned(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            now: i64,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            if Self::owned_mut(&mut row, lease, now).is_none() {
+                return Ok(false);
+            }
+            *row = None;
+            Ok(true)
+        }
+
+        async fn release_owned(
+            &self,
+            lease: &crate::multipart::JournalLease,
+            now: i64,
+        ) -> crate::multipart::JournalResult<bool> {
+            let mut row = self.row.lock().unwrap();
+            let Some(row) = row.as_mut().filter(|row| row.claim.lease == *lease) else {
+                return Ok(false);
+            };
+            row.expires_at = now;
+            Ok(true)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum CompleteBehavior {
+        Normal,
+        ErrorAfterCommit,
+        CorruptAfterCommit,
+    }
+
+    struct TestMultipartStore {
+        inner: Arc<InMemory>,
+        behavior: CompleteBehavior,
+        gate_first_part: bool,
+        part_started: Arc<tokio::sync::Semaphore>,
+        part_release: Arc<tokio::sync::Semaphore>,
+        creates: AtomicU64,
+        parts: AtomicU64,
+        completes: AtomicU64,
+        aborts: AtomicU64,
+        abort_failures: AtomicU64,
+        missing_upload_ids: std::sync::Mutex<HashSet<String>>,
+    }
+
+    #[derive(Debug)]
+    struct FailFirstBodyGetStore {
+        inner: Arc<InMemory>,
+        remaining_failures: AtomicU64,
+    }
+
+    impl fmt::Display for FailFirstBodyGetStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("fail-first-body-get")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FailFirstBodyGetStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if !options.head
+                && self
+                    .remaining_failures
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "transient body read".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<Path>>,
+        ) -> BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    impl TestMultipartStore {
+        fn new(inner: Arc<InMemory>, behavior: CompleteBehavior, gate_first_part: bool) -> Self {
+            Self {
+                inner,
+                behavior,
+                gate_first_part,
+                part_started: Arc::new(tokio::sync::Semaphore::new(0)),
+                part_release: Arc::new(tokio::sync::Semaphore::new(0)),
+                creates: AtomicU64::new(0),
+                parts: AtomicU64::new(0),
+                completes: AtomicU64::new(0),
+                aborts: AtomicU64::new(0),
+                abort_failures: AtomicU64::new(0),
+                missing_upload_ids: std::sync::Mutex::new(HashSet::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MultipartStore for TestMultipartStore {
+        async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+            self.creates.fetch_add(1, Ordering::Relaxed);
+            self.inner.create_multipart(path).await
+        }
+
+        async fn put_part(
+            &self,
+            path: &Path,
+            id: &MultipartId,
+            part_idx: usize,
+            data: PutPayload,
+        ) -> object_store::Result<PartId> {
+            if self
+                .missing_upload_ids
+                .lock()
+                .unwrap()
+                .contains(id.as_str())
+            {
+                return Err(object_store::Error::NotFound {
+                    path: path.to_string(),
+                    source: "provider multipart session is absent".into(),
+                });
+            }
+            let call = self.parts.fetch_add(1, Ordering::Relaxed);
+            if self.gate_first_part && call == 0 {
+                self.part_started.add_permits(1);
+                let permit = self.part_release.acquire().await.map_err(|_| {
+                    object_store::Error::Generic {
+                        store: "test",
+                        source: "multipart test gate closed".into(),
+                    }
+                })?;
+                permit.forget();
+            }
+            self.inner.put_part(path, id, part_idx, data).await
+        }
+
+        async fn complete_multipart(
+            &self,
+            path: &Path,
+            id: &MultipartId,
+            parts: Vec<PartId>,
+        ) -> object_store::Result<PutResult> {
+            self.completes.fetch_add(1, Ordering::Relaxed);
+            let result = self.inner.complete_multipart(path, id, parts).await?;
+            match self.behavior {
+                CompleteBehavior::Normal => Ok(result),
+                CompleteBehavior::ErrorAfterCommit => Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "response lost after commit".into(),
+                }),
+                CompleteBehavior::CorruptAfterCommit => {
+                    self.inner
+                        .put(path, Bytes::from_static(b"corrupt").into())
+                        .await?;
+                    Ok(result)
+                }
+            }
+        }
+
+        async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> object_store::Result<()> {
+            self.aborts.fetch_add(1, Ordering::Relaxed);
+            if self
+                .abort_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "transient abort failure".into(),
+                });
+            }
+            self.inner.abort_multipart(path, id).await
+        }
+    }
+
+    fn resumable_store(multipart: Arc<TestMultipartStore>) -> Store {
+        let inner: Arc<dyn ObjectStore> = multipart.inner.clone();
+        let multipart_handle: Arc<dyn MultipartStore> = multipart;
+        let identity = BucketIdentity::new(StorageProviderKind::S3, "s3.example.test", "bucket");
+        memory_store_with_inner(inner)
+            .with_bucket_identity(identity.clone())
+            .with_multipart(multipart_handle, identity)
+    }
+
+    fn memory_store_with_inner(inner: Arc<dyn ObjectStore>) -> Store {
+        Store::with_retry(
+            inner,
+            RetryPolicy {
+                max_attempts: 2,
+                base: Duration::from_millis(1),
+                cap: Duration::from_millis(5),
+            },
+        )
+    }
 
     fn memory_store() -> Store {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1843,6 +3070,65 @@ mod tests {
             cap: std::time::Duration::from_millis(5),
         };
         Store::with_retry(inner, policy)
+    }
+
+    #[tokio::test]
+    async fn heartbeat_refuses_to_poll_provider_after_ownership_is_lost() {
+        let journal = TestJournal::default();
+        let lease = crate::multipart::JournalLease {
+            entry_id: "retired-entry".into(),
+            owner_token: "former-owner".into(),
+        };
+        let provider_calls = AtomicU64::new(0);
+        let result = await_with_heartbeat(
+            &journal,
+            &lease,
+            &tokio_util::sync::CancellationToken::new(),
+            async { provider_calls.fetch_add(1, Ordering::Relaxed) },
+        )
+        .await;
+
+        assert!(matches!(result, Err(StorageError::StateConflict { .. })));
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_renews_ownership_through_a_slow_phase() {
+        use crate::multipart::MultipartJournal as _;
+
+        let journal = TestJournal::default();
+        let target = crate::multipart::MultipartTarget {
+            provider: "s3".into(),
+            host: "endpoint".into(),
+            container: "bucket".into(),
+            key: "key".into(),
+        };
+        let crate::multipart::JournalClaimOutcome::Acquired(claim) = journal
+            .claim(
+                &target,
+                &[0; 32],
+                &[0; 32],
+                0,
+                8,
+                "owner",
+                unix_now(),
+                MULTIPART_LEASE_DURATION,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("fresh journal must be acquirable");
+        };
+        await_with_heartbeat(
+            &journal,
+            &claim.lease,
+            &tokio_util::sync::CancellationToken::new(),
+            tokio::time::sleep(MULTIPART_HEARTBEAT_INTERVAL * 2 + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(journal.renewals.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
@@ -2302,6 +3588,576 @@ mod tests {
             store.head(&path).await,
             Err(StorageError::NotFound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_rejects_hash_before_claim_or_provider_creation() {
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::Normal,
+            false,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let journal = TestJournal::default();
+        let body = b"verified before provider state";
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+
+        let error = store
+            .put_multipart_file_resumable(
+                &Path::from("blobs/preverified"),
+                &source,
+                body.len() as u64,
+                [9; 32],
+                b"payload",
+                5,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .expect_err("wrong expected hash must fail before provider state exists");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert_eq!(journal.claims.load(Ordering::Relaxed), 0);
+        assert_eq!(multipart.creates.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn resumable_existing_object_retries_transient_body_read() {
+        let inner = Arc::new(InMemory::new());
+        let body = Bytes::from_static(b"already durable");
+        let path = Path::from("blobs/existing-after-transient-read");
+        inner.put(&path, body.clone().into()).await.unwrap();
+        let read_store: Arc<dyn ObjectStore> = Arc::new(FailFirstBodyGetStore {
+            inner: Arc::clone(&inner),
+            remaining_failures: AtomicU64::new(1),
+        });
+        let multipart: Arc<dyn MultipartStore> = inner;
+        let identity = BucketIdentity::new(StorageProviderKind::S3, "s3.example.test", "bucket");
+        let store = memory_store_with_inner(read_store)
+            .with_bucket_identity(identity.clone())
+            .with_multipart(multipart, identity);
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, &body).await.unwrap();
+        let journal = TestJournal::default();
+        let hash = *blake3::hash(&body).as_bytes();
+
+        let outcome = store
+            .put_multipart_file_resumable(
+                &path,
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                8,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            crate::multipart::ResumableUploadOutcome::AlreadyPresent
+        );
+        assert_eq!(journal.claims.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_multipart_abort_retries_transient_failure() {
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::Normal,
+            false,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let path = Path::from("blobs/abort-retry");
+        let upload_id = multipart.create_multipart(&path).await.unwrap();
+        multipart.abort_failures.store(1, Ordering::Relaxed);
+
+        store
+            .abort_explicit_multipart(&path, upload_id.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(multipart.aborts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_reuses_recorded_provider_parts() {
+        use crate::multipart::MultipartJournal as _;
+
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::Normal,
+            false,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let journal = TestJournal::default();
+        let path = Path::from("blobs/resume");
+        let body = b"resume exact provider parts";
+        let hash = *blake3::hash(body).as_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+        let target = store.multipart_target(&path).unwrap();
+        let now = unix_now();
+        let claim = match journal
+            .claim(
+                &target,
+                &hash,
+                &hash,
+                body.len() as u64,
+                8,
+                "first-owner",
+                now,
+                MULTIPART_LEASE_DURATION,
+            )
+            .await
+            .unwrap()
+        {
+            crate::multipart::JournalClaimOutcome::Acquired(claim) => claim,
+            crate::multipart::JournalClaimOutcome::Busy => panic!("new journal must be acquirable"),
+        };
+        let upload_id = multipart.create_multipart(&path).await.unwrap();
+        assert!(
+            journal
+                .bind_upload(
+                    &claim.lease,
+                    upload_id.as_ref(),
+                    now,
+                    MULTIPART_LEASE_DURATION,
+                )
+                .await
+                .unwrap()
+        );
+        let provider_part = multipart
+            .put_part(
+                &path,
+                &upload_id,
+                0,
+                Bytes::copy_from_slice(&body[..8]).into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .record_part(
+                    &claim.lease,
+                    &crate::multipart::JournalPart {
+                        part_idx: 0,
+                        content_id: provider_part.content_id,
+                        size: 8,
+                    },
+                    now,
+                    MULTIPART_LEASE_DURATION,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(journal.release_owned(&claim.lease, now).await.unwrap());
+
+        let outcome = store
+            .put_multipart_file_resumable(
+                &path,
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                8,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, crate::multipart::ResumableUploadOutcome::Resumed);
+        assert_eq!(multipart.creates.load(Ordering::Relaxed), 1);
+        assert_eq!(multipart.parts.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            store.get_with_etag(&path).await.unwrap().0,
+            Bytes::copy_from_slice(body)
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_replaces_missing_provider_session() {
+        use crate::multipart::MultipartJournal as _;
+
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::Normal,
+            false,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let journal = TestJournal::default();
+        let path = Path::from("blobs/provider-session-lost");
+        let body = b"provider session vanishes after one durable part";
+        let hash = *blake3::hash(body).as_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+        let target = store.multipart_target(&path).unwrap();
+        let now = unix_now();
+        let claim = match journal
+            .claim(
+                &target,
+                &hash,
+                &hash,
+                body.len() as u64,
+                8,
+                "first-owner",
+                now,
+                MULTIPART_LEASE_DURATION,
+            )
+            .await
+            .unwrap()
+        {
+            crate::multipart::JournalClaimOutcome::Acquired(claim) => claim,
+            crate::multipart::JournalClaimOutcome::Busy => panic!("new journal must be acquirable"),
+        };
+        let lost_upload_id = multipart.create_multipart(&path).await.unwrap();
+        assert!(
+            journal
+                .bind_upload(
+                    &claim.lease,
+                    lost_upload_id.as_ref(),
+                    now,
+                    MULTIPART_LEASE_DURATION,
+                )
+                .await
+                .unwrap()
+        );
+        let provider_part = multipart
+            .put_part(
+                &path,
+                &lost_upload_id,
+                0,
+                Bytes::copy_from_slice(&body[..8]).into(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .record_part(
+                    &claim.lease,
+                    &crate::multipart::JournalPart {
+                        part_idx: 0,
+                        content_id: provider_part.content_id,
+                        size: 8,
+                    },
+                    now,
+                    MULTIPART_LEASE_DURATION,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(journal.release_owned(&claim.lease, now).await.unwrap());
+        multipart
+            .abort_multipart(&path, &lost_upload_id)
+            .await
+            .unwrap();
+        multipart
+            .missing_upload_ids
+            .lock()
+            .unwrap()
+            .insert(lost_upload_id.to_string());
+        let credited = AtomicU64::new(0);
+        let on_part = |bytes| {
+            credited.fetch_add(bytes, Ordering::Relaxed);
+        };
+
+        let outcome = store
+            .put_multipart_file_resumable(
+                &path,
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                8,
+                &tokio_util::sync::CancellationToken::new(),
+                Some(&on_part),
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, crate::multipart::ResumableUploadOutcome::Uploaded);
+        assert_eq!(multipart.creates.load(Ordering::Relaxed), 2);
+        assert_eq!(credited.load(Ordering::Relaxed), body.len() as u64);
+        assert_eq!(
+            store.get_with_etag(&path).await.unwrap().0,
+            Bytes::copy_from_slice(body)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_resumable_uploads_have_one_provider_owner() {
+        use crate::multipart::MultipartJournal as _;
+
+        for resume_existing in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            let multipart = Arc::new(TestMultipartStore::new(
+                inner,
+                CompleteBehavior::Normal,
+                true,
+            ));
+            let store = resumable_store(Arc::clone(&multipart));
+            let journal = Arc::new(TestJournal::default());
+            let body = b"one owner completes this upload";
+            let hash = *blake3::hash(body).as_bytes();
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("payload");
+            tokio::fs::write(&source, body).await.unwrap();
+            let path = Path::from("blobs/concurrent");
+
+            if resume_existing {
+                let target = store.multipart_target(&path).unwrap();
+                let now = unix_now();
+                let crate::multipart::JournalClaimOutcome::Acquired(claim) = journal
+                    .claim(
+                        &target,
+                        &hash,
+                        &hash,
+                        body.len() as u64,
+                        64,
+                        "original",
+                        now,
+                        MULTIPART_LEASE_DURATION,
+                    )
+                    .await
+                    .unwrap()
+                else {
+                    panic!("new journal must be acquirable")
+                };
+                let upload_id = multipart.create_multipart(&path).await.unwrap();
+                assert!(
+                    journal
+                        .bind_upload(&claim.lease, &upload_id, now, MULTIPART_LEASE_DURATION)
+                        .await
+                        .unwrap()
+                );
+                assert!(journal.release_owned(&claim.lease, now).await.unwrap());
+            }
+
+            let first = {
+                let store = store.clone();
+                let journal = Arc::clone(&journal);
+                let source = source.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    store
+                        .put_multipart_file_resumable(
+                            &path,
+                            &source,
+                            body.len() as u64,
+                            hash,
+                            &hash,
+                            64,
+                            &tokio_util::sync::CancellationToken::new(),
+                            None,
+                            Some(journal.as_ref()),
+                        )
+                        .await
+                })
+            };
+            let started = multipart.part_started.acquire().await.unwrap();
+            started.forget();
+            let claims_before_second = journal.claims.load(Ordering::Relaxed);
+            let second = {
+                let store = store.clone();
+                let journal = Arc::clone(&journal);
+                let source = source.clone();
+                let path = path.clone();
+                tokio::spawn(async move {
+                    store
+                        .put_multipart_file_resumable(
+                            &path,
+                            &source,
+                            body.len() as u64,
+                            hash,
+                            &hash,
+                            64,
+                            &tokio_util::sync::CancellationToken::new(),
+                            None,
+                            Some(journal.as_ref()),
+                        )
+                        .await
+                })
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while journal.claims.load(Ordering::Relaxed) == claims_before_second {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            multipart.part_release.add_permits(1);
+            let first = first.await.unwrap().unwrap();
+            let second = second.await.unwrap().unwrap();
+
+            let expected = if resume_existing {
+                crate::multipart::ResumableUploadOutcome::Resumed
+            } else {
+                crate::multipart::ResumableUploadOutcome::Uploaded
+            };
+            assert_eq!(first, expected);
+            assert_eq!(
+                second,
+                crate::multipart::ResumableUploadOutcome::AlreadyPresent
+            );
+            assert_eq!(multipart.creates.load(Ordering::Relaxed), 1);
+            assert_eq!(multipart.completes.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_upload_releases_lease_and_resumes_same_provider_session() {
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::Normal,
+            true,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let journal = Arc::new(TestJournal::default());
+        let body = b"interrupted upload resumes its provider session";
+        let hash = *blake3::hash(body).as_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+        let path = Path::from("blobs/interrupted");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let interrupted = {
+            let store = store.clone();
+            let journal = Arc::clone(&journal);
+            let source = source.clone();
+            let path = path.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                store
+                    .put_multipart_file_resumable(
+                        &path,
+                        &source,
+                        body.len() as u64,
+                        hash,
+                        &hash,
+                        64,
+                        &cancel,
+                        None,
+                        Some(journal.as_ref()),
+                    )
+                    .await
+            })
+        };
+        let started = multipart.part_started.acquire().await.unwrap();
+        started.forget();
+        cancel.cancel();
+        assert!(matches!(
+            interrupted.await.unwrap(),
+            Err(StorageError::Cancelled)
+        ));
+        assert!(journal.row.lock().unwrap().is_some());
+
+        let outcome = store
+            .put_multipart_file_resumable(
+                &path,
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                64,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(journal.as_ref()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, crate::multipart::ResumableUploadOutcome::Resumed);
+        assert_eq!(multipart.creates.load(Ordering::Relaxed), 1);
+        assert_eq!(multipart.completes.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn uncertain_completion_is_accepted_only_after_canonical_readback() {
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::ErrorAfterCommit,
+            false,
+        ));
+        let store = resumable_store(multipart);
+        let journal = TestJournal::default();
+        let body = b"provider committed before response was lost";
+        let hash = *blake3::hash(body).as_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+
+        let outcome = store
+            .put_multipart_file_resumable(
+                &Path::from("blobs/uncertain"),
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                9,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::multipart::ResumableUploadOutcome::Uploaded);
+        assert!(journal.row.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupt_provider_completion_is_repaired_once_then_rejected() {
+        let inner = Arc::new(InMemory::new());
+        let multipart = Arc::new(TestMultipartStore::new(
+            inner,
+            CompleteBehavior::CorruptAfterCommit,
+            false,
+        ));
+        let store = resumable_store(Arc::clone(&multipart));
+        let journal = TestJournal::default();
+        let body = b"provider returns the wrong canonical bytes";
+        let hash = *blake3::hash(body).as_bytes();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("payload");
+        tokio::fs::write(&source, body).await.unwrap();
+
+        let error = store
+            .put_multipart_file_resumable(
+                &Path::from("blobs/corrupt-complete"),
+                &source,
+                body.len() as u64,
+                hash,
+                &hash,
+                11,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+                Some(&journal),
+            )
+            .await
+            .expect_err("two corrupt completions must not be accepted");
+
+        assert!(matches!(error, StorageError::CorruptObject { .. }));
+        assert_eq!(multipart.creates.load(Ordering::Relaxed), 2);
+        assert_eq!(multipart.completes.load(Ordering::Relaxed), 2);
+        assert!(journal.row.lock().unwrap().is_none());
     }
 
     #[tokio::test]

@@ -42,6 +42,12 @@ failure signal.
 3. Missing chunks are packed into xorbs and uploaded.
 4. The remote ref is updated only after required data is available.
 
+When a push produces multiple Git packs, Crab uploads up to four pack
+transactions concurrently, bounded further by the configured upload concurrency.
+Each transaction installs and verifies its pack before publishing its index and
+metadata. A failure stops new transactions, waits for active transactions to
+finish, and leaves the remote refs unchanged.
+
 ## Verify publication
 
 Check the ref and repository closure after a successful push:
@@ -65,7 +71,9 @@ another job will hydrate the result.
 ## Failure Recovery
 
 - If upload fails, fix the cause and run `crab push` again. Already uploaded
-  chunks are skipped.
+  chunks are skipped. Eligible file-backed S3 and GCS uploads also reuse
+  journaled provider parts; completion is accepted only after the canonical
+  object passes size and Blake3 read-back verification.
 - If a teammate cannot hydrate a file, run `crab fsck` locally and confirm the
   producing machine completed `crab push`.
 - Use `crab logs` for detailed diagnostics when a push fails in CI.

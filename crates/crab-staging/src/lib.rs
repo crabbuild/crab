@@ -51,6 +51,11 @@ pub mod shard_replay;
 pub mod stats;
 pub mod stream;
 
+pub use multipart_resume::{
+    AbandonedClaim, AbandonedUpload, ClaimOutcome, CompletedPart, MultipartClaim, MultipartLease,
+    MultipartRegistry, MultipartTarget,
+};
+
 #[cfg(test)]
 #[path = "../tests/unit/prop_compaction_preserves_reads.rs"]
 mod prop_compaction_preserves_reads;
@@ -1496,7 +1501,10 @@ async fn read_prepared_staged_chunks_batch(
                         expected_hash.hex()
                     )));
                 }
-                decoded.push((position, chunk.data));
+                // Parser chunks are slices of the full serialized xorb. The
+                // caller can retain this batch while packing other sources,
+                // so detach each requested chunk before dropping the parser.
+                decoded.push((position, Bytes::copy_from_slice(&chunk.data)));
             }
             Ok::<_, StagingError>((expected_bytes, decoded))
         });
@@ -4982,6 +4990,12 @@ mod tests {
             .expect("read prepared source")
             .expect("one source group");
         assert_eq!(decoded.len(), chunks.len());
+        for (_, _, data) in decoded {
+            assert!(
+                data.try_into_mut().is_ok(),
+                "each decoded chunk must own its allocation instead of retaining the source xorb"
+            );
+        }
         assert!(
             plan.read_next(1, 1)
                 .await

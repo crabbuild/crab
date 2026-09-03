@@ -2,7 +2,8 @@
 //!
 //! Checks Crab manifests, pack/index presence, data-chain metadata, and
 //! coordination state. The production object-store checker does not yet run
-//! full Git connectivity or enumerate provider-side multipart uploads.
+//! full Git connectivity or enumerate multipart uploads outside Crab's local
+//! recovery journal.
 
 use std::io::Stdout;
 use std::time::{Duration, SystemTime};
@@ -80,7 +81,12 @@ pub enum IssueKind {
     ExpiredPushLock { key: String, age: Duration },
     /// A multipart upload older than the grace period.
     AbandonedMultipart {
-        upload_id: String,
+        entry_id: String,
+        revision: i64,
+        upload_id: Option<String>,
+        provider: String,
+        host: String,
+        container: String,
         key: String,
         age: Duration,
     },
@@ -216,15 +222,16 @@ impl FsckIssue {
         }
     }
 
-    pub(crate) fn abandoned_multipart(
-        upload_id: impl Into<String>,
-        key: impl Into<String>,
-        age: Duration,
-    ) -> Self {
+    pub(crate) fn abandoned_multipart(upload: &MultipartMeta, age: Duration) -> Self {
         Self {
             kind: IssueKind::AbandonedMultipart {
-                upload_id: upload_id.into(),
-                key: key.into(),
+                entry_id: upload.entry_id.clone(),
+                revision: upload.revision,
+                upload_id: upload.upload_id.clone(),
+                provider: upload.provider.clone(),
+                host: upload.host.clone(),
+                container: upload.container.clone(),
+                key: upload.key.clone(),
                 age,
             },
             severity: IssueSeverity::Error,
@@ -309,12 +316,17 @@ impl std::fmt::Display for FsckIssue {
             }
             IssueKind::AbandonedMultipart {
                 upload_id,
+                provider,
+                host,
+                container,
                 key,
                 age,
+                ..
             } => {
                 write!(
                     f,
-                    "{prefix}: abandoned multipart upload {upload_id} for {key} (age: {}s)",
+                    "{prefix}: abandoned multipart upload {} for {provider} endpoint {host}, container {container}, key {key} (age: {}s)",
+                    upload_id.as_deref().unwrap_or("<not-created>"),
                     age.as_secs()
                 )
             }
@@ -409,12 +421,22 @@ pub struct PushLockMeta {
 /// Metadata for a multipart upload discovered during fsck.
 #[derive(Debug, Clone)]
 pub struct MultipartMeta {
+    /// Stable local journal row ID used for an atomic repair claim.
+    pub entry_id: String,
+    /// Journal revision observed by the checker; repair claims exactly it.
+    pub revision: i64,
     /// Upload ID from the object store.
-    pub upload_id: String,
+    pub upload_id: Option<String>,
+    /// Provider owning the upload.
+    pub provider: String,
+    /// Provider endpoint/host identity.
+    pub host: String,
+    /// Bucket or container owning the upload.
+    pub container: String,
     /// Target key for the upload.
     pub key: String,
-    /// When the upload was initiated.
-    pub initiated: SystemTime,
+    /// Last journal activity used to classify the upload as abandoned.
+    pub last_updated: SystemTime,
 }
 
 /// Trait abstracting the storage queries needed by fsck.
@@ -495,8 +517,7 @@ pub trait FsckRepairer: Send + Sync {
     /// Abort an abandoned multipart upload.
     fn abort_multipart(
         &self,
-        upload_id: &str,
-        key: &str,
+        upload: MultipartMeta,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>;
 }
 
@@ -528,8 +549,7 @@ impl FsckRepairer for NullRepairer {
 
     fn abort_multipart(
         &self,
-        _upload_id: &str,
-        _key: &str,
+        _upload: MultipartMeta,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>> {
         Box::pin(async { Ok(false) })
     }
@@ -603,13 +623,9 @@ pub async fn run_fsck(
         Ok(uploads) => {
             for upload in uploads {
                 let age = now
-                    .duration_since(upload.initiated)
+                    .duration_since(upload.last_updated)
                     .unwrap_or(Duration::ZERO);
-                all_issues.push(FsckIssue::abandoned_multipart(
-                    &upload.upload_id,
-                    &upload.key,
-                    age,
-                ));
+                all_issues.push(FsckIssue::abandoned_multipart(&upload, age));
             }
         }
         Err(e) => warn!(error = %e, "multipart upload check failed"),
@@ -728,17 +744,33 @@ async fn repair_issues(
                 repairer.repair_push_lock(key).await
             }
             IssueKind::AbandonedMultipart {
+                entry_id,
+                revision,
                 upload_id,
+                provider,
+                host,
+                container,
                 key,
                 age,
             } => {
                 info!(
-                    upload_id = %upload_id,
+                    upload_id = upload_id.as_deref().unwrap_or("<not-created>"),
                     key = %key,
                     age_secs = age.as_secs(),
                     "repairing: aborting abandoned multipart upload"
                 );
-                repairer.abort_multipart(upload_id, key).await
+                repairer
+                    .abort_multipart(MultipartMeta {
+                        entry_id: entry_id.clone(),
+                        revision: *revision,
+                        upload_id: upload_id.clone(),
+                        provider: provider.clone(),
+                        host: host.clone(),
+                        container: container.clone(),
+                        key: key.clone(),
+                        last_updated: SystemTime::UNIX_EPOCH,
+                    })
+                    .await
             }
             IssueKind::GitVisibilityBackfill {
                 generation, digest, ..
@@ -858,7 +890,7 @@ mod tests {
     struct MockRepairer {
         repaired_file_indexes: std::sync::Mutex<Vec<String>>,
         repaired_locks: std::sync::Mutex<Vec<String>>,
-        aborted_multiparts: std::sync::Mutex<Vec<(String, String)>>,
+        aborted_multiparts: std::sync::Mutex<Vec<(Option<String>, String)>>,
     }
 
     impl MockRepairer {
@@ -905,14 +937,26 @@ mod tests {
 
         fn abort_multipart(
             &self,
-            upload_id: &str,
-            key: &str,
+            upload: MultipartMeta,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send + '_>>
         {
             if let Ok(mut v) = self.aborted_multiparts.lock() {
-                v.push((upload_id.to_string(), key.to_string()));
+                v.push((upload.upload_id, upload.key));
             }
             Box::pin(async { Ok(true) })
+        }
+    }
+
+    fn multipart_meta(upload_id: &str, key: &str, last_updated: SystemTime) -> MultipartMeta {
+        MultipartMeta {
+            entry_id: format!("entry-{upload_id}"),
+            revision: 0,
+            upload_id: Some(upload_id.to_owned()),
+            provider: "s3".to_owned(),
+            host: "s3.example.test".to_owned(),
+            container: "bucket".to_owned(),
+            key: key.to_owned(),
+            last_updated,
         }
     }
 
@@ -961,11 +1005,11 @@ mod tests {
                 created: now - Duration::from_secs(7200),
                 ttl: Duration::from_secs(3600),
             }],
-            multipart_uploads: vec![MultipartMeta {
-                upload_id: "mp-123".to_string(),
-                key: "xorbs/ab/partial".to_string(),
-                initiated: now - Duration::from_secs(86400),
-            }],
+            multipart_uploads: vec![multipart_meta(
+                "mp-123",
+                "xorbs/ab/partial",
+                now - Duration::from_secs(86400),
+            )],
             shard_divergence_issues: vec![FsckIssue::shard_list_divergence("shards/ef/divergent")],
             orphan_file_index_issues: vec![FsckIssue::orphan_file_index("file-index/gh/orphan1")],
         };
@@ -1057,11 +1101,11 @@ mod tests {
     async fn fsck_repair_aborts_abandoned_multiparts() {
         let now = SystemTime::now();
         let checker = MockChecker {
-            multipart_uploads: vec![MultipartMeta {
-                upload_id: "mp-old".to_string(),
-                key: "xorbs/ab/stale".to_string(),
-                initiated: now - Duration::from_secs(172800),
-            }],
+            multipart_uploads: vec![multipart_meta(
+                "mp-old",
+                "xorbs/ab/stale",
+                now - Duration::from_secs(172800),
+            )],
             ..MockChecker::default()
         };
         let repairer = MockRepairer::new();
@@ -1087,7 +1131,7 @@ mod tests {
         assert_eq!(aborted.len(), 1);
         assert_eq!(
             aborted[0],
-            ("mp-old".to_string(), "xorbs/ab/stale".to_string())
+            (Some("mp-old".to_string()), "xorbs/ab/stale".to_string())
         );
     }
 
@@ -1215,8 +1259,9 @@ mod tests {
             FsckIssue::expired_push_lock("k", Duration::from_secs(1)).severity,
             IssueSeverity::Error
         );
+        let multipart = multipart_meta("u", "k", SystemTime::UNIX_EPOCH);
         assert_eq!(
-            FsckIssue::abandoned_multipart("u", "k", Duration::from_secs(1)).severity,
+            FsckIssue::abandoned_multipart(&multipart, Duration::from_secs(1)).severity,
             IssueSeverity::Error
         );
         assert_eq!(
@@ -1239,7 +1284,8 @@ mod tests {
         assert!(!FsckIssue::orphan_shard("k").repairable);
         assert!(!FsckIssue::pack_list_divergence("k").repairable);
         assert!(FsckIssue::expired_push_lock("k", Duration::from_secs(1)).repairable);
-        assert!(FsckIssue::abandoned_multipart("u", "k", Duration::from_secs(1)).repairable);
+        let multipart = multipart_meta("u", "k", SystemTime::UNIX_EPOCH);
+        assert!(FsckIssue::abandoned_multipart(&multipart, Duration::from_secs(1)).repairable);
         assert!(!FsckIssue::shard_list_divergence("k").repairable);
         assert!(!FsckIssue::orphan_file_index("k").repairable);
     }

@@ -3998,9 +3998,34 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
             crab::core::remote_layout::open(&store, &router).await?;
 
-            let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone());
+            let multipart_journal_path =
+                crab::git::discover::resolve_main_worktree_root().map(|root| {
+                    root.join(".crab")
+                        .join("staging")
+                        .join("multipart-uploads.sqlite3")
+                });
+            let multipart_journal = match multipart_journal_path {
+                Some(path) if path.try_exists()? => Some(
+                    tokio::task::spawn_blocking(move || {
+                        crab_staging::MultipartRegistry::open(&path)
+                    })
+                    .await
+                    .map_err(|error| {
+                        crab::core::error::CrabError::Io(std::io::Error::other(error))
+                    })??,
+                ),
+                _ => None,
+            }
+            .map(|registry| {
+                std::sync::Arc::new(crab::storage::store::MultipartJournal::new(registry))
+            });
+            let checker = crab::cmd::fsck_store::StoreChecker::new(store.clone(), prefix.clone())
+                .with_multipart_journal(multipart_journal.clone());
             let repairer: Box<dyn crab::cmd::fsck::FsckRepairer> = if repair {
-                Box::new(crab::cmd::fsck_store::StoreRepairer::new(store, prefix))
+                Box::new(
+                    crab::cmd::fsck_store::StoreRepairer::new(store, prefix)
+                        .with_multipart_journal(multipart_journal),
+                )
             } else {
                 Box::new(crab::cmd::fsck::NullRepairer)
             };

@@ -125,6 +125,14 @@ pub enum StorageError {
     #[error("storage operation cancelled")]
     Cancelled,
 
+    /// Local multipart recovery journal failed.
+    #[error("multipart recovery journal failed during {operation}: {source}")]
+    MultipartJournal {
+        operation: &'static str,
+        #[source]
+        source: crate::multipart::JournalError,
+    },
+
     /// Raw object-store error that was not classified more specifically.
     #[error("object store error: {source}")]
     ObjectStore {

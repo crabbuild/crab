@@ -6,11 +6,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
+use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
 use object_store::signer::Signer;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta,
+    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
@@ -22,6 +23,8 @@ use crate::Result;
 pub struct RefreshingStoreParts {
     pub inner: Arc<dyn ObjectStore>,
     pub signer: Option<Arc<dyn Signer>>,
+    pub multipart: Option<Arc<dyn MultipartStore>>,
+    pub multipart_identity: Option<crab_storage::BucketIdentity>,
 }
 
 impl Clone for RefreshingStoreParts {
@@ -29,6 +32,8 @@ impl Clone for RefreshingStoreParts {
         Self {
             inner: Arc::clone(&self.inner),
             signer: self.signer.as_ref().map(Arc::clone),
+            multipart: self.multipart.as_ref().map(Arc::clone),
+            multipart_identity: self.multipart_identity.clone(),
         }
     }
 }
@@ -92,6 +97,11 @@ where
         self.state.read().await.signer.is_some()
     }
 
+    pub async fn has_multipart(&self) -> bool {
+        let state = self.state.read().await;
+        state.multipart.is_some() && state.multipart_identity.is_some()
+    }
+
     async fn parts_for_operation(&self) -> object_store::Result<RefreshingStoreParts> {
         if self.provider.needs_refresh() {
             self.refresh_parts(false).await
@@ -120,6 +130,17 @@ where
             .await
             .map_err(to_object_store_error)?;
         let parts = (self.build)(resolution).map_err(to_object_store_error)?;
+        let current_identity = self.state.read().await.multipart_identity.clone();
+        if parts.multipart_identity != current_identity {
+            return Err(object_store::Error::Generic {
+                store: "refreshing",
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "refreshed credentials changed the multipart destination",
+                )
+                .into(),
+            });
+        }
         *self.state.write().await = parts.clone();
         Ok(parts)
     }
@@ -303,6 +324,73 @@ where
     }
 }
 
+#[async_trait]
+impl<P> MultipartStore for RefreshingObjectStore<P>
+where
+    P: CredentialProvider + ?Sized + 'static,
+{
+    async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+        self.retryable_multipart_unary(|multipart| {
+            let path = path.clone();
+            async move { multipart.create_multipart(&path).await }
+        })
+        .await
+    }
+
+    async fn create_multipart_opts(
+        &self,
+        path: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<MultipartId> {
+        self.retryable_multipart_unary(|multipart| {
+            let path = path.clone();
+            let opts = opts.clone();
+            async move { multipart.create_multipart_opts(&path, opts).await }
+        })
+        .await
+    }
+
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> object_store::Result<PartId> {
+        self.retryable_multipart_unary(|multipart| {
+            let path = path.clone();
+            let id = id.clone();
+            let data = data.clone();
+            async move { multipart.put_part(&path, &id, part_idx, data).await }
+        })
+        .await
+    }
+
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> object_store::Result<PutResult> {
+        self.retryable_multipart_unary(|multipart| {
+            let path = path.clone();
+            let id = id.clone();
+            let parts = parts.clone();
+            async move { multipart.complete_multipart(&path, &id, parts).await }
+        })
+        .await
+    }
+
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> object_store::Result<()> {
+        self.retryable_multipart_unary(|multipart| {
+            let path = path.clone();
+            let id = id.clone();
+            async move { multipart.abort_multipart(&path, &id).await }
+        })
+        .await
+    }
+}
+
 impl<P> RefreshingObjectStore<P>
 where
     P: CredentialProvider + ?Sized,
@@ -324,6 +412,24 @@ where
             Err(err) => Err(err),
         }
     }
+
+    async fn retryable_multipart_unary<T, F, Fut>(&self, op: F) -> object_store::Result<T>
+    where
+        F: Fn(Arc<dyn MultipartStore>) -> Fut,
+        Fut: Future<Output = object_store::Result<T>>,
+    {
+        let parts = self.parts_for_operation().await?;
+        let multipart = parts.multipart.ok_or_else(multipart_not_supported)?;
+        match op(Arc::clone(&multipart)).await {
+            Ok(value) => Ok(value),
+            Err(error) if self.should_retry_auth_error(&error) => {
+                let parts = self.refresh_parts(true).await?;
+                let multipart = parts.multipart.ok_or_else(multipart_not_supported)?;
+                op(Arc::clone(&multipart)).await
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 fn signer_not_supported() -> object_store::Error {
@@ -331,6 +437,16 @@ fn signer_not_supported() -> object_store::Error {
         source: std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "current refreshed backend cannot sign URLs",
+        )
+        .into(),
+    }
+}
+
+fn multipart_not_supported() -> object_store::Error {
+    object_store::Error::NotSupported {
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "current refreshed backend has no stable multipart upload IDs",
         )
         .into(),
     }
@@ -417,6 +533,57 @@ mod tests {
         generation: usize,
         unauth_once: bool,
         forbidden: bool,
+    }
+
+    struct MockMultipart {
+        generation: usize,
+        unauthenticated: bool,
+    }
+
+    #[async_trait]
+    impl MultipartStore for MockMultipart {
+        async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+            if self.unauthenticated {
+                return Err(object_store::Error::Unauthenticated {
+                    path: path.to_string(),
+                    source: "expired".into(),
+                });
+            }
+            Ok(format!("gen-{}", self.generation))
+        }
+
+        async fn put_part(
+            &self,
+            _path: &Path,
+            _id: &MultipartId,
+            _part_idx: usize,
+            _data: PutPayload,
+        ) -> object_store::Result<PartId> {
+            Ok(PartId {
+                content_id: format!("gen-{}", self.generation),
+            })
+        }
+
+        async fn complete_multipart(
+            &self,
+            _path: &Path,
+            _id: &MultipartId,
+            _parts: Vec<PartId>,
+        ) -> object_store::Result<PutResult> {
+            Ok(PutResult {
+                e_tag: Some(format!("gen-{}", self.generation)),
+                version: None,
+                extensions: Default::default(),
+            })
+        }
+
+        async fn abort_multipart(
+            &self,
+            _path: &Path,
+            _id: &MultipartId,
+        ) -> object_store::Result<()> {
+            Ok(())
+        }
     }
 
     impl fmt::Display for MockStore {
@@ -534,6 +701,7 @@ mod tests {
         build_count: Arc<AtomicUsize>,
         initial: RefreshingStoreParts,
     ) -> RefreshingObjectStore<MockProvider> {
+        let multipart_identity = initial.multipart_identity.clone();
         let builder = Arc::new(move |_creds| {
             let generation = build_count.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(RefreshingStoreParts {
@@ -543,6 +711,11 @@ mod tests {
                     forbidden: false,
                 }),
                 signer: None,
+                multipart: Some(Arc::new(MockMultipart {
+                    generation,
+                    unauthenticated: false,
+                })),
+                multipart_identity: multipart_identity.clone(),
             })
         });
         RefreshingObjectStore::new(
@@ -570,6 +743,8 @@ mod tests {
                     forbidden: false,
                 }),
                 signer: None,
+                multipart: None,
+                multipart_identity: None,
             },
         );
 
@@ -599,6 +774,8 @@ mod tests {
                     forbidden: false,
                 }),
                 signer: None,
+                multipart: None,
+                multipart_identity: None,
             },
         );
 
@@ -627,6 +804,8 @@ mod tests {
                     forbidden: true,
                 }),
                 signer: None,
+                multipart: None,
+                multipart_identity: None,
             },
         );
 
@@ -654,6 +833,8 @@ mod tests {
                     forbidden: false,
                 }),
                 signer: None,
+                multipart: None,
+                multipart_identity: None,
             },
         );
         let raw: Arc<dyn ObjectStore> = Arc::new(store);
@@ -667,5 +848,99 @@ mod tests {
             .unwrap();
         assert_eq!(got, Bytes::from_static(b"gen-1"));
         assert_eq!(provider.resolve_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_handle_refreshes_after_unauthenticated_response() {
+        let provider = Arc::new(MockProvider::default());
+        let build_count = Arc::new(AtomicUsize::new(0));
+        let store = wrapper(
+            Arc::clone(&provider),
+            Arc::clone(&build_count),
+            RefreshingStoreParts {
+                inner: Arc::new(MockStore {
+                    generation: 0,
+                    unauth_once: false,
+                    forbidden: false,
+                }),
+                signer: None,
+                multipart: Some(Arc::new(MockMultipart {
+                    generation: 0,
+                    unauthenticated: true,
+                })),
+                multipart_identity: Some(crab_storage::BucketIdentity::new(
+                    crab_storage::StorageProviderKind::S3,
+                    "endpoint-a",
+                    "bucket",
+                )),
+            },
+        );
+
+        let upload_id = store.create_multipart(&Path::from("object")).await.unwrap();
+
+        assert_eq!(upload_id, "gen-1");
+        assert_eq!(provider.resolve_count.load(Ordering::SeqCst), 1);
+        assert_eq!(build_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_refresh_rejects_changed_destination() {
+        let provider = Arc::new(MockProvider::default());
+        provider.needs_refresh.store(true, Ordering::SeqCst);
+        let initial_identity = crab_storage::BucketIdentity::new(
+            crab_storage::StorageProviderKind::S3,
+            "endpoint-a",
+            "bucket",
+        );
+        let builder = Arc::new(move |_creds| {
+            Ok(RefreshingStoreParts {
+                inner: Arc::new(MockStore {
+                    generation: 1,
+                    unauth_once: false,
+                    forbidden: false,
+                }),
+                signer: None,
+                multipart: Some(Arc::new(MockMultipart {
+                    generation: 1,
+                    unauthenticated: false,
+                })),
+                multipart_identity: Some(crab_storage::BucketIdentity::new(
+                    crab_storage::StorageProviderKind::S3,
+                    "endpoint-b",
+                    "bucket",
+                )),
+            })
+        });
+        let store = RefreshingObjectStore::new(
+            provider,
+            "bucket".into(),
+            "repo".into(),
+            "fetch".into(),
+            RefreshingStoreParts {
+                inner: Arc::new(MockStore {
+                    generation: 0,
+                    unauth_once: false,
+                    forbidden: false,
+                }),
+                signer: None,
+                multipart: Some(Arc::new(MockMultipart {
+                    generation: 0,
+                    unauthenticated: false,
+                })),
+                multipart_identity: Some(initial_identity),
+            },
+            builder,
+        );
+
+        let error = store
+            .create_multipart(&Path::from("object"))
+            .await
+            .expect_err("destination changes must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed the multipart destination")
+        );
     }
 }

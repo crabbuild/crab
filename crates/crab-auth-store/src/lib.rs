@@ -90,9 +90,13 @@ pub fn build_store_from_transfer_grant(
                 direct.endpoint.as_deref().unwrap_or(&direct.container),
                 &direct.container,
             );
+            let multipart_identity = built.multipart_identity;
             let mut store = Store::new(built.inner).with_bucket_identity(identity);
             if let Some(signer) = built.signer {
                 store = store.with_signer(signer);
+            }
+            if let (Some(multipart), Some(identity)) = (built.multipart, multipart_identity) {
+                store = store.with_multipart(multipart, identity);
             }
             store
         }
@@ -194,9 +198,13 @@ pub fn build_object_store_from_credentials(
 pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials) -> Result<Store> {
     let built = build_object_store_from_credentials(bucket, credentials)?;
     let identity = crab_storage::BucketIdentity::new(built.provider, bucket, bucket);
+    let multipart_identity = built.multipart_identity;
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
+    }
+    if let (Some(multipart), Some(identity)) = (built.multipart, multipart_identity) {
+        store = store.with_multipart(multipart, identity);
     }
     Ok(store)
 }

@@ -94,6 +94,7 @@ pub fn retry_class(err: &StorageError) -> RetryClass {
         | StorageError::NoCredentials
         | StorageError::Forbidden { .. }
         | StorageError::Cancelled
+        | StorageError::MultipartJournal { .. }
         | StorageError::Internal(_) => RetryClass::Fatal,
     }
 }
