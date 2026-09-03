@@ -51,6 +51,7 @@ crab fsck
 | Issue | Description | Auto-repairable |
 |-------|-------------|:---:|
 | Expired push lock | Lock from a crashed process | ✓ |
+| Abandoned Crab multipart upload | Expired journal lease for an incomplete S3 or GCS upload | ✓ |
 | Orphan shard | Shard not referenced by any file index | ✗ |
 | Shard list divergence | Shard list doesn't match actual shards | ✗ |
 
@@ -62,12 +63,15 @@ crab fsck --repair
 
 Repair is conservative:
 - Expired locks are deleted
+- Journaled multipart sessions are aborted only when the current provider
+  endpoint, container, and key exactly match the recorded destination and the
+  journal row still has the revision observed by the check
 - Derivable historical Git visibility proofs can be rebuilt
 
 Repair is limited to issues explicitly marked repairable. Missing content
-requires history, replica, cache, or backup recovery. Provider-side incomplete
-multipart uploads require a provider lifecycle rule because the generic
-object-store API cannot enumerate them.
+requires history, replica, cache, or backup recovery. Multipart sessions not
+created through Crab's resumable journal still require a provider lifecycle
+rule because the generic object-store API cannot enumerate them.
 
 ## Verify after repair
 

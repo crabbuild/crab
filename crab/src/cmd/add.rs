@@ -122,6 +122,26 @@ struct StagedEntry {
     index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
 }
 
+struct IndexPublicationEntry {
+    batch_id: Option<crab_staging::StagingBatchId>,
+    abs_path: PathBuf,
+    file_hash: [u8; 32],
+    size: u64,
+    index_stat: Option<crate::cmd::stream_stage::VerifiedIndexStat>,
+}
+
+impl From<&StagedEntry> for IndexPublicationEntry {
+    fn from(entry: &StagedEntry) -> Self {
+        Self {
+            batch_id: entry.batch_id.clone(),
+            abs_path: entry.abs_path.clone(),
+            file_hash: entry.file_hash,
+            size: entry.size,
+            index_stat: entry.index_stat,
+        }
+    }
+}
+
 struct AddExecutionPlans {
     duplicate_plan: DuplicateReusePlan,
     stream_xorb_plan: Option<StreamPreparedXorbPlan>,
@@ -1413,95 +1433,127 @@ async fn execute_add(
         // ticks up to `total_files` as each pointer is staged.
         progress.files_done.store(0, Relaxed);
 
-        // Load the persistent shard-hint cache so newly-emitted pointers
-        // carry a hint when one is known. Failure to load is non-fatal
-        // — an empty cache degrades to the file-index path on hydrate.
-        let shard_hints = crate::cache::ShardHintCache::load_sync(
-            &crate::cache::shard_hints::default_path(),
-        )
-        .unwrap_or_else(|err| {
-            debug!(error = %err, "failed to load shard-hint cache; pointers will omit hints");
-            crate::cache::ShardHintCache::new()
-        });
-
         let publication_staging = StagingAreaReadOnly::open(staging_root.clone()).await?;
-        let mut publication_intent = None;
+        let index_entries = staged_entries
+            .iter()
+            .map(IndexPublicationEntry::from)
+            .collect::<Vec<_>>();
+        let index_repo_root = repo_root.clone();
+        let tracking_patterns = generated_tracking_patterns.clone();
         let progress_cb = Arc::clone(&progress);
-        if let Err(e) = write_pointers_and_tracking_to_git_index(
-            &staged_entries,
-            &repo_root,
-            &shard_hints,
-            &generated_tracking_patterns,
-            |index_entries, current_index| {
-                let entries = staged_entries
-                    .iter()
-                    .zip(index_entries)
-                    .map(|(staged, indexed)| {
-                        let batch_id = staged.batch_id.clone().ok_or_else(|| {
-                            CrabError::StagingCorrupt(format!(
-                                "staged path {} has no publication batch",
-                                staged.abs_path.display()
-                            ))
-                        })?;
-                        let path = staged
-                            .abs_path
-                            .strip_prefix(&repo_root)
-                            .unwrap_or(&staged.abs_path)
-                            .to_path_buf();
-                        let index_path = git_index_path_bstring(&path);
-                        Ok(PublicationIntentEntry {
-                            batch_id,
-                            path,
-                            expected_pointer_oid: indexed.sha.clone(),
-                            previous_index_state: git_index_path_state(
-                                current_index,
-                                index_path.as_bstr(),
-                            ),
+        let index_result = tokio::task::spawn_blocking(move || {
+            let shard_hints = crate::cache::ShardHintCache::load_sync(
+                &crate::cache::shard_hints::default_path(),
+            )
+            .unwrap_or_else(|err| {
+                debug!(error = %err, "failed to load shard-hint cache; pointers will omit hints");
+                crate::cache::ShardHintCache::new()
+            });
+            let mut publication_intent = None;
+            let write_result = write_pointers_and_tracking_to_git_index(
+                &index_entries,
+                &index_repo_root,
+                &shard_hints,
+                &tracking_patterns,
+                |git_entries, current_index| {
+                    let entries = index_entries
+                        .iter()
+                        .zip(git_entries)
+                        .map(|(staged, indexed)| {
+                            let batch_id = staged.batch_id.clone().ok_or_else(|| {
+                                CrabError::StagingCorrupt(format!(
+                                    "staged path {} has no publication batch",
+                                    staged.abs_path.display()
+                                ))
+                            })?;
+                            let path = staged
+                                .abs_path
+                                .strip_prefix(&index_repo_root)
+                                .unwrap_or(&staged.abs_path)
+                                .to_path_buf();
+                            let index_path = git_index_path_bstring(&path);
+                            Ok(PublicationIntentEntry {
+                                batch_id,
+                                path,
+                                expected_pointer_oid: indexed.sha.clone(),
+                                previous_index_state: git_index_path_state(
+                                    current_index,
+                                    index_path.as_bstr(),
+                                ),
+                            })
                         })
+                        .collect::<Result<Vec<_>>>()?;
+                    publication_intent =
+                        Some(publication_staging.create_publication_intent(&entries)?);
+                    Ok(())
+                },
+                || {
+                    progress_cb.files_done.fetch_add(1, Relaxed);
+                },
+            );
+            if let Err(error) = write_result {
+                return Err((error, publication_intent));
+            }
+            let Some(publication_intent) = publication_intent else {
+                return Err((
+                    GitIndexWriteError::IndexMutationUncertain(CrabError::Internal(
+                        "Git index publication intent was not recorded".to_owned(),
+                    )),
+                    None,
+                ));
+            };
+            if let Err(error) = publication_staging.publish_publication_intent(&publication_intent)
+            {
+                return Err((
+                    GitIndexWriteError::IndexMutationUncertain(error.into()),
+                    Some(publication_intent),
+                ));
+            }
+
+            let verified_paths = index_entries
+                .iter()
+                .filter_map(|entry| {
+                    entry.index_stat.map(|index_stat| VerifiedPath {
+                        path: entry.abs_path.clone(),
+                        file_hash: entry.file_hash,
+                        size: entry.size,
+                        index_stat,
                     })
-                    .collect::<Result<Vec<_>>>()?;
-                publication_intent = Some(publication_staging.create_publication_intent(&entries)?);
-                Ok(())
-            },
-            || {
-                progress_cb.files_done.fetch_add(1, Relaxed);
-            },
-        ) {
+                })
+                .collect::<Vec<_>>();
+            match crate::cache::add_validation::record_verified_paths(
+                &index_repo_root,
+                &verified_paths,
+            ) {
+                Ok(validations) => debug!(validations, "recorded verified add validations"),
+                Err(error) => debug!(
+                    error = %error,
+                    "failed to persist verified add validations; later add will rehash"
+                ),
+            }
+            Ok(())
+        })
+        .await;
+        let index_error = match index_result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some((
+                GitIndexWriteError::IndexMutationUncertain(CrabError::Io(std::io::Error::other(
+                    error,
+                ))),
+                None,
+            )),
+        };
+        if let Some((error, publication_intent)) = index_error {
             let error = handle_git_index_write_error(
                 &staging_root,
                 &staged_entries,
                 publication_intent.as_ref(),
-                e,
+                error,
             )
             .await;
             stop_progress_ticker(ticker.take(), &ticker_cancel).await;
             return Err(error);
-        }
-        let publication_intent = publication_intent.ok_or_else(|| {
-            CrabError::Internal("Git index publication intent was not recorded".to_owned())
-        })?;
-        publication_staging.publish_publication_intent(&publication_intent)?;
-        let verified_paths = staged_entries
-            .iter()
-            .filter_map(|entry| {
-                entry.index_stat.map(|index_stat| VerifiedPath {
-                    path: entry.abs_path.clone(),
-                    file_hash: entry.file_hash,
-                    size: entry.size,
-                    index_stat,
-                })
-            })
-            .collect::<Vec<_>>();
-        match crate::cache::add_validation::record_verified_paths(&repo_root, &verified_paths) {
-            Ok(validations) => {
-                debug!(validations, "recorded verified add validations");
-            }
-            Err(error) => {
-                debug!(
-                    error = %error,
-                    "failed to persist verified add validations; later add will rehash"
-                );
-            }
         }
         summary.indexing_duration_ms = indexing_start.elapsed().as_millis() as u64;
     }
@@ -3252,8 +3304,12 @@ fn write_pointers_to_git_index(
     shard_hints: &crate::cache::ShardHintCache,
     mut on_file_done: impl FnMut(),
 ) -> std::result::Result<(), GitIndexWriteError> {
+    let entries = entries
+        .iter()
+        .map(IndexPublicationEntry::from)
+        .collect::<Vec<_>>();
     write_pointers_and_tracking_to_git_index(
-        entries,
+        &entries,
         repo_root,
         shard_hints,
         &[],
@@ -3263,7 +3319,7 @@ fn write_pointers_to_git_index(
 }
 
 fn write_pointers_and_tracking_to_git_index(
-    entries: &[StagedEntry],
+    entries: &[IndexPublicationEntry],
     repo_root: &Path,
     shard_hints: &crate::cache::ShardHintCache,
     tracking_patterns: &[String],
@@ -4686,12 +4742,13 @@ mod tests {
         let path = dir.path().join("model.bin");
         let payload = b"model payload";
         std::fs::write(&path, payload).unwrap();
+        let staged = staged_entry(
+            path,
+            *blake3::hash(payload).as_bytes(),
+            payload.len() as u64,
+        );
         write_pointers_and_tracking_to_git_index(
-            &[staged_entry(
-                path,
-                *blake3::hash(payload).as_bytes(),
-                payload.len() as u64,
-            )],
+            &[IndexPublicationEntry::from(&staged)],
             dir.path(),
             &crate::cache::ShardHintCache::new(),
             &["*.bin".to_owned()],

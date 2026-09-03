@@ -2,16 +2,19 @@
 
 use std::sync::Arc;
 
-use object_store::aws::{AmazonS3, AmazonS3Builder, AwsCredentialProvider, S3CopyIfNotExists};
+use object_store::aws::{
+    AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, AwsCredentialProvider, S3CopyIfNotExists,
+};
 use object_store::azure::MicrosoftAzureBuilder;
-use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
+use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey};
 use object_store::path::Path;
 use object_store::{ObjectStore, StaticCredentialProvider};
 
 use crate::error::{Result, StorageError};
 use crate::identity::{BucketIdentity, StorageProviderKind};
 use crate::provider_options::{
-    apply_s3_env_overrides, default_client_options, parse_sas_query_pairs,
+    default_client_options, parse_sas_query_pairs, s3_endpoint_from_env,
+    s3_virtual_hosted_style_from_env,
 };
 use crate::store::Store;
 
@@ -64,7 +67,13 @@ pub enum AzureAuthorization {
 pub struct BuiltObjectStore {
     pub inner: Arc<dyn ObjectStore>,
     pub provider: StorageProviderKind,
+    /// Exact destination used to bind resumable provider sessions.
+    ///
+    /// Custom endpoint and credential-derived endpoint material is stored as
+    /// a non-secret fingerprint, never as credentials or raw endpoint text.
+    pub multipart_identity: Option<BucketIdentity>,
     pub signer: Option<Arc<dyn object_store::signer::Signer>>,
+    pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
 }
 
 /// Object-store handle parsed from a URL plus the path prefix embedded in that URL.
@@ -297,12 +306,13 @@ pub fn build_s3_object_store_with_provider(
     region: &str,
     credentials: AwsCredentialProvider,
 ) -> Result<BuiltObjectStore> {
+    let endpoint = s3_endpoint_from_env();
     let builder = AmazonS3Builder::from_env()
         .with_bucket_name(bucket)
         .with_region(region)
         .with_credentials(credentials)
         .with_client_options(default_client_options());
-    build_s3_object_store(bucket, builder, None, true)
+    build_s3_object_store(bucket, builder, None, endpoint.as_deref(), true)
 }
 
 /// Builds an object-store backend with an optional grant-pinned endpoint.
@@ -331,20 +341,22 @@ fn build_object_store_inner(
             session_token,
             region,
         } => {
+            let endpoint = endpoint.map(str::to_owned).or_else(|| {
+                allow_environment_overrides
+                    .then(s3_endpoint_from_env)
+                    .flatten()
+            });
             let builder = AmazonS3Builder::new()
                 .with_bucket_name(bucket)
                 .with_access_key_id(&access_key_id)
                 .with_secret_access_key(&secret_access_key)
                 .with_region(&region)
                 .with_client_options(default_client_options());
-            let builder = match endpoint {
-                Some(value) => builder.with_endpoint(value),
-                None => builder,
-            };
             build_s3_object_store(
                 bucket,
                 builder,
                 session_token.as_deref(),
+                endpoint.as_deref(),
                 allow_environment_overrides,
             )
         }
@@ -358,16 +370,21 @@ fn build_object_store_inner(
             let credential_provider = Arc::new(StaticCredentialProvider::new(GcpCredential {
                 bearer: access_token,
             }));
-            let gcs = GoogleCloudStorageBuilder::new()
+            let builder = GoogleCloudStorageBuilder::new()
                 .with_bucket_name(bucket)
                 .with_credentials(credential_provider)
-                .with_client_options(default_client_options())
+                .with_client_options(default_client_options());
+            let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
+            let gcs = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let gcs = Arc::new(gcs);
             Ok(BuiltObjectStore {
-                inner: Arc::new(gcs),
+                inner: gcs.clone() as Arc<dyn ObjectStore>,
                 provider,
+                multipart_identity: Some(multipart_identity),
                 signer: None,
+                multipart: Some(gcs),
             })
         }
         ObjectStoreCredentials::Azure { account, token } => {
@@ -391,7 +408,9 @@ fn build_object_store_inner(
             Ok(BuiltObjectStore {
                 inner: Arc::new(azure),
                 provider,
+                multipart_identity: None,
                 signer: None,
+                multipart: None,
             })
         }
     }
@@ -404,6 +423,10 @@ pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Re
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
+    }
+    if let (Some(multipart), Some(multipart_identity)) = (built.multipart, built.multipart_identity)
+    {
+        store = store.with_multipart(multipart, multipart_identity);
     }
     Ok(store)
 }
@@ -462,24 +485,33 @@ fn build_static_env_object_store(
     provider: StorageProviderKind,
 ) -> Result<BuiltObjectStore> {
     match provider {
-        StorageProviderKind::S3 => build_s3_object_store(
-            bucket,
-            AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .with_client_options(default_client_options()),
-            None,
-            true,
-        ),
+        StorageProviderKind::S3 => {
+            let endpoint = s3_endpoint_from_env();
+            build_s3_object_store(
+                bucket,
+                AmazonS3Builder::from_env()
+                    .with_bucket_name(bucket)
+                    .with_client_options(default_client_options()),
+                None,
+                endpoint.as_deref(),
+                true,
+            )
+        }
         StorageProviderKind::Gcs => {
-            let gcs = GoogleCloudStorageBuilder::from_env()
+            let builder = GoogleCloudStorageBuilder::from_env()
                 .with_bucket_name(bucket)
-                .with_client_options(default_client_options())
+                .with_client_options(default_client_options());
+            let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
+            let gcs = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
+            let gcs = Arc::new(gcs);
             Ok(BuiltObjectStore {
-                inner: Arc::new(gcs),
+                inner: gcs.clone() as Arc<dyn ObjectStore>,
                 provider,
+                multipart_identity: Some(multipart_identity),
                 signer: None,
+                multipart: Some(gcs),
             })
         }
         StorageProviderKind::Azure => {
@@ -491,7 +523,9 @@ fn build_static_env_object_store(
             Ok(BuiltObjectStore {
                 inner: Arc::new(azure),
                 provider,
+                multipart_identity: None,
                 signer: None,
+                multipart: None,
             })
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),
@@ -502,16 +536,21 @@ fn build_s3_object_store(
     bucket: &str,
     builder: AmazonS3Builder,
     session_token: Option<&str>,
+    endpoint: Option<&str>,
     allow_environment_overrides: bool,
 ) -> Result<BuiltObjectStore> {
-    let mut builder = if allow_environment_overrides {
-        apply_s3_env_overrides(builder)
-    } else {
-        builder
+    let mut builder = match endpoint {
+        Some(endpoint) => builder.with_config(AmazonS3ConfigKey::S3Endpoint, endpoint),
+        None => builder,
     };
+    if allow_environment_overrides && let Some(virtual_hosted) = s3_virtual_hosted_style_from_env()
+    {
+        builder = builder.with_virtual_hosted_style_request(virtual_hosted);
+    }
     if let Some(session_token) = session_token {
         builder = builder.with_token(session_token);
     }
+    let multipart_identity = s3_multipart_identity(&builder, bucket);
     let s3 = builder
         .with_copy_if_not_exists(S3CopyIfNotExists::Multipart)
         .build()
@@ -520,8 +559,76 @@ fn build_s3_object_store(
     Ok(BuiltObjectStore {
         inner: s3.clone() as Arc<dyn ObjectStore>,
         provider: StorageProviderKind::S3,
-        signer: Some(s3 as Arc<dyn object_store::signer::Signer>),
+        multipart_identity: Some(multipart_identity),
+        signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
+        multipart: Some(s3),
     })
+}
+
+fn s3_multipart_identity(builder: &AmazonS3Builder, bucket: &str) -> BucketIdentity {
+    // object_store 0.14 derives the bucket URL from all four routing fields;
+    // custom endpoints with different addressing modes are different targets.
+    let endpoint = builder
+        .get_config_value(&AmazonS3ConfigKey::S3Endpoint)
+        .or_else(|| builder.get_config_value(&AmazonS3ConfigKey::Endpoint));
+    let region = builder.get_config_value(&AmazonS3ConfigKey::Region);
+    let virtual_hosted = builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest);
+    let express = builder.get_config_value(&AmazonS3ConfigKey::S3Express);
+    let routing = format!("{endpoint:?}\0{region:?}\0{virtual_hosted:?}\0{express:?}");
+    multipart_identity(
+        StorageProviderKind::S3,
+        bucket,
+        "s3-routing",
+        routing.as_bytes(),
+    )
+}
+
+fn gcs_multipart_builder(
+    builder: GoogleCloudStorageBuilder,
+    bucket: &str,
+) -> Result<(GoogleCloudStorageBuilder, BucketIdentity)> {
+    let endpoint = if let Some(base_url) = builder.get_config_value(&GoogleConfigKey::BaseUrl) {
+        Some(base_url)
+    } else if let Some(service_account) =
+        builder.get_config_value(&GoogleConfigKey::ServiceAccountKey)
+    {
+        gcs_service_account_base_url(service_account.as_bytes())
+    } else if let Some(path) = builder.get_config_value(&GoogleConfigKey::ServiceAccount) {
+        let service_account = std::fs::read(path)?;
+        gcs_service_account_base_url(&service_account)
+    } else {
+        None
+    };
+    // Pin object_store 0.14's resolved default/custom URL before build rereads
+    // a service-account file, so a concurrent file change cannot retarget it.
+    let endpoint = endpoint.unwrap_or_else(|| "https://storage.googleapis.com".to_owned());
+    let identity = multipart_identity(
+        StorageProviderKind::Gcs,
+        bucket,
+        "gcs-base-url",
+        endpoint.as_bytes(),
+    );
+    Ok((builder.with_base_url(&endpoint), identity))
+}
+
+fn gcs_service_account_base_url(service_account: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(service_account).ok()?;
+    value.get("gcs_base_url")?.as_str().map(str::to_owned)
+}
+
+fn multipart_identity(
+    provider: StorageProviderKind,
+    bucket: &str,
+    kind: &str,
+    material: &[u8],
+) -> BucketIdentity {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab multipart destination v1\0");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(material);
+    let host = format!("endpoint:{}", hasher.finalize().to_hex());
+    BucketIdentity::new(provider, host, bucket)
 }
 
 fn provider_config_error(
@@ -614,6 +721,100 @@ mod tests {
 
         assert_eq!(built.provider, StorageProviderKind::S3);
         assert!(built.signer.is_some());
+    }
+
+    #[test]
+    fn explicit_s3_endpoint_is_part_of_destination_identity() {
+        let first = build_object_store_with_endpoint(
+            "shared-bucket",
+            ObjectStoreCredentials::Aws {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            Some("https://objects.example.test"),
+        )
+        .expect("S3 builder construction does not perform network I/O");
+        let second = build_object_store_with_endpoint(
+            "shared-bucket",
+            ObjectStoreCredentials::Aws {
+                access_key_id: "access".into(),
+                secret_access_key: "secret".into(),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            Some("https://other.example.test"),
+        )
+        .expect("S3 builder construction does not perform network I/O");
+
+        assert_ne!(first.multipart_identity, second.multipart_identity);
+        let identity = first.multipart_identity.expect("S3 supports multipart");
+        assert_eq!(identity.container, "shared-bucket");
+        assert!(identity.host.starts_with("endpoint:"));
+        assert!(!identity.host.contains("objects.example.test"));
+    }
+
+    #[test]
+    fn gcs_base_url_and_service_account_config_bind_multipart_identity() {
+        let explicit = GoogleCloudStorageBuilder::new()
+            .with_config(GoogleConfigKey::BaseUrl, "https://gcs-a.example.test");
+        let other_explicit = GoogleCloudStorageBuilder::new()
+            .with_config(GoogleConfigKey::BaseUrl, "https://gcs-b.example.test");
+        let service_account = GoogleCloudStorageBuilder::new().with_config(
+            GoogleConfigKey::ServiceAccountKey,
+            r#"{"gcs_base_url":"https://gcs-a.example.test"}"#,
+        );
+
+        let (_, explicit) = gcs_multipart_builder(explicit, "bucket").expect("identity");
+        let (_, other_explicit) =
+            gcs_multipart_builder(other_explicit, "bucket").expect("identity");
+        let (_, service_account) =
+            gcs_multipart_builder(service_account, "bucket").expect("identity");
+
+        assert_ne!(explicit, other_explicit);
+        assert_eq!(explicit, service_account);
+        assert_eq!(explicit.container, "bucket");
+        assert!(explicit.host.starts_with("endpoint:"));
+    }
+
+    #[test]
+    fn s3_multipart_identity_distinguishes_addressing_mode_and_region() {
+        let path_style = AmazonS3Builder::new()
+            .with_endpoint("https://objects.example.test")
+            .with_region("us-east-1");
+        let virtual_hosted = path_style.clone().with_virtual_hosted_style_request(true);
+        let other_region = path_style.clone().with_region("us-west-2");
+        let identity = s3_multipart_identity(&path_style, "bucket");
+
+        assert_ne!(identity, s3_multipart_identity(&virtual_hosted, "bucket"));
+        assert_ne!(identity, s3_multipart_identity(&other_region, "bucket"));
+    }
+
+    #[test]
+    fn gcs_multipart_pins_endpoint_before_service_account_file_changes() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("service-account.json");
+        std::fs::write(&path, r#"{"gcs_base_url":"https://first.example.test"}"#)
+            .expect("write original endpoint");
+        let builder =
+            GoogleCloudStorageBuilder::new().with_service_account_path(path.to_string_lossy());
+        let (builder, identity) = gcs_multipart_builder(builder, "bucket").expect("pin endpoint");
+        std::fs::write(&path, r#"{"gcs_base_url":"https://second.example.test"}"#)
+            .expect("replace credential file");
+
+        assert_eq!(
+            builder
+                .get_config_value(&GoogleConfigKey::BaseUrl)
+                .as_deref(),
+            Some("https://first.example.test"),
+        );
+        assert_eq!(
+            gcs_multipart_builder(builder, "bucket")
+                .expect("recheck pinned endpoint")
+                .1,
+            identity,
+        );
     }
 
     #[test]

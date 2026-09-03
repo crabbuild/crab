@@ -20,6 +20,7 @@ use crate::git::worktree::WorktreeContext;
 use crate::speculation::access_db::AsyncAccessDb;
 use crate::speculation::driver::SpeculativeDriver;
 use crate::speculation::predictor::Predictor;
+use crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE;
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_lfs::LfsObjectStore;
 use crab_staging::StagingArea;
@@ -82,6 +83,12 @@ enum SmudgeOutput {
     Bytes(Bytes),
     File(PathBuf),
     TemporaryFile(tempfile::TempPath),
+}
+
+#[derive(Debug)]
+enum SmudgeInput {
+    PointerCandidate(Vec<u8>),
+    PassthroughFile(tempfile::TempPath),
 }
 
 /// How long the filter process will wait for the next command before
@@ -1091,7 +1098,18 @@ fn dispatch_command<R: Read, W: Write>(
             output.flush().map_err(CrabError::Io)?;
         }
         "smudge" => {
-            let content = read_content_until_flush(input)?;
+            let content = match read_smudge_input_until_flush(input)? {
+                SmudgeInput::PointerCandidate(content) => content,
+                SmudgeInput::PassthroughFile(path) => {
+                    write_status(output, "success")?;
+                    write_flush(output)?;
+                    write_content_file(output, &path)?;
+                    write_flush(output)?;
+                    write_flush(output)?;
+                    output.flush().map_err(CrabError::Io)?;
+                    return Ok(());
+                }
+            };
             let lazy = ctx.config().checkout.lazy;
 
             // Speculative hydration: on smudge of a dehydrated file
@@ -1739,45 +1757,44 @@ fn read_text_line<R: Read>(input: &mut R) -> Result<Option<String>> {
         .map_err(|_| CrabError::Protocol("non-UTF-8 packet-line data".into()))
 }
 
-/// Read content data packets until a flush packet.
+/// Read one complete smudge request without retaining a non-pointer body.
 ///
-/// Pre-allocates a reasonable buffer and reads packet data directly into
-/// the accumulator to avoid per-packet allocations on large files.
-fn read_content_until_flush<R: Read>(input: &mut R) -> Result<Vec<u8>> {
-    // Start with 1 MB; will grow as needed for large files.
-    let mut content = Vec::with_capacity(1024 * 1024);
-    let mut hdr = [0u8; 4];
-    loop {
-        match input.read_exact(&mut hdr) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(CrabError::Io(e)),
+/// Git requires the request flush before the filter starts its response.
+/// Direct LFS parsing accepts `MAX_LFS_POINTER_SIZE` bytes, so only after that
+/// boundary is exceeded can the body be classified as passthrough and
+/// spooled packet-by-packet to disk with bounded memory.
+fn read_smudge_input_until_flush<R: Read>(input: &mut R) -> Result<SmudgeInput> {
+    let mut reader = PktLineReader::from_read(input);
+    let mut pointer_candidate = Vec::with_capacity(MAX_LFS_POINTER_SIZE);
+    let mut passthrough: Option<tempfile::NamedTempFile> = None;
+    while let Some(packet) = reader.read_packet()? {
+        if let Some(file) = passthrough.as_mut() {
+            file.write_all(packet).map_err(CrabError::Io)?;
+            continue;
+        }
+        let next_len = pointer_candidate
+            .len()
+            .checked_add(packet.len())
+            .ok_or_else(|| CrabError::Protocol("smudge input length overflow".to_owned()))?;
+        if next_len <= MAX_LFS_POINTER_SIZE {
+            pointer_candidate.extend_from_slice(packet);
+            continue;
         }
 
-        if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
-            break;
-        }
-
-        let hex = std::str::from_utf8(&hdr)
-            .map_err(|_| CrabError::Protocol("invalid packet-line hex".into()))?;
-        let len: usize = u16::from_str_radix(hex, 16)
-            .map_err(|_| CrabError::Protocol(format!("invalid packet-line length: {hex}")))?
-            .into();
-
-        if len < 4 {
-            return Err(CrabError::Protocol(format!(
-                "packet-line length too small: {len}"
-            )));
-        }
-
-        let data_len = len - 4;
-        let start = content.len();
-        content.resize(start + data_len, 0);
-        input
-            .read_exact(&mut content[start..start + data_len])
-            .map_err(CrabError::Io)?;
+        let mut file = tempfile::NamedTempFile::new().map_err(CrabError::Io)?;
+        file.write_all(&pointer_candidate).map_err(CrabError::Io)?;
+        file.write_all(packet).map_err(CrabError::Io)?;
+        pointer_candidate.clear();
+        passthrough = Some(file);
     }
-    Ok(content)
+
+    match passthrough {
+        Some(mut file) => {
+            file.flush().map_err(CrabError::Io)?;
+            Ok(SmudgeInput::PassthroughFile(file.into_temp_path()))
+        }
+        None => Ok(SmudgeInput::PointerCandidate(pointer_candidate)),
+    }
 }
 
 /// Drain packet-lines from `input` until a flush/delimiter packet is seen
@@ -1979,9 +1996,8 @@ impl<R: Read> PktLineReader<R> {
         self.inner.read_exact(&mut hdr).map_err(CrabError::Io)?;
 
         // Flush and the other delimiter packets all have zero body length.
-        // `read_content_until_flush` treats `0001` and `0002` as flush too,
-        // but the clean-filter content stream only uses `0000`. Accepting
-        // the same set here keeps behavior aligned.
+        // Git's filter content stream uses `0000`; accepting the protocol's
+        // other zero-body delimiters preserves the existing recovery boundary.
         if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
             return Ok(None);
         }
@@ -2005,6 +2021,12 @@ impl<R: Read> PktLineReader<R> {
             return Err(CrabError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("pkt-line length {len} shorter than header"),
+            )));
+        }
+        if len - 4 > PKT_LINE_MAX_BODY {
+            return Err(CrabError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("pkt-line body exceeds {PKT_LINE_MAX_BODY} bytes"),
             )));
         }
 
@@ -2484,14 +2506,74 @@ mod tests {
     }
 
     #[test]
-    fn read_content_collects_data() {
+    fn read_smudge_input_collects_pointer_candidate_across_packets() {
         let mut input = Vec::new();
         input.extend(pkt_data(b"hello "));
         input.extend(pkt_data(b"world"));
         input.extend(pkt_flush());
 
-        let content = read_content_until_flush(&mut &input[..]).unwrap();
-        assert_eq!(content, b"hello world");
+        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        assert!(matches!(
+            content,
+            SmudgeInput::PointerCandidate(bytes) if bytes == b"hello world"
+        ));
+    }
+
+    #[test]
+    fn read_smudge_input_supports_pointer_split_at_every_byte() {
+        let pointer = crab_types::pointer::Pointer {
+            file_hash: [7; 32],
+            size: 42,
+            shard_hint: Some([8; 32]),
+        }
+        .serialize();
+        let mut input = Vec::new();
+        for byte in &pointer {
+            input.extend(pkt_data(std::slice::from_ref(byte)));
+        }
+        input.extend(pkt_flush());
+
+        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        assert!(matches!(
+            content,
+            SmudgeInput::PointerCandidate(bytes) if bytes == pointer
+        ));
+    }
+
+    #[test]
+    fn read_smudge_input_spools_large_passthrough_across_many_packets() {
+        let body = (0..(MAX_LFS_POINTER_SIZE * 3 + 17))
+            .map(|idx| (idx % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut input = Vec::new();
+        for chunk in body.chunks(7) {
+            input.extend(pkt_data(chunk));
+        }
+        input.extend(pkt_flush());
+
+        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        let SmudgeInput::PassthroughFile(path) = content else {
+            panic!("large non-pointer input must be spooled");
+        };
+        assert_eq!(std::fs::read(path).unwrap(), body);
+    }
+
+    #[test]
+    fn read_smudge_input_retains_direct_lfs_parse_size_boundary() {
+        let mut body = b"version https://git-lfs.github.com/spec/v1\noid sha256:0000000000000000000000000000000000000000000000000000000000000000\nsize 1\n".to_vec();
+        body.resize(MAX_LFS_POINTER_SIZE, b'\n');
+        let mut input = Vec::new();
+        for chunk in body.chunks(11) {
+            input.extend(pkt_data(chunk));
+        }
+        input.extend(pkt_flush());
+
+        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+
+        assert!(matches!(
+            content,
+            SmudgeInput::PointerCandidate(bytes) if bytes == body
+        ));
     }
 
     #[test]
@@ -3086,6 +3168,45 @@ size 1048576\n";
             output.windows(content.len()).any(|w| w == content),
             "non-pointer content should pass through unchanged"
         );
+    }
+
+    #[test]
+    fn large_non_pointer_smudge_roundtrips_after_request_flush() {
+        let body = (0..(MAX_LFS_POINTER_SIZE * 3 + 17))
+            .map(|idx| (idx % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut input = build_handshake_input();
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=large.bin"));
+        input.extend(pkt_flush());
+        for chunk in body.chunks(7) {
+            input.extend(pkt_data(chunk));
+        }
+        input.extend(pkt_flush());
+
+        let mut output = Vec::new();
+        run_filter_loop(
+            &mut &input[..],
+            &mut output,
+            AppContext::default(),
+            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .unwrap();
+
+        let status = output
+            .windows(b"status=success".len())
+            .position(|window| window == b"status=success")
+            .unwrap();
+        let content = output
+            .windows(body.len())
+            .position(|window| window == body)
+            .unwrap();
+        assert!(status < content);
     }
 
     #[test]

@@ -318,11 +318,10 @@ pub async fn build_store(
         (storage_scope, credential_provider, built)
     };
 
-    // A crab:// URL puts the bucket in the host component, so host
-    // and container carry the same value today. A later change that
-    // adds an ObjectUrl parser for raw `s3://` / `az://` URLs will
-    // differentiate endpoint host from container.
+    // Multipart recovery has a stricter endpoint-bound identity; retain the
+    // existing bucket identity used for provider selection and safety rails.
     let identity = BucketIdentity::new(built.provider, url.bucket.as_str(), url.bucket.as_str());
+    let multipart_identity = built.multipart_identity.clone();
 
     if let Some(cp) = credential_provider.as_ref() {
         let bucket = url.bucket.clone();
@@ -335,6 +334,8 @@ pub async fn build_store(
             .map(|built| RefreshingStoreParts {
                 inner: built.inner,
                 signer: built.signer,
+                multipart: built.multipart,
+                multipart_identity: built.multipart_identity,
             })
         });
         let refreshing = Arc::new(RefreshingObjectStore::new(
@@ -345,12 +346,19 @@ pub async fn build_store(
             RefreshingStoreParts {
                 inner: built.inner,
                 signer: built.signer,
+                multipart: built.multipart,
+                multipart_identity: built.multipart_identity,
             },
             builder,
         ));
         built.inner = refreshing.clone() as Arc<dyn ObjectStore>;
         built.signer = if refreshing.has_signer().await {
-            Some(refreshing as Arc<dyn object_store::signer::Signer>)
+            Some(refreshing.clone() as Arc<dyn object_store::signer::Signer>)
+        } else {
+            None
+        };
+        built.multipart = if refreshing.has_multipart().await {
+            Some(refreshing as Arc<dyn object_store::multipart::MultipartStore>)
         } else {
             None
         };
@@ -359,6 +367,9 @@ pub async fn build_store(
     let mut store = Store::new(built.inner).with_bucket_identity(identity);
     if let Some(s) = built.signer {
         store = store.with_signer(s);
+    }
+    if let (Some(multipart), Some(identity)) = (built.multipart, multipart_identity) {
+        store = store.with_multipart(multipart, identity);
     }
     if let Some(scope) = storage_scope {
         store = store.with_storage_scope(scope);

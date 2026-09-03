@@ -22,6 +22,7 @@ pub fn apply_s3_env_overrides(builder: AmazonS3Builder) -> AmazonS3Builder {
 #[must_use]
 pub fn s3_endpoint_from_env() -> Option<String> {
     for key in [
+        "AWS_ENDPOINT_URL_S3",
         "AWS_ENDPOINT_URL",
         "AWS_ENDPOINT",
         "ENDPOINT_URL",
@@ -109,6 +110,7 @@ mod tests {
     #[test]
     fn s3_endpoint_env_accepts_standard_object_store_names() {
         let _lock = ENV_MUTEX.lock().unwrap();
+        let _aws_s3_endpoint = EnvGuard::set("AWS_ENDPOINT_URL_S3", None);
         let _aws_endpoint_url = EnvGuard::set("AWS_ENDPOINT_URL", None);
         let _aws_endpoint = EnvGuard::set("AWS_ENDPOINT", None);
         let _endpoint_url = EnvGuard::set("ENDPOINT_URL", Some(" http://localhost:5000 "));
@@ -117,6 +119,21 @@ mod tests {
         assert_eq!(
             s3_endpoint_from_env(),
             Some("http://localhost:5000".to_owned())
+        );
+    }
+
+    #[test]
+    fn service_specific_s3_endpoint_takes_precedence() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _aws_s3_endpoint = EnvGuard::set(
+            "AWS_ENDPOINT_URL_S3",
+            Some("https://s3-specific.example.test"),
+        );
+        let _aws_endpoint = EnvGuard::set("AWS_ENDPOINT_URL", Some("https://generic.example.test"));
+
+        assert_eq!(
+            s3_endpoint_from_env(),
+            Some("https://s3-specific.example.test".to_owned())
         );
     }
 

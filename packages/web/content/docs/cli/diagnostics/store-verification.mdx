@@ -84,18 +84,26 @@ Only specific issue types are auto-repaired:
 | Issue | Repair action |
 |-------|--------------|
 | Expired push lock | Delete the lock |
+| Abandoned Crab multipart upload | Abort the journaled provider session and remove its journal row |
 
 Repairs are conservative. Expired lock objects are deleted only after the
-holder-safe expiry check; committed repository content is not deleted.
+holder-safe expiry check. Multipart repair acquires the expired journal lease
+again and requires the configured provider endpoint, container, and object key
+to match the recorded destination exactly. It also claims the exact journal
+revision observed by the check, so a resumed or replaced session wins a race
+with repair and remains untouched. A changed remote is left untouched and the
+journal row is retained. Committed repository content is not deleted.
 
 ## Current Boundaries
 
 - The current Git-object check does not reconstruct current head and run full
   Git reachability. Monitor an independent clone/fetch; use `crab recover
   history verify <generation>` for strict Git fsck of a historical root.
-- The generic object-store API cannot enumerate provider-side incomplete
-  multipart uploads, so configure the provider lifecycle rule that aborts old
-  incomplete uploads.
+- `fsck` can inspect resumable multipart sessions created by Crab and retained
+  in the shared staging journal. It cannot enumerate sessions created by other
+  clients or by upload paths without stable provider upload IDs. Keep the
+  provider lifecycle rule that aborts old incomplete uploads as the outer
+  cleanup boundary.
 - Locator or visibility acceleration damage requires `crab metadb rebuild`
   followed by another verification run.
 - Same-bucket manifest history is recovery history, not an independent backup.

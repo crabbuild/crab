@@ -1831,6 +1831,12 @@ impl From<crab_storage::error::StorageError> for CrabError {
             crab_storage::error::StorageError::AuthExpired { path } => Self::AuthExpired { path },
             crab_storage::error::StorageError::Io { source } => Self::Io(source),
             crab_storage::error::StorageError::Cancelled => Self::Cancelled,
+            crab_storage::error::StorageError::MultipartJournal { source, .. } => {
+                Self::Storage(object_store::Error::Generic {
+                    store: "multipart journal",
+                    source,
+                })
+            }
             crab_storage::error::StorageError::NotSupported { source }
             | crab_storage::error::StorageError::ObjectStore { source } => Self::Storage(source),
             crab_storage::error::StorageError::Internal(message) => Self::Internal(message),

@@ -54,7 +54,7 @@ use crate::metadata::manifest::{
 };
 use crate::replication::{ActiveActivePushPlan, ReplicationConfig};
 use crate::storage::StoreLayout;
-use crate::storage::store::{StagedWrite, Store};
+use crate::storage::store::{MultipartJournal, StagedWrite, Store};
 use crab_coordination::write_coordinator::{
     CommitOutcome, CoordinatedRefUpdate, PushTransactionState, WriteCoordinator,
     commit_uploaded_push_refs,
@@ -2880,6 +2880,10 @@ const XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT: usize = 256 * 1024 * 1024;
 /// bytes, while still allowing one oversized (but valid) chunk to progress.
 const XORB_PACK_READ_PAYLOAD_LIMIT: u64 = 16 * 1024 * 1024;
 
+// Each pack owns an index-pack process and a bounded multipart buffer pool.
+// Bound whole transactions as well as individual provider requests.
+const GIT_PACK_UPLOAD_MAX_CONCURRENCY: usize = 4;
+
 /// Maximum post-success xorb cache warm tasks.
 const XORB_CACHE_WARM_MAX_CONCURRENCY: usize = 8;
 
@@ -2924,7 +2928,7 @@ impl fmt::Debug for ActiveActiveWriteCoordinator {
 /// Configuration for the push pipeline.
 #[derive(Debug, Clone)]
 pub struct PushConfig {
-    /// Maximum number of concurrent xorb uploads (step 7).
+    /// Maximum concurrent uploads; Git pack transactions are additionally capped at four.
     pub upload_concurrency: usize,
     /// Maximum number of concurrent HEAD/LIST requests for the HEAD-check
     /// resume step (step 6). Defaults to 64.
@@ -4088,6 +4092,7 @@ pub struct PushPipeline {
     /// uploaded objects to the cache in the background.
     caching_store: Option<crab_cache_store::CachingStore>,
     staging: Option<Arc<StagingAreaReadOnly>>,
+    multipart_journal: tokio::sync::OnceCell<Arc<MultipartJournal>>,
     /// Object-store key prefix (e.g. `ml` for `crab://crab/ml`).
     prefix: String,
     /// Routes content-addressed paths to `.crab/` and per-repo paths
@@ -4693,12 +4698,9 @@ impl PackedXorb {
         spill_dir: &Path,
         packed_payload_budget: Option<&Arc<tokio::sync::Semaphore>>,
     ) -> Result<Self> {
-        let memory_limit = packed_payload_budget
-            .map(|_| XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT)
-            .unwrap_or(XORB_MEMORY_PAYLOAD_LIMIT);
         Self::from_result_with_memory_limit(
             result,
-            memory_limit,
+            XORB_MEMORY_PAYLOAD_LIMIT,
             Some(spill_dir),
             packed_payload_budget,
         )
@@ -7365,6 +7367,7 @@ impl PushPipeline {
             store,
             caching_store,
             staging,
+            multipart_journal: tokio::sync::OnceCell::new(),
             prefix,
             router,
             metrics,
@@ -7430,6 +7433,31 @@ impl PushPipeline {
 
     fn git_dir_override(&self) -> Option<&Path> {
         self.config.git_dir.as_deref()
+    }
+
+    async fn multipart_journal(&self) -> Result<Option<Arc<MultipartJournal>>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let Some(staging) = &self.staging else {
+            return Ok(None);
+        };
+        if !store.has_resumable_multipart() || store.staging_write_prefix().is_some() {
+            return Ok(None);
+        }
+        let path = staging.root().join("multipart-uploads.sqlite3");
+        let journal = self
+            .multipart_journal
+            .get_or_try_init(|| async move {
+                let registry = tokio::task::spawn_blocking(move || {
+                    crab_staging::MultipartRegistry::open(&path)
+                })
+                .await
+                .map_err(|error| CrabError::Io(std::io::Error::other(error)))??;
+                Ok::<_, CrabError>(Arc::new(MultipartJournal::new(registry)))
+            })
+            .await?;
+        Ok(Some(Arc::clone(journal)))
     }
 
     fn discover_git_dir(&self) -> Result<PathBuf> {
@@ -12037,6 +12065,7 @@ impl PushPipeline {
             debug!("step 7: no xorbs to upload");
             return Ok(());
         }
+        let multipart_journal = self.multipart_journal().await?;
 
         let upload_concurrency = Arc::new(UploadConcurrency::from_config(
             self.config.adaptive_concurrency,
@@ -12142,6 +12171,8 @@ impl PushPipeline {
             // Clone the shared progress handle (if any) into the task
             // so the per-part callback can credit bytes in real time.
             let progress_for_task = self.progress.clone();
+            let metrics_for_task = self.metrics.clone();
+            let journal_for_task = multipart_journal.clone();
             #[cfg(test)]
             let test_metrics = Arc::clone(&self.test_metrics);
             // Hand the push cancellation token into the task so the
@@ -12186,17 +12217,38 @@ impl PushPipeline {
                             p.add_upload_bytes(bytes);
                         }
                     });
-                    store_for_task
-                        .put_multipart_file_retry(
+                    let outcome = store_for_task
+                        .put_multipart_file_resumable(
                             &path,
                             file_path,
                             file_len as u64,
                             payload_hash,
+                            &payload_hash,
                             XORB_MULTIPART_PART_SIZE,
                             &cancel_for_task,
                             Some(&*on_part),
+                            journal_for_task.as_deref().map(|journal| {
+                                journal as &dyn crab_storage::multipart::MultipartJournal
+                            }),
                         )
-                        .await
+                        .await;
+                    match outcome {
+                        Ok(outcome) => {
+                            match outcome {
+                                crab_storage::multipart::ResumableUploadOutcome::Resumed => {
+                                    if let Some(metrics) = &metrics_for_task {
+                                        metrics.inc_multipart_resumed_uploads();
+                                    }
+                                }
+                                crab_storage::multipart::ResumableUploadOutcome::AlreadyPresent => {
+                                    on_part(file_len as u64);
+                                }
+                                crab_storage::multipart::ResumableUploadOutcome::Uploaded => {}
+                            }
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     let data = match payload.read_bytes().await {
                         Ok(data) => data,
@@ -12258,6 +12310,19 @@ impl PushPipeline {
                             store_for_task.put_overwrite(&path, data.clone()).await
                         }
                         other => other,
+                    };
+                    let result = match result {
+                        Ok(()) => {
+                            let payload_hash = *blake3::hash(&data).as_bytes();
+                            store_for_task
+                                .verify_written_size_and_hash(
+                                    &path,
+                                    data.len() as u64,
+                                    &payload_hash,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
                     };
                     drop(data);
                     result
@@ -13352,8 +13417,9 @@ impl PushPipeline {
             return Ok(());
         }
         if all_candidates_proven {
+            let objects = self.git_object_candidates.lock().await.len();
             info!(
-                objects = self.git_object_candidates.lock().await.len(),
+                objects,
                 "step 10: every candidate Git object is committed; no pack upload needed"
             );
             return Ok(());
@@ -13390,17 +13456,24 @@ impl PushPipeline {
         );
 
         if let Some(store) = &self.store {
+            let multipart_journal = self.multipart_journal().await?;
             let ref_tips = refs
                 .iter()
                 .map(|update| update.new_sha.clone())
                 .collect::<Vec<_>>();
             let pack_dir = self.objects_dir()?.join("pack");
             let mut uploaded = Vec::with_capacity(packed_files.len());
-            for packed in packed_files {
+            let ref_tips = &ref_tips;
+            let pack_dir = &pack_dir;
+            let multipart_journal = multipart_journal
+                .as_deref()
+                .map(|journal| journal as &dyn crab_storage::multipart::MultipartJournal);
+            let mut jobs = packed_files.iter().enumerate().map(|(index, packed)| async move {
+                check_cancelled(&self.cancel)?;
                 let pack_sha = packed.pack_blake3_hex.clone();
                 let pack_path = self.router.pack_path(&pack_sha);
                 let installed = pack::install_pack_file_locally_with_timeout(
-                    &pack_dir,
+                    pack_dir,
                     packed.pack_path.as_ref(),
                     &pack_sha,
                     self.config.receive_max_input_size,
@@ -13420,6 +13493,8 @@ impl PushPipeline {
                     packed.pack_size,
                     packed.pack_blake3,
                     &self.cancel,
+                    multipart_journal,
+                    self.metrics.as_deref(),
                 )
                 .await?
                 {
@@ -13525,8 +13600,8 @@ impl PushPipeline {
                     object_count: packed.object_count,
                 };
                 let meta_path = self.router.pack_metadata_path(&pack_sha);
-                // The pack body is verified and durable; its immutable index
-                // evidence, metadata, and origin receipt can now publish in parallel.
+                // Body and index evidence are durable. Publish metadata and
+                // the origin receipt before admitting this pack to the manifest set.
                 let (metadata, _) = tokio::try_join!(
                     upsert_pack_metadata(
                         store,
@@ -13560,13 +13635,46 @@ impl PushPipeline {
                     git_sha1 = %installed.git_sha1,
                     "step 10: bounded pack and immutable locator evidence uploaded"
                 );
-                uploaded.push(UploadedGitPack {
+                Ok::<_, CrabError>((index, UploadedGitPack {
                     entry,
                     idx_path: installed.idx_path,
                     kind_metadata_published: kind_metadata.is_some(),
-                });
+                }))
+            });
+            let concurrency = self
+                .config
+                .upload_concurrency
+                .clamp(1, GIT_PACK_UPLOAD_MAX_CONCURRENCY);
+            let mut running = futures_util::stream::FuturesUnordered::new();
+            for job in jobs.by_ref().take(concurrency) {
+                running.push(job);
             }
-            *self.uploaded_packs.lock().await = uploaded;
+            let mut first_error = None;
+            while let Some(result) = running.next().await {
+                match result {
+                    Ok(pack) => uploaded.push(pack),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+                // Do not drop active local indexing or provider work on a
+                // sibling failure: its inputs and the push lock must outlive it.
+                if first_error.is_none()
+                    && !self.cancel.is_cancelled()
+                    && let Some(job) = jobs.next()
+                {
+                    running.push(job);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            check_cancelled(&self.cancel)?;
+            // Completion order is not publication order. Preserve the generated
+            // pack order and expose no partial set to manifest construction.
+            uploaded.sort_unstable_by_key(|(index, _)| *index);
+            *self.uploaded_packs.lock().await =
+                uploaded.into_iter().map(|(_, pack)| pack).collect();
         }
 
         debug!("step 10: pack upload complete");
@@ -18687,19 +18795,34 @@ async fn upload_push_pack_file_body(
     pack_size: u64,
     pack_blake3: [u8; 32],
     cancel: &CancellationToken,
+    journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
+    metrics: Option<&Metrics>,
 ) -> Result<bool> {
     if store.staging_write_prefix().is_some() {
         let pack_bytes = tokio::fs::read(pack_file).await?;
+        verify_pack_body(pack_file, &pack_bytes, pack_size, &pack_blake3)?;
         store.put(pack_path, Bytes::from(pack_bytes)).await?;
+        store
+            .verify_written_size_and_hash(pack_path, pack_size, &pack_blake3)
+            .await?;
         return Ok(true);
     }
 
     match store.head(pack_path).await {
         Ok(_) => {
-            store
+            match store
                 .verify_size_and_hash(pack_path, pack_size, &pack_blake3)
-                .await?;
-            return Ok(false);
+                .await
+            {
+                Ok(()) => return Ok(false),
+                Err(CrabError::CorruptObject { .. }) => {
+                    warn!(
+                        path = %pack_path,
+                        "existing content-addressed pack is corrupt; repairing from verified local body"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         Err(CrabError::NotFound { .. }) => {}
         Err(e) => return Err(e),
@@ -18708,22 +18831,71 @@ async fn upload_push_pack_file_body(
     if pack_size > PACK_MULTIPART_THRESHOLD_BYTES {
         // Route through `Store` so a transient part-PUT failure retries
         // the whole upload instead of aborting the push.
-        store
-            .put_multipart_file_retry(
+        let outcome = store
+            .put_multipart_file_resumable(
                 pack_path,
                 pack_file,
                 pack_size,
                 pack_blake3,
+                &pack_blake3,
                 PACK_MULTIPART_THRESHOLD_BYTES as usize,
                 cancel,
                 None,
+                journal,
             )
             .await?;
+        if matches!(
+            outcome,
+            crab_storage::multipart::ResumableUploadOutcome::Resumed
+        ) && let Some(metrics) = metrics
+        {
+            metrics.inc_multipart_resumed_uploads();
+        }
     } else {
         let pack_bytes = tokio::fs::read(pack_file).await?;
-        store.put(pack_path, Bytes::from(pack_bytes)).await?;
+        verify_pack_body(pack_file, &pack_bytes, pack_size, &pack_blake3)?;
+        let pack_bytes = Bytes::from(pack_bytes);
+        match store.put(pack_path, pack_bytes.clone()).await {
+            Ok(()) => {}
+            Err(CrabError::CasConflict { .. }) => {
+                store.put_overwrite(pack_path, pack_bytes).await?;
+            }
+            Err(error) => return Err(error),
+        }
+        store
+            .verify_written_size_and_hash(pack_path, pack_size, &pack_blake3)
+            .await?;
     }
     Ok(true)
+}
+
+fn verify_pack_body(
+    pack_file: &Path,
+    body: &[u8],
+    expected_size: u64,
+    expected_hash: &[u8; 32],
+) -> Result<()> {
+    if body.len() as u64 != expected_size {
+        return Err(CrabError::CorruptObject {
+            path: pack_file.display().to_string(),
+            reason: format!(
+                "pack body has {} bytes; expected {expected_size}",
+                body.len()
+            ),
+        });
+    }
+    let actual_hash = *blake3::hash(body).as_bytes();
+    if actual_hash != *expected_hash {
+        return Err(CrabError::CorruptObject {
+            path: pack_file.display().to_string(),
+            reason: format!(
+                "pack body Blake3 {} does not match expected {}",
+                blake3::Hash::from(actual_hash).to_hex(),
+                blake3::Hash::from(*expected_hash).to_hex()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn hash_file_blake3(path: &Path) -> Result<([u8; 32], u64)> {
@@ -20864,6 +21036,8 @@ mod tests {
         release: Arc<tokio::sync::Semaphore>,
         head_started: Option<Arc<tokio::sync::Semaphore>>,
         head_release: Option<Arc<tokio::sync::Semaphore>>,
+        pack_only: bool,
+        fail_next_put: AtomicBool,
     }
 
     impl std::fmt::Display for GatedPutStore {
@@ -20880,6 +21054,9 @@ mod tests {
             payload: PutPayload,
             opts: PutOptions,
         ) -> object_store::Result<PutResult> {
+            if self.pack_only && !location.as_ref().ends_with(".pack") {
+                return self.inner.put_opts(location, payload, opts).await;
+            }
             self.started.add_permits(1);
             let permit =
                 self.release
@@ -20890,6 +21067,12 @@ mod tests {
                         source: Box::new(error),
                     })?;
             permit.forget();
+            if self.fail_next_put.swap(false, Ordering::SeqCst) {
+                return Err(object_store::Error::NotFound {
+                    path: location.to_string(),
+                    source: "injected pack upload failure".into(),
+                });
+            }
             self.inner.put_opts(location, payload, opts).await
         }
 
@@ -20953,6 +21136,310 @@ mod tests {
         ) -> object_store::Result<()> {
             self.inner.copy_opts(from, to, options).await
         }
+    }
+
+    async fn gated_pack_pipeline(
+        concurrency: usize,
+    ) -> (tempfile::TempDir, Arc<PushPipeline>, Arc<GatedPutStore>) {
+        let source = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(source.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.name", "Pack Pipeline Test"]);
+        git(&["config", "user.email", "pack-pipeline@example.test"]);
+        for index in 0..6 {
+            std::fs::write(
+                source.path().join(format!("blob-{index}.bin")),
+                test_deterministic_bytes(index, 700 * 1024),
+            )
+            .unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "bounded pack fixture"]);
+        let inner = Arc::new(GatedPutStore {
+            inner: object_store::memory::InMemory::new(),
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            head_started: None,
+            head_release: None,
+            pack_only: true,
+            fail_next_put: AtomicBool::new(false),
+        });
+        let store = Store::new(inner.clone());
+        let router = StoreLayout::new(store.clone(), "repo-pack-pipeline".to_owned());
+        initialize_test_repository(&store, &router).await;
+        let pipeline = Arc::new(PushPipeline::new(
+            PushConfig {
+                git_dir: Some(source.path().join(".git")),
+                upload_concurrency: concurrency,
+                receive_max_input_size: 1024 * 1024,
+                ..PushConfig::default()
+            },
+            vec![make_spec("refs/heads/main")],
+            Some(store),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        ));
+        (source, pipeline, inner)
+    }
+
+    async fn assert_pack_pipeline_leases_released(
+        pipeline: &PushPipeline,
+        store: &GatedPutStore,
+        objects: &[ObjectMeta],
+    ) {
+        let prefix = pipeline.router.repo_prefix();
+        let ref_lock = crab_coordination::push_lock_path(prefix, "refs/heads/main").unwrap();
+        let slots = format!(
+            "{}/",
+            crab_coordination::push_admission::push_admission_prefix(prefix).unwrap()
+        );
+        let locks = objects
+            .iter()
+            .filter(|object| {
+                object.location.as_ref() == ref_lock || object.location.as_ref().starts_with(&slots)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            locks.len() >= 2,
+            "fixture must exercise ref and admission leases"
+        );
+        for object in locks {
+            let bytes = store
+                .inner
+                .get(&object.location)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            // Coordination releases with holder-checked CAS tombstones; absence
+            // is not its contract and would permit a stale delete to erase a successor.
+            let payload: crab_coordination::push_lock::PushLockPayload =
+                serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                payload.is_released(),
+                "lease still active: {}",
+                object.location
+            );
+        }
+        for domain in [prefix, pipeline.router.global_prefix()] {
+            let sweep = crab_coordination::gc_fence::GcFenceLease::acquire_sweep(
+                pipeline.store.as_ref().unwrap().inner(),
+                domain,
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("no writer GC fence may survive push cleanup");
+            sweep.release().await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_pack_uploads_overlap_without_publishing_partial_inventory() {
+        let _git_env = CleanGitEnvGuard::new();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for (configured, expected) in [(0, 1), (2, 2), (64, 4)] {
+                    let (_source, pipeline, store) = gated_pack_pipeline(configured).await;
+                    let task_pipeline = Arc::clone(&pipeline);
+                    let task =
+                        tokio::task::spawn_local(async move { task_pipeline.execute().await });
+                    tokio::time::timeout(
+                        Duration::from_secs(10),
+                        store.started.acquire_many(expected),
+                    )
+                    .await
+                    .expect("independent packs must enter the upload window")
+                    .unwrap()
+                    .forget();
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(100), store.started.acquire())
+                            .await
+                            .is_err(),
+                        "the whole-pack concurrency bound must apply while bodies are stalled"
+                    );
+                    assert!(pipeline.uploaded_packs.lock().await.is_empty());
+                    let (manifest, _) =
+                        read_manifest(pipeline.store.as_ref().unwrap(), &pipeline.router)
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        manifest.generation, 0,
+                        "refs must remain unpublished while packs are incomplete"
+                    );
+                    store.release.add_permits(32);
+                    let result = tokio::time::timeout(Duration::from_secs(20), task)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(result.all_ok(), "{result:?}");
+                    let (manifest, _) =
+                        read_manifest(pipeline.store.as_ref().unwrap(), &pipeline.router)
+                            .await
+                            .unwrap();
+                    assert_eq!(manifest.generation, 1);
+                    let packs = read_bulk_pack_list(
+                        pipeline.store.as_ref().unwrap(),
+                        &pipeline.router,
+                        &manifest.pack_index_hash,
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        packs.len() >= 6,
+                        "fixture must exceed every tested upload window"
+                    );
+                    for pack in packs {
+                        let bytes = store
+                            .inner
+                            .get(&pipeline.router.pack_path(&pack.pack_id))
+                            .await
+                            .unwrap()
+                            .bytes()
+                            .await
+                            .unwrap();
+                        assert_eq!(blake3::hash(&bytes).to_hex().as_str(), pack.content_hash);
+                        assert!(bytes.len() <= 1024 * 1024);
+                    }
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_pack_failure_drains_active_work_without_admitting_more_or_publishing_refs() {
+        let _git_env = CleanGitEnvGuard::new();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_source, pipeline, store) = gated_pack_pipeline(2).await;
+                store.fail_next_put.store(true, Ordering::SeqCst);
+                let task_pipeline = Arc::clone(&pipeline);
+                let mut task =
+                    tokio::task::spawn_local(async move { task_pipeline.execute().await });
+                tokio::time::timeout(Duration::from_secs(10), store.started.acquire_many(2))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .forget();
+                store.release.add_permits(1);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while store.fail_next_put.load(Ordering::SeqCst) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), &mut task)
+                        .await
+                        .is_err(),
+                    "push must keep ownership until the already-running sibling finishes"
+                );
+                assert_eq!(store.started.available_permits(), 0);
+                store.release.add_permits(1);
+                let result = tokio::time::timeout(Duration::from_secs(20), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!result.all_ok());
+                assert_eq!(
+                    store.started.available_permits(),
+                    0,
+                    "failure must stop admitting packs"
+                );
+                assert!(pipeline.uploaded_packs.lock().await.is_empty());
+                let (manifest, _) =
+                    read_manifest(pipeline.store.as_ref().unwrap(), &pipeline.router)
+                        .await
+                        .unwrap();
+                assert_eq!(manifest.generation, 0);
+                let objects = store
+                    .inner
+                    .list(None)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    objects
+                        .iter()
+                        .filter(|object| object.location.as_ref().ends_with(".pack"))
+                        .count(),
+                    1,
+                    "the admitted sibling must finish before push returns"
+                );
+                assert_eq!(result.failure_stage, Some(PushFailureStage::GitPackUpload));
+                assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_pack_cancellation_stops_admission_and_leaves_refs_unchanged() {
+        let _git_env = CleanGitEnvGuard::new();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_source, pipeline, store) = gated_pack_pipeline(2).await;
+                let task_pipeline = Arc::clone(&pipeline);
+                let mut task =
+                    tokio::task::spawn_local(async move { task_pipeline.execute().await });
+                tokio::time::timeout(Duration::from_secs(10), store.started.acquire_many(2))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .forget();
+                pipeline.cancel.cancel();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), &mut task)
+                        .await
+                        .is_err(),
+                    "cancellation must drain already-admitted single-PUT transactions"
+                );
+                store.release.add_permits(2);
+                let result = tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!result.all_ok());
+                assert_eq!(store.started.available_permits(), 0);
+                assert!(pipeline.uploaded_packs.lock().await.is_empty());
+                let (manifest, _) =
+                    read_manifest(pipeline.store.as_ref().unwrap(), &pipeline.router)
+                        .await
+                        .unwrap();
+                assert_eq!(manifest.generation, 0);
+                let objects = store
+                    .inner
+                    .list(None)
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    objects
+                        .iter()
+                        .filter(|object| object.location.as_ref().ends_with(".pack"))
+                        .count(),
+                    2
+                );
+                assert_eq!(result.failure_stage, Some(PushFailureStage::GitPackUpload));
+                assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+            })
+            .await;
     }
 
     #[derive(Debug)]
@@ -21066,6 +21553,8 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -21104,6 +21593,8 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -21114,6 +21605,8 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -21123,6 +21616,74 @@ mod tests {
         let stored = inner.get(&pack_path).await.unwrap().bytes().await.unwrap();
         assert_eq!(stored.len(), body.len());
         assert_eq!(blake3::hash(&stored), pack_hash);
+    }
+
+    #[tokio::test]
+    async fn upload_push_pack_file_body_repairs_corrupt_existing_object() {
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let store_inner: Arc<dyn object_store::ObjectStore> = inner.clone();
+        let store = crate::storage::store::Store::new(store_inner);
+        let pack_path = ObjectPath::from("repo/packs/content-addressed.pack");
+        inner
+            .put(&pack_path, Bytes::from_static(b"corrupt").into())
+            .await
+            .unwrap();
+        let body = Bytes::from_static(b"verified replacement pack body");
+        let mut pack_file = tempfile::NamedTempFile::new().unwrap();
+        pack_file.write_all(&body).unwrap();
+        pack_file.flush().unwrap();
+        let pack_hash = blake3::hash(&body);
+
+        let uploaded = upload_push_pack_file_body(
+            &store,
+            &pack_path,
+            pack_file.path(),
+            body.len() as u64,
+            *pack_hash.as_bytes(),
+            &CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(uploaded);
+        let stored = inner.get(&pack_path).await.unwrap().bytes().await.unwrap();
+        assert_eq!(stored, body);
+    }
+
+    #[tokio::test]
+    async fn upload_push_pack_file_body_rejects_changed_source_before_staging() {
+        let read_inner: Arc<dyn object_store::ObjectStore> = Arc::new(DenyHeadStore::new());
+        let write_inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = crate::storage::store::Store::new(read_inner)
+            .with_staging_write_store("repo/staging/push-1".to_owned(), write_inner.clone());
+        let pack_path = ObjectPath::from("repo/packs/changed.pack");
+        let staged_path = ObjectPath::from("repo/staging/push-1/objects/repo/packs/changed.pack");
+        let body = Bytes::from_static(b"changed source");
+        let mut pack_file = tempfile::NamedTempFile::new().unwrap();
+        pack_file.write_all(&body).unwrap();
+        pack_file.flush().unwrap();
+
+        let error = upload_push_pack_file_body(
+            &store,
+            &pack_path,
+            pack_file.path(),
+            body.len() as u64,
+            [7; 32],
+            &CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("changed pack body must fail before storage mutation");
+
+        assert!(matches!(error, CrabError::CorruptObject { .. }));
+        assert!(matches!(
+            write_inner.head(&staged_path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -25603,6 +26164,8 @@ mod tests {
             release: Arc::clone(&release),
             head_started: None,
             head_release: None,
+            pack_only: false,
+            fail_next_put: AtomicBool::new(false),
         });
         let mut lock = PushLock::acquire_internal(
             &store,
@@ -31175,6 +31738,8 @@ mod tests {
             release: Arc::clone(&release),
             head_started: None,
             head_release: None,
+            pack_only: false,
+            fail_next_put: AtomicBool::new(false),
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "repo-backpressure".to_owned());
@@ -31276,6 +31841,8 @@ mod tests {
             release: Arc::clone(&release),
             head_started: Some(Arc::clone(&head_started)),
             head_release: Some(Arc::clone(&head_release)),
+            pack_only: false,
+            fail_next_put: AtomicBool::new(false),
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "repo-overlap".to_owned());
@@ -31297,10 +31864,12 @@ mod tests {
 
         let (tx, rx) = tokio::sync::mpsc::channel(3);
         for seed in 1..=3u64 {
+            let bytes = Bytes::from(vec![seed as u8; 1024]);
+            let payload_digest = *blake3::hash(&bytes).as_bytes();
             let xorb = PackedXorb::from_result(XorbResult {
-                bytes: Bytes::from(vec![seed as u8; 1024]),
+                bytes,
                 hash: MerkleHash::from([seed, seed, seed, seed]),
-                payload_digest: [9; 32],
+                payload_digest,
                 placements: Vec::new(),
             })
             .await
@@ -31326,9 +31895,16 @@ mod tests {
                     .expect("all uploads must start before any is released")
                     .expect("started semaphore open");
             permits.forget();
+            // Once overlap is proven, allow the canonical read-back HEADs
+            // introduced by post-write integrity verification to finish.
+            head_release.add_permits(3);
             release.add_permits(3);
         };
-        let (uploaded, ()) = tokio::join!(consumer, observe_overlap);
+        let (uploaded, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(consumer, observe_overlap)
+        })
+        .await
+        .expect("overlapping uploads and read-back verification must finish");
         let uploaded = uploaded.expect("upload stream");
         assert_eq!(uploaded.planned_xorbs, 3);
         assert_eq!(uploaded.planned_bytes, 3 * 1024);
@@ -31522,6 +32098,32 @@ mod tests {
         assert_eq!(uploaded[0].len(), bytes.len());
         assert!(!uploaded[0].prepared);
         assert!(!uploaded[0].has_payload());
+    }
+
+    #[tokio::test]
+    async fn production_packer_spills_payloads_above_multipart_threshold() {
+        let spill_dir = tempfile::tempdir().expect("spill directory");
+        let budget_units = XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT
+            .div_ceil(XORB_UPLOAD_PAYLOAD_PERMIT_BYTES)
+            .max(1);
+        let budget = Arc::new(tokio::sync::Semaphore::new(budget_units));
+        let before = budget.available_permits();
+        let bytes = Bytes::from(vec![3; XORB_MULTIPART_THRESHOLD + 1]);
+        let packed = PackedXorb::from_result_in(
+            XorbResult {
+                bytes,
+                hash: MerkleHash::from([3_u64; 4]),
+                payload_digest: [3; 32],
+                placements: Vec::new(),
+            },
+            spill_dir.path(),
+            Some(&budget),
+        )
+        .await
+        .expect("pack large xorb");
+
+        assert!(packed.is_spilled());
+        assert_eq!(budget.available_permits(), before);
     }
 
     #[tokio::test(flavor = "multi_thread")]
