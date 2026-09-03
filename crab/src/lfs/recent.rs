@@ -1,5 +1,7 @@
 //! Git LFS recent-ref and recent-commit selection helpers.
 
+use std::collections::{HashMap, HashSet};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{ChildStdin, Command};
 use tokio_util::sync::CancellationToken;
@@ -59,19 +61,21 @@ pub(crate) fn recent_ref_oids_in(
     ))
 }
 
-/// Returns commits inside `lfs.fetchrecentcommitsdays` reachable from revisions.
+/// Returns commits within each selected tip's recent-history window.
 pub(crate) fn recent_commit_oids(
     revisions: &[String],
+    extra_days: u64,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>> {
     check_cancelled(cancel)?;
     let root = std::env::current_dir().map_err(CrabError::Io)?;
-    recent_commit_oids_in(&root, revisions, cancel)
+    recent_commit_oids_in(&root, revisions, extra_days, cancel)
 }
 
 pub(crate) fn recent_commit_oids_in(
     repo_root: &Path,
     revisions: &[String],
+    extra_days: u64,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>> {
     check_cancelled(cancel)?;
@@ -83,27 +87,136 @@ pub(crate) fn recent_commit_oids_in(
     if days == 0 {
         return Ok(Vec::new());
     }
-    let cutoff = cutoff_unix(days);
-
-    let mut args = vec!["rev-list", "--timestamp"];
-    args.extend(revisions.iter().map(String::as_str));
-
-    let output = git_output(repo_root, &args, cancel)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if rev_list_can_be_empty(&stderr) {
-            return Ok(Vec::new());
+    let window = days.saturating_add(extra_days).saturating_mul(24 * 60 * 60);
+    let mut roots = HashSet::new();
+    let mut remaining = MAX_CAPTURE_BYTES;
+    for revision in revisions {
+        check_cancelled(cancel)?;
+        let commit = format!("{revision}^{{commit}}");
+        let resolved = git_output(
+            repo_root,
+            &["rev-parse", "--verify", "--end-of-options", &commit],
+            cancel,
+        )?;
+        let resolved = crate::lfs::discovery::successful_git("rev-parse", resolved)?;
+        let resolved = String::from_utf8(resolved)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let oid = resolved.trim();
+        if !crate::lfs::discovery::is_git_object_id(oid) {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "invalid resolved commit ID").into(),
+            );
         }
-        return Err(CrabError::Internal(format!(
-            "git rev-list failed: {stderr}"
-        )));
+        if roots.contains(oid) {
+            continue;
+        }
+        crate::lfs::discovery::spend_scan_budget(
+            &mut remaining,
+            2 * (oid.len() + std::mem::size_of::<String>() * 2),
+        )?;
+        roots.insert(oid.to_owned());
     }
+    let mut command = Command::new("git");
+    command
+        .args([
+            "rev-list",
+            "--timestamp",
+            "--parents",
+            "--topo-order",
+            "--stdin",
+        ])
+        .current_dir(repo_root);
+    let write_roots = |mut stdin: ChildStdin| -> Result<()> {
+        for root in &roots {
+            check_cancelled(cancel)?;
+            writeln!(stdin, "{root}")?;
+        }
+        Ok(())
+    };
+    let output = process::run(command, cancel, Some(write_roots), |stdout| {
+        select_recent_commits(stdout, &roots, window, &mut remaining, cancel)
+    })?;
+    crate::lfs::discovery::successful_git("rev-list", output)
+}
 
-    Ok(parse_timestamped_commit_oids(
-        &String::from_utf8_lossy(&output.stdout),
-        cutoff,
-    ))
+fn select_recent_commits(
+    stdout: impl Read,
+    roots: &HashSet<String>,
+    window: u64,
+    remaining: &mut u64,
+    cancel: &CancellationToken,
+) -> Result<Vec<String>> {
+    let mut selected = Vec::new();
+    let mut cutoffs = HashMap::<String, u64>::new();
+    let mut seen_roots = HashSet::new();
+    let mut reader = BufReader::new(stdout);
+    let mut record = Vec::new();
+    loop {
+        check_cancelled(cancel)?;
+        record.clear();
+        let read = (&mut reader)
+            .take(MAX_CAPTURE_BYTES + 1)
+            .read_until(b'\n', &mut record)?;
+        if read == 0 {
+            break;
+        }
+        if read as u64 > MAX_CAPTURE_BYTES || record.pop() != Some(b'\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "oversized or truncated recent commit",
+            )
+            .into());
+        }
+        let line = std::str::from_utf8(&record)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let (timestamp, oid, parents) = parse_timestamped_commit(line)?;
+        let mut cutoff = cutoffs.remove(oid);
+        if cutoff.is_some() {
+            // Only the pending frontier is retained. Refund its entry when
+            // consumed so long history is bounded by live state, not rows.
+            *remaining += (oid.len() + std::mem::size_of::<String>() * 2) as u64;
+        }
+        if let Some(root) = roots.get(oid) {
+            if !seen_roots.insert(root) {
+                return Err(
+                    io::Error::new(io::ErrorKind::InvalidData, "duplicate recent root").into(),
+                );
+            }
+            let own = timestamp.saturating_sub(window);
+            cutoff = Some(cutoff.map_or(own, |inherited| inherited.min(own)));
+        }
+        let cutoff = cutoff.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected commit in recent history",
+            )
+        })?;
+        if timestamp >= cutoff {
+            crate::lfs::discovery::spend_scan_budget(
+                remaining,
+                oid.len() + std::mem::size_of::<String>() * 2,
+            )?;
+            selected.push(oid.to_owned());
+        }
+        // Children precede parents. Propagate the widest applicable window
+        // once through shared ancestry, even across skewed timestamps, so
+        // independent tips cannot lose each other's retained commits.
+        for parent in parents.split_whitespace() {
+            if let Some(existing) = cutoffs.get_mut(parent) {
+                *existing = (*existing).min(cutoff);
+            } else {
+                crate::lfs::discovery::spend_scan_budget(
+                    remaining,
+                    parent.len() + std::mem::size_of::<String>() * 2,
+                )?;
+                cutoffs.insert(parent.to_owned(), cutoff);
+            }
+        }
+    }
+    if seen_roots.len() != roots.len() || !cutoffs.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "incomplete recent history").into());
+    }
+    Ok(selected)
 }
 
 pub(crate) fn git_config_u64_in(
@@ -215,223 +328,24 @@ fn parse_recent_ref_oids(output: &str, cutoff_unix: u64) -> Vec<String> {
         .collect()
 }
 
-fn parse_timestamped_commit_oids(output: &str, cutoff_unix: u64) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (timestamp, oid) = line.split_once(' ')?;
-            let timestamp = timestamp.trim().parse::<u64>().ok()?;
-            if timestamp < cutoff_unix {
-                return None;
-            }
-            Some(oid.trim().to_owned())
-        })
-        .filter(|oid| !oid.is_empty())
-        .collect()
+fn parse_timestamped_commit(line: &str) -> Result<(u64, &str, &str)> {
+    let (timestamp, object_ids) = line.split_once(' ').ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "malformed timestamped commit")
+    })?;
+    let timestamp = timestamp
+        .parse::<u64>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let (oid, parents) = object_ids.split_once(' ').unwrap_or((object_ids, ""));
+    if object_ids
+        .split(' ')
+        .any(|oid| !crate::lfs::discovery::is_git_object_id(oid))
+    {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "invalid timestamped commit ID").into(),
+        );
+    }
+    Ok((timestamp, oid, parents))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture_git(root: &Path, args: &[&str]) -> String {
-        let output = git_output(root, args, &CancellationToken::new()).unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
-
-    #[test]
-    fn cancelled_recent_queries_stop_before_repository_access() {
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let root = Path::new("missing-recent-query-repository");
-        assert!(matches!(
-            recent_ref_oids_in(root, 0, &cancel),
-            Err(CrabError::Cancelled)
-        ));
-        for revisions in [vec![], vec!["HEAD".to_owned()]] {
-            assert!(matches!(
-                recent_commit_oids_in(root, &revisions, &cancel),
-                Err(CrabError::Cancelled)
-            ));
-        }
-        assert!(matches!(
-            git_config_u64_in(root, "lfs.pruneoffsetdays", 3, &cancel),
-            Err(CrabError::Cancelled)
-        ));
-        assert!(matches!(
-            git_config_bool_in(root, "lfs.fetchrecentremoterefs", true, &cancel),
-            Err(CrabError::Cancelled)
-        ));
-    }
-
-    #[test]
-    fn typed_config_preserves_defaults_and_rejects_invalid_values() {
-        let _guard = crate::test::git_repo::GIT_DIR_MUTEX.lock().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path();
-        fixture_git(root, &["init", "-q"]);
-        let cancel = CancellationToken::new();
-        let key = "crab.recentQueryFixture";
-        assert_eq!(git_config_u64_in(root, key, 7, &cancel).unwrap(), 7);
-        assert!(git_config_bool_in(root, key, true, &cancel).unwrap());
-        for (value, expected) in [("0", 0), ("2k", 2048)] {
-            fixture_git(root, &["config", key, value]);
-            assert_eq!(git_config_u64_in(root, key, 7, &cancel).unwrap(), expected);
-        }
-        fixture_git(root, &["config", key, "off"]);
-        assert!(!git_config_bool_in(root, key, true, &cancel).unwrap());
-        for value in ["-1", "invalid"] {
-            fixture_git(root, &["config", key, value]);
-            assert!(git_config_u64_in(root, key, 7, &cancel).is_err());
-        }
-        assert!(git_config_bool_in(root, key, true, &cancel).is_err());
-    }
-
-    #[test]
-    fn supervised_recent_queries_preserve_ref_and_commit_selection() {
-        let _guard = crate::test::git_repo::GIT_DIR_MUTEX.lock().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path();
-        fixture_git(root, &["init", "-q"]);
-        for args in [
-            ["config", "user.name", "Fixture"],
-            ["config", "user.email", "fixture@example.invalid"],
-            ["config", "commit.gpgsign", "false"],
-            ["config", "lfs.fetchrecentrefsdays", "7"],
-            ["config", "lfs.fetchrecentcommitsdays", "7"],
-            ["config", "lfs.fetchrecentremoterefs", "false"],
-        ] {
-            fixture_git(root, &args);
-        }
-        fixture_git(root, &["commit", "--allow-empty", "-qm", "first"]);
-        let first = fixture_git(root, &["rev-parse", "HEAD"]);
-        fixture_git(root, &["update-ref", "refs/remotes/origin/other", &first]);
-        fixture_git(root, &["commit", "--allow-empty", "-qm", "second"]);
-        let second = fixture_git(root, &["rev-parse", "HEAD"]);
-        let cancel = CancellationToken::new();
-        assert_eq!(
-            recent_ref_oids_in(root, 0, &cancel).unwrap(),
-            [second.clone()]
-        );
-        fixture_git(root, &["config", "lfs.fetchrecentremoterefs", "true"]);
-        let mut refs = recent_ref_oids_in(root, 0, &cancel).unwrap();
-        refs.sort();
-        let mut expected = vec![first.clone(), second.clone()];
-        expected.sort();
-        assert_eq!(refs, expected);
-        assert_eq!(
-            recent_commit_oids_in(root, &["HEAD".to_owned()], &cancel).unwrap(),
-            [second, first]
-        );
-        fixture_git(root, &["config", "lfs.fetchrecentrefsdays", "0"]);
-        assert!(recent_ref_oids_in(root, 3, &cancel).unwrap().is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn recent_query_output_is_bounded_on_both_pipes() {
-        let _guard = crate::test::git_repo::GIT_DIR_MUTEX.lock().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        for redirect in ["", " >&2"] {
-            let alias = format!("alias.recent-query=!head -c 67108865 /dev/zero{redirect}");
-            let error = git_output(
-                temporary.path(),
-                &["-c", &alias, "recent-query"],
-                &CancellationToken::new(),
-            )
-            .err()
-            .expect("oversized output must fail");
-            assert!(
-                matches!(error, CrabError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData)
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stalled_recent_query_is_cancelled_and_joined() {
-        use std::time::{Duration, Instant};
-        let _guard = crate::test::git_repo::GIT_DIR_MUTEX.lock().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path();
-        let ready = root.join("ready");
-        let cancel = CancellationToken::new();
-        std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                git_output(
-                    root,
-                    &[
-                        "-c",
-                        "alias.recent-query=!echo $$ > ready; exec sleep 30",
-                        "recent-query",
-                    ],
-                    &cancel,
-                )
-            });
-            let started = Instant::now();
-            let mut pid = None;
-            while started.elapsed() < Duration::from_secs(15) {
-                pid = std::fs::read_to_string(&ready)
-                    .ok()
-                    .and_then(|value| value.trim().parse::<u32>().ok());
-                if pid.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            cancel.cancel();
-            assert!(matches!(worker.join().unwrap(), Err(CrabError::Cancelled)));
-            let pid = pid.expect("query must have started").to_string();
-            let status = Command::new("kill")
-                .args(["-0", &pid])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(!status.success(), "cancelled Git descendant is still alive");
-            assert!(started.elapsed() < Duration::from_secs(25));
-        });
-    }
-
-    #[test]
-    fn parse_recent_ref_oids_filters_by_cutoff() {
-        let output = "\
-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 100
-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 90
-cccccccccccccccccccccccccccccccccccccccc bad
-";
-
-        let refs = parse_recent_ref_oids(output, 100);
-
-        assert_eq!(refs, vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
-    }
-
-    #[test]
-    fn parse_timestamped_commit_oids_filters_by_cutoff() {
-        let output = "\
-100 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-90 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-bad cccccccccccccccccccccccccccccccccccccccc
-";
-
-        let commits = parse_timestamped_commit_oids(output, 100);
-
-        assert_eq!(commits, vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
-    }
-
-    #[test]
-    fn rev_list_empty_errors_are_non_fatal() {
-        assert!(rev_list_can_be_empty("fatal: bad default revision 'HEAD'"));
-        assert!(rev_list_can_be_empty(
-            "fatal: your current branch does not have any commits"
-        ));
-        assert!(rev_list_can_be_empty(
-            "fatal: ambiguous argument 'refs/stash'"
-        ));
-        assert!(!rev_list_can_be_empty("fatal: object database is corrupt"));
-    }
-}
+mod tests;

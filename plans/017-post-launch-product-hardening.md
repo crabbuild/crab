@@ -2753,11 +2753,12 @@ windows are relative to each selected ref's tip, remote refs belong to the
 selected remote, and prune offsets apply to both recent windows. Current
 helpers use wall-clock commit cutoffs and all remote refs. Qualify old ref
 tips, two remotes, non-monotonic commit dates, offset boundaries, unborn HEAD
-and staged-only pointers before changing policy. Prune's current `--force`
-path also disables recent retention despite the documented confirmation-only
-contract. This requires a retention-specific correction and destructive-path
-tests; the new cancellation proof does not certify prune safety or Git LFS
-selection parity.
+and staged-only pointers before changing policy. Crab documents `--force` as
+confirmation-only, whereas upstream Git LFS defines it as pruning pushed
+objects even when required by current checkouts, implying `--recent`. This is
+a contract discrepancy to resolve explicitly, not evidence that upstream
+`--force` merely skips confirmation. This packet does not change that flag;
+the cancellation proof does not certify prune safety or selection parity.
 
 ### Ref-journal rollback ownership: 2026-09-03 UTC
 
@@ -2941,6 +2942,81 @@ do not infer plan attribution from equal refs or transient journal markers.
 An explicit repository-format/writer upgrade decision is pending. No new
 format, automatic migration, terminal receipt or acceptance closure is
 implied by this packet.
+
+### Per-ref recent commit windows: 2026-09-03 UTC
+
+**Context.** A real-Git regression with two independently dated historical
+branches returned an empty selection even though both had commits within
+their configured windows. `lfs::recent` used today's wall clock for history;
+Git LFS measures history backward from each selected tip. Prune already added
+its offset to the ref window but omitted it from the commit window.
+
+**Implementation.** Resolve each requested revision with Git's single-commit
+verification before walking frozen OIDs. One streamed topological walk seeds
+each tip's cutoff and propagates the widest applicable window to shared
+parents, including across non-monotonic dates. Each commit is visited once;
+consumed frontier entries release their memory budget. Roots arrive on stdin
+instead of a growing command line. Retained graph/selection state uses the shared
+discovery inventory budget; input records are separately bounded. Reject failed
+revision resolution and malformed timestamped records; never treat a missing selected
+revision as an empty successful history. The existing fetch owner supplies
+zero extra days; the prune owner supplies its configured offset. A disabled
+window remains disabled, and addition/subtraction saturate safely. No new
+configuration, dependency, persistent shape or alternate process owner.
+
+**Acceptance.** Old selected tips and two independent windows produce their
+own expected commit sets; duplicate aliases/annotated tags do not duplicate
+results; a newer-dated ancestor behind an older parent remains discoverable;
+offset boundaries and zero-disabled windows behave consistently. Invalid
+selected refs fail closed. Existing cancellation and bounded-output tests
+must pass. Exact-binary full/partial RustFS fetch must retrieve current and
+historical payloads with verified SHA-256 bytes when commit dates are old.
+
+**Pre-fix evidence.** The optimized `b44fe67` binary reproduced the missing-history
+failure against RustFS after 39 commands: current payloads and full clone passed,
+but the partial clone still lacked historical pointer blobs after recent fetch.
+The fixture uses four 65 MiB payload versions, two paths, and two commits dated
+in 2001, two days apart. Its original full-clone checks were unchanged. Report:
+`phase2-lfs-dated-before-b44fe67-configured-20260903/report.json` in the external
+qualification workspace. An earlier attempt used an incorrect remote URL and
+failed during setup; it is retained but is not product regression evidence.
+
+**Local proof.** All 62 selected recent/fetch/prune/discovery tests pass,
+including shared-ancestor window propagation, long streamed history with a
+small live-state budget, truncated/missing/out-of-order graph rejection,
+old independent tips, offset boundaries and cancellation. Production-library
+correctness/suspicious Clippy and formatting pass; other existing warning
+categories are not claimed clean. Production code grows by approximately
+125 lines to own one bounded union walk instead of unchecked whole-output
+filtering; the larger test module now lives in `lfs/recent/tests.rs`.
+Exact-candidate release build and dated-history RustFS proof remain required.
+
+The preceding `b44fe67` checkpoint now has terminal success in all nine
+[protocol CI jobs](https://github.com/crabbuild/crab/actions/runs/33741342130).
+That evidence does not cover this newer change or the separately documented
+recovery fixture failure.
+
+**Contract sources.** [Git LFS fetch](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-fetch.adoc)
+and its [fetch owner](https://github.com/git-lfs/git-lfs/blob/main/commands/command_fetch.go)
+define the per-tip cutoff; the [prune owner](https://github.com/git-lfs/git-lfs/blob/main/commands/command_prune.go)
+adds its offset to both enabled windows. Git 2.30's
+[revision verification](https://git-scm.com/docs/git-rev-parse/2.30.0)
+defines `--verify`, `--end-of-options` and commit peeling; its
+[revision walk](https://git-scm.com/docs/git-rev-list/2.30.0)
+defines child-before-parent ordering and stdin roots. Object-ID validation
+uses the existing shared discovery contract, independent of optional gix
+hash-algorithm features.
+
+**Remaining work.** This selects commit trees, not exact previous pointer
+versions removed by changes inside the window. In particular, a replaced
+version can live in a parent predating the cutoff. That needs the existing
+verified object-discovery owner extended to the changed previous objects,
+with merge, deletion, path-filter and boundary tests. Fetch's recent remote
+scope, typed default-unborn prune handling, staged-index/stash protection,
+prune's unchecked alternate inventory paths and the `--force` contract remain
+open. No destructive prune or complete retention/parity claim is authorized
+by this evidence. Exact-candidate CI and controlled performance comparisons
+remain separate acceptance gates.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

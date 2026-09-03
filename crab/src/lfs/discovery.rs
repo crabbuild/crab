@@ -64,7 +64,7 @@ pub(crate) fn collect_pointers_from_trees_in(
     Ok(entries)
 }
 
-fn is_git_object_id(value: &str) -> bool {
+pub(crate) fn is_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -316,7 +316,7 @@ pub(crate) fn spend_scan_budget(remaining: &mut u64, bytes: usize) -> io::Result
     Ok(())
 }
 
-fn successful_git<T>(operation: &str, output: process::Output<T>) -> Result<T> {
+pub(crate) fn successful_git<T>(operation: &str, output: process::Output<T>) -> Result<T> {
     if !output.status.success() {
         return Err(CrabError::Internal(format!(
             "git {operation} failed: {}",

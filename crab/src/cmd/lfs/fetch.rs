@@ -478,7 +478,7 @@ fn collect_lfs_pointers(
         roots.extend(recent_refs.iter().cloned());
         selected.extend(recent_refs);
         selected.extend(crate::lfs::recent::recent_commit_oids_in(
-            repo_dir, &roots, cancel,
+            repo_dir, &roots, 0, cancel,
         )?);
     }
     check_cancelled(cancel)?;

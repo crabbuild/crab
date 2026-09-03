@@ -657,7 +657,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 |-----|---------|-------------|
 | `lfs.concurrenttransfers` | 8 | Max concurrent uploads/downloads (range 1–100) |
 | `lfs.fetchrecentrefsdays` | 7 | Days of recent refs to include in `--recent` fetch |
-| `lfs.fetchrecentcommitsdays` | 0 | Days of commits within recent refs to fetch |
+| `lfs.fetchrecentcommitsdays` | 0 | History window measured backward from each selected ref's commit time; zero disables it |
 | `lfs.pruneoffsetdays` | 3 | Grace period before pruning unreferenced objects |
 | `lfs.fetchinclude` | (none) | Glob pattern for paths to include in fetch |
 | `lfs.fetchexclude` | (none) | Glob pattern for paths to exclude from fetch |
@@ -669,6 +669,22 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.lfsdir` | `.git/lfs` | Legacy Crab alias for `lfs.storage` |
 | `lfs.pruneverifyremotealways` | false | Verify prune candidates remotely unless the CLI overrides it |
 | `lfs.pruneverifyunreachablealways` | false | Also verify unreachable prune candidates unless the CLI overrides it |
+
+### Recent Commit Selection
+
+Recent commit selection resolves each requested revision to one commit before
+walking its history. Each tip supplies its own cutoff; prune adds
+`lfs.pruneoffsetdays` only when the commit window is enabled. One streamed
+topological walk visits shared ancestry once, propagating the widest applicable
+cutoff to each parent. Pending graph entries and deduplicated results share
+the existing scan budget; each input record is bounded separately. Missing selected
+revisions, malformed timestamped commit records and cancelled Git queries
+fail rather than returning an incomplete successful selection.
+
+This commit selection is not complete Git LFS previous-version parity: an
+object replaced inside the window can have its previous version in a parent
+outside the window. Exact previous-version discovery and prune's remaining
+unchecked inventory paths still need separate qualification.
 
 ### Configuration Precedence
 

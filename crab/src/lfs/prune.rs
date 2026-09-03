@@ -494,7 +494,8 @@ fn protected_revision_arg_sets(
         if !recent_refs.is_empty() {
             sets.push(recent_refs.clone());
         }
-        let recent_commits = crate::lfs::recent::recent_commit_oids(&recent_roots, cancel)?;
+        let recent_commits =
+            crate::lfs::recent::recent_commit_oids(&recent_roots, offset_days, cancel)?;
         if !recent_commits.is_empty() {
             sets.push(recent_commits);
         }
