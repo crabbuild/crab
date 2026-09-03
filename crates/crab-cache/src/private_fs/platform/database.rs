@@ -79,6 +79,7 @@ impl Drop for Database {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(feature = "local-cache", test))]
 pub(in crate::private_fs) fn open_database(
     root: &Path,
     path: &Path,
@@ -180,14 +181,14 @@ fn open_with_generation(
         recovery_files |= exists && suffix != "-owner";
     }
     if !validate_file(&directory, filename)? {
-        if mode != DatabaseMode::Create {
-            return Err(io::Error::from(io::ErrorKind::NotFound).into());
-        }
         if recovery_files {
             return Err(unsafe_path(
                 path,
                 "missing database has recovery side files",
             ));
+        }
+        if mode != DatabaseMode::Create {
+            return Err(io::Error::from(io::ErrorKind::NotFound).into());
         }
         // Exclusive creation cannot touch an existing SQLite inode. The fd is
         // closed before SQLite opens, and no later pathname chmod is needed.
@@ -252,6 +253,7 @@ fn open_with_generation(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(feature = "local-cache", test))]
 pub(in crate::private_fs) fn open_database(
     _root: &Path,
     path: &Path,

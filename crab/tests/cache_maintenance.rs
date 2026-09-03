@@ -164,7 +164,29 @@ fn maintenance_commands_leave_missing_roots_missing() {
     }
 }
 
-const STATS_COMMANDS: &[&[&str]] = &[&["cache", "stats"], &["optimize", "cache", "stats"]];
+const STATS_COMMANDS: &[&[&str]] = &[
+    &["cache", "stats"],
+    &["optimize", "cache", "stats"],
+    &["cache", "stats", "--json"],
+    &["optimize", "cache", "stats", "--json"],
+];
+
+fn stats_data(stdout: &[u8]) -> serde_json::Value {
+    // Parsing the entire stdout also rejects a second trailing envelope.
+    let envelope: serde_json::Value = serde_json::from_slice(stdout).unwrap();
+    assert_eq!(envelope["schema"], "cache.stats");
+    assert_eq!(envelope["version"], "1.0");
+    assert!(envelope.get("error").is_none());
+    envelope["data"].clone()
+}
+
+fn family_columns<'a>(stdout: &'a str, family: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .find(|columns| columns.first() == Some(&family))
+        .unwrap()
+}
 
 #[test]
 fn stats_commands_leave_missing_roots_and_range_directories_missing() {
@@ -216,6 +238,7 @@ fn cache_tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec
 
 #[tokio::test]
 async fn stats_commands_count_chunk_payloads_without_mutating_cache_state() {
+    use std::os::unix::fs::PermissionsExt as _;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache");
     let cache = LocalCache::new(root.clone());
@@ -227,20 +250,31 @@ async fn stats_commands_count_chunk_payloads_without_mutating_cache_state() {
         .put(&CacheKey::Shard(compute_data_hash(b"shard")), b"shard")
         .await
         .unwrap();
-    // A corrupt retained database is not opened, repaired, or counted as a
-    // payload by this inspection command.
+    // Unrelated index bodies are counted but never opened or repaired.
     std::fs::write(root.join("shard-hints.db"), b"invalid sqlite").unwrap();
+    std::fs::set_permissions(
+        root.join("shard-hints.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let before = cache_tree(&root);
     for args in STATS_COMMANDS {
-        let output = String::from_utf8(command(temp.path(), &root, args)).unwrap();
-        let objects = output.split_once("Object cache:").unwrap().1;
-        assert!(objects.contains("used_bytes:  9 B (9 bytes)"), "{output}");
-        assert!(
-            objects
-                .lines()
-                .any(|line| line.split_whitespace().collect::<Vec<_>>()
-                    == ["chunks", "1", "entries,", "4", "B"])
-        );
+        let output = command(temp.path(), &root, args);
+        if args.contains(&"--json") {
+            let data = stats_data(&output);
+            assert_eq!(data["families"]["chunk"]["logical_bytes"], 4);
+            assert_eq!(data["families"]["shard"]["logical_bytes"], 5);
+            assert_eq!(data["families"]["shard-hint"]["logical_bytes"], 14);
+            assert_eq!(data["catalog"]["state"], "readable");
+            assert_eq!(data["scan_complete"], true);
+        } else {
+            let stdout = String::from_utf8(output).unwrap();
+            let columns = family_columns(&stdout, "chunk");
+            assert_eq!(
+                (&columns[1..4], columns[5]),
+                (&["1", "0", "4"][..], "inspected")
+            );
+        }
         assert_eq!(cache_tree(&root), before, "{args:?} mutated cache state");
     }
 }
@@ -286,14 +320,22 @@ async fn stats_commands_report_healthy_groups_when_the_other_is_unsafe() {
                 !output.status.success(),
                 "{args:?} hid unsafe {unsafe_family}"
             );
-            let stdout = String::from_utf8(output.stdout).unwrap();
-            let (ranges, objects) = stdout.split_once("Object cache:").unwrap();
-            if unsafe_family == "ranges" {
-                assert!(ranges.contains("unavailable:"), "{stdout}");
-                assert!(objects.contains("used_bytes:  5 B (5 bytes)"), "{stdout}");
+            let (healthy, bytes, unsafe_name) = if unsafe_family == "ranges" {
+                ("shard", 5, "decoded-range")
             } else {
-                assert!(ranges.contains("used_bytes:  16 B (16 bytes)"), "{stdout}");
-                assert!(objects.contains("unavailable:"), "{stdout}");
+                ("decoded-range", 16, "shard")
+            };
+            if args.contains(&"--json") {
+                let data = stats_data(&output.stdout);
+                assert_eq!(data["families"][healthy]["logical_bytes"], bytes);
+                assert_eq!(data["families"][healthy]["complete"], true);
+                assert_eq!(data["families"][unsafe_name]["complete"], false);
+                assert_eq!(data["scan_complete"], false);
+            } else {
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                assert_eq!(family_columns(&stdout, healthy)[3], bytes.to_string());
+                assert_eq!(family_columns(&stdout, healthy)[5], "inspected");
+                assert_eq!(family_columns(&stdout, unsafe_name)[5], "partial");
             }
             assert_eq!(cache_tree(&root), before, "{args:?} repaired unsafe state");
         }
@@ -314,6 +356,12 @@ fn stats_commands_reject_invalid_configuration_without_creating_a_cache() {
             "{args:?} ignored invalid configuration"
         );
         assert!(!root.exists());
+        if args.contains(&"--json") {
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(envelope["schema"], "cache.stats");
+            assert!(envelope.get("error").is_some());
+            assert!(envelope.get("data").is_none());
+        }
     }
 }
 
@@ -337,10 +385,70 @@ async fn stats_commands_do_not_inspect_ranges_through_an_aliased_cache_root() {
     for args in STATS_COMMANDS {
         let output = command_output(temp.path(), &alias, args);
         assert!(!output.status.success());
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(stdout.matches("unavailable:").count(), 2, "{stdout}");
-        assert!(!stdout.contains("used_bytes:"), "{stdout}");
+        if args.contains(&"--json") {
+            let data = stats_data(&output.stdout);
+            assert_eq!(data["root_state"], "unavailable");
+            assert_eq!(data["observed"]["logical_bytes"], 0);
+            assert_eq!(data["scan_complete"], false);
+            assert!(data["over_budget"].is_null());
+        } else {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains("(Unavailable)"), "{stdout}");
+            assert!(stdout.contains("partial scan; lower bounds"), "{stdout}");
+        }
         assert_eq!(cache_tree(&root), before);
+    }
+}
+
+#[tokio::test]
+async fn doctor_reports_missing_unsafe_corrupt_and_over_budget_cache_without_mutation() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for state in ["missing", "unsafe", "corrupt", "over-budget"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        if state != "missing" {
+            LocalCache::new(root.clone())
+                .put(&CacheKey::Shard(compute_data_hash(b"data")), b"data")
+                .await
+                .unwrap();
+        }
+        match state {
+            "unsafe" => std::fs::set_permissions(
+                root.join("shards"),
+                std::fs::Permissions::from_mode(0o777),
+            )
+            .unwrap(),
+            "corrupt" => std::fs::write(root.join(".catalog.sqlite"), b"invalid sqlite").unwrap(),
+            "over-budget" => {
+                let config = temp.path().join(crab::core::config::REPO_CONFIG_REL);
+                std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+                std::fs::write(config, "[cache]\nmax_bytes = 1\n").unwrap();
+            }
+            _ => {}
+        }
+        let before = root.exists().then(|| cache_tree(&root));
+        let output = command(temp.path(), &root, &["doctor", "--json"]);
+        let envelope: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let checks = envelope["data"]["checks"].as_array().unwrap();
+        let (name, status, detail) = match state {
+            "missing" => ("local cache", "ok", "not yet created"),
+            "unsafe" => ("cache family", "fail", "owner-only permissions"),
+            "corrupt" => ("cache family", "warn", "preserve the affected database"),
+            _ => ("cache budget", "warn", "exceeds the effective budget"),
+        };
+        assert!(
+            checks.iter().any(|check| check["name"] == name
+                && check["status"] == status
+                && check["detail"].as_str().unwrap().contains(detail)),
+            "{state}: {}",
+            String::from_utf8_lossy(&output)
+        );
+        assert_eq!(
+            root.exists().then(|| cache_tree(&root)),
+            before,
+            "doctor mutated {state} cache"
+        );
     }
 }
 

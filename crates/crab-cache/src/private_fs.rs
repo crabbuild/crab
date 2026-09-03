@@ -13,6 +13,13 @@ pub(crate) struct FileStat {
     pub(crate) modified_ns: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct EntryStat {
+    pub(crate) file: FileStat,
+    pub(crate) allocated_bytes: u64,
+    pub(crate) is_directory: bool,
+}
+
 pub(crate) struct PinnedRoot(platform::Directory);
 
 pub(crate) use platform::Database;
@@ -60,6 +67,7 @@ pub(crate) enum DatabaseMode {
     Create,
 }
 
+#[cfg(any(feature = "local-cache", test))]
 pub(crate) fn open_database(
     root: &Path,
     path: &Path,
@@ -104,6 +112,13 @@ impl PinnedRoot {
         visitor: &mut dyn FnMut(&Path, FileStat) -> Result<()>,
     ) -> Result<()> {
         self.0.visit_selected_files(select, visitor)
+    }
+
+    pub(crate) fn inspect_entries(
+        &self,
+        visitor: &mut dyn FnMut(&Path, Result<EntryStat>) -> Result<()>,
+    ) -> Result<()> {
+        self.0.inspect_entries(visitor)
     }
 
     pub(crate) fn remove_file_if(
@@ -364,9 +379,11 @@ mod platform {
     mod database;
     mod scan;
     pub(crate) use database::Database;
+    #[cfg(any(feature = "local-cache", test))]
+    pub(super) use database::open_database;
+    pub(super) use database::open_database_at;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) use database::{Generation, open_database_leased, validate_database_generation};
-    pub(super) use database::{open_database, open_database_at};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1084,6 +1101,7 @@ mod platform {
 
     pub(crate) type Database = rusqlite::Connection;
 
+    #[cfg(any(feature = "local-cache", test))]
     pub(super) fn open_database(
         _root: &Path,
         path: &Path,
@@ -1116,6 +1134,12 @@ mod platform {
             &self,
             _select: &dyn Fn(&Path) -> Result<bool>,
             _visitor: &mut dyn FnMut(&Path, super::FileStat) -> Result<()>,
+        ) -> Result<()> {
+            Err(unsupported(Path::new("cache")))
+        }
+        pub(super) fn inspect_entries(
+            &self,
+            _visitor: &mut dyn FnMut(&Path, Result<super::EntryStat>) -> Result<()>,
         ) -> Result<()> {
             Err(unsupported(Path::new("cache")))
         }

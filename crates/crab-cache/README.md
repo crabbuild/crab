@@ -51,11 +51,23 @@ or reported as valid. Dropping an async scan cancels its blocking worker via a
 child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
-Product stats use `xet_chunk_cache_stats_in_root` to pin the configured cache
-root before traversing decoded ranges, rather than treating its parent as
-ambient. Standalone range-directory statistics retain their narrower ownership
-contract. Neither scan opens a database or creates missing paths; this does not
-establish full-family health or physical disk accounting.
+Product stats and doctor use `health::inspect_cache`: one pinned root, one
+streaming filesystem walk, and a read-only catalog transaction. Every linked
+file is counted by family, including databases, side files, temporaries, hints,
+and retained/unknown state. Logical file lengths and allocated 512-byte blocks
+are separate; directory allocation has its own row. The walk retains at most
+64 issue details, marks affected families incomplete, and continues independent
+subtrees. Strict maintenance uses the same walker but still aborts on an unsafe
+entry. Missing roots/catalogs are not initialized and unsafe paths are not
+repaired. Standalone object/range statistics retain their narrower contracts.
+
+The live filesystem walk is not atomic, an integrity check, or unique-volume
+allocation accounting (shared filesystem extents can be counted more than
+once). It excludes unlinked open files and reports reservations separately.
+An incomplete scan gives observed lower bounds and unknown over-budget status,
+unless observed allocation already exceeds the budget. Catalog read failures
+do not invalidate independently measured file bytes. The report does not
+establish all-family eviction or inspect other database/index bodies.
 
 Object-cache stats, prune, targeted eviction, and verification use that same
 private boundary. The three eviction loops are consolidated, and stats/verify
@@ -144,8 +156,8 @@ write permission; SQL and VFS data writes remain disabled. A filesystem that
 cannot grant that descriptor reports unavailable rather than weakening locking.
 Native macOS tests cover quiet and retained WAL state, contention, direct VFS
 write denial, native writer exclusion, and inspection after writer death. This
-is a library boundary, not full health-model/CLI integration, native Linux proof,
-or a bound on heap WAL-index size and total inspection time.
+is used by both stats spellings and doctor. Native Linux proof and bounds on
+heap WAL-index size, SQL aggregation, and total inspection time remain open.
 
 Admission includes the incoming file and other active reservations when making
 space, even below the current-usage high watermark. The final capacity check

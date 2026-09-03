@@ -73,13 +73,14 @@ are no longer supported.
 crab cache stats
 ```
 
-Shows the shared budget, decoded-range usage, and object-cache counts and
-payload bytes, including chunk payloads. Inspection leaves missing roots
-missing and does not open cache databases, initialize the writable range
-cache, or repair entries. A failed range or object scan is reported without
-hiding the other group's results, and causes an unsuccessful exit. These are
-not full disk-usage totals: manifest bytes, databases, hints, bloom files,
-temporaries, and retained state are excluded. See
+Shows the shared budget and per-family logical/allocated usage, including
+databases, hints, bloom files, temporaries, and retained state. Add `--json`
+for a versioned report. Inspection leaves missing roots missing, reads the
+catalog without mutation, and does not initialize Xet state or repair entries.
+A failed family remains visible without hiding independent family counts;
+partial reports have a nonzero exit. These are live linked-entry measurements,
+not an atomic snapshot, integrity verification, or proof of budget enforcement.
+See
 [`crab cache stats`](/docs/cli/reference/crab-cache#stats) for the exact scope.
 
 ## Cleaning the Cache

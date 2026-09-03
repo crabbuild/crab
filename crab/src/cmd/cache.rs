@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::core::output::OutputMode;
-use crab_cache::lifecycle::{CacheCleanGuard, cleanup_preview};
+use crate::core::output::{OutputMode, emit_json};
+use crab_cache::health::{CacheCatalogHealth, CacheHealthReport, inspect_cache};
 use tokio_util::sync::CancellationToken;
 
 /// Summary of a cache verify operation.
@@ -19,72 +19,99 @@ pub struct CacheVerifySummary {
     pub objects_corrupt: u64,
 }
 
-/// Inspect decoded ranges and object payloads without creating or repairing cache state.
-pub async fn run_cache_stats(cancel: &CancellationToken) -> Result<()> {
+/// Print a non-mutating cache report, returning whether all inspections were available.
+pub async fn run_cache_stats(mode: OutputMode, cancel: &CancellationToken) -> Result<bool> {
     check_cancelled(cancel)?;
     let config = Config::resolve_local()?;
     let root = crate::cache::default_cache_root();
-    let range_directory = config.effective_chunk_cache_dir();
-    let ranges = crab_cache::xet_chunk_cache::xet_chunk_cache_stats_in_root(&root, cancel).await;
+    let report = inspect_cache(&root, config.cache.max_bytes, cancel).await?;
     check_cancelled(cancel)?;
-    let cache = crate::cache::LocalCache::new(root);
-    let objects = tokio::select! {
-        () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        result = cache.stats() => result,
-    };
-    check_cancelled(cancel)?;
+    if mode.is_machine() {
+        emit_json("cache.stats", "1.0", &report);
+    } else {
+        print_cache_stats(&report);
+    }
+    Ok(report.is_available())
+}
 
-    // Inspect both groups before propagating an error: a broken range entry
-    // must not hide healthy object totals, or vice versa. Neither scan opens
-    // a database; SQLite read-only opens can still write WAL side files.
-    println!("Chunk cache:");
-    println!("  directory:   {}", range_directory.display());
+fn print_cache_stats(report: &CacheHealthReport) {
     println!(
-        "  size_limit:  {} ({} bytes; shared cache budget)",
-        format_bytes(config.cache.max_bytes),
-        config.cache.max_bytes,
+        "Local cache: {} ({:?})",
+        report.root.display(),
+        report.root_state
     );
-    match &ranges {
-        Ok(stats) => {
-            println!("  entries:     {}", stats.entries);
+    println!("  budget: {} bytes", report.budget_bytes);
+    println!(
+        "  observed: {} logical bytes, {} allocated bytes ({})",
+        report.observed.logical_bytes,
+        report.observed.allocated_bytes,
+        if report.scan_complete {
+            "complete scan"
+        } else {
+            "partial scan; lower bounds"
+        }
+    );
+    println!(
+        "  over budget: {}",
+        match report.over_budget {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        }
+    );
+    println!(
+        "\n  {:<14} {:>8} {:>8} {:>14} {:>14}  status",
+        "family", "files", "dirs", "logical bytes", "allocated bytes"
+    );
+    for (family, health) in &report.families {
+        let state = if !health.complete {
+            "partial"
+        } else if health.issues > 0 {
+            "unavailable"
+        } else {
+            "inspected"
+        };
+        println!(
+            "  {family:<14} {:>8} {:>8} {:>14} {:>14}  {state}",
+            health.usage.files,
+            health.usage.directories,
+            health.usage.logical_bytes,
+            health.usage.allocated_bytes
+        );
+    }
+    match &report.catalog {
+        CacheCatalogHealth::Readable { stats } => {
             println!(
-                "  used_bytes:  {} ({} bytes)",
-                format_bytes(stats.total_bytes),
-                stats.total_bytes,
+                "\n  catalog: {} entries, {} recorded bytes, {} temporary bytes, {} reserved bytes",
+                stats.entries, stats.total_bytes, stats.temporary_bytes, stats.reservations_bytes
+            );
+            println!(
+                "  last maintenance (Unix ms): {}",
+                stats
+                    .last_maintenance_unix_ms
+                    .map_or_else(|| "unknown".into(), |value| value.to_string())
             );
         }
-        Err(error) => println!("  unavailable: {error}"),
+        CacheCatalogHealth::Missing => println!("\n  catalog: missing (not initialized)"),
+        CacheCatalogHealth::Unavailable => println!("\n  catalog: unavailable"),
     }
-
-    println!();
-    println!("Object cache:");
-    println!("  directory:   {}", cache.root().display());
-    match &objects {
-        Ok(stats) => {
-            let families = [
-                ("chunks", stats.chunk_count, stats.chunk_bytes),
-                ("shards", stats.shard_count, stats.shard_bytes),
-                ("xorbs", stats.xorb_count, stats.xorb_bytes),
-                ("stages", stats.stage_count, stats.stage_bytes),
-            ];
-            let bytes = families.iter().try_fold(0_u64, |total, (_, _, bytes)| {
-                total
-                    .checked_add(*bytes)
-                    .ok_or_else(|| CrabError::Internal("cache payload byte total overflow".into()))
-            })?;
-            println!("  used_bytes:  {} ({bytes} bytes)", format_bytes(bytes));
-            for (family, count, bytes) in families {
-                println!("  {family:8} {count} entries, {}", format_bytes(bytes));
-            }
-            println!("  manifests:   {} entries", stats.manifest_count);
-        }
-        Err(error) => println!("  unavailable: {error}"),
+    for issue in &report.issues {
+        println!(
+            "  unavailable: {} [{}]: {}",
+            issue.path,
+            issue.family.unwrap_or("root"),
+            issue.error
+        );
     }
-    println!();
-    println!("Payload bytes only; excludes manifests, databases, temporary and retained state.");
-    ranges?;
-    objects?;
-    Ok(())
+    if report.omitted_issues > 0 {
+        println!("  {} additional issues omitted", report.omitted_issues);
+    }
+    println!(
+        "\nAllocation includes linked files and directories, not unlinked open files; reservations are separate."
+    );
+    println!(
+        "Live scan, not an atomic snapshot or payload/index integrity verification. No persistent hit rate is recorded."
+    );
 }
 
 /// Remove eligible payloads through the shared ownership-aware cleanup boundary.
@@ -245,7 +272,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(matches!(
-            run_cache_stats(&cancel).await,
+            run_cache_stats(OutputMode::Text, &cancel).await,
             Err(CrabError::Cancelled)
         ));
     }

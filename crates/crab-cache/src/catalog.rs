@@ -10,7 +10,9 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 
 use crate::clean::{EntryKind, entry_kind};
-use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot, open_database};
+#[cfg(test)]
+use crate::private_fs::open_database;
+use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
 
 const CATALOG_FILE: &str = ".catalog.sqlite";
@@ -32,7 +34,7 @@ pub struct CacheCatalog {
 }
 
 /// Read-only catalog totals.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct CacheCatalogStats {
     pub entries: u64,
     pub total_bytes: u64,
@@ -292,16 +294,29 @@ impl CacheCatalog {
     /// Inspection never writes database or recovery files. A busy or unsafe
     /// catalog returns an error instead of repairing state or bypassing its WAL.
     pub fn read_only_stats(root: &Path) -> Result<CacheCatalogStats> {
-        let path = root.join(CATALOG_FILE);
-        let mut connection = match open_database(
-            root,
-            &path,
+        let pinned = match PinnedRoot::open(root) {
+            Ok(pinned) => pinned,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(CacheCatalogStats::default());
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Self::read_only_stats_at(&pinned, root)?.unwrap_or_default())
+    }
+
+    pub(crate) fn read_only_stats_at(
+        root: &PinnedRoot,
+        display_root: &Path,
+    ) -> Result<Option<CacheCatalogStats>> {
+        let path = display_root.join(CATALOG_FILE);
+        let mut connection = match root.open_database(
+            Path::new(CATALOG_FILE),
             DatabaseMode::ReadOnly,
             std::time::Duration::from_secs(5),
         ) {
             Ok(connection) => connection,
             Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(CacheCatalogStats::default());
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };
@@ -340,13 +355,13 @@ impl CacheCatalog {
             .optional()
             .map_err(|source| index_error(&path, source))?
             .and_then(|value| value.parse().ok());
-        Ok(CacheCatalogStats {
+        Ok(Some(CacheCatalogStats {
             entries,
             total_bytes,
             temporary_bytes,
             reservations_bytes,
             last_maintenance_unix_ms,
-        })
+        }))
     }
 
     fn record_sync(
@@ -737,14 +752,19 @@ fn scan_catalog(
     })
 }
 
-fn classify_family(relative: &str) -> &'static str {
+pub(crate) fn classify_family(relative: &str) -> &'static str {
     if relative == CATALOG_FILE || relative.starts_with(&format!("{CATALOG_FILE}-")) {
         return "catalog";
     }
     if relative == MAINTENANCE_LOCK || relative.starts_with("locks/") {
         return "lock";
     }
-    if relative.contains(".tmp.") || relative.contains("/.tmp-") {
+    if relative.contains(".tmp.")
+        || relative.contains("/.tmp-")
+        || relative.starts_with(".tmp-")
+        || relative.starts_with(".sqlite-temp-")
+        || relative.contains("/.sqlite-temp-")
+    {
         return "temporary";
     }
     match relative.split('/').next().unwrap_or("") {

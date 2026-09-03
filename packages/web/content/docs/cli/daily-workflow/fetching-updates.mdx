@@ -75,7 +75,7 @@ access from cached ranges alone. Cross-process and provider qualification is tra
 
 The fetch cache persists across operations and repositories. Over time it can grow large. Manage it with:
 
-- `crab cache stats` — See the reported range/object cache sizes and counts
+- `crab cache stats` — Inspect per-family logical/allocated usage and availability (`--json` supported)
 - `crab prune` — Evict oldest cache objects until cache budgets are satisfied
 - `crab cache clean` — Clear the entire cache
 

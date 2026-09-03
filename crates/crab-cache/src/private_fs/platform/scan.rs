@@ -1,7 +1,7 @@
 use super::{
     Directory, DirectoryStream, Path, component_name, io, unsafe_path, validate_permissions,
 };
-use crate::private_fs::FileStat;
+use crate::private_fs::{EntryStat, FileStat};
 use crate::{CacheError, Result};
 
 const MAX_SCAN_DEPTH: usize = 32;
@@ -11,7 +11,7 @@ impl Directory {
         &self,
         visitor: &mut dyn FnMut(&Path, FileStat) -> Result<()>,
     ) -> Result<()> {
-        visit_directory(self, Path::new(""), 0, &|_| Ok(true), visitor)
+        self.visit_selected_files(&|_| Ok(true), visitor)
     }
 
     pub(in crate::private_fs) fn visit_selected_files(
@@ -19,7 +19,22 @@ impl Directory {
         select: &dyn Fn(&Path) -> Result<bool>,
         visitor: &mut dyn FnMut(&Path, FileStat) -> Result<()>,
     ) -> Result<()> {
-        visit_directory(self, Path::new(""), 0, select, visitor)
+        // Maintenance remains fail-closed: inspection's recoverable entry
+        // errors must never let reconciliation/eviction use a partial inventory.
+        visit_directory(self, Path::new(""), 0, select, &mut |path, entry| {
+            let entry = entry?;
+            if !entry.is_directory {
+                visitor(path, entry.file)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(in crate::private_fs) fn inspect_entries(
+        &self,
+        visitor: &mut dyn FnMut(&Path, Result<EntryStat>) -> Result<()>,
+    ) -> Result<()> {
+        visit_directory(self, Path::new(""), 0, &|_| Ok(true), visitor)
     }
 }
 
@@ -28,19 +43,41 @@ fn visit_directory(
     relative: &Path,
     depth: usize,
     select: &dyn Fn(&Path) -> Result<bool>,
-    visitor: &mut dyn FnMut(&Path, FileStat) -> Result<()>,
+    visitor: &mut dyn FnMut(&Path, Result<EntryStat>) -> Result<()>,
 ) -> Result<()> {
     if depth > MAX_SCAN_DEPTH {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "cache inventory exceeds maximum directory depth",
-        )
-        .into());
+        return visitor(
+            relative,
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cache inventory exceeds maximum directory depth",
+            )
+            .into()),
+        );
+    }
+    // Include directory allocation through the retained descriptor. This is
+    // overhead, not payload length; strict file-only callers omit the event.
+    let own_stat = directory
+        .stat_component(c".")
+        .map_err(CacheError::from)
+        .and_then(|stat| entry_stat(&stat, &directory.path));
+    let unavailable = own_stat.is_err();
+    visitor(relative, own_stat)?;
+    if unavailable {
+        return Ok(());
     }
     // Retain only the current directory chain and one entry. fstatat does not
     // open/close SQLite files, which could release this process's POSIX locks.
-    let mut stream = DirectoryStream::new(directory)?;
-    while let Some(name) = stream.next_name()? {
+    let mut stream = match DirectoryStream::new(directory) {
+        Ok(stream) => stream,
+        Err(error) => return visitor(relative, Err(error)),
+    };
+    loop {
+        let name = match stream.next_name() {
+            Ok(Some(name)) => name,
+            Ok(None) => return Ok(()),
+            Err(error) => return visitor(relative, Err(error)),
+        };
         let path = directory.path.join(&name);
         let relative = relative.join(&name);
         if !select(&relative)? {
@@ -50,35 +87,61 @@ fn visit_directory(
         let stat = match directory.stat_component(&name_c) {
             Ok(stat) => stat,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                visitor(&relative, Err(error.into()))?;
+                continue;
+            }
         };
-        validate_permissions(stat.st_mode, stat.st_uid, &path)?;
-        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        let entry = match entry_stat(&stat, &path) {
+            Ok(entry) => entry,
+            Err(error) => {
+                visitor(&relative, Err(error))?;
+                continue;
+            }
+        };
+        if entry.is_directory {
             // Inspect descendants through the opened child, not its pathname.
-            // A replacement symlink fails here; an unsafe open aborts the scan.
+            // A replacement symlink fails here; maintenance aborts while
+            // diagnostics retain the error and inspect independent siblings.
             match directory.child(&name, false) {
                 Ok(child) => visit_directory(&child, &relative, depth + 1, select, visitor)?,
                 Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => visitor(&relative, Err(error))?,
             }
             continue;
         }
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_nlink != 1 {
-            return Err(unsafe_path(
-                &path,
-                "inventory entry is a special file or has another hard link",
-            ));
-        }
-        let size = u64::try_from(stat.st_size)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let modified_ns = u64::try_from(stat.st_mtime).map_or(0, |seconds| {
-            seconds
-                .saturating_mul(1_000_000_000)
-                .saturating_add(u64::try_from(stat.st_mtime_nsec).unwrap_or(0))
-        });
-        visitor(&relative, FileStat { size, modified_ns })?;
+        visitor(&relative, Ok(entry))?;
     }
-    Ok(())
+}
+
+fn entry_stat(stat: &libc::stat, path: &Path) -> Result<EntryStat> {
+    validate_permissions(stat.st_mode, stat.st_uid, path)?;
+    let is_directory = stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
+    if !is_directory && (stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_nlink != 1) {
+        return Err(unsafe_path(
+            path,
+            "inventory entry is a special file or has another hard link",
+        ));
+    }
+    let size = u64::try_from(stat.st_size)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // stat's allocation unit is 512 bytes, not st_blksize's preferred I/O size.
+    let allocated_bytes = u64::try_from(stat.st_blocks)
+        .ok()
+        .and_then(|blocks| blocks.checked_mul(512))
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid cache allocation count")
+        })?;
+    let modified_ns = u64::try_from(stat.st_mtime).map_or(0, |seconds| {
+        seconds
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::try_from(stat.st_mtime_nsec).unwrap_or(0))
+    });
+    Ok(EntryStat {
+        file: FileStat { size, modified_ns },
+        allocated_bytes,
+        is_directory,
+    })
 }
 
 #[cfg(test)]

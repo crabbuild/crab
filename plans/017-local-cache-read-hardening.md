@@ -3261,6 +3261,131 @@ growth owns the absent-WAL and write-denial/locking invariants in the existing
 VFS; it adds no fallback parser, compatibility alias, public configuration,
 serialized format, or dependency change.
 
+### Shared cache health reporting checkpoint, 2026-09-03
+
+**Context and owner boundary.** At `4ea6415`, product stats has two independent
+payload scans but no JSON, physical accounting, or catalog integration. Doctor
+uses an ambient recursive size estimate that can hide errors. The shared
+private walker and catalog are the owners; product code should render their
+report, not invent another scan, permission, or database policy.
+
+**Implemented design.** `crates/crab-cache/src/health.rs` uses one pinned root
+for the filesystem walk and catalog transaction. The existing scanner emits
+linked-file lengths and allocated blocks, plus directory allocation. Allocation
+uses checked `st_blocks * 512`, not preferred I/O block size (`st_blksize`);
+this matches Rust Unix `MetadataExt::blocks` and Darwin `stat.h`'s `S_BLKSIZE`
+contract. Counts include metadata side files, hints/bloom, temporaries, and
+retained/unknown files. Existing catalog family classification is shared;
+bucket/repository dedup state, including shard spill files, is grouped under
+`chunk-index`. This classification is not deletion authority.
+
+Inspection reports missing, present, or unavailable roots, and missing,
+readable, or unavailable catalogs. Missing main with surviving recovery files
+is unavailable, not an empty catalog. Typed errors are retained and classified
+for diagnostics. At most 64 details are retained; per-family and omitted-error
+counts continue. Unsafe entries are not followed or repaired. A failing subtree
+does not suppress independent family counts. Ambiguous raw-chunk/range-key
+ancestors mark both affected families partial; opaque subtrees also make
+directory/temporary totals incomplete. Unknown invalid-UTF-8 names remain
+counted; display strings never become filesystem identity or deletion authority.
+
+`crab cache stats` and `crab optimize cache stats` share this report and expose
+`--json`: one `cache.stats` version `1.0` envelope. Completed partial inspection
+stays in `data` with a nonzero exit; pre-inspection failure emits the normal
+single `error` envelope. Doctor removes its recursive scanner and turns the
+same failures into path-specific ownership/permission, busy, and corruption
+guidance without repair. Budget pressure is a warning, not failed inspection;
+prune is not represented as authority over retained state. No hit rate is
+invented. The old human group format is replaced rather than maintained as a
+second report implementation.
+
+**Limits.** Filesystem counters are live observations, not an atomic snapshot.
+Incomplete counters are observed lower bounds (subject to concurrent change).
+Over-budget is unknown unless the complete scan proves otherwise or observed
+allocation already exceeds the budget. Shared extents can be counted more than
+once; unlinked open files are outside this linked-tree measurement. Catalog
+reservations and coherent SQL row totals are separate. Allocation reporting
+does not establish physical admission/eviction. Other database/index bodies
+are not opened and payload integrity is not checked. The existing exclusive
+pager, heap WAL-index, OS `O_RDWR` descriptor, and aggregate-time/memory review
+gates remain. Strict maintenance still propagates every walker error and cannot
+evict against an accepted partial inventory.
+
+**Focused proof.** 251 cache-library tests pass with local-cache,
+xet-chunk-cache, and remote-client enabled, with strict all-target Clippy for
+that combination. The range-only build passes seven health tests and strict
+all-target Clippy; the minimal-feature check passes. Eleven actual CLI
+maintenance/diagnostic tests pass, including both stats spellings and doctor.
+The no-default-features CLI build reports existing unused/dead-code warnings
+outside this change; it is not a CLI-wide strict-Clippy pass. The new tests
+preserve whole-tree contents, inode/mode/mtime, missing-root,
+healthy-family, and failure-exit assertions while replacing obsolete human
+format assertions. The on-disk invalid-UTF-8 case needs Linux: APFS rejects
+fixture creation before inspection. A separate portable serialization test
+passes; the failed APFS fixture attempt was not a cache-runtime failure.
+
+**Installed proof.** Isolated Make install, external per-worktree target,
+CLI `4ea6415-cache-health-final-dirty`, built 2026-09-03 14:22:52 UTC:
+SHA-256 `9eae614367df01f0148a068f7287b5e1569a4c113f1143e7525c2aa00189ee9a`.
+Production-module diff against `4ea6415` (the three changed CLI modules,
+`catalog.rs`, `lib.rs`, `private_fs.rs`, `platform/database.rs`,
+`platform/scan.rs`, `health.rs`, and `xet_chunk_cache.rs`):
+SHA-256 `af9076b76be8fd7c8b87212ef768611e7255d1e7a1ba7c723cbb7c80ad48c31b`.
+Retained run group `cache-f410.E7nt8I/cache-health.F6Bvs2`:
+
+- `health-smoke-final-v1`, fresh dedicated bucket
+  `crabbuild-cache-health-f6bvs2-final-v1`: **1,192 checks / 89 commands pass**.
+  Uses the committed maintained harness snapshot and previous availability
+  server identified above, isolating this CLI change from unpublished evidence
+  validator changes. Add/commit/push/dedup, clone/hydrate, restart, and same-push
+  service recovery pass. Cold/warm/restart stages each retain 15 service hits,
+  zero service fetches/payload-origin GETs, and 19 metadata/control GETs.
+  Hydrated SHA-256:
+  `d6a1ca50327298a83ecca92a305043c2f0f40f41f3678c44be74077f40245dfe`.
+  Packaged audit and installed Rust release verification (275 checks plus
+  summary) pass. These service counts do not replace the separate local-only
+  fetch-to-hydrate/origin-denied proof elsewhere in this plan.
+- `installed-health-final-v1` and `live-health-final-v1`: each **80 checks /
+  40 commands pass**. Both human and JSON stats spellings plus doctor inspect
+  missing, sparse, unsafe, orphaned-WAL, and aliased fixtures and three real
+  hydrated caches. Independent native-stat totals match; snapshots preserve
+  contents, identity, mode, length, mtime, and allocated blocks. Access time is
+  excluded. The latter run inspects the final smoke's actual cache roots.
+- Earlier `health-smoke-v1` and diagnostic artifacts remain retained with
+  their own binary identity; final proof does not overwrite those inputs.
+
+Web typecheck, nine tests, docs audit (192 pages, zero findings), and rendered
+link checks (398 pages / 4,292 fragments) pass. Web lint exits successfully with
+16 existing warnings in unchanged TS/TSX files. No Phase 5 acceptance is claimed.
+No protected baseline/inventory, dependency, lockfile,
+remote-proof record, or unrelated generated web file is part of this change.
+Runtime growth pays for one shared health model and bounded-detail error
+collection used immediately by both stats entry points and doctor; it removes
+the separate doctor scanner and duplicated product scan policy. The replaced
+product-only `xet_chunk_cache_stats_in_root` and its two obsolete tests are
+deleted after caller/tag checks; standalone range statistics remain live.
+
+**Next acceptance slices.** Complete verify/schema/reference coverage per
+family; transactional scope-isolated shard hints; removal of unused placement
+state with remote-proof consumer proof; total inspection resource limits and
+native-platform qualification. Reconcile allocation reporting with the actual
+admission/maintenance lifecycle before asserting a hard total disk budget.
+
+**CI evidence at `4ea6415`.** Cache-service smoke, split-crate contracts, binary
+contracts, and docs pass. Linux protocol reader tests fail at
+`crates/crab-read/src/hydrator.rs:645`, where the origin-integrity source is
+missing from the returned error chain (83/84 shared-read tests pass). Do not
+call this an infrastructure failure or waive its assertion. The separate broad
+Rust job fails linking the CLI libtest with `ld` signal 7 and subsequently
+reports runner disk exhaustion. Architecture inventory/dependency gates remain
+red. These are outstanding landing gates, independent of local diagnostic
+proof; PR #147 remains a draft checkpoint.
+All 84 shared-read tests and 100 repeated isolated invocations of the failing
+origin-integrity test pass locally; the repetition report is retained in this
+run group. That does not reproduce or resolve the Linux failure. The next
+investigation must capture its actual returned error before selecting a fix;
+no assertion or dependency has been changed to hide it.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
@@ -3348,12 +3473,12 @@ contract. Do not ship a warning-only shared cache containing private bytes.
 
 **Context**
 
-Current stats and verify commands see only part of the root. Stats now uses
-read-only filesystem scans, with range/object-group errors isolated, but lacks
-full-family accounting, per-object-family errors, and JSON. The catalog's
-write-denying inspection boundary has native macOS tests, but is not wired into
-the shared health model or qualified for aggregate resource bounds and other
-native platforms. Local xorb-placement rows are written but unused,
+Stats and doctor now share a pinned-root filesystem/catalog report, including
+logical and allocated bytes, per-family partial failures, and versioned stats
+JSON. This inventory does not verify every family, establish all-family
+eviction, or bound aggregate SQL/WAL memory and elapsed time. The catalog's
+write-denying inspection boundary needs other-native-platform qualification
+and review of its OS-write-capable descriptor contract. Local xorb-placement rows are written but unused,
 while the live remote proof index shares their database. Shard hints use a
 global JSON read-modify-write that loses updates across processes.
 

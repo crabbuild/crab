@@ -1193,8 +1193,12 @@ enum OptimizeCmd {
 
 #[derive(Subcommand)]
 enum OptimizeCacheCmd {
-    /// Print cache statistics.
-    Stats,
+    /// Inspect local cache usage and availability without changing cache state.
+    Stats {
+        /// Structured JSON output (single envelope, including partial failures).
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
@@ -1439,9 +1443,8 @@ impl OptimizeCmd {
                 | OptimizeCacheCmd::Warm { json, jsonl, .. } => {
                     OutputMode::from_flags(*json, *jsonl)
                 }
-                OptimizeCacheCmd::Stats | OptimizeCacheCmd::Verify | OptimizeCacheCmd::Clean => {
-                    OutputMode::Text
-                }
+                OptimizeCacheCmd::Stats { json } => OutputMode::from_flags(*json, false),
+                OptimizeCacheCmd::Verify | OptimizeCacheCmd::Clean => OutputMode::Text,
             },
             Self::Indexes(command) => match command {
                 OptimizeIndexesCmd::Diagnose { json, .. }
@@ -1475,7 +1478,7 @@ impl OptimizeCmd {
                 crab::cmd::tier::TierCommand::Rollback { .. } => "tier.rollback",
             },
             Self::Cache(command) => match command {
-                OptimizeCacheCmd::Stats => "cache.stats",
+                OptimizeCacheCmd::Stats { .. } => "cache.stats",
                 OptimizeCacheCmd::Verify => "cache.verify",
                 OptimizeCacheCmd::Clean => "cache.clean",
                 OptimizeCacheCmd::Prune { .. } => "prune",
@@ -1892,8 +1895,12 @@ enum DaemonMountBackendArg {
 
 #[derive(Subcommand)]
 enum CacheCmd {
-    /// Print cache statistics.
-    Stats,
+    /// Inspect local cache usage and availability without changing cache state.
+    Stats {
+        /// Structured JSON output (single envelope, including partial failures).
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
     /// Remove eligible local cache payloads, preserving retained and busy state.
@@ -2112,6 +2119,7 @@ impl Cmd {
             | Self::Repack { json, jsonl, .. }
             | Self::Prune { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
             Self::Optimize(command) => command.output_mode(),
+            Self::Cache(CacheCmd::Stats { json }) => OutputMode::from_flags(*json, false),
             Self::Mirror(args) => args.output_mode(),
             Self::Push(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Ship { json, .. } => OutputMode::from_flags(*json, false),
@@ -2349,7 +2357,7 @@ impl Cmd {
             Self::Optimize(command) => command.schema_name(),
             Self::Tier(..) => "tier",
             Self::Metadb(..) => "metadb",
-            Self::Cache(CacheCmd::Stats) => "cache.stats",
+            Self::Cache(CacheCmd::Stats { .. }) => "cache.stats",
             Self::Cache(CacheCmd::Verify) => "cache.verify",
             Self::Cache(CacheCmd::Clean) => "cache.clean",
             Self::Config(ConfigCmd::Get { .. }) => "config.get",
@@ -5283,7 +5291,9 @@ async fn run_optimize_command(
         } => run_compact_command(repo, bucket, dry_run, max_shard_size, cancel).await,
         OptimizeCmd::Tiers { command } => run_tier_command(command, cancel).await,
         OptimizeCmd::Cache(command) => match command {
-            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats, cancel).await,
+            OptimizeCacheCmd::Stats { json } => {
+                run_cache_command(CacheCmd::Stats { json }, cancel).await
+            }
             OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
             OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean, cancel).await,
             OptimizeCacheCmd::Prune {
@@ -5696,7 +5706,17 @@ async fn run_metadb_command(
 async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<ExitCode> {
     let _span = tracing::info_span!("cache").entered();
     match sub {
-        CacheCmd::Stats => crab::cmd::cache::run_cache_stats(cancel).await?,
+        CacheCmd::Stats { json } => {
+            let mode = OutputMode::from_flags(json, false);
+            let available = crab::cmd::cache::run_cache_stats(mode, cancel).await?;
+            // Inspection errors belong in the partial report, not a second
+            // JSON envelope. Preserve a nonzero exit for automation.
+            return Ok(if available {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
+        }
         CacheCmd::Verify => {
             let mode = OutputMode::from_flags(false, false);
             crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
