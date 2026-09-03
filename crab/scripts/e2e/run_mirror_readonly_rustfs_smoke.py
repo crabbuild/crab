@@ -7,6 +7,7 @@ divergence use one isolated prefix with all remote mutations denied.
 
 import importlib.util
 from pathlib import Path
+import signal
 import threading
 
 
@@ -22,6 +23,12 @@ RUNNER = RECEIPT.RUNNER
 class ReadOnlyProxy(RECEIPT.MarkerProxy):
     def forward(self):
         path = self.path.split("?", 1)[0]
+        if (self.server.block_reads and self.command == "GET"
+                and path.startswith(self.server.fault_prefix) and path.endswith(".idx")):
+            self.server.read_entered.set()
+            if not self.server.release_reads.wait(30):
+                self.send_error(504, "qualification read was not released")
+                return
         fault = self.server.read_fault
         if (fault and self.command == "GET" and path.startswith(self.server.fault_prefix)
                 and path.endswith(fault[1])):
@@ -68,6 +75,9 @@ def main():
     proxy.read_fault = None
     proxy.fault_hits = []
     proxy.fault_prefix = "/unarmed/"
+    proxy.block_reads = False
+    proxy.read_entered = threading.Event()
+    proxy.release_reads = threading.Event()
     worker = threading.Thread(target=proxy.serve_forever, daemon=True)
     worker.start()
     args.endpoint_url = f"http://127.0.0.1:{proxy.server_port}"
@@ -160,6 +170,34 @@ def main():
                         failed.get("state") == "unverifiable" and not failed.get("ci_passed")
                         and len(proxy.fault_hits) > before_faults and not proxy.denied)
         proxy.read_fault = None
+        interrupted_cache = smoke.run_root / "cancelled-history-cache.git"
+        proxy.block_reads = True
+
+        def cancel_blocked_read(process):
+            if not proxy.read_entered.wait(10):
+                raise RuntimeError("inspection did not reach the blocked canonical index read")
+            process.send_signal(signal.SIGTERM)
+
+        try:
+            cancelled = smoke.run_cmd(
+                "cancel read-only inspection during canonical index read",
+                [*mirror, "--cache-dir", str(interrupted_cache)], smoke.run_root,
+                check=False, timeout=15, on_started=cancel_blocked_read)
+            smoke.check("cancelled-read-returns-before-origin-response",
+                        cancelled["exit_code"] == 10
+                        and proxy.read_entered.is_set() and not proxy.release_reads.is_set()
+                        and not proxy.denied)
+        finally:
+            proxy.block_reads = False
+            proxy.release_reads.set()
+        resumed = smoke.json_data(
+            smoke.run_cmd("reuse cache after cancelled canonical read",
+                          [*mirror, "--cache-dir", str(interrupted_cache)], smoke.run_root),
+            "mirror.check")
+        smoke.check("cancelled-read-releases-cache-for-retry",
+                    resumed.get("state") == "diverged"
+                    and resumed.get("pointers", {}).get("state") == "verified"
+                    and not proxy.denied)
         smoke.report["status"] = "passed"
         return 0
     except Exception as error:
@@ -167,6 +205,7 @@ def main():
         smoke.report["error"] = RUNNER.redact_text(str(error), smoke.credentials())
         return 1
     finally:
+        proxy.release_reads.set()
         smoke.report["denied_write_attempts"] = proxy.denied
         smoke.report["injected_read_faults"] = proxy.fault_hits
         smoke.write_report()

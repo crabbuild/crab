@@ -146,7 +146,7 @@ jobs:
           RUST_MIN_STACK: "8388608"
         run: |
           cargo test -p crab-cache --features local-cache --locked
-          cargo test -p crab --lib cmd::mirror --locked --features gix-transport
+          cargo test -p crab --lib cmd::mirror --locked --features gix-transport,testing
           cargo test -p crab --lib git::process::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::coordinator::tests --locked --features gix-transport
@@ -231,7 +231,7 @@ jobs:
       - name: Run native mirror and subprocess contracts
         run: >-
           cargo test -p crab --lib cmd::mirror --locked --no-default-features
-          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport,testing
 
       - name: Run complete pre-push batch decoder contracts
         run: |

@@ -58,6 +58,7 @@ pub(super) async fn run_integrity_command(
         let cache = cache?;
         let mode = options.mode;
         let summary = apply_plan(args, plan_path, &cache, cancel, options, runner, &store?).await?;
+        check_cancelled(cancel)?;
         render_apply(&summary, mode);
         return Ok(MirrorCommandOutcome::Apply(summary));
     }
@@ -79,6 +80,9 @@ pub(super) async fn run_integrity_command(
             format!("mirror cache unavailable: {error}"),
         ),
     };
+    // Inspection captures provider failures as diagnostic results, but a user
+    // cancellation must not emit success or persist a reconciliation plan.
+    check_cancelled(cancel)?;
     if let Some(path) = &args.write_plan {
         let plan = build_plan(&check, args.allow_delete_refs)?;
         write_plan(path, &plan)?;

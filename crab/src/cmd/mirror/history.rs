@@ -51,6 +51,8 @@ pub(super) async fn load_changed_history(
     if roots.is_empty() {
         return Ok(());
     }
+    let cancellation = cancel.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
     let bucket = layout.store().bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity = RepositoryIdentity::new(provider, layout.repo_prefix().to_owned(), 1)?;
@@ -62,30 +64,41 @@ pub(super) async fn load_changed_history(
         identity,
         Arc::clone(&runtime),
         options,
-        cancel,
+        &cancellation,
     )
     .await;
-    let result = match opened {
+    match opened {
         Ok(operation) => {
             let executor = tokio::runtime::Handle::current();
             // Git inflation, parsing, and loose-object writes stay off Tokio's
-            // executor. The worker is joined before releasing cache ownership.
+            // executor. The worker retains cache ownership and drains its own
+            // runtime even when dropping the caller cancels the read.
             tokio::task::spawn_blocking(move || {
                 executor.block_on(async move {
                     let result =
                         populate(&cache.path().join("objects"), roots, &operation, options).await;
-                    let close = operation.finish(Ok(())).await;
-                    result.and(close.map_err(Error::Remote))
+                    let result = match result {
+                        Err(Error::Remote(error)) => {
+                            operation.finish(Err(error)).await.map_err(Error::Remote)
+                        }
+                        result => {
+                            let close = operation.finish(Ok(())).await;
+                            result.and(close.map_err(Error::Remote))
+                        }
+                    };
+                    runtime.shutdown().await;
+                    result
                 })
             })
             .await
             .map_err(Error::Worker)
             .and_then(|result| result)
         }
-        Err(error) => Err(Error::Remote(error)),
-    };
-    runtime.shutdown().await;
-    result
+        Err(error) => {
+            runtime.shutdown().await;
+            Err(Error::Remote(error))
+        }
+    }
 }
 
 async fn populate(
@@ -158,4 +171,100 @@ async fn populate(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::storage::testing::mock_store::{FailSpec, MockStore};
+    use crab_cache::lifecycle::CacheUseGuard;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_inspection_releases_cache_and_origin_work() {
+        for abort_caller in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache_path = dir.path().join("cache.git");
+            let cancel = CancellationToken::new();
+            let cache = Arc::new(CacheUseGuard::acquire(&cache_path, &cancel).unwrap());
+            std::fs::create_dir_all(cache.path().join("objects")).unwrap();
+            let backend = Arc::new(MockStore::new());
+            let store = Store::new(backend.clone());
+            let layout = StoreLayout::new(store.clone(), "cancel-history".to_owned());
+            let mut manifest =
+                crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+            manifest
+                .refs
+                .insert("refs/heads/main".to_owned(), "1".repeat(40));
+            manifest.seal_git_validation();
+            let packs = vec![crab_metadata::manifests::PackManifestEntry {
+                pack_id: "2".repeat(64),
+                content_hash: "2".repeat(64),
+                size: 128,
+                object_count: 1,
+                ref_tips: vec!["1".repeat(40)],
+            }];
+            let journal = crab_metadata::ref_journal::materialize_ref_journal(
+                &store,
+                &layout,
+                &manifest,
+                &packs,
+                &[],
+                &BTreeSet::new(),
+            )
+            .await
+            .unwrap();
+            let snapshot = RepositorySnapshot {
+                layout: crab_metadata::layout_descriptor::LayoutDescriptor::canonical(),
+                manifest,
+                manifest_etag: "test-snapshot".to_owned(),
+                journal,
+            };
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            backend
+                .inject_failure(FailSpec::Pause {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                })
+                .await;
+            drop(store);
+            let source = BTreeMap::from([("refs/heads/main".to_owned(), "3".repeat(40))]);
+            let worker_cancel = cancel.clone();
+            let task = tokio::spawn(async move {
+                load_changed_history(cache, &source, &snapshot, layout, &worker_cancel).await
+            });
+            tokio::time::timeout(Duration::from_secs(10), entered.notified())
+                .await
+                .expect("inspection must reach the paused origin read");
+            if abort_caller {
+                task.abort();
+            } else {
+                cancel.cancel();
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("stopped caller must return");
+            let cleaned = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if Arc::strong_count(&backend) == 1
+                        && CacheUseGuard::acquire(&cache_path, &CancellationToken::new()).is_ok()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok();
+            // Release the injected read even on a regression so a failed test
+            // does not leave a blocking worker alive until the operation deadline.
+            release.notify_waiters();
+            assert!(
+                cleaned,
+                "origin and cache ownership leaked after abort={abort_caller}"
+            );
+        }
+    }
 }

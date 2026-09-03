@@ -4655,9 +4655,8 @@ of section 2 or a GC safety claim:
 1. Complete the non-writing sweep-observation/retention protocol from the prior
    subsection. Acceptance remains no false-clean result during an intermediate
    sweep, ABA recreation, or old-client maintenance.
-2. Extend the passing cold missing/corrupt canonical pack/index response tests
-   with cancellation, then managed read-only grants with scope/hidden-ref
-   boundaries. Acceptance:
+2. Extend the passing cold missing/corrupt canonical pack/index and cancellation
+   tests to managed read-only grants with scope/hidden-ref boundaries. Acceptance:
    explicit unverifiable/refusal, no mutation or grant widening, bounded cleanup.
 3. Qualify very long destination-only history and many-pack inventories under
    the shared read budgets. The current defaults permit 10,000 remote logical
@@ -4670,6 +4669,86 @@ of section 2 or a GC safety claim:
    rollback proof against the final committed release candidate. The ongoing
    Kubernetes replay uses its earlier pinned release binary and cannot certify
    this new reader. Production-provider and cross-platform rows stay separate.
+
+### Cancellation ownership and command status: 2026-09-03 UTC
+
+**Observed failures.** A deterministic paused-origin test passed cooperative
+cancellation but failed when its awaiting task was aborted: cache ownership and
+origin work survived the caller. Retaining the cache guard in a blocking worker
+was necessary but insufficient; the worker also needed cancellation and runtime
+shutdown ownership. Separately, the real RustFS proxy test
+`phase2-mirror-readonly-cancel-exit-3b0fee1-20260903/artifacts/report.json`
+returned in 342 ms after SIGTERM but emitted `mirror.check` success JSON with
+an unverifiable/cancelled diagnostic and exit code zero. This report remains
+failed and unchanged. An earlier attempted run was refused by the binary/source
+provenance check and is not behavior evidence.
+
+**Implementation.** The inspection caller now owns a child-token drop guard.
+Dropping that caller cancels the detached worker; the worker finishes its read
+operation and shuts down its own remote-read runtime before relinquishing cache
+ownership. Remote read failures are supplied to operation completion rather
+than recorded as successful reads. The mirror command boundary rechecks user
+cancellation before rendering check/apply success or persisting a plan, covering
+diagnostic conversion across the whole inspection rather than matching one error
+message. This small ownership change adds lifecycle control, not another reader,
+lease or fallback path.
+
+**Proof.** The paused-origin regression failed before the production change and
+now passes for both cooperative cancellation and caller abortion. It checks that
+origin references are released and the real cache lock can be reacquired while
+the injected origin response remains blocked. It uses the existing `testing`
+feature's store wrapper; Linux/macOS/Windows mirror CI commands now enable that
+feature so the regression cannot silently be skipped. All 70 mirror tests pass
+locally with it enabled.
+
+`phase2-mirror-readonly-cancel-fixed-3b0fee1-20260903/artifacts/report.json`
+passes 31 commands and 12 checks with zero mutation attempts. The blocked-index
+SIGTERM case returns cancellation exit code 10 in 426 ms, before the proxy
+releases its response; a following inspection reuses the same cache successfully.
+Dirty debug candidate SHA-256:
+`295910c5b36b266e561b47ba842b4bd04b49932776b58a6867e4ff96b8ea500c`.
+Existing missing/corrupt and drift cases still pass. Cross-platform execution,
+managed grants, hard parent death of publishing children and GC lifetime proof
+remain separate release gates.
+
+Receipt/rollback siblings pass again on the same binary:
+`phase2-mirror-receipt-cancel-owner-3b0fee1-20260903/artifacts/report.json`
+retains 23 commands and 11 checks, with four publisher-tree processes killed
+after marker acceptance and exact receipt recovery after tagged compaction.
+The eight existing store-wrapper tests and formatting also pass. CLI-wide
+Clippy still reports the previously observed 488 diagnostics, with none in
+the touched mirror history/reconciliation files.
+
+### Thousand-push Kubernetes run completed: 2026-09-03 UTC
+
+`phase2-kubernetes-journal-771e8be-20260903/artifacts/report.json` completed
+with status `ok`: 1,152 commands, 1,000 incremental pushes plus the initial push,
+and 36 passing checks. Terminal evidence includes cold/warm full clones,
+blob-none clone, shallow depths 1/10/100/1000, full and incremental Git fsck,
+matching advertised refs/tips, and an unchanged source checkout. Generation
+maintenance converged after 31 passes at the final checkpoint. This is the
+earlier pinned release binary SHA-256
+`771e8bee09211480f7d46b628546547f4ec57f3087af877c9c0276d0fcd0578a`, not
+the current cancellation/read-only candidate.
+
+**Evidence audit.** The driver's check named `sampled-objects-byte-identical`
+actually compares `cat-file --batch-check` object IDs/types/sizes. To add direct
+byte evidence without rewriting that completed report, both source and retained
+cold clone were read with `git --no-replace-objects -c protocol.allow=never
+cat-file --batch`, `GIT_NO_LAZY_FETCH=1`, and the retained 1,000-OID sample on
+stdin. Both complete output streams have SHA-256
+`5168883b61da07077b6a4214f7e354241e0f61b2c19342a9e722bcfb3fd29572`;
+both pipelines exit zero. These are Git representation bytes, not evidence that
+every Crab pointer payload was hydrated. Strengthen the reusable driver to
+capture raw-byte evidence directly in a future run.
+
+The report remains `valid_for_comparison: false`: recovered historical payload
+preparation and uncontrolled development-host load make it unsuitable as a
+performance baseline. The unchanged standard verifier correctly refuses it for
+comparison. Do not relabel it, change expected values, or close the performance
+gate. Next acceptance: run the exact final release candidate through fresh
+large-repository add/commit/push/hydrate/clone and pointer-byte verification,
+then repeat baseline/candidate measurements in a controlled environment.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
