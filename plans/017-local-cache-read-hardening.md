@@ -3306,7 +3306,9 @@ allocation already exceeds the budget. Shared extents can be counted more than
 once; unlinked open files are outside this linked-tree measurement. Catalog
 reservations and coherent SQL row totals are separate. Allocation reporting
 does not establish physical admission/eviction. Other database/index bodies
-are not opened and payload integrity is not checked. The existing exclusive
+are not opened and payload integrity is not checked. The shard-hint database
+added later in this plan has its own schema/row/SQLite validation described
+below. The existing exclusive
 pager, heap WAL-index, OS `O_RDWR` descriptor, and aggregate-time/memory review
 gates remain. Strict maintenance still propagates every walker error and cannot
 evict against an accepted partial inventory.
@@ -3549,9 +3551,46 @@ is a CI gate; Windows continues to take advisory misses because the Phase 4
 private SQLite owner is not implemented there.
 
 This completes the transactional and scope-isolation behavior in Phase 5 work
-item 5. It does not complete Phase 5: all-family verify/repair, hint-database
-health validation, VFS scope composition, resource bounds, and the separate
-placement-schema migration remain open.
+item 5. It does not complete Phase 5: all-family verify/repair, VFS scope
+composition, resource bounds, and the separate placement-schema migration
+remain open.
+
+### Read-only shard-hint health checkpoint, 2026-09-03
+
+**Context.** The transactional hint database previously had strict validation
+only on its producer and consumer paths. A corrupt, unsupported, unsafe, or
+contended database therefore appeared in physical inventory but could not be
+distinguished from a usable accelerator by `crab cache stats` or `crab doctor`.
+Health must not create, checkpoint, migrate, repair, or delete disposable state.
+
+**Design.** The shared health scan reuses its pinned private root to open
+`hints/shard-hints.sqlite` in the custom read-only SQLite VFS with a 250 ms lock
+budget. One deferred transaction validates schema version 1 and the exact table
+definition, runs `PRAGMA quick_check(1)`, counts the global rows against the
+one-million-row product bound, and rejects non-BLOB or non-32-byte scope/file/
+shard hashes. A missing database remains healthy and missing. Any typed failure
+is attached to the `shard-hint` family without marking the already-completed
+filesystem inventory partial or hiding independent payload counts. Existing
+stats exit and doctor guidance then report corruption, contention, and unsafe
+ownership through the same health model; neither command gains repair authority.
+
+**Acceptance evidence.** A valid database is accepted with zero family issues,
+and a whole-tree snapshot proves inspection preserves names, inodes, modes,
+mtimes, and file bytes. A 32-character TEXT scope that satisfies the schema's
+length constraint is rejected by the stronger BLOB row-shape check and remains
+byte-for-byte unchanged. An exclusive rollback-
+journal writer is reported busy within the inspection lock budget, while a
+healthy shard remains counted; inspection succeeds after the writer releases
+the lock. The local-cache health suite passes 10 tests and the range-only build
+retains its seven-test health suite, proving feature-gated callers do not pull in
+the shard-hint database.
+
+**Remaining bounds.** The 250 ms timeout bounds lock admission, not SQLite CPU
+or I/O after a read transaction starts. `quick_check` and the exact global row
+count are explicit operator diagnostics but do not yet have a progress-handler
+deadline. Payload bodies, unrelated indexes, Windows private SQLite ownership,
+all-family repair, and an installed corrupt/contended diagnostic run remain
+open Phase 5 release evidence.
 
 ### Cache-write completion checkpoint
 

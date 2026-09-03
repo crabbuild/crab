@@ -22,6 +22,7 @@ use crab_xet::xorb::format::MerkleHash;
 pub const SHARD_HINTS_DATABASE: &str = "hints/shard-hints.sqlite";
 const MAX_SHARD_HINTS_ENTRIES: usize = 1_000_000;
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const DATABASE_INSPECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Stable namespace for hints that address one physical global-content view.
 ///
@@ -199,6 +200,61 @@ fn load_scope(database: &Database, path: &Path, scope: &ShardHintScope) -> Resul
     Ok(ShardHintCache { hints })
 }
 
+pub(crate) fn inspect_database_at(root: &PinnedRoot, display_root: &Path) -> Result<()> {
+    let path = database_path(display_root);
+    let mut database = match root.open_database(
+        Path::new(SHARD_HINTS_DATABASE),
+        DatabaseMode::ReadOnly,
+        DATABASE_INSPECTION_BUSY_TIMEOUT,
+    ) {
+        Ok(database) => database,
+        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let transaction = database
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|source| index_error(&path, source))?;
+    validate_schema(&transaction, &path)?;
+    let quick_check = transaction
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
+        .map_err(|source| index_error(&path, source))?;
+    if quick_check != "ok" {
+        return Err(CacheError::CorruptObject {
+            path: path.display().to_string(),
+            reason: "shard-hint database failed SQLite quick_check".into(),
+        });
+    }
+    let (count, malformed): (i64, bool) = transaction
+        .query_row(
+            "SELECT COUNT(*), EXISTS(
+               SELECT 1 FROM shard_hints
+               WHERE typeof(scope) != 'blob' OR length(scope) != 32
+                  OR typeof(file_hash) != 'blob' OR length(file_hash) != 32
+                  OR typeof(shard_hash) != 'blob' OR length(shard_hash) != 32
+               LIMIT 1
+             )
+             FROM shard_hints",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|source| index_error(&path, source))?;
+    if count > MAX_SHARD_HINTS_ENTRIES as i64 {
+        return Err(CacheError::CorruptObject {
+            path: path.display().to_string(),
+            reason: format!(
+                "shard-hint database contains {count} entries; limit is {MAX_SHARD_HINTS_ENTRIES}"
+            ),
+        });
+    }
+    if malformed {
+        return Err(CacheError::CorruptObject {
+            path: path.display().to_string(),
+            reason: "shard-hint database contains a malformed hash row".into(),
+        });
+    }
+    Ok(())
+}
+
 fn update_sync(
     root_path: &Path,
     scope: &ShardHintScope,
@@ -298,7 +354,7 @@ fn configure_writer(database: &Database, path: &Path) -> Result<()> {
     validate_schema(database, path)
 }
 
-fn validate_schema(database: &Database, path: &Path) -> Result<()> {
+fn validate_schema(database: &rusqlite::Connection, path: &Path) -> Result<()> {
     let version = schema_version(database, path)?;
     if version != 1 {
         return unsupported_schema(path, version);
@@ -320,13 +376,13 @@ fn validate_schema(database: &Database, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn schema_version(database: &Database, path: &Path) -> Result<i64> {
+fn schema_version(database: &rusqlite::Connection, path: &Path) -> Result<i64> {
     database
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|source| index_error(path, source))
 }
 
-fn table_sql(database: &Database, path: &Path) -> Result<Option<String>> {
+fn table_sql(database: &rusqlite::Connection, path: &Path) -> Result<Option<String>> {
     database
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'shard_hints'",

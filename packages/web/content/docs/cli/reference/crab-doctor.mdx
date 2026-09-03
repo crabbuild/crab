@@ -28,9 +28,11 @@ Local-cache checks share the non-mutating report from
 per-family inspection failures, catalog availability, and allocated usage
 against the effective budget. Missing caches remain missing. Unsafe paths
 produce a failure with exact-path ownership/link/permission guidance; busy or
-corrupt catalogs produce warnings without recovery or deletion. Over-budget
-usage warns that pruning only removes eligible payloads. These checks do not
-verify every payload or index body.
+corrupt catalogs and shard-hint databases produce warnings without recovery or
+deletion. Shard-hint checks cover the exact schema, hash row shapes, global row
+bound, and SQLite `quick_check`. Over-budget usage warns that pruning only
+removes eligible payloads. These checks do not verify every payload or index
+body.
 
 When a cache service is configured, `crab doctor` also verifies health, object
 route auth, authenticated capabilities, repo-scoped authorization, and admin

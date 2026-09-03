@@ -1025,7 +1025,7 @@ fn cache_checks(report: &CacheHealthReport) -> Vec<CheckResult> {
         )];
     }
     let summary = format!(
-        "{}: {} allocated bytes, {} logical bytes, {} byte budget; {} (not integrity verification)",
+        "{}: {} allocated bytes, {} logical bytes, {} byte budget; {} (not full integrity verification)",
         report.root.display(),
         report.observed.allocated_bytes,
         report.observed.logical_bytes,

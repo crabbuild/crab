@@ -110,7 +110,7 @@ fn print_cache_stats(report: &CacheHealthReport) {
         "\nAllocation includes linked files and directories, not unlinked open files; reservations are separate."
     );
     println!(
-        "Live scan, not an atomic snapshot or payload/index integrity verification. No persistent hit rate is recorded."
+        "Live scan, not an atomic snapshot or full payload/index integrity verification. No persistent hit rate is recorded."
     );
 }
 

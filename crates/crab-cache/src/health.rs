@@ -238,7 +238,8 @@ impl CacheHealthReport {
 /// Unsafe entries are reported without following links. Errors in one subtree
 /// do not hide other families. Allocation includes directory blocks but not
 /// unlinked open files; catalog reservations are reported separately. No payload
-/// bodies or unrelated indexes are opened, and no integrity verification is implied.
+/// bodies or unrelated indexes are opened. The catalog is read as one snapshot,
+/// and the shard-hint database receives bounded-detail schema and SQLite checks.
 pub async fn inspect_cache(
     root: &Path,
     budget_bytes: u64,
@@ -305,6 +306,17 @@ fn inspect(
             CacheCatalogHealth::Unavailable
         }
     };
+    check_cancelled(cancel)?;
+    #[cfg(feature = "local-cache")]
+    if let Err(error) = crate::shard_hints::inspect_database_at(&pinned, root) {
+        report.issue(
+            Path::new(crate::shard_hints::SHARD_HINTS_DATABASE),
+            Some("shard-hint"),
+            error,
+            false,
+        )?;
+    }
+    check_cancelled(cancel)?;
     report.over_budget = if report.observed.allocated_bytes > budget_bytes {
         Some(true)
     } else if report.scan_complete {

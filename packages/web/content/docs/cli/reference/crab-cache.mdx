@@ -45,11 +45,13 @@ Directory allocation has a separate row. Catalog row totals, reserved bytes,
 and the last recorded maintenance time are separate from filesystem usage.
 
 Inspection leaves missing paths missing and does not initialize the writable
-range cache, verify payload/index bodies, or repair unsafe files. The catalog
-uses a non-mutating SQLite transaction: existing WAL data is read without
-checkpointing or creating recovery files. Busy, corrupt, or unsafe catalogs
-are reported unavailable, not empty. The main file needs OS write permission
-for SQLite's exclusive byte-range lock, although SQL/VFS data writes are denied.
+range cache, verify payload bodies or unrelated index bodies, or repair unsafe
+files. The catalog uses a non-mutating SQLite transaction. The shard-hint
+database is checked read-only for its exact schema, hash row shapes, global row
+bound, and SQLite `quick_check`. Existing WAL data is read without checkpointing
+or creating recovery files. Busy, corrupt, or unsafe databases are reported
+unavailable, not empty. A main file can need OS write permission for SQLite's
+exclusive byte-range lock even though SQL/VFS data writes are denied.
 
 Errors in one family do not hide independent healthy families. Affected rows
 are partial; their measured bytes are lower bounds. At most 64 issue details
@@ -61,7 +63,7 @@ defaults. Over-budget usage is reported but is not itself an inspection error.
 in `data` with a nonzero exit; failures before inspection use the normal `error`
 envelope. `crab optimize cache stats` uses the same report and option.
 
-The streaming walk is not an atomic snapshot or an integrity verification.
+The streaming walk is not an atomic snapshot or a full integrity verification.
 Allocation covers linked entries, not unlinked open files; reservations are
 separate and shared filesystem extents may be counted more than once. An
 incomplete scan reports unknown over-budget state unless observed allocation

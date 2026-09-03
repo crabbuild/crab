@@ -52,22 +52,25 @@ child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
 Product stats and doctor use `health::inspect_cache`: one pinned root, one
-streaming filesystem walk, and a read-only catalog transaction. Every linked
-file is counted by family, including databases, side files, temporaries, hints,
-and retained/unknown state. Logical file lengths and allocated 512-byte blocks
-are separate; directory allocation has its own row. The walk retains at most
-64 issue details, marks affected families incomplete, and continues independent
-subtrees. Strict maintenance uses the same walker but still aborts on an unsafe
-entry. Missing roots/catalogs are not initialized and unsafe paths are not
-repaired. Standalone object/range statistics retain their narrower contracts.
+streaming filesystem walk, a read-only catalog transaction, and read-only
+validation of the shard-hint database schema, row shape, row bound, and SQLite
+`quick_check`. Every linked file is counted by family, including databases,
+side files, temporaries, hints, and retained/unknown state. Logical file lengths
+and allocated 512-byte blocks are separate; directory allocation has its own
+row. The walk retains at most 64 issue details, marks affected families
+incomplete, and continues independent subtrees. Strict maintenance uses the
+same walker but still aborts on an unsafe entry. Missing roots/catalogs/hint
+databases are not initialized and unsafe or corrupt paths are not repaired.
+Standalone object/range statistics retain their narrower contracts.
 
 The live filesystem walk is not atomic, an integrity check, or unique-volume
 allocation accounting (shared filesystem extents can be counted more than
 once). It excludes unlinked open files and reports reservations separately.
 An incomplete scan gives observed lower bounds and unknown over-budget status,
-unless observed allocation already exceeds the budget. Catalog read failures
-do not invalidate independently measured file bytes. The report does not
-establish all-family eviction or inspect other database/index bodies.
+unless observed allocation already exceeds the budget. Catalog or shard-hint
+validation failures do not invalidate independently measured file bytes. The
+report does not establish all-family eviction or inspect other database/index
+bodies.
 
 Object-cache stats, prune, targeted eviction, and verification use that same
 private boundary. The three eviction loops are consolidated, and stats/verify

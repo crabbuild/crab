@@ -5,7 +5,7 @@ Manage the local Crab cache.
 ## Synopsis
 
 ```
-crab cache stats
+crab cache stats [--json]
 crab cache verify
 crab cache clean
 ```
@@ -37,21 +37,26 @@ service cache data after a successful push cannot affect clone or hydrate.
 
 ### crab cache stats
 
-Print recognized payload sizes, object counts, the shared budget, and cache
-paths. Decoded-range and object scans stream entries on blocking workers and
-honor cancellation. Missing roots remain missing; inspection never opens a
-cache database or initializes the writable range cache. A failed group does
-not hide the other group's report, but makes the command fail. Invalid
-configuration fails without substituting defaults.
+Print the effective root and budget, observed logical and allocated bytes, and
+per-family counts and availability. The live inventory includes payloads,
+directories, databases and side files, hints, bloom files, temporaries, and
+retained state. Catalog row totals and reservations are reported separately.
 
-The object total includes chunk, shard, xorb, and stage payload bytes. Manifest
-counts are shown, but manifest bytes, SQLite/index/hint files, bloom bytes,
-temporaries, and retained state are not part of either byte total. This is not
-full disk accounting or a content-integrity check. Per-object-family error
-isolation and a versioned JSON report remain Plan 017 work.
+Inspection leaves missing state missing. It reads the catalog without mutation
+and validates the shard-hint database's exact schema, hash row shapes, global
+row bound, and SQLite `quick_check`. Busy, corrupt, and unsafe databases are
+reported unavailable instead of being rebuilt. One failed family does not hide
+independently measured families, but makes the command fail. `--json` emits the
+versioned `cache.stats` `1.0` envelope.
+
+The live scan is not an atomic snapshot, a full payload/index integrity check,
+or proof that the configured budget is enforced across every family. It counts
+linked entries, not unlinked open files, and may count shared extents more than
+once.
 
 ```bash
 crab cache stats
+crab cache stats --json
 ```
 
 ### crab cache clean
@@ -153,8 +158,9 @@ remain Plan 017 work; the configured budget is not yet a qualified total-disk ca
 
 Cache files can reconstruct private repository content. Keep the cache root
 private to one operating-system user; do not share it through permissive
-filesystem permissions. Use the authenticated remote cache service for team
-reuse. Explicit owner/mode enforcement is tracked in Plan 017 Phase 4.
+filesystem permissions. Unix cache I/O validates owner-only roots and uses
+descriptor-relative access. Native Windows enforcement remains a release gap.
+Use the authenticated remote cache service for team reuse.
 
 ## Related Commands
 
