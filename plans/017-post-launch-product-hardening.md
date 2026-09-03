@@ -5460,13 +5460,26 @@ fail Git. The driver explicitly sets `required=true`.
       pass (118 total), including mid-read
       mutation, exact empty/large content, bounded chunks, oversized input,
       sink-error preservation and existing final-error/session recovery.
-- [ ] Build a committed release and run
+- [x] Build a committed release and run
       `python3 crab/scripts/e2e/run_lfs_cache_mutation_smoke.py --crab-bin <release> --root <workspace-qualification-root> --run-id <new-id>`.
       All three healthy checkouts must produce exact 4 MiB content; all three
       injected truncations must reach a normal nonzero Git exit. Signals and
       timeouts are failures, not acceptance. Retain binary/driver hashes,
       Git version, fixture identity, command logs and unchanged-binary proof.
-- [ ] Re-run the real CLI broken-output probe for both process-filter routes.
+- [x] Re-run the real CLI broken-output probe for both process-filter routes.
+
+Release `400cb7c` builds successfully, binary SHA-256
+`2fea6e0bbeca956e39eff6cecc10706582a303b4496c5913cbcd58dc346467a1`.
+`phase2-cache-mutation-400cb7c-20260903/report.json` passes 35 commands and
+seven checks with Apple Git 2.50.1. All three healthy checkouts preserve exact
+4 MiB content. All three cache-truncation cases report `CRAB-E0101`, make Git
+exit 128 and leave no incomplete worktree file. The same directory's
+`broken-output-report.json` records both real process-filter commands exiting
+5 in 27 ms after their output reader closes mid-response. Binary identity is
+unchanged after both probes. This is local real-Git/CLI proof, not a controlled
+benchmark or provider matrix. The release was built with only the retained
+`cfg(test)` GC regression and generated web files uncommitted; it is not a
+clean-checkout CI attestation. Formatting and diff checks pass.
 
 **Phase C — remaining release gates.** Once Docker/RustFS is restored, use
 fresh run IDs for cold-LFS, native protocol/mirror and Kubernetes lifecycle
