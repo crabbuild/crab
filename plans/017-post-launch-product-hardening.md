@@ -4498,6 +4498,53 @@ backup/restore inventory, publication/GC lifetime, declared-source recovery,
 host protection and the full platform/provider matrix remain open. No Phase 2
 acceptance criterion is closed by this checkpoint.
 
+### First-import receipt and early-return ownership: 2026-09-03 UTC
+
+**Context and change.** A new real-Git pipeline regression reproduced an
+initial mirror push that succeeded without a plan receipt: the empty-repository
+manifest shortcut bypassed the journal authority. Planned mirrors now use the
+same receipt-bound journal path for first and subsequent imports. Ordinary
+initial pushes retain the manifest shortcut. Managed publication retains its
+service-owned manifest authority. A second regression reproduced a still-held
+pre-acquired lease immediately after invalid mirror context returned. Native
+validation, empty batches and Git-context errors now await lease cleanup; the
+redundant unguarded cancellation check before delegation was removed.
+
+**Proof and acceptance boundary.** Both new tests failed before their source
+fixes; all 25 native-push tests pass afterward, including the existing ordinary
+push and staging-contention siblings. The debug candidate passed the full
+RustFS protocol/mirror runner: 481 commands / 139 checks, report
+`phase2-terminal-initial-debug-b05e6f8-20260903/artifacts/report.json` under the
+qualification root. New live assertions require an exact two-ref initial
+transaction receipt, then replay after source advancement with the same
+historical identity, current source-ahead state and no new publication. The
+checksum-verified tagged v1.0.1 binary also passes the runner's raw-OID rollback
+probe. Debug/emulator evidence is not release/performance/provider acceptance.
+The separate pinned Kubernetes replay and the previously failing broad-suite
+fixtures/inventories remain open; no original Phase 2 gate is closed here.
+
+**Accepted-marker process-death proof.** The separate local run
+`phase2-mirror-authority-loss-debug-b05e6f8-20260903/artifacts/report.json`
+passes 23 commands / 11 checks. A forwarding proxy holds the successful active
+marker response while the harness kills the publisher's four-process tree.
+Only its intent exists afterward. Tagged v1.0.1 then clones, passes strict fsck
+and byte comparison, compacts the active marker and preserves the plan intent.
+A restarted candidate resolves the exact transaction, writes its terminal
+receipt, and replays again without a second marker or transaction. The
+reproducible runner is `crab/scripts/e2e/run_mirror_receipt_rustfs_smoke.py`;
+pass the candidate, checksum-verified tagged binary, existing isolated bucket
+and workspace qualification root through the protocol runner's existing CLI.
+Its repository-local rerun also passes 23 commands / 11 checks:
+`phase2-mirror-receipt-runner-debug-b05e6f8-20260903/artifacts/report.json`.
+
+The earlier wrapper-only kill report
+`phase2-mirror-marker-loss-debug-b05e6f8-20260903/artifacts/report.json` remains
+failed: the separately grouped Git publisher survived and finished its receipt.
+That was not the intended authority-loss injection. This distinction also
+leaves abrupt-parent-death child supervision open; the passing process-tree
+kill must not be presented as automatic child cleanup. Other crash points,
+GC overlap, managed finalize and production provider rows still require proof.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

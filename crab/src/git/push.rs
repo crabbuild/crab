@@ -9125,7 +9125,10 @@ impl PushPipeline {
         current: &crate::metadata::manifest::RepositorySnapshot,
         admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<bool> {
-        let eligible = self.config.protected_push.is_none()
+        // Planned mirrors must cross the journal authority that binds their
+        // exact edits to a durable receipt, including the first import.
+        let eligible = self.config.mirror_plan_id.is_none()
+            && self.config.protected_push.is_none()
             && self.config.active_active_replication.is_none()
             && current.manifest.generation == 0
             && current.manifest.refs.is_empty()

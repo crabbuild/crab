@@ -2919,6 +2919,56 @@ class ProtocolV2PartialCloneSmoke:
             and self.git_value(source, ["ls-remote", "--refs", destination], name="verify refs after cache restoration") == before,
         )
 
+    def mirror_initial_plan_checks(self) -> None:
+        """Require first-import attribution and historical retry after source drift."""
+        source = self.run_root / "initial-plan-source"
+        upstream = self.run_root / "initial-plan-upstream.git"
+        remote = self.remote_url + "-initial-plan"
+        plan = self.artifacts / "initial-mirror-plan.json"
+        self.run_git(self.run_root, ["init", "-b", "main", str(source)])
+        self.run_git(self.run_root, ["init", "--bare", str(upstream)])
+        self.run_git(source, ["remote", "add", "origin", str(upstream)])
+        self.run_git(source, ["config", "core.hooksPath", ".git/hooks"])
+        (source / "readme.txt").write_text("initial mirror content\n", encoding="utf-8")
+        self.run_git(source, ["add", "readme.txt"])
+        self.run_git(source, ["commit", "-m", "initial planned import"])
+        self.run_git(source, ["tag", "v1"])
+        self.run_cmd("initialize empty planned destination",
+                     [str(self.crab_bin), "init", "--mirror=origin", remote], source)
+        mirror = [str(self.crab_bin), "mirror", str(source), remote]
+        checked = self.run_cmd("plan first mirror import",
+                               [*mirror, "--check", "--write-plan", str(plan), "--json"],
+                               self.run_root)
+        self.check("initial-mirror-plan-is-source-ahead",
+                   self.json_data(checked, "mirror.check").get("state") == "source_ahead")
+        apply = [*mirror, "--apply-plan", str(plan), "--json"]
+        applied = self.json_data(
+            self.run_cmd("apply first mirror import", apply, self.run_root), "mirror.apply")
+        transaction = applied.get("transaction_id")
+        self.check("initial-mirror-import-has-transaction-receipt",
+                   isinstance(transaction, str) and len(transaction) == 64
+                   and applied.get("actions_applied") == 2
+                   and applied.get("final_state") == "equal")
+        source_refs = self.git_value(source, ["show-ref"], name="initial source refs")
+        remote_refs = self.git_value(self.run_root, ["ls-remote", "--refs", remote],
+                                     name="initial planned remote refs")
+        self.check("initial-mirror-import-publishes-exact-batch",
+                   sorted(source_refs.split()) == sorted(remote_refs.split()))
+        (source / "readme.txt").write_text("new source content\n", encoding="utf-8")
+        self.run_git(source, ["add", "readme.txt"])
+        self.run_git(source, ["commit", "-m", "advance source after planned import"])
+        retried = self.json_data(
+            self.run_cmd("replay historical plan after source advances", apply, self.run_root),
+            "mirror.apply")
+        self.check("historical-mirror-retry-retains-identity-and-current-drift",
+                   retried.get("already_applied") is True
+                   and retried.get("transaction_id") == transaction
+                   and retried.get("actions_applied") == 0
+                   and retried.get("final_state") == "source_ahead")
+        after = self.git_value(self.run_root, ["ls-remote", "--refs", remote],
+                              name="remote refs after historical retry")
+        self.check("historical-mirror-retry-does-not-publish-new-source", after == remote_refs)
+
     def mirror_reconciliation_checks(self) -> None:
         """Exercise read-only drift, immutable plan/apply, CI, and deletion approval."""
         mirror_source = self.run_root / "mirror-source"
@@ -3659,6 +3709,7 @@ class ProtocolV2PartialCloneSmoke:
         self.security_checks(hidden_oid, dangling_oid)
         self.disconnect_check()
         if self.args.mirror_reconciliation:
+            self.mirror_initial_plan_checks()
             self.mirror_pre_push_batch_checks()
             self.mirror_reconciliation_checks()
         self.redaction_check()
