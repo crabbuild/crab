@@ -6,8 +6,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import runpy
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,63 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_cache_service_rustfs_smoke as smoke_module
+
+
+verifier_module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "verify-cache-service-smoke-report.py"))
+
+
+class CommandEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.smoke = object.__new__(smoke_module.CacheServiceRustfsSmoke)
+        self.smoke.logs = root / "logs"
+        self.smoke.logs.mkdir()
+        self.smoke.artifacts = root / "artifacts"
+        self.smoke.command_lock = threading.Lock()
+        self.smoke.command_index = 0
+        self.smoke.args = SimpleNamespace(timeout=10)
+        self.smoke.env = {}
+        self.smoke.report = smoke_module.SmokeReport(
+            run_id="command-proof", status="running", root=str(root),
+            endpoint_url="http://127.0.0.1:1", bucket="unused",
+        )
+
+    def retained_report(self) -> dict:
+        return json.loads((self.smoke.artifacts / "report.json").read_text())
+
+    def test_timeout_retains_attempt_and_logs_before_propagation(self) -> None:
+        command = [sys.executable, "-c", (
+            "import sys, threading; print('started', flush=True); "
+            "print('waiting', file=sys.stderr, flush=True); threading.Event().wait()"
+        )]
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.smoke.run_cmd("bounded command", command, self.smoke.logs, timeout=1, check=False)
+        report = self.retained_report()
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(len(report["commands"]), 1)
+        record = report["commands"][0]
+        self.assertIsNone(record["exit_code"])
+        self.assertTrue(record["timed_out"])
+        self.assertGreaterEqual(record["duration_ms"], 1000)
+        self.assertEqual(Path(record["stdout_log"]).read_text(), "started\n")
+        self.assertEqual(Path(record["stderr_log"]).read_text(), "waiting\n")
+        with self.assertRaises(verifier_module["VerifyError"]):
+            verifier_module["Verifier"](report, Path("report.json")).verify_report_status()
+
+    def test_completed_command_keeps_real_exit_code_and_redacted_args(self) -> None:
+        for exit_code in (0, 3):
+            with self.subTest(exit_code=exit_code):
+                record = self.smoke.run_cmd(
+                    "completed command", [sys.executable, "-c", f"raise SystemExit({exit_code})"],
+                    self.smoke.logs, check=False, report_args=["redacted-command"],
+                )
+                retained = self.retained_report()["commands"][-1]
+                self.assertEqual(record.exit_code, exit_code)
+                self.assertFalse(retained["timed_out"])
+                self.assertEqual(retained["args"], ["redacted-command"])
+
 
 
 class OriginFixtureSafetyTests(unittest.TestCase):

@@ -98,10 +98,11 @@ class CommandRecord:
     name: str
     args: list[str]
     cwd: str
-    exit_code: int
+    exit_code: int | None
     duration_ms: int
     stdout_log: str
     stderr_log: str
+    timed_out: bool = False
 
 
 @dataclass
@@ -936,6 +937,8 @@ class CacheServiceRustfsSmoke:
     ) -> CommandRecord:
         stdout_log, stderr_log = self.next_log_paths(name)
         started = time.monotonic()
+        exit_code = None
+        timeout_error = None
         with stdout_log.open("wb") as stdout, stderr_log.open("wb") as stderr:
             try:
                 proc = subprocess.run(
@@ -947,22 +950,33 @@ class CacheServiceRustfsSmoke:
                     timeout=timeout or self.args.timeout,
                     check=False,
                 )
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired as exc:
+                # subprocess.run kills and waits for its direct child. Preserve
+                # the timed-out attempt before propagating, without inventing
+                # an exit code that the dependency does not return.
+                timeout_error = exc
             except FileNotFoundError as exc:
                 raise SmokeError(f"{name} could not start: {exc}") from exc
         record = CommandRecord(
             name=name,
             args=report_args or args,
             cwd=str(cwd),
-            exit_code=proc.returncode,
+            exit_code=exit_code,
             duration_ms=int((time.monotonic() - started) * 1000),
             stdout_log=str(stdout_log),
             stderr_log=str(stderr_log),
+            timed_out=timeout_error is not None,
         )
         self.report.commands.append(asdict(record))
+        if timeout_error is not None:
+            self.report.status = "failed"
         self.write_report()
-        if check and proc.returncode != 0:
+        if timeout_error is not None:
+            raise timeout_error
+        if check and exit_code != 0:
             stderr = stderr_log.read_text(encoding="utf-8", errors="replace")[-2000:]
-            raise SmokeError(f"{name} failed with exit {proc.returncode}: {stderr}")
+            raise SmokeError(f"{name} failed with exit {exit_code}: {stderr}")
         return record
 
     def run_aws(self, name: str, args: list[str], *, check: bool = True) -> CommandRecord:

@@ -2916,6 +2916,99 @@ first; the follow-up publishes this ledger and the multi-threaded test setting.
 Earlier qualification/validator code remains local pending its fixture
 decision. No shared-bucket cleanup or protected fixture change occurred.
 
+#### Follow-up CLI warming gate is red
+
+After `3484b4b`, the unchanged
+`candidate_writer_warming_preserves_origin_commit` test in
+`crab/src/git/push.rs` fails on its HTTP-503 iteration. Its healthy iteration
+passes. The test requires every committed immutable metadata object to be
+attempted at the service, including objects published after the first 503.
+That assertion conflicts with the new shared suppression policy; the earlier
+success/503 pass recorded above belongs to the pre-suppression checkpoint.
+The focused Cargo command completed with **0/1 tests passing**, not a build
+failure. No source rollback, assertion weakening, or fixture edit was made.
+
+Approval requested: preserve healthy full-object warming and origin-durability
+checks, but make the outage expectation explicitly count one failed request
+and verify its body against committed origin bytes. A map of distinct keys
+alone cannot prove attempt count. This remains a red touched-surface gate
+pending that decision; the cache-service smoke and lower-level passes do not
+waive it. The live single-operation recovery workload is independent of this
+test-fixture decision and must retain its own results.
+
+#### Installed single-push failure and recovery; complete timeout records
+
+Retained workspace run group `cache-f410.E7nt8I/recovery.gQAk1L` uses the
+same installed availability candidate identified above; no new Crab runtime
+change. An owned forwarding endpoint passes real health/capabilities and
+normal traffic to the running cache service, but injects one 503 on the first
+versioned metadata PUT. Two successive 17-second holds on immutable origin
+metadata publication keep the **same push process** alive past cooldown;
+lease/control requests are not deliberately held. The cache returns to normal
+immediately after the injected response, so the request-free interval measures
+client suppression, not an unavailable test listener.
+
+`single-push-v2`, fresh bucket `crabbuild-recovery-gqak1l-v2`, passes **39
+checks / 21 commands**, explicitly `scoped-passed`:
+
+- Real 128 MiB add/commit/push, then a 4 KiB edit, add, commit, and one push.
+- Exactly one healthy negotiation. Injected metadata PUT fails at 0.175 s;
+  no later HTTP request starts until the recovery PUT at 34.753 s. That PUT
+  returns **201 Created**; further service reads/writes resume in the same
+  command. Push exits zero after 35,118 ms. Timings include deliberate origin
+  gates, not normal latency or an SLO.
+- Recovery metadata bytes match an independent origin read. Fresh lazy clone
+  starts with a pointer; hydration matches edited-input SHA-256
+  `9560e4f765eedc14b85ad8a1852aca997c878a997aecfd69c61cbe226d107714`.
+- Source ownership proof: normal push constructs one health-gated
+  `CachingStore` in `crab/src/cmd/push.rs`; pipeline and metadata adapters
+  retain/cloned-share that client. The forwarding trace observes one health
+  and one capabilities request, with no renegotiation after the failure.
+
+The first diagnostic, `single-push-v1`, is retained **failed**, 35 checks / 18
+commands: its assertion incorrectly required HTTP 200 for a successful PUT.
+Server `write_file_backed_object` returns 201, and the client accepts success
+statuses. Its trace already showed recovery at 34.685 s, but it stopped before
+clone/hydrate. The corrected selector reran in a new bucket; no failed report
+or product status behavior was overwritten. Selector SHA-256:
+`6ef7e41db125c69938b5ff58af00ea8ca45215126f1556061239cf3804ae20e3`.
+Both diagnostics logged client connection resets during proxy connection
+teardown; this is not server/native-platform reliability qualification.
+
+The maintained RustFS harness now retains timed-out command attempts before
+propagating `TimeoutExpired`: `timed_out: true`, `exit_code: null`, elapsed
+milliseconds, and stdout/stderr log paths. It sets report status to `failed`
+even with `check=False`. Successful/nonzero completed commands retain their
+actual exit code and have `timed_out: false`. Dependency proof: Python 3.9's
+`subprocess.run` kills/waits for its direct child on timeout, but does not
+return a `CompletedProcess`; no child exit code is invented. This does not
+claim process-tree termination, launch-failure recording, or hard-kill report
+durability. Python/Rust release consumers already reject non-passed reports;
+neither deserializes command records as a fixed exit-code structure.
+
+New real-subprocess tests cover timeout logs/report persistence, propagation,
+failure rejection, completed exit codes, and redacted report arguments. The
+exact staged timeout-only harness/test snapshot passes **10 tests**; the full
+local continuation passes **22 tests**. Workspace format and whitespace pass.
+Installed baseline replay `timeout-record-v1`, fresh bucket
+`crabbuild-recovery-gqak1l-timeout`, intentionally fails the sustained-stall
+case at 100 seconds: report remains **failed**, 32 checks / **19 command
+records**, now including the timed-out hydrate with `duration_ms: 100004`,
+`exit_code: null`, and `timed_out: true`. Previously that attempt was absent.
+Full local harness SHA-256 for this replay:
+`1007aa7e11659136bb468531815705dcdfc228ceb6b4eb97401ad665384e7739`.
+
+Remaining: integrate the recovery/latency selectors as required maintained
+release workloads; repeat recovery/cancellation/fatal-origin behavior across
+fetch, hydrate and long-lived mounts; establish whole-operation limits. The
+separate mTLS/workflow/scale harness command runners are not shared consumers
+of this record type and are unchanged; audit their timeout evidence separately
+before claiming a universal qualification-runner contract. Earlier local
+validator/harness work and the CLI warming fixture decision remain pending.
+At `3484b4b`, cache-service build/test/smoke CI, documentation, and NFS feature
+checks pass; multi-crate guardrails are red, broad CI remains incomplete, and
+native/provider skips are not proof. No phase acceptance or merge permission.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
