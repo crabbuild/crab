@@ -55,17 +55,18 @@ Standalone private range directories remain usable without a private parent;
 only a captured private parent may supply a catalog. Windows support, crash
 recovery, side-file ownership, and complete byte accounting remain open.
 
-Decoded-range reads retain their original root and file descriptor through
-validation and repair. A failed read releases its own finished read lease, then
+Object and decoded-range reads retain their original root and file descriptor
+through validation and repair. A failed read releases its own finished read lease, then
 compares the live descriptor's device/inode with the deletion candidate while
 holding the candidate's exclusive lease and parent lock. A replacement file is
 retained and its catalog row deletion rolls back. Other readers still exclude
 removal; a root replacement cannot redirect cleanup into the new tree. The
 reader duplicate shares only the seek cursor/lease, not a second independent
 read. No new body copy or unbounded read is added. Failed opens and request-bound
-rejections carry no file identity and authorize no deletion. Object/xorb and
-manifest read-side invalidation still need the same identity-lifetime treatment;
-this does not close all stale-read races or qualify arbitrary in-place mutation.
+rejections carry no file identity and authorize no deletion. A manifest-body
+failure cannot delete an unobserved ETag. Outer xorb decoder failures reverify
+the current file under the maintenance lock, retaining healthy refills. This
+does not close all stale-read races or qualify arbitrary in-place mutation.
 
 Decoded-range stats, prune, and verify now use pinned private directories and
 the same fixed range-layout ownership policy as cleanup. Unknown files,

@@ -66,6 +66,9 @@ typed errors into Xet instead of formatting them; consumers can walk the
 standard source chain to distinguish origin integrity, availability hooks,
 and writer I/O. Caller-token and source-reported cancellation return
 `ReadError::Cancelled`. Runtime initialization errors also retain their source.
+An intermittent protocol CI failure still loses the availability source through
+actual reconstruction. The typed-source contract is not fully qualified; see
+Plan 017's direct read-through checkpoint for the failing job and investigation.
 
 CLI/server adapters own user-facing classification. They must preserve this
 chain; converting only its display text loses recovery information. The CLI

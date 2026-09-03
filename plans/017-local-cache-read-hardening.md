@@ -1519,6 +1519,68 @@ included. All-target shared-read Clippy also reports the unchanged
 `upload_pack.rs:2343` cloned-reference lint. Both findings remain explicit
 delivery gates, alongside the unapproved architecture inventories.
 
+The same head's broad CI run `33803797865`, job `100809637408`, reports
+`No space left on device` while writing an integration-test fingerprint, then
+linker bus errors. This is direct evidence of build-resource exhaustion in that
+run, not a passing workspace suite or proof about the earlier linker-only
+failure. Qualification must provide adequate artifact space without dropping
+tests; no CI profile or inventory has been changed in this checkpoint.
+
+**Installed before/after proof.** The direct resolver's reachable CLI caller is
+`crab/src/cmd/diff.rs::run_diff`, via the CLI TermResolver facade and
+`resolve_sequences_batch`. Its non-strict failure policy drops unresolved chunk
+sequences, so a successful exit does not prove complete chunk metrics. The new
+retained `qualify_shard_diff.py` harness exercises this actual path on the same
+committed old/new 128-MiB versions in `generation-f77a446.DplIMs`:
+
+- Old installed `f77a446`: `shard-diff-f77a446.sQOuGF/report.json` fails the
+  blocked-cache chunk-metrics assertion. Healthy storage reports a 1,403,568-byte
+  delta and 0.9895426034927368 reuse ratio; with a regular file blocking the
+  `shards` directory, exit remains zero but chunk metrics disappear, delta is
+  zero, and reuse is zero. The failing report and original harness are retained.
+- New installed `3b2823e`: `shard-diff-3b2823e.2wN5aT/report.json` passes the
+  unchanged 15 checks / five commands / 172 gateway requests. Healthy and
+  blocked-cache JSON payloads are identical, including all chunk metrics.
+  Both read real origin shards and make zero xorb-body attempts with bodies
+  denied. The blocking file's device/inode/mode/mtime/digest is unchanged;
+  pointers stay unmaterialized and the checkout remains clean.
+
+The harness SHA-256 is
+`a9577bbce0ce94e3c65a3efba9af960142bcf3a5e1d5e9f9586da21c9ba9fa63`.
+No assertions were relaxed between old/new runs. A separate whole-file
+hydration fixture also passes on the old binary, so it is regression coverage,
+not evidence that old hydration failed: `shard-write-failure-f77a446.17hLaa`.
+Its new-binary repeat `shard-write-failure-3b2823e.iGjyfA/report.json` passes
+13 checks / six commands / 421 gateway requests. Blocked shard storage does
+not prevent clone or byte-identical hydration; decoded ranges still populate,
+warm hydration uses zero denied xorb GETs, and the blocking file remains intact.
+That harness is `qualify_shard_write_failure.py`, SHA-256
+`b9651814f319c5b7ded69f0f65251368b9cc1062a8abf0d0496fec6614f2cdd5`.
+
+Make installed CLI/read/cache source revision
+`3b2823ef991ee081f4b18b028c29d1643517cd76`; the qualified CLI SHA-256 is
+`a6b8dbb3c4c60b48fe8cbc48c751837fb78d19c599f3858880f9db937b671a63`.
+The sibling cache-server build includes unrelated dirty evidence work and is
+not qualified here as a clean committed artifact. Existing RustFS image,
+requested local credential pair, and bucket `crabbuild` were checked; no
+service reset, shared-object repair, or remote cleanup was performed.
+
+`generation-3b2823e.bbND6N/report.json` repeats the unchanged full generation
+harness: 63 checks / 53 commands / 1,553 gateway requests pass. Add/commit/push,
+lazy clone, cold/warm hydrate, separate-process fetch-to-hydrate, corrupt-range
+recovery, unsafe/unbound-cache bypass, scoped clean/prune, fsck, independent
+SHA-256 identity, and clean Git state pass. Initial duplicate/delta fixtures
+store 135,478,156 xorb bytes; the next exact duplicate adds no xorbs; a one-MiB
+edit adds 1,105,256 bytes. Cold hydrate/fetch use 16/17 xorb GETs, and both warm
+cases use zero with bodies denied. Cold denial exits 7 and preserves pointers;
+restored origin hydrates correctly. These request counts are observations, not
+a controlled performance comparison or a no-amplification claim.
+
+All three new installed runs total 91 passing checks and 64 commands. External
+harnesses remain prototypes; maintained qualification tooling, full-disk/read-
+only faults, bounded resource/latency proof, platform/provider coverage, CI
+failures, and the remaining phase requirements are not closed by this slice.
+
 ### Decoded-range read/repair identity execution slice
 
 **Context and evidence map.** At `bc0fe3b`, `CrabRangeCache::get` calls
