@@ -787,10 +787,6 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     // path is effective immediately (no cold-start penalty).
     session.load_bloom_from_cache();
 
-    // Load the `file_hash → shard_hash` map populated by previous pushes
-    // so emitted pointers carry `shard-hint` and hydration can skip the
-    // file-index GET.
-    session.load_shard_hints_from_cache();
     let mut file_index_checker_attempted = false;
 
     // Configure LFS support: set the current worktree root for
@@ -926,12 +922,18 @@ fn install_clean_file_index_checker(
         }
     };
 
+    let shard_hint_scope = crate::cache::shard_hints::ShardHintScope::new(
+        &selection.store.bucket_identity(),
+        selection.router.global_prefix(),
+    );
+
     let router = file_index_checker_router(
         selection.store,
         selection.router.repo_prefix().to_owned(),
         ctx,
         handle,
     );
+    session.load_shard_hints_from_cache(&shard_hint_scope);
     session.set_file_index_checker(Box::new(super::clean::StoreFileIndexChecker::new(
         router,
         handle.clone(),

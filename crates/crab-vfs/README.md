@@ -49,6 +49,12 @@ adapter bypasses current-thread Tokio runtimes, where `block_in_place` would
 panic. Whole-pointer reconstruction continues through the configured
 `crab-read` runtime and its decoded-range cache.
 
+Writable mount publication currently has repository-local Git state but no
+resolved storage identity at the pointer-write boundary. It therefore omits
+the optional shard hint instead of consulting another bucket or managed view's
+cache row; hydration retains the file-index fallback. Product composition can
+thread a resolved storage scope here in a later ownership consolidation.
+
 This does not yet qualify the separate file-window cache in `hydration.rs`:
 its failure isolation, per-read verification, private filesystem access, and
 budget/lifetime ownership remain Plan 017 work. Startup and in-memory-origin

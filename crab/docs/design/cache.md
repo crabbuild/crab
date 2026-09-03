@@ -130,9 +130,11 @@ remote proof records remain active.
 ### Shard hints and bloom data
 
 Shard hints avoid some file-index work but are advisory. Missing, corrupt, or
-stale hints fall back to the canonical file-index path. The current global JSON
-read-modify-write can lose unrelated concurrent additions and is not scoped by
-storage identity.
+stale hints fall back to the canonical file-index path. The working tree uses
+`hints/shard-hints.sqlite`, with a primary key over resolved storage scope and
+file hash. SQLite transactions retain unrelated concurrent updates; provider,
+physical bucket, and managed global prefix isolate rows. The released global
+JSON file is no longer read or migrated.
 
 The clean-filter bloom is also advisory. A definite miss can skip work; a
 possible hit still requires an authoritative lookup. Corrupt persisted bloom

@@ -54,7 +54,7 @@ pub use service::{
 };
 #[cfg(feature = "local-cache")]
 pub use shard_hints::{
-    MAX_SHARD_HINTS_BYTES, SHARD_HINTS_FILENAME, ShardHintCache, default_path as shard_hints_path,
+    SHARD_HINTS_DATABASE, ShardHintCache, ShardHintScope, database_path as shard_hints_path,
 };
 #[cfg(feature = "xet-chunk-cache")]
 pub use xet_chunk_cache::{

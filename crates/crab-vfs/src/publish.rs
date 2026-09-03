@@ -1569,13 +1569,10 @@ fn write_pointer_entries_to_git_index(
         return Ok(());
     }
 
-    let shard_hints = crab_cache::ShardHintCache::load_sync(
-        &crab_cache::shard_hints_path(),
-    )
-    .unwrap_or_else(|err| {
-        debug!(error = %err, "failed to load shard-hint cache; mount publish pointers will omit hints");
-        crab_cache::ShardHintCache::new()
-    });
+    // This repository-only boundary has no resolved storage identity. Using
+    // process-global hints could attach a shard from another bucket or managed
+    // view, so mount publication takes the advisory miss path.
+    let shard_hints = crab_cache::ShardHintCache::new();
 
     let mut index_entries = Vec::with_capacity(entries.len());
     for entry in entries {

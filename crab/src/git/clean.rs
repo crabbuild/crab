@@ -1492,14 +1492,17 @@ impl CleanSession {
         }
     }
 
-    /// Load the persisted `file_hash → shard_hash` mapping from the
-    /// default cache location. Any error (missing, unreadable, or corrupt
-    /// JSON) is logged at `warn!` and degrades to an empty cache —
-    /// emitted pointers simply won't carry `shard-hint`, which falls
-    /// back to the file-index path on hydrate.
-    pub fn load_shard_hints_from_cache(&mut self) {
-        let path = crate::cache::shard_hints::default_path();
-        match ShardHintCache::load_sync(&path) {
+    /// Load persisted hints for one resolved global-content storage scope.
+    ///
+    /// Any unavailable or corrupt index degrades to an empty cache. Emitted
+    /// pointers then omit `shard-hint` and hydrate uses the file-index path.
+    pub fn load_shard_hints_from_cache(
+        &mut self,
+        scope: &crate::cache::shard_hints::ShardHintScope,
+    ) {
+        let root = crate::cache::default_cache_root();
+        let path = crate::cache::shard_hints::database_path(&root);
+        match ShardHintCache::load_sync(&root, scope) {
             Ok(cache) => {
                 tracing::debug!(
                     path = %path.display(),

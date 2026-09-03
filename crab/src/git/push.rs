@@ -4325,6 +4325,14 @@ impl AddRemoteChunkClassifier {
     pub(crate) async fn close(&self) {
         self.pipeline.close_metadb().await;
     }
+
+    #[must_use]
+    pub(crate) fn shard_hint_scope(&self) -> crate::cache::shard_hints::ShardHintScope {
+        crate::cache::shard_hints::ShardHintScope::new(
+            &self.pipeline.router.store().bucket_identity(),
+            self.pipeline.router.global_prefix(),
+        )
+    }
 }
 
 #[async_trait::async_trait]
@@ -13044,8 +13052,13 @@ impl PushPipeline {
         }
 
         let entry_count = entries.len();
-        let path = crate::cache::shard_hints::default_path();
-        match crate::cache::ShardHintCache::update_on_disk(&path, entries).await {
+        let root = crate::cache::default_cache_root();
+        let scope = crate::cache::shard_hints::ShardHintScope::new(
+            &self.router.store().bucket_identity(),
+            self.router.global_prefix(),
+        );
+        let path = crate::cache::shard_hints::database_path(&root);
+        match crate::cache::ShardHintCache::update(&root, &scope, entries).await {
             Ok(()) => debug!(
                 path = %path.display(),
                 entries = entry_count,

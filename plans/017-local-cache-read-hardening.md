@@ -3366,10 +3366,10 @@ product-only `xet_chunk_cache_stats_in_root` and its two obsolete tests are
 deleted after caller/tag checks; standalone range statistics remain live.
 
 **Next acceptance slices.** Complete verify/schema/reference coverage per
-family; transactional scope-isolated shard hints; removal of unused placement
-state with remote-proof consumer proof; total inspection resource limits and
-native-platform qualification. Reconcile allocation reporting with the actual
-admission/maintenance lifecycle before asserting a hard total disk budget.
+family; the explicit placement-table preservation migration; total inspection
+resource limits and native-platform qualification. Reconcile allocation
+reporting with the actual admission/maintenance lifecycle before asserting a
+hard total disk budget.
 
 **CI evidence at `4ea6415`.** Cache-service smoke, split-crate contracts, binary
 contracts, and docs pass. Linux protocol reader tests fail at
@@ -3482,6 +3482,57 @@ table/API, byte-for-byte preservation and reuse of both remote record families,
 no mutation during ordinary verification, and an installed RustFS push,
 hydrate, and clone run with no correctness or request-count regression.
 
+### Transactional storage-scoped shard-hint checkpoint, 2026-09-03
+
+The released `shard-hints.json` format is one process-global map. Atomic rename
+prevents partial reads but its read-modify-write sequence still loses unrelated
+concurrent updates, and the file key omits both the physical bucket and managed
+global-content prefix. A hint is advisory and stale-shard lookup already falls
+back to the authoritative file index, so this is locality and tenancy debt,
+not a new correctness authority.
+
+The working tree replaces that file with canonical schema version 1 at
+`hints/shard-hints.sqlite`. Its `WITHOUT ROWID` primary key is
+`(scope_digest, file_hash)`; the digest length-prefixes provider, normalized
+physical bucket identity, and the resolved global-content prefix. This shares
+hints across repositories only when their shards occupy the same physical
+namespace, while isolating managed views inside one bucket. One immediate
+SQLite transaction upserts a push batch. Busy/locked initialization retries
+within the existing two-second hint budget; the database retains the global
+one-million-row safety bound. Reads are descriptor-bound and read-only, do not
+create missing roots/databases, and return errors for unsupported schemas so
+product callers can log and take the existing advisory miss path.
+
+Push writes the scope resolved by its `StoreLayout`. Native `crab add` reuses
+the exact scope already resolved for remote classification, and filter clean
+loads hints only after its store/layout is resolved. The repository-only VFS
+overlay publisher has no resolved store identity at pointer publication, so it
+now omits the optional hint instead of consuming a row from another storage
+namespace. Hydration still uses file-index fallback. Threading a resolved
+scope through VFS composition is a bounded follow-up performance opportunity,
+not permission to infer a bucket from repository-local Git state.
+
+The tagged JSON file is disposable cache state. It is intentionally neither
+read nor silently migrated; the health inventory continues to classify it so
+explicit maintenance can report or remove it. This avoids a compatibility
+reader and prevents unscoped rows from entering the new table.
+
+Acceptance proof at this checkpoint includes same-process and separate-process
+concurrent writers retaining both unrelated rows; provider/bucket normalization
+and global-prefix isolation; three scopes storing different shard hashes for
+the same file hash without cross-reads; round-trip pointer construction; and a
+missing-root read that creates nothing. The focused seven-test shard-hint suite,
+whole Crab package check, formatting, and strict `crab-cache` Clippy pass on
+macOS. Installed RustFS add/commit/push/hydrate/clone qualification is still
+required before claiming this slice complete. Linux native-process proof is a
+CI gate; Windows continues to take advisory misses because the Phase 4 private
+SQLite owner is not implemented there.
+
+This completes the transactional and scope-isolation behavior in Phase 5 work
+item 5. It does not complete Phase 5: all-family verify/repair, hint-database
+health validation, VFS scope composition, resource bounds, and the separate
+placement-schema migration remain open.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
@@ -3577,8 +3628,9 @@ write-denying inspection boundary needs other-native-platform qualification
 and review of its OS-write-capable descriptor contract. Local xorb-placement
 runtime access is removed, but the dormant v1.0.1 table still shares a database
 with live remote proof/index records pending an explicit preservation
-migration. Shard hints use a global JSON read-modify-write that loses updates
-across processes.
+migration. Transactional storage-scoped shard hints are implemented, but their
+all-family verify/repair integration, VFS scope composition, and Linux/Windows
+qualification remain open.
 
 **Work**
 

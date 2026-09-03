@@ -7,6 +7,7 @@
 //! ├── shards/{h[:2]}/{h}
 //! ├── xorbs/{h[:2]}/{h}
 //! ├── xorb-index/index.db
+//! ├── hints/shard-hints.sqlite
 //! ├── manifests/{name}.json
 //! ├── manifests/{name}.etag
 //! └── stages/{h[:2]}/{h}

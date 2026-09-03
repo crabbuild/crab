@@ -73,6 +73,7 @@ async fn every_family_and_directory_allocation_reconciles_with_native_stat() {
         ("buckets/scope/index.sqlite", "chunk-index"),
         ("xorb-index/index.sqlite-wal", "xorb-index"),
         ("hints/clean-bloom.bin", "bloom"),
+        ("hints/shard-hints.sqlite", "shard-hint"),
         ("shard-hints.json", "shard-hint"),
         (".maintenance.lock", "lock"),
         (".tmp-payload", "temporary"),

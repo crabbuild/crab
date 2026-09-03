@@ -1274,6 +1274,10 @@ async fn execute_add(
             &duplicate_representatives,
         );
     }
+    let shard_hint_scope = execution_plans
+        .remote_classifier
+        .as_ref()
+        .map(|classifier| classifier.shard_hint_scope());
     if let Some(classifier) = execution_plans.remote_classifier.take() {
         classifier.close().await;
     }
@@ -1442,13 +1446,16 @@ async fn execute_add(
         let tracking_patterns = generated_tracking_patterns.clone();
         let progress_cb = Arc::clone(&progress);
         let index_result = tokio::task::spawn_blocking(move || {
-            let shard_hints = crate::cache::ShardHintCache::load_sync(
-                &crate::cache::shard_hints::default_path(),
-            )
-            .unwrap_or_else(|err| {
-                debug!(error = %err, "failed to load shard-hint cache; pointers will omit hints");
-                crate::cache::ShardHintCache::new()
-            });
+            let shard_hints = shard_hint_scope.map_or_else(
+                crate::cache::ShardHintCache::new,
+                |scope| {
+                    let root = crate::cache::default_cache_root();
+                    crate::cache::ShardHintCache::load_sync(&root, &scope).unwrap_or_else(|err| {
+                        debug!(error = %err, "failed to load shard-hint cache; pointers will omit hints");
+                        crate::cache::ShardHintCache::new()
+                    })
+                },
+            );
             let mut publication_intent = None;
             let write_result = write_pointers_and_tracking_to_git_index(
                 &index_entries,

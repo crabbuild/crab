@@ -162,6 +162,15 @@ write denial, native writer exclusion, and inspection after writer death. This
 is used by both stats spellings and doctor. Native Linux proof and bounds on
 heap WAL-index size, SQL aggregation, and total inspection time remain open.
 
+Shard hints now use `hints/shard-hints.sqlite` instead of the released global
+`shard-hints.json` read-modify-write file. The primary key combines a digest of
+the resolved provider/bucket/global-content prefix with the file hash, so two
+managed views in one physical bucket cannot consume each other's hints.
+SQLite transactions preserve unrelated concurrent updates. Missing, busy,
+corrupt, or stale hints remain advisory misses and hydration falls back to the
+authoritative file index. The old JSON cache is not migrated or read; cache
+inventory still recognizes it as disposable retained state.
+
 Admission includes the incoming file and other active reservations when making
 space, even below the current-usage high watermark. The final capacity check
 and reservation insertion share a writer transaction. Object, file-backed
