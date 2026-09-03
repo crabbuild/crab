@@ -196,6 +196,67 @@ fn distinct_objects_and_repeated_work_have_separate_fail_closed_bounds() {
 }
 
 #[test]
+fn shared_history_is_scanned_once_across_many_annotated_tags() {
+    let repo = Repo::new();
+    let blob = repo.blob(&pointer().serialize());
+    let tree = repo.tree(&blob);
+    let mut tip = repo.commit(&tree, None);
+    for _ in 0..39 {
+        tip = repo.commit(&tree, Some(&tip));
+    }
+    let targets = (0..100)
+        .map(|index| {
+            let body = format!(
+                "object {tip}\ntype commit\ntag snapshot-{index}\ntagger Scan <scan@example.invalid> 1 +0000\n\nsnapshot\n"
+            );
+            repo.git(&["mktag"], body.as_bytes())
+        })
+        .collect::<Vec<_>>();
+    let mut budget = limits();
+    budget.objects = 142;
+    budget.lookups = 800;
+    let refs = targets.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(repo.scan(&refs, budget).unwrap().len(), 1);
+}
+
+#[test]
+fn per_ref_visibility_keeps_independent_object_closures() {
+    let repo = Repo::new();
+    let mut refs = Vec::new();
+    let mut expected = BTreeMap::new();
+    for index in [0x31, 0x32] {
+        let mut content = pointer();
+        content.file_hash = [index; 32];
+        let blob = repo.blob(&content.serialize());
+        let commit = repo.commit(&repo.tree(&blob), None);
+        let body = format!(
+            "object {commit}\ntype commit\ntag snapshot-{index}\ntagger Scan <scan@example.invalid> 1 +0000\n\nsnapshot\n"
+        );
+        let tag = repo.git(&["mktag"], body.as_bytes());
+        let name = format!("refs/tags/{index}");
+        refs.push((name.clone(), tag));
+        expected.insert(name, vec![content.file_hash]);
+    }
+    let closures =
+        super::super::walk_reachable_by_ref_bounded(repo.0.path(), &refs, &BTreeMap::new(), 8)
+            .unwrap();
+    let actual = closures
+        .into_iter()
+        .map(|(name, closure)| {
+            (
+                name,
+                closure
+                    .pointers
+                    .into_iter()
+                    .map(|pointer| pointer.file_hash)
+                    .collect(),
+            )
+        })
+        .collect::<BTreeMap<_, Vec<_>>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn cancellation_before_open_and_during_history_never_returns_partial_pointers() {
     assert!(matches!(
         scan_pointers(Path::new("absent"), &[], limits(), &|| true),

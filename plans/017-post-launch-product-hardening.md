@@ -4816,6 +4816,99 @@ Controlled baseline/candidate measurements, final-candidate protocol/rollback
 matrix, GC lifetime, protected publication, managed grants and cross-platform
 gates remain open. Do not mark Phase 2 complete from this lifecycle run.
 
+### Multi-ref Kubernetes pointer-scan scaling: 2026-09-03 UTC
+
+**Observed failure.** The mutation-denying proxy run
+`phase2-k8s-readonly-mirror-6d9fd88-20260903/artifacts/report.json` failed on
+the retained Kubernetes publication: all 1,246 source refs were captured and
+the published main ref compared equal, but pointer verification exhausted
+8,000,000 lookups. It returned unverifiable, not clean, after 67,327 ms.
+There were zero attempted remote writes, and source/binary identity checks
+passed. The original failed report remains unchanged. The source has
+1,790,727 distinct reachable objects; ref fanout, not an oversized distinct
+object set, exposed repeated ancestry work.
+
+**Implementation candidate.** Pointer discovery now resolves roots with the
+existing strict annotated-tag parser and runs one multi-tip commit walk over
+their union. Gitoxide's `Simple::new` contract visits each reachable commit
+once; the existing tree visitor shares its visited set across that walk.
+Direct tree/blob roots are then checked against the same closure. Tag objects
+consume the same distinct-object budget; lookup/allocation/cancellation and
+raw large-blob verification remain enforced. No limits were increased and no
+source refs were removed. Shared root resolution avoids a second tag policy.
+
+The direct push and managed receive visibility builders still use per-ref
+closures: their authorization indexes cannot substitute an all-ref union.
+The added isolation regression protects that caller difference. Non-test
+code growth pays for union traversal while retaining the required per-ref
+result, not a compatibility fallback or duplicate Git object reader.
+
+**Current proof and next acceptance.** The 100-tag/40-commit regression failed
+at 800 lookups before the change and passes afterward. All 19 traversal tests
+pass with both minimal and facade features, including missing/corrupt/wrong
+kind objects, nested tags, direct tree/blob targets, budgets, cancellation and
+per-ref isolation. All 70 mirror tests and `crab-git` library Clippy pass.
+The full cold/warm Kubernetes retry is running on the dirty debug candidate
+in `phase2-k8s-readonly-union-debug-d45ac62-20260903`; it is not yet acceptance
+evidence. Require completed pointer verification with all refs and zero
+mutation attempts, then repeat on the committed release candidate. Neither
+development-host timings nor a debug/release comparison can establish a
+performance improvement or close the controlled regression gate.
+
+### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
+
+**Evidence and limit.** The local regression
+`released_fence_identity_distinguishes_domain_recreation` acquires/releases a
+real `GcFenceLease`, deletes only its isolated in-memory fence, then completes
+another sweep. It fails: both released states are byte-identical, with schema
+1, epoch 2, writer epoch 0, and empty holders/quarantine. The regression is
+uncommitted and intentionally red; no production contract has changed.
+This proves that current serialized state is not an incarnation identity,
+not that a correctly rooted GC run has deleted live data.
+
+`phase2-gc-observation-aba-d45ac62-20260903/artifacts/report.json` separately
+checks the provider property on one new, run-owned RustFS object. Identical
+bodies before/after delete-and-recreate receive the same ETag
+`8106e21a6f59e6b359f354e91a336086` and no version ID. Only that diagnostic key
+was deleted and immediately recreated; no GC command or existing repository
+data was touched. The different last-modified timestamps in this run are not
+evidence of a monotonic, unique provider incarnation contract. The report is
+explicitly excluded from performance comparisons.
+
+**Compatibility decision requiring approval.** Tagged v1.0.1 has the same
+schema-1 state, strict unknown-field rejection, and schema-version validation.
+A versioned incarnation field would therefore make old writers and sweepers
+refuse a migrated domain, not coexist transparently. Do not add an optional
+field, silently rewrite existing fences, or rely on ETags as an ABA-proof
+substitute. Proposed direction: an explicit versioned coordination upgrade,
+with a fresh unpredictable incarnation identity on domain creation, persistent
+released state, checked epoch advancement, and migration under quiescence.
+Arbitrary restoration of an old coordination object remains outside an
+unversioned store's observable guarantees and needs an explicit restore policy.
+
+**Executable packets after approval.**
+
+1. Coordination owner: implement the versioned identity and explicit migration;
+   refuse absent, malformed, unsupported, saturated or unqualified observation
+   state. Acceptance: the current red test passes; old-client refusal, expiry,
+   crash, deletion/recreation and restore boundaries are tested. No automatic
+   migration of unrelated global domains or bucket-wide mutation.
+2. Shared inspection owner: capture non-writing observations for both repository
+   and physical global-data domains before snapshot/history/dependency reads;
+   revalidate after the complete scan. Reject crossed sweeps and uncertain
+   holders without acquiring a write lease. Acceptance: a sweep entirely
+   inside the scan is detected, cancellation remains bounded, scoped grants
+   cannot read another domain, and all inspection paths attempt zero writes.
+3. Publication owner: use existing writer admission, revalidate under that owner,
+   and keep it through dependency flush, ref commit and terminal read-back.
+   Acceptance: direct, managed, hook and apply paths reject stale proof or lost
+   protection; no independent parent/child guard stack is introduced. Run
+   isolated RustFS fault tests and the tagged-client migration/rollback matrix
+   before repeating the large-repository final-candidate qualification.
+
+The proposed upgrade is not implemented or approved by this evidence packet.
+The read-only lifetime and Phase 2 completion gates remain open.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

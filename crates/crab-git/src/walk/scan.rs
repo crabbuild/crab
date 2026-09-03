@@ -6,7 +6,7 @@ use std::path::Path;
 
 use gix_object::{Find, FindHeader};
 
-use super::{PointerBlob, Result, WalkError, visit_reachable_by_ref};
+use super::{PointerBlob, Result, WalkError, walk_ref_union};
 use crate::batch::BlobHeader;
 
 /// Pointer candidates and the remaining blob bodies needed for a complete scan.
@@ -64,19 +64,7 @@ pub fn scan_pointers(
         cancelled,
         unchecked_blobs: RefCell::new(BTreeMap::new()),
     };
-    let mut pointers = BTreeMap::new();
-    let result = visit_reachable_by_ref(
-        &odb,
-        refs,
-        &BTreeMap::new(),
-        Some(limits.objects),
-        |_, closure| {
-            for pointer in closure.pointers {
-                pointers.insert(pointer.oid, pointer);
-            }
-            Ok(())
-        },
-    );
+    let result = walk_ref_union(&odb, refs, limits.objects);
     // Git traversal wraps Find errors (including a cancelled commit lookup).
     // Keep the first budget failure authoritative instead of misreporting it
     // as missing history or allowing a partial scan to become a proof.
@@ -95,12 +83,18 @@ pub fn scan_pointers(
         }
         None => {}
     }
-    result?;
+    let reachable = result?;
     if cancelled() {
         return Err(WalkError::Cancelled);
     }
     Ok(PointerScan {
-        pointers: pointers.into_values().collect(),
+        pointers: reachable
+            .pointers
+            .into_iter()
+            .map(|pointer| (pointer.oid, pointer))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect(),
         unchecked_blobs: odb
             .unchecked_blobs
             .into_inner()
