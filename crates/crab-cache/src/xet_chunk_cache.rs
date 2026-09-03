@@ -61,25 +61,9 @@ impl CrabRangeCache {
         {
             return Err(ChunkCacheError::InvalidArguments);
         }
-        let display_root = self.catalog.root().to_owned();
-        let relative = path
-            .strip_prefix(&display_root)
-            .map_err(std::io::Error::other)?
-            .to_owned();
-        let read_root = display_root.clone();
-        let read_relative = relative.clone();
-        let (root, original) =
-            crate::private_fs::run_blocking(&CancellationToken::new(), move |_| {
-                let root = PinnedRoot::open(&read_root)?;
-                let file = root.open_read(&read_relative)?;
-                Ok((root, file))
-            })
+        let (entry, file) = crate::catalog::PayloadRead::open(self.catalog.root(), path)
             .await
             .map_err(std::io::Error::other)?;
-        // The duplicate is the only reader of the shared cursor. Retain the
-        // original descriptor and root until validation and repair finish;
-        // a later pathname lookup cannot identify the failed read's entry.
-        let file = tokio::fs::File::from_std(original.try_clone()?);
         let result = Self::read_open_entry(file, item, requested)
             .await
             .and_then(|hit| {
@@ -95,32 +79,7 @@ impl CrabRangeCache {
                 }
                 Ok(hit)
             });
-        if result.is_err() {
-            let repair = Self::discard_read(root, display_root, relative, original).await;
-            if let Err(error) = repair {
-                warn!(family = "decoded-range", operation = "evict", path = %path.display(),
-                    recovery = "bypass-cache", %error, "local cache repair failed");
-            }
-        }
-        result
-    }
-
-    async fn discard_read(
-        root: PinnedRoot,
-        display_root: PathBuf,
-        relative: PathBuf,
-        original: fs::File,
-    ) -> Result<()> {
-        crate::private_fs::run_blocking(&CancellationToken::new(), move |cancel| {
-            let mut removal =
-                crate::catalog::PayloadRemoval::open(Some(&root), &display_root, false)?;
-            removal.remove(&relative, || {
-                check_cancelled(cancel)?;
-                root.remove_read_file(&relative, &original)
-            })?;
-            Ok(())
-        })
-        .await
+        entry.finish(result).await
     }
 
     async fn read_open_entry(

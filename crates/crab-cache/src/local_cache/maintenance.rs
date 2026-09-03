@@ -11,6 +11,41 @@ const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards"];
 const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 impl LocalCache {
+    /// Remove a cached xorb only if its current locked payload is corrupt.
+    ///
+    /// Healthy replacements are retained. Verification streams bounded chunks;
+    /// operational failures return errors without authorizing deletion.
+    pub async fn evict_corrupt_xorb(&self, hash: &MerkleHash) -> Result<()> {
+        let path = self.hash_path(&CacheKey::Xorb(*hash));
+        let relative = path
+            .strip_prefix(&self.root)
+            .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+            .to_owned();
+        let root_path = self.root.clone();
+        with_pinned_root(
+            &self.root,
+            &CancellationToken::new(),
+            move |root, cancel| {
+                let mut removal =
+                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
+                let result = removal.remove(&relative, || {
+                    root.remove_file_if(&relative, false, &mut |file| {
+                        let valid = verify_file(file, &relative, PruneObjectKind::Xorb, cancel)?;
+                        check_cancelled(cancel)?;
+                        Ok(!valid)
+                    })
+                });
+                match result {
+                    Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(())
+                    }
+                    result => result.map(|_| ()),
+                }
+            },
+        )
+        .await
+    }
+
     /// Prune eligible private objects to the configured LRU limits.
     pub async fn prune(&self) -> Result<PruneStats> {
         self.prune_with_options(PruneOptions::default()).await

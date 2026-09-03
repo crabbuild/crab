@@ -1544,6 +1544,56 @@ manifest sibling readers, LRU touch identity, complete cancellation/resource
 qualification, catalog generation changes during a read, and external in-place
 mutations; this slice does not establish full Phase 2 acceptance.
 
+### Object and outer-decoder repair identity execution slice
+
+**Context and evidence map.** The prior range checkpoint left sibling pathname
+invalidation in `LocalCache` bounded reads, full-xorb identity/payload checks,
+metadata/range readers, and `CachingStore::xorb_read_failed`. The latter receives
+a parser error after its local handle has closed. A fresh path lookup could
+remove a healthy refill for an earlier corrupt body's failure. Maintenance's
+streaming `verify_file` already verifies the current descriptor inside the
+payload removal lock. Catalog deletion transactions and the retained-directory
+private filesystem are the shared ownership boundary. This extends the branch's
+read-repair work; it is not a claim about a reproduced regression on main.
+
+**Design and acceptance.** Share one crate-private `PayloadRead` between range
+and object readers, retaining the original descriptor through validation and
+conditional catalog-aware deletion. Consume/drop the duplicate reader before
+repair. Open failures never authorize path deletion. Keep explicit unconditional
+eviction separate. For outer decoding, use one targeted current-xorb verification
+under the maintenance lock instead of exposing read tokens across the public
+API. Stream bounded chunks; delete only proven corruption, retain healthy
+replacements, and propagate operational failures to the existing optional-cache
+bypass. A manifest-body failure cannot authorize deleting an unobserved ETag.
+
+Acceptance requires real publication between failed validation and cleanup,
+including root replacement; preservation of replacement bytes and accounting;
+active-reader exclusion; retirement of original corruption across xorb read
+variants; preservation of origin provenance and bounded/noninstalling read
+policy; and an installed RustFS repeat of large-file operations and corruption
+recovery. The existing range interleaving assertions are retained and use the
+shared owner. `fs4` 0.13.1's advisory-lock/duplicate-descriptor contract and
+the existing descriptor-owning xorb verifier were inspected before wiring.
+
+**Focused proof, 2026-09-03.** All 272 cache tests and 63 cache-store tests pass,
+including a real payload-digest failure followed by a healthy refill before
+outer error handling. Local-only repair tests (four) and range-only tests (28)
+pass. Strict all-target Clippy passes for the two affected crates with all
+features and for cache local-only/range-only; minimal cache compilation and
+workspace formatting pass. Production code shrinks overall by sharing repair
+ownership and deleting pathname-error branches. No dependency/config/schema
+change or protected inventory edit is included.
+
+The previous-head CI workspace test build failed while linking `crab`'s test
+binary: `rust-lld` terminated with signal 7 (bus error), before workspace test
+execution completed. See run `33801077920`, job `100800970479`. This does not
+prove an application test failure or a passing workspace suite; cause and broad
+proof remain open. Multi-crate guardrails also remain red and unwaived.
+Installed qualification for this slice is pending. Atomic manifest pairing,
+LRU touch identity, catalog-generation changes during reads, external in-place
+mutation, cancellation/resource/platform qualification, and outstanding approval
+boundaries remain open; this checkpoint does not complete Phase 2.
+
 ## Phase 3: Enforce one cache budget and lifecycle
 
 **Context**

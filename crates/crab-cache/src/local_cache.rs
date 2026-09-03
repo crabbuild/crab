@@ -21,6 +21,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, warn};
 
+use crate::catalog::PayloadRead;
 use crate::error::{CacheError, Result};
 use crate::key::CacheKey;
 use crab_xet::hash::{compute_data_hash, xorb_hash};
@@ -376,25 +377,19 @@ impl LocalCache {
     /// # Errors
     ///
     /// Returns an I/O or corruption error when an existing entry cannot be
-    /// read as the requested content-addressed xorb. Invalid entries are
-    /// evicted before the error is returned.
+    /// read as the requested content-addressed xorb. Repair targets only the
+    /// failed read's file; busy entries and later replacements are retained.
     pub async fn get_read_xorb_if_present(&self, hash: &MerkleHash) -> Result<Option<Bytes>> {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
-        let Some(data) = read_file_bounded_result(&self.root, &path, MAX_XORB_SIZE as u64).await?
+        let Some(data) =
+            read_file_bounded_result(&self.root, &path, MAX_XORB_SIZE as u64, |data| {
+                verify_xorb_identity(data, hash)
+            })
+            .await?
         else {
             return Ok(None);
         };
-        if let Err(error) = verify_xorb_identity(&data, hash) {
-            warn!(
-                path = %path.display(),
-                expected = %hash.hex(),
-                error = %error,
-                "cached xorb identity mismatch — evicting"
-            );
-            let _ = self.evict(&key).await;
-            return Err(error);
-        }
         crate::private_fs::touch(&self.root, &path).await;
         Ok(Some(data))
     }
@@ -421,29 +416,10 @@ impl LocalCache {
             }
             CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
-                let data = match max_bytes {
-                    Some(max_bytes) => {
-                        match read_file_bounded_result(&self.root, &path, max_bytes).await {
-                            Ok(Some(data)) => data,
-                            Ok(None) => return None,
-                            Err(error) => {
-                                warn!(
-                                    family = "stage",
-                                    operation = "bounded-read",
-                                    path = %path.display(),
-                                    recovery = "evict-and-use-origin",
-                                    error = %error,
-                                    "local cache read failed"
-                                );
-                                let _ = crate::catalog::remove_file(&self.root, &path).await;
-                                return None;
-                            }
-                        }
-                    }
-                    None => read_file_bounded_result(&self.root, &path, MAX_CACHE_STAGE_BYTES)
-                        .await
-                        .ok()??,
-                };
+                let limit = max_bytes.unwrap_or(MAX_CACHE_STAGE_BYTES);
+                let data = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
+                    .await
+                    .ok()??;
                 crate::private_fs::touch(&self.root, &path).await;
                 Some(data)
             }
@@ -455,34 +431,12 @@ impl LocalCache {
                     return None;
                 }
                 let path = self.manifest_data_path(name);
-                let data = match max_bytes {
-                    Some(max_bytes) => {
-                        match read_file_bounded_result(&self.root, &path, max_bytes).await {
-                            Ok(Some(data)) => data,
-                            Ok(None) => return None,
-                            Err(error) => {
-                                warn!(
-                                    family = "manifest",
-                                    operation = "bounded-read",
-                                    path = %path.display(),
-                                    recovery = "evict-and-use-origin",
-                                    error = %error,
-                                    "local cache read failed"
-                                );
-                                let _ = crate::catalog::remove_file(&self.root, &path).await;
-                                let _ = crate::catalog::remove_file(
-                                    &self.root,
-                                    &self.manifest_etag_path(name),
-                                )
-                                .await;
-                                return None;
-                            }
-                        }
-                    }
-                    None => read_file_bounded_result(&self.root, &path, MAX_CACHE_MANIFEST_BYTES)
-                        .await
-                        .ok()??,
-                };
+                // A body-read failure cannot authorize deleting a later ETag
+                // publication. Missing bodies are misses regardless of ETag.
+                let limit = max_bytes.unwrap_or(MAX_CACHE_MANIFEST_BYTES);
+                let data = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
+                    .await
+                    .ok()??;
                 debug!(manifest = %name, "manifest cache hit (ETag match)");
                 Some(data)
             }
@@ -829,37 +783,29 @@ impl LocalCache {
         }
         let len = usize::try_from(range.end.checked_sub(range.start)?).ok()?;
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let file = crate::private_fs::open_read(&self.root, &path).await.ok()?;
-        let meta = file.metadata().await.ok()?;
-        if meta.len() > MAX_XORB_SIZE as u64 || range.end > meta.len() {
-            return None;
-        }
-        let mut file = match verify_xorb_file_identity(file, &path, meta.len(), hash).await {
-            Ok(file) => file,
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    expected = %hash.hex(),
-                    error = %e,
-                    "cached xorb range identity check failed — evicting"
-                );
-                let _ = crate::catalog::remove_file(&self.root, &path).await;
-                return None;
+        let (entry, file) = PayloadRead::open(&self.root, &path).await.ok()?;
+        let result: Result<_> = async {
+            let bytes = file.metadata().await?.len();
+            // Request bounds do not prove the cached object is corrupt.
+            if bytes > MAX_XORB_SIZE as u64 || range.end > bytes {
+                return Ok(None);
             }
-        };
-        file.seek(std::io::SeekFrom::Start(range.start))
-            .await
-            .ok()?;
-        let mut buf = vec![0u8; len];
-        file.read_exact(&mut buf).await.ok()?;
+            let mut file = verify_xorb_file_identity(file, &path, bytes, hash).await?;
+            file.seek(std::io::SeekFrom::Start(range.start)).await?;
+            let mut buf = vec![0u8; len];
+            file.read_exact(&mut buf).await?;
+            Ok(Some((Bytes::from(buf), bytes)))
+        }
+        .await;
+        let data = entry.finish(result).await.ok()??;
         crate::private_fs::touch(&self.root, &path).await;
-        Some((Bytes::from(buf), meta.len()))
+        Some(data)
     }
 
     /// Return verified chunk metadata and payload length for a cached xorb.
     ///
-    /// Invalid entries are evicted and returned as errors so callers can
-    /// distinguish corruption repair from an ordinary cold miss.
+    /// Invalid entries return errors and repair targets the failed read's file,
+    /// retaining busy entries and later replacements.
     ///
     /// # Errors
     ///
@@ -870,47 +816,31 @@ impl LocalCache {
         hash: &MerkleHash,
     ) -> Result<Option<(Vec<ChunkMeta>, u64)>> {
         let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let file = match crate::private_fs::open_read(&self.root, &path).await {
-            Ok(file) => file,
+        let (entry, file) = match PayloadRead::open(&self.root, &path).await {
+            Ok(opened) => opened,
             Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None);
             }
             Err(error) => return Err(error),
         };
-        let meta = file.metadata().await?;
-        let metadata = read_xorb_file_metadata(file, &path, meta.len()).await;
-        match metadata {
-            Ok((chunks, actual)) if actual == *hash => {
-                let payload_len = chunks.last().map_or(0, |chunk| {
-                    u64::from(chunk.offset) + u64::from(chunk.compressed_len)
-                });
-                crate::private_fs::touch(&self.root, &path).await;
-                Ok(Some((chunks, payload_len)))
-            }
-            Ok((_, actual)) => {
-                warn!(
-                    path = %path.display(),
-                    expected = %hash.hex(),
-                    actual = %actual.hex(),
-                    "cached xorb metadata identity mismatch — evicting"
-                );
-                let _ = self.evict(&CacheKey::Xorb(*hash)).await;
-                Err(CacheError::HashMismatch {
+        let result = async {
+            let bytes = file.metadata().await?.len();
+            let (chunks, actual) = read_xorb_file_metadata(file, &path, bytes).await?;
+            if actual != *hash {
+                return Err(CacheError::HashMismatch {
                     requested: hash.hex(),
                     actual: actual.hex(),
-                })
+                });
             }
-            Err(error) => {
-                warn!(
-                    path = %path.display(),
-                    expected = %hash.hex(),
-                    error = %error,
-                    "cached xorb metadata validation failed — evicting"
-                );
-                let _ = self.evict(&CacheKey::Xorb(*hash)).await;
-                Err(error)
-            }
+            let payload_len = chunks.last().map_or(0, |chunk| {
+                u64::from(chunk.offset) + u64::from(chunk.compressed_len)
+            });
+            Ok((chunks, payload_len))
         }
+        .await;
+        let metadata = entry.finish(result).await?;
+        crate::private_fs::touch(&self.root, &path).await;
+        Ok(Some(metadata))
     }
 
     // --- private helpers ---
@@ -958,34 +888,13 @@ impl LocalCache {
         max_bytes: Option<u64>,
     ) -> Option<Bytes> {
         let max_bytes = max_bytes?;
-        let data = match read_file_bounded_result(&self.root, path, max_bytes).await {
-            Ok(Some(data)) => data,
-            Ok(None) => return None,
-            Err(error) => {
-                warn!(
-                    family = "content-addressed",
-                    operation = "bounded-read",
-                    path = %path.display(),
-                    recovery = "evict-and-use-origin",
-                    error = %error,
-                    "local cache read failed"
-                );
-                let _ = crate::catalog::remove_file(&self.root, path).await;
-                return None;
-            }
-        };
-        if compute_data_hash(&data) == *expected {
-            crate::private_fs::touch(&self.root, path).await;
-            return Some(data);
-        }
-
-        warn!(
-            path = %path.display(),
-            expected = %expected.hex(),
-            "cache hash mismatch — evicting"
-        );
-        let _ = crate::catalog::remove_file(&self.root, path).await;
-        None
+        let data = read_file_bounded_result(&self.root, path, max_bytes, |data| {
+            verify_data_hash(data, expected)
+        })
+        .await
+        .ok()??;
+        crate::private_fs::touch(&self.root, path).await;
+        Some(data)
     }
 
     async fn try_read_xorb_bytes_limited(
@@ -997,58 +906,28 @@ impl LocalCache {
         let max_bytes = max_bytes
             .unwrap_or(MAX_XORB_SIZE as u64)
             .min(MAX_XORB_SIZE as u64);
-        let data = match read_file_bounded_result(&self.root, path, max_bytes).await {
-            Ok(Some(data)) => data,
-            Ok(None) => return None,
-            Err(error) => {
-                warn!(
-                    family = "xorb",
-                    operation = "bounded-read",
-                    path = %path.display(),
-                    recovery = "evict-and-use-origin",
-                    error = %error,
-                    "local cache read failed"
-                );
-                let _ = crate::catalog::remove_file(&self.root, path).await;
-                return None;
-            }
-        };
-
-        if verify_xorb_identity(&data, expected).is_ok() {
-            crate::private_fs::touch(&self.root, path).await;
-            return Some(data);
-        }
-
-        warn!(
-            path = %path.display(),
-            expected = %expected.hex(),
-            "cached xorb identity mismatch — evicting"
-        );
-        let _ = crate::catalog::remove_file(&self.root, path).await;
-        None
+        let data = read_file_bounded_result(&self.root, path, max_bytes, |data| {
+            verify_xorb_identity(data, expected)
+        })
+        .await
+        .ok()??;
+        crate::private_fs::touch(&self.root, path).await;
+        Some(data)
     }
 
     async fn try_verify_xorb_payload_file(&self, path: &Path, expected: &MerkleHash) -> bool {
-        let Ok(file) = crate::private_fs::open_read(&self.root, path).await else {
+        let Ok((entry, file)) = PayloadRead::open(&self.root, path).await else {
             return false;
         };
-        let Ok(meta) = file.metadata().await else {
-            return false;
-        };
-        let verified = verify_xorb_file_payload(file, path, meta.len(), expected)
-            .await
-            .is_ok();
-        if verified {
+        let result = async {
+            let bytes = file.metadata().await?.len();
+            verify_xorb_file_payload(file, path, bytes, expected).await
+        }
+        .await;
+        if entry.finish(result).await.is_ok() {
             crate::private_fs::touch(&self.root, path).await;
             return true;
         }
-
-        warn!(
-            path = %path.display(),
-            expected = %expected.hex(),
-            "cached xorb payload check failed — evicting"
-        );
-        let _ = crate::catalog::remove_file(&self.root, path).await;
         false
     }
 
@@ -1188,37 +1067,44 @@ async fn read_file_bounded_result(
     root: &Path,
     path: &Path,
     max_bytes: u64,
+    validate: impl FnOnce(&Bytes) -> Result<()>,
 ) -> Result<Option<Bytes>> {
-    let file = match crate::private_fs::open_read(root, path).await {
-        Ok(file) => file,
+    let (entry, file) = match PayloadRead::open(root, path).await {
+        Ok(opened) => opened,
         Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None);
         }
         Err(error) => return Err(error),
     };
-    let metadata = file.metadata().await?;
-    if metadata.len() > max_bytes {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!(
-                "file is {} bytes; bounded read supports at most {max_bytes} bytes",
-                metadata.len()
-            ),
-        });
+    let result = async {
+        let metadata = file.metadata().await?;
+        if metadata.len() > max_bytes {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!(
+                    "file is {} bytes; bounded read supports at most {max_bytes} bytes",
+                    metadata.len()
+                ),
+            });
+        }
+        let mut data = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut data)
+            .await?;
+        if data.len() as u64 > max_bytes {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!(
+                    "file grew beyond the bounded read limit of {max_bytes} bytes while reading"
+                ),
+            });
+        }
+        let data = Bytes::from(data);
+        validate(&data)?;
+        Ok(data)
     }
-    let mut data = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut data)
-        .await?;
-    if data.len() as u64 > max_bytes {
-        return Err(CacheError::CorruptObject {
-            path: path.display().to_string(),
-            reason: format!(
-                "file grew beyond the bounded read limit of {max_bytes} bytes while reading"
-            ),
-        });
-    }
-    Ok(Some(Bytes::from(data)))
+    .await;
+    entry.finish(result).await.map(Some)
 }
 
 async fn private_cache_file_metadata(
@@ -1818,7 +1704,7 @@ fn decode_fixed_hash(value: &[u8]) -> Option<[u8; HASH_BYTES]> {
 
 /// Read a file to a string, returning `None` on any error.
 async fn read_string_if_exists(root: &Path, path: &Path) -> Option<String> {
-    let bytes = read_file_bounded_result(root, path, 16 * 1024)
+    let bytes = read_file_bounded_result(root, path, 16 * 1024, |_| Ok(()))
         .await
         .ok()??;
     std::str::from_utf8(&bytes).ok().map(str::to_owned)
@@ -1836,6 +1722,8 @@ mod tests {
 
     #[cfg(unix)]
     mod maintenance;
+    #[cfg(unix)]
+    mod read_repair;
 
     fn temp_cache() -> (tempfile::TempDir, LocalCache) {
         let dir = tempfile::tempdir().unwrap();

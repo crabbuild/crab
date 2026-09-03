@@ -16,9 +16,9 @@ use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
 
 mod removal;
-pub(crate) use removal::PayloadRemoval;
 #[cfg(feature = "local-cache")]
 pub(crate) use removal::remove_file;
+pub(crate) use removal::{PayloadRead, PayloadRemoval};
 
 const CATALOG_FILE: &str = ".catalog.sqlite";
 const MAINTENANCE_LOCK: &str = ".maintenance.lock";

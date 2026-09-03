@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use bytes::Bytes;
-use crab_cache::{CacheError, CacheKey};
+use crab_cache::CacheError;
 use crab_storage::StorageError;
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::{ChunkMeta, FOOTER_SIZE, MAX_XORB_SIZE};
@@ -147,8 +147,10 @@ impl CachingStore {
             %error,
             "optional xorb cache read failed"
         );
+        // Decoding outlives the local read handle. Reverify the current payload
+        // under its removal lock; old bytes cannot authorize deleting a refill.
         if source == XorbSource::Local
-            && let Err(error) = self.local_cache.evict(&CacheKey::Xorb(*xorb_hash)).await
+            && let Err(error) = self.local_cache.evict_corrupt_xorb(xorb_hash).await
         {
             tracing::warn!(
                 family = "xorb",

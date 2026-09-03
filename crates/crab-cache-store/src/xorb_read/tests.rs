@@ -1,5 +1,66 @@
 use super::*;
 
+#[tokio::test]
+async fn delayed_decode_failure_preserves_a_healthy_refill() {
+    use crate::CacheConfig;
+    use crab_cache::{CacheCatalog, LocalCache};
+    use crab_xet::xorb::builder::{RunId, XorbBuilder};
+    use crab_xet::xorb::format::Chunk;
+    use std::sync::Arc;
+
+    let mut builder = XorbBuilder::new();
+    builder
+        .push(&Chunk::new(Bytes::from_static(b"data")), RunId(0))
+        .unwrap();
+    let xorb = builder.finalize().unwrap().pop().unwrap();
+    let hash = xorb.hash;
+    let temp = tempfile::tempdir().unwrap();
+    let cache = Arc::new(LocalCache::new(temp.path().join("cache")));
+    cache
+        .put_read_xorb(&hash, xorb.bytes.clone())
+        .await
+        .unwrap();
+    let local_path = cache
+        .root()
+        .join("xorbs")
+        .join(&hash.hex()[..2])
+        .join(hash.hex());
+    let mut corrupt = xorb.bytes.to_vec();
+    corrupt[0] ^= 0xff;
+    std::fs::write(&local_path, corrupt).unwrap();
+    // The local identity check succeeds; decoding/digest verification belongs
+    // to the outer reader and can finish after another process publishes.
+    let old = cache
+        .get_read_xorb_if_present(&hash)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = XorbParser::parse(old)
+        .unwrap()
+        .verify_payload_digest()
+        .unwrap_err();
+    cache
+        .put_read_xorb(&hash, xorb.bytes.clone())
+        .await
+        .unwrap();
+    let before = CacheCatalog::read_only_stats(cache.root()).unwrap();
+    let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let store =
+        CachingStore::new_with_local_cache(origin, CacheConfig::default(), cache.clone()).unwrap();
+    let path = Path::from(format!(".crab/xorbs/{}/{hash}", &hash.hex()[..2]));
+    store
+        .xorb_read_failed(
+            &path,
+            &hash,
+            XorbSource::Local,
+            CacheError::from(error).into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(local_path).unwrap(), xorb.bytes);
+    assert_eq!(CacheCatalog::read_only_stats(cache.root()).unwrap(), before);
+}
+
 fn key(id: u64) -> XorbReadKey {
     XorbReadKey::new(MerkleHash::from([id, 0, 0, 0]), &[(0, 1)], false).unwrap()
 }

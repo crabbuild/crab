@@ -1,7 +1,7 @@
 use super::*;
-use crate::catalog::CacheCatalog;
+use crate::catalog::{CacheCatalog, PayloadRead};
 
-async fn failed_read(root: &Path) -> (CrabRangeCache, PinnedRoot, PathBuf, fs::File) {
+async fn failed_read(root: &Path) -> (CrabRangeCache, PathBuf, PayloadRead) {
     let cache = CrabRangeCache {
         root: root.join("chunks"),
         capacity: 1024 * 1024,
@@ -20,15 +20,13 @@ async fn failed_read(root: &Path) -> (CrabRangeCache, PinnedRoot, PathBuf, fs::F
     let item = decode_range_item_name(path.file_name().unwrap()).unwrap();
     fs::write(&path, b"bad").unwrap();
     let relative = path.strip_prefix(root).unwrap().to_owned();
-    let pinned = PinnedRoot::open(root).unwrap();
-    let original = pinned.open_read(&relative).unwrap();
-    let reader = tokio::fs::File::from_std(original.try_clone().unwrap());
+    let (entry, reader) = PayloadRead::open(root, &path).await.unwrap();
     assert!(
         CrabRangeCache::read_open_entry(reader, item, &ChunkRange::new(0, 1))
             .await
             .is_err()
     );
-    (cache, pinned, relative, original)
+    (cache, relative, entry)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,7 +34,7 @@ async fn failed_read_cannot_discard_a_later_publication() {
     for replace_root in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
-        let (cache, pinned, relative, original) = failed_read(&root).await;
+        let (cache, relative, entry) = failed_read(&root).await;
         let moved = temp.path().join("moved");
         if replace_root {
             fs::rename(&root, &moved).unwrap();
@@ -49,9 +47,7 @@ async fn failed_read_cannot_discard_a_later_publication() {
             .unwrap();
         let before = CacheCatalog::read_only_stats(&root).unwrap();
         let bytes = fs::read(root.join(&relative)).unwrap();
-        CrabRangeCache::discard_read(pinned, root.clone(), relative.clone(), original)
-            .await
-            .unwrap();
+        entry.discard().await.unwrap();
         assert_eq!(fs::read(root.join(&relative)).unwrap(), bytes);
         assert_eq!(CacheCatalog::read_only_stats(&root).unwrap(), before);
         assert_eq!(
@@ -74,11 +70,13 @@ async fn failed_read_cannot_discard_a_later_publication() {
 async fn failed_read_repair_respects_other_live_readers() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache");
-    let (_, pinned, relative, original) = failed_read(&root).await;
-    let other_reader = pinned.open_read(&relative).unwrap();
+    let (_, relative, entry) = failed_read(&root).await;
+    let other_reader = PinnedRoot::open(&root)
+        .unwrap()
+        .open_read(&relative)
+        .unwrap();
     let before = CacheCatalog::read_only_stats(&root).unwrap();
-    let result =
-        CrabRangeCache::discard_read(pinned, root.clone(), relative.clone(), original).await;
+    let result = entry.discard().await;
     assert!(
         matches!(result, Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
@@ -91,10 +89,8 @@ async fn failed_read_repair_respects_other_live_readers() {
 async fn failed_read_repair_retires_only_its_own_file() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("cache");
-    let (_, pinned, relative, original) = failed_read(&root).await;
-    CrabRangeCache::discard_read(pinned, root.clone(), relative.clone(), original)
-        .await
-        .unwrap();
+    let (_, relative, entry) = failed_read(&root).await;
+    entry.discard().await.unwrap();
     assert!(!root.join(relative).exists());
     assert_eq!(CacheCatalog::read_only_stats(&root).unwrap().entries, 0);
 }

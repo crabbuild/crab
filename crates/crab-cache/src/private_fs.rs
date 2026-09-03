@@ -152,12 +152,10 @@ impl PinnedRoot {
         self.0.remove_relative(relative)
     }
 
-    #[cfg(feature = "xet-chunk-cache")]
     pub(crate) fn open_read(&self, relative: &Path) -> Result<std::fs::File> {
         self.0.open_read(relative)
     }
 
-    #[cfg(feature = "xet-chunk-cache")]
     pub(crate) fn remove_read_file(
         &self,
         relative: &Path,
@@ -553,7 +551,6 @@ mod platform {
             Ok(file)
         }
 
-        #[cfg(feature = "xet-chunk-cache")]
         pub(super) fn remove_read_file(
             &self,
             relative: &Path,
@@ -1181,11 +1178,9 @@ mod platform {
         pub(super) fn root(path: &Path, _create: bool) -> Result<Self> {
             Err(unsupported(path))
         }
-        #[cfg(feature = "xet-chunk-cache")]
         pub(super) fn open_read(&self, relative: &Path) -> Result<File> {
             Err(unsupported(relative))
         }
-        #[cfg(feature = "xet-chunk-cache")]
         pub(super) fn remove_read_file(
             &self,
             relative: &Path,

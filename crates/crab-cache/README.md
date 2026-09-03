@@ -125,6 +125,16 @@ without discarding the live remote proof and parsed-index records beside it.
 Complete payload/database root correlation and cancellation authority are not
 established by connection pinning alone.
 
+Bounded object, manifest/stage body, and xorb readers now share the decoded-range
+reader's retained root/file identity through validation and conditional repair.
+A failed read cannot delete a later publication at the same path. Body repair
+does not delete a separately published manifest ETag. Cache-store decoding can
+outlive the local handle, so its error path freshly verifies the current xorb
+under the existing removal lock and retains healthy replacements. This reuses
+streaming maintenance verification, without an additional full-body buffer.
+Atomic manifest body/ETag pairing, access-time identity, and catalog-generation
+changes during a read remain separate work.
+
 Catalog eviction uses the same payload ownership and deletion boundary. Its
 final lease/reservation check and row removal share an immediate SQLite writer
 transaction. One pinned root covers the maintenance lock, metadata-only

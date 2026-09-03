@@ -25,6 +25,76 @@ pub(crate) async fn remove_file(root: &Path, path: &Path) -> Result<()> {
     .await
 }
 
+pub(crate) struct PayloadRead {
+    root: PinnedRoot,
+    display_root: PathBuf,
+    relative: PathBuf,
+    original: std::fs::File,
+}
+
+impl PayloadRead {
+    pub(crate) async fn open(root: &Path, path: &Path) -> Result<(Self, tokio::fs::File)> {
+        let relative = PathBuf::from(relative_path(root, path)?);
+        let display_root = root.to_owned();
+        crate::private_fs::run_blocking(&tokio_util::sync::CancellationToken::new(), move |_| {
+            let root = PinnedRoot::open(&display_root)?;
+            let original = root.open_read(&relative)?;
+            // Only this duplicate reads the shared cursor. The retained
+            // descriptor pins identity until validation and repair finish.
+            let reader = tokio::fs::File::from_std(original.try_clone()?);
+            Ok((Self { root, display_root, relative, original }, reader))
+        })
+        .await
+        .inspect_err(|error| {
+            if !matches!(error, CacheError::Io(error) if error.kind() == std::io::ErrorKind::NotFound) {
+                let family = path.strip_prefix(root).ok().and_then(Path::to_str)
+                    .map(classify_family).unwrap_or("other");
+                tracing::warn!(family, operation = "open-read", path = %path.display(),
+                    recovery = "bypass-cache", %error, "local cache open failed");
+            }
+        })
+    }
+
+    pub(crate) async fn finish<T, E: std::fmt::Display>(
+        self,
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        // The reader must have finished before releasing its shared lease.
+        // Preserve the validation error even when optional cleanup fails.
+        if let Err(error) = &result {
+            let path = self.display_root.join(&self.relative);
+            let family = self
+                .relative
+                .to_str()
+                .map(classify_family)
+                .unwrap_or("other");
+            tracing::warn!(family, operation = "read-and-verify", path = %path.display(),
+                recovery = "discard-read-and-use-origin", %error, "local cache read failed");
+            if let Err(error) = self.discard().await {
+                tracing::warn!(family, operation = "evict", path = %path.display(),
+                    recovery = "bypass-cache", %error, "local cache repair failed");
+            }
+        }
+        result
+    }
+
+    pub(crate) async fn discard(self) -> Result<()> {
+        crate::private_fs::run_blocking(
+            &tokio_util::sync::CancellationToken::new(),
+            move |cancel| {
+                let mut removal =
+                    PayloadRemoval::open(Some(&self.root), &self.display_root, false)?;
+                removal.remove(&self.relative, || {
+                    crate::private_fs::check_cancelled(cancel)?;
+                    self.root.remove_read_file(&self.relative, &self.original)
+                })?;
+                Ok(())
+            },
+        )
+        .await
+    }
+}
+
 pub(crate) struct PayloadRemoval {
     connection: Option<Database>,
     path: PathBuf,
