@@ -1,4 +1,6 @@
 use rusqlite::{Connection, OpenFlags};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{Directory, OsStr, Path, component_name, io, unsafe_path, validate_permissions};
@@ -9,6 +11,8 @@ use crate::{CacheError, Result};
 mod file;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod generation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::private_fs) use generation::Generation;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod lifetime_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -33,6 +37,11 @@ impl std::ops::Deref for Database {
 }
 
 impl Database {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(in crate::private_fs) fn generation(&self) -> Arc<Generation> {
+        self.registration.generation()
+    }
+
     // Do not expose &mut Connection: replacing it could let the old SQLite
     // handle outlive its registered callbacks. Transactions borrow the owner.
     #[cfg(feature = "local-cache")]
@@ -90,6 +99,48 @@ pub(in crate::private_fs) fn open_database_at(
     mode: DatabaseMode,
     busy_timeout: Duration,
 ) -> Result<Database> {
+    open_with_generation(root, relative, mode, busy_timeout, None)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::private_fs) fn open_database_leased(
+    root: &Directory,
+    relative: &Path,
+    expected: &Generation,
+    busy_timeout: Duration,
+) -> Result<Database> {
+    open_with_generation(
+        root,
+        relative,
+        DatabaseMode::ReadWrite,
+        busy_timeout,
+        Some(expected),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::private_fs) fn validate_database_generation(
+    root: &Directory,
+    relative: &Path,
+    expected: &Generation,
+) -> Result<()> {
+    let (directory, name) = root.descendant_parent(relative, false)?;
+    expected
+        .validate(&directory, &name)
+        .map_err(|code| CacheError::Index {
+            path: root.path.join(relative).display().to_string(),
+            source: rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+        })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_with_generation(
+    root: &Directory,
+    relative: &Path,
+    mode: DatabaseMode,
+    busy_timeout: Duration,
+    expected: Option<&Generation>,
+) -> Result<Database> {
     let (directory, name) = root.descendant_parent(relative, mode == DatabaseMode::Create)?;
     let path = root.path.join(relative);
     let path = path.as_path();
@@ -110,6 +161,14 @@ pub(in crate::private_fs) fn open_database_at(
             Err(error) => return Err(error),
         }
     };
+    if let Some(expected) = expected {
+        expected
+            .validate(&directory, &name)
+            .map_err(|code| CacheError::Index {
+                path: path.display().to_string(),
+                source: rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+            })?;
+    }
     let filename = path
         .file_name()
         .ok_or_else(|| unsafe_path(path, "database has no filename"))?;
@@ -135,7 +194,17 @@ pub(in crate::private_fs) fn open_database_at(
         drop(directory.open_component(&name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, path)?);
         directory.file.sync_all()?;
     }
-    let generation = generation::Generation::open(&directory, &name, mode)?;
+    // Reopening needs independent file descriptions for SQLite's OFD locks.
+    // Retain the old lease for identity, never reuse its main fd for a new connection.
+    let generation = Arc::new(Generation::open(&directory, &name, mode)?);
+    if let Some(expected) = expected
+        && !generation.matches(expected)?
+    {
+        return Err(unsafe_path(
+            path,
+            "database generation changed while reopening",
+        ));
+    }
     drop(_mutation);
     let registration = vfs::Registration::new(directory, name, generation, busy_timeout)?;
     let flags = if mode == DatabaseMode::ReadOnly {

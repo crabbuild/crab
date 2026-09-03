@@ -2171,16 +2171,17 @@ Cache-service smoke still fails `cli-cold-hydrate-cache-service-origin-fetches-f
 tests passing does not waive the failed real-command smoke. Required CI remains
 red; skipped native/provider jobs are not qualification evidence.
 
-#### Next executable slice: catalog owners across connection lifetimes
+#### Catalog owners across connection lifetimes
 
-Status: design/read-path audit only, **not implemented or qualified**. Current
+Initial status at `6f65281`: design/read-path audit only. At that checkpoint,
 `catalog.rs::reserve_sync` and `lease_sync` return owners retaining the root but
 not `database/generation.rs::Generation`; their registration connection closes.
 `record_completed_sync` later calls `record_sync`, which opens/initializes a
 catalog again. `remove_owner_row` opens existing state, but has no captured
 main/owner identity to compare. Existing root-replacement and missing/symlink
 tests do not prove safety for a valid replacement main with copied owner rows.
-This is a source-evidenced gap, not a newly reproduced runtime failure.
+The continuation below reproduces and repairs these paths; the execution and
+acceptance contract remains:
 
 | Ordered slice / context | Execution and acceptance |
 |---|---|
@@ -2195,6 +2196,53 @@ tagged-contract audit already required above; do not silently delete the public
 lease surface or mistake its tests for production read wiring. This slice does
 not replace the separate side-file identity, inode-reuse, non-mutating health,
 remaining index-owner, or platform acceptance gates.
+
+**Retained-generation implementation checkpoint.** New regressions on
+`6f65281` failed: a live reservation allowed a different main to be rebound;
+old-owner cleanup changed a valid replacement catalog containing copied owner
+rows; a fill accepted a changed generation before temporary creation. The
+expanded fill fixture additionally covers replacement before streamed commit
+and before registration, and the cleanup fixture covers owner-only replacement.
+
+`DatabaseLease` retains the existing generation's main/owner descriptors through
+reservation and SQL-lease lifetime without retaining a SQLite connection. Bound
+reopen validates the expected main and owner before opening, and compares the
+new descriptors before returning a connection; missing state is never created.
+It opens independent descriptions rather than cloning an old main into a second
+connection, preserving OFD writer exclusion. Byte-backed, streamed, and
+synchronous bloom fills share the reserved publication boundary. Registration,
+subsequent accounting, and maintenance keep one bound connection; the former
+unqualified reopen after releasing a reservation is removed. Shared catalog
+configuration preserves WAL/NORMAL and schema; bound opens retain the existing
+two-second writer and five-second owner-cleanup timeouts.
+
+Extending descriptor lifetime exposed a separate close contract: the callback
+test retained a main description, closed a SQLite file with a partial byte-lock
+acquisition, and still observed a conflicting lock. Bundled SQLite's
+`unixClose` explicitly calls `unixUnlock(NO_LOCK)` before closing; descriptor
+Drop alone is no longer sufficient. Crab's close callback now clears that
+description's OFD byte locks before dropping the file state, independent of
+namespace validity or the recorded lock level. The generation-owner flock is
+on a different file and remains held. No dependency patch, mode switch, timeout
+increase, public API, or remote-format change is introduced.
+
+The added ownership code extends existing main/owner lifetime and adds bound
+reopen; it is not a second catalog implementation. It retains two descriptors
+per independently created active owner after connection close. Resource caps,
+contention cost, fsync/crash injection, and native-platform qualification still
+need measurement. Publication validation and advisory ownership do not claim
+immunity to a same-user process deliberately ignoring locks between filesystem
+operations. Independent journal/WAL/SHM replacement remains a separate gate.
+
+Focused native macOS proof: **229** all-feature cache tests, **177** minimal
+local-cache tests, **126** minimal decoded-range tests; strict all-target cache
+Clippy passes all three selections. The original eight-thread reservation
+capacity regression passes **50** consecutive runs. Cache-store passes **61**
+remote-client and **40** minimal tests plus strict all-feature/all-target Clippy;
+shared-read passes **84** tests. The new real-adapter fixture proves a replaced
+catalog cannot block valid origin, cannot admit bytes while its old generation
+is retained, and can cache again after the old owner releases. These results
+do not replace fresh installed qualification or the remaining lifecycle gates.
 
 ### Cache-write completion checkpoint
 

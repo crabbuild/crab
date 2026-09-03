@@ -108,9 +108,18 @@ journal/WAL/SHM exists. Only creating opens may bind quiescent state without
 recovery files; read-only inspection never initializes the binding or reports
 a missing binding as an empty catalog. Cleanup retains owner files.
 
+Catalog reservations and SQL leases now retain that main/owner binding after
+their creating connection closes. Temporary creation and publication validate
+it; registration and cleanup reopen only the captured generation. Separate
+connections still open independent descriptions for SQLite's byte-range locks.
+SQLite close explicitly releases those locks even while an owner retains the
+main descriptor. Accounting/eviction reuse the registration connection instead
+of selecting a new catalog after releasing the reservation. The existing
+catalog timeouts and WAL/NORMAL writer policy are unchanged.
+
 This is a main-inode replacement checkpoint, not complete database-generation
 qualification. Side-file-only replacement, identity reuse after all descriptors
-close, reservation lifetimes beyond the connection, remaining index callers,
+close, resource/crash qualification of retained owners, remaining index callers,
 non-mutating WAL inspection, complete temporary-byte accounting, bounded
 cancellation, and other native-platform qualification remain open. Read-only
 main connections may still update WAL/SHM bookkeeping. Native SQLite does not

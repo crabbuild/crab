@@ -1880,6 +1880,59 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn replaced_catalog_bypasses_cache_until_old_generation_is_released() {
+        let good_body = Bytes::from_static(b"origin survives replaced catalog");
+        let hash = crab_xet::hash::compute_data_hash(&good_body);
+        let path = content_path("shards", &hash.hex());
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(good_body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let cache = Arc::new(LocalCache::new(root.clone()));
+        let catalog = crab_cache::CacheCatalog::new(root.clone(), cache.max_bytes());
+        let reservation = catalog
+            .reserve(&root.join("pending"), 7)
+            .await
+            .unwrap()
+            .unwrap();
+        let main = root.join(".catalog.sqlite");
+        let retired = tmp.path().join("retired.sqlite");
+        std::fs::rename(&main, &retired).unwrap();
+        std::fs::copy(retired, &main).unwrap();
+        let before = std::fs::read(&main).unwrap();
+        let key = CacheKey::Shard(hash);
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+
+        assert_eq!(got, good_body);
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert!(!cache.contains(&key).await);
+        assert!(
+            std::fs::read(&main).unwrap() == before,
+            "replacement catalog changed"
+        );
+        drop(reservation);
+        let (got, _) = store
+            .get_with_etag_bounded(&path, good_body.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(got, good_body);
+        assert!(cache.contains_verified(&key).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn unwritable_cache_root_does_not_block_valid_origin() {
         use std::os::unix::fs::PermissionsExt as _;
 

@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 
 use crate::clean::{EntryKind, entry_kind};
-use crate::private_fs::{Database, DatabaseMode, PinnedRoot, open_database};
+use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot, open_database};
 use crate::{CacheError, Result};
 
 const CATALOG_FILE: &str = ".catalog.sqlite";
@@ -55,6 +55,7 @@ pub struct CacheMaintenanceStats {
 /// Active catalog lease preventing eviction of one cache file.
 pub struct CacheLease {
     root: Arc<PinnedRoot>,
+    generation: DatabaseLease,
     relative_path: String,
     owner: String,
 }
@@ -62,6 +63,7 @@ pub struct CacheLease {
 /// Active byte reservation covering one in-progress cache write.
 pub struct CacheReservation {
     root: Arc<PinnedRoot>,
+    generation: DatabaseLease,
     relative_path: PathBuf,
     payload_lease: Option<std::fs::File>,
     id: String,
@@ -73,43 +75,57 @@ pub(crate) struct ReservedFile {
 }
 
 impl ReservedFile {
-    #[cfg(any(feature = "local-cache", test))]
     pub(crate) fn file(&self) -> Result<tokio::fs::File> {
         self.pending.file()
     }
 
-    #[cfg(any(feature = "local-cache", test))]
     pub(crate) async fn commit(self) -> Result<CacheReservation> {
+        tokio::task::spawn_blocking(move || self.commit_sync())
+            .await
+            .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+    }
+
+    fn commit_sync(self) -> Result<CacheReservation> {
         let Self {
             pending,
             reservation,
         } = self;
-        pending.commit().await?;
+        // A fill can outlive every SQLite connection. Check the retained
+        // generation in the publication worker, after all data writes finish.
+        reservation
+            .generation
+            .validate(&reservation.root, Path::new(CATALOG_FILE))?;
+        pending.commit_sync()?;
         Ok(reservation)
     }
 }
 
 impl CacheReservation {
-    pub(crate) async fn pending_file(mut self) -> Result<ReservedFile> {
-        tokio::task::spawn_blocking(move || {
-            let pending = self.root.pending_file(&self.relative_path)?;
-            self.payload_lease = Some(pending.lease()?);
-            Ok(ReservedFile {
-                pending,
-                reservation: self,
-            })
+    fn pending_file_sync(mut self) -> Result<ReservedFile> {
+        self.generation
+            .validate(&self.root, Path::new(CATALOG_FILE))?;
+        let pending = self.root.pending_file(&self.relative_path)?;
+        self.payload_lease = Some(pending.lease()?);
+        Ok(ReservedFile {
+            pending,
+            reservation: self,
         })
-        .await
-        .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
+    }
+
+    pub(crate) async fn pending_file(self) -> Result<ReservedFile> {
+        tokio::task::spawn_blocking(move || self.pending_file_sync())
+            .await
+            .map_err(|error| CacheError::Io(std::io::Error::other(error)))?
     }
 
     pub(crate) async fn write(self, data: &[u8]) -> Result<Self> {
-        let ReservedFile {
-            pending,
-            reservation,
-        } = self.pending_file().await?;
-        pending.write(data).await?;
-        Ok(reservation)
+        use tokio::io::AsyncWriteExt as _;
+        let pending = self.pending_file().await?;
+        let mut writer = pending.file()?;
+        writer.write_all(data).await?;
+        writer.sync_all().await?;
+        drop(writer);
+        pending.commit().await
     }
 }
 
@@ -117,6 +133,7 @@ impl Drop for CacheLease {
     fn drop(&mut self) {
         remove_owner_row(
             &self.root,
+            &self.generation,
             "DELETE FROM leases WHERE relative_path = ?1 AND owner = ?2",
             &self.relative_path,
             &self.owner,
@@ -130,6 +147,7 @@ impl Drop for CacheReservation {
         // removal so explicit maintenance cannot race the registration handoff.
         remove_owner_row(
             &self.root,
+            &self.generation,
             "DELETE FROM reservations WHERE id = ?1 AND id = ?2",
             &self.id,
             &self.id,
@@ -183,11 +201,20 @@ impl CacheCatalog {
         // until registration commits. Releasing first permits uncharged bytes.
         let root = Arc::clone(&reservation.root);
         let path = self.root.join(&reservation.relative_path);
-        self.record_sync(&root, family, &path, logical_key, size)?;
+        let catalog_path = self.root.join(CATALOG_FILE);
+        let connection = reservation.generation.open(
+            &root,
+            Path::new(CATALOG_FILE),
+            std::time::Duration::from_secs(2),
+        )?;
+        let mut connection = configure_catalog(connection, &catalog_path)?;
+        self.record_sync(&connection, family, &path, logical_key, size)?;
         drop(reservation);
-        let total = self.total_registered_bytes_sync(&root)?;
+        // Keep this bound connection through accounting and eviction. Reopening
+        // by name after owner release could maintain an unrelated generation.
+        let total = self.total_registered_bytes_sync(&connection)?;
         if total > self.max_bytes {
-            self.maintain_at(&root, 0)
+            self.maintain_at(&root, 0, &mut connection)
         } else {
             Ok(CacheMaintenanceStats {
                 final_bytes: total,
@@ -202,12 +229,12 @@ impl CacheCatalog {
         if size > self.max_bytes {
             return Ok(());
         }
-        let Some(mut reservation) = self.reserve_sync(path, size)? else {
+        let Some(reservation) = self.reserve_sync(path, size)? else {
             return Ok(());
         };
-        let pending = reservation.root.pending_file(&reservation.relative_path)?;
-        reservation.payload_lease = Some(pending.lease()?);
-        pending.write_sync(data)?;
+        let pending = reservation.pending_file_sync()?;
+        pending.pending.write_body_sync(data)?;
+        let reservation = pending.commit_sync()?;
         self.record_completed_sync(family, family, size, reservation)?;
         Ok(())
     }
@@ -304,14 +331,13 @@ impl CacheCatalog {
 
     fn record_sync(
         &self,
-        root: &PinnedRoot,
+        connection: &Database,
         family: &str,
         path: &Path,
         logical_key: &str,
         size: u64,
     ) -> Result<()> {
         let relative = relative_path(&self.root, path)?;
-        let connection = open_catalog(root, &self.root.join(CATALOG_FILE))?;
         connection
             .execute(
                 "INSERT INTO cache_entries(relative_path, family, logical_key, size, last_access_ns, scan_generation)
@@ -340,6 +366,7 @@ impl CacheCatalog {
             )
             .map_err(|source| index_error(&catalog_path, source))?;
         Ok(CacheLease {
+            generation: DatabaseLease::capture(&connection),
             root,
             relative_path,
             owner,
@@ -380,6 +407,7 @@ impl CacheCatalog {
                     .commit()
                     .map_err(|source| index_error(&catalog_path, source))?;
                 return Ok(Some(CacheReservation {
+                    generation: DatabaseLease::capture(&connection),
                     root,
                     relative_path: PathBuf::from(relative),
                     payload_lease: None,
@@ -387,7 +415,7 @@ impl CacheCatalog {
                 }));
             }
             drop(transaction);
-            if attempt == 0 && !self.maintain_at(&root, size)?.coalesced {
+            if attempt == 0 && !self.maintain_at(&root, size, &mut connection)?.coalesced {
                 continue;
             }
             break;
@@ -397,10 +425,16 @@ impl CacheCatalog {
 
     fn maintain_sync(&self, incoming_bytes: u64) -> Result<CacheMaintenanceStats> {
         let root = PinnedRoot::create(&self.root)?;
-        self.maintain_at(&root, incoming_bytes)
+        let mut connection = open_catalog(&root, &self.root.join(CATALOG_FILE))?;
+        self.maintain_at(&root, incoming_bytes, &mut connection)
     }
 
-    fn maintain_at(&self, root: &PinnedRoot, incoming_bytes: u64) -> Result<CacheMaintenanceStats> {
+    fn maintain_at(
+        &self,
+        root: &PinnedRoot,
+        incoming_bytes: u64,
+        connection: &mut Database,
+    ) -> Result<CacheMaintenanceStats> {
         let lock = root.open_lock(Path::new(MAINTENANCE_LOCK))?;
         if !lock.try_lock_exclusive()? {
             return Ok(CacheMaintenanceStats {
@@ -409,14 +443,13 @@ impl CacheCatalog {
             });
         }
 
-        let result = self.maintain_locked(root, incoming_bytes);
+        let result = self.maintain_locked(root, incoming_bytes, connection);
         let _ = lock.unlock();
         result
     }
 
-    fn total_registered_bytes_sync(&self, root: &PinnedRoot) -> Result<u64> {
+    fn total_registered_bytes_sync(&self, connection: &Database) -> Result<u64> {
         let path = self.root.join(CATALOG_FILE);
-        let connection = open_catalog(root, &path)?;
         connection
             .query_row(
                 "SELECT
@@ -432,9 +465,9 @@ impl CacheCatalog {
         &self,
         root: &PinnedRoot,
         incoming_bytes: u64,
+        connection: &mut Database,
     ) -> Result<CacheMaintenanceStats> {
         let catalog_path = self.root.join(CATALOG_FILE);
-        let mut connection = open_catalog(root, &catalog_path)?;
         let generation = now_unix_ns();
         // Acquire the writer before reading owners. SQLite cannot wait on a
         // read-to-write upgrade when a reservation writer changed the snapshot.
@@ -527,7 +560,7 @@ impl CacheCatalog {
             }
             for (relative, size, last_access) in page {
                 cursor = (last_access, relative.clone());
-                match self.evict_candidate(root, &mut connection, &relative)? {
+                match self.evict_candidate(root, connection, &relative)? {
                     Eviction::Retained => {}
                     Eviction::Missing => remaining = remaining.saturating_sub(size),
                     Eviction::Removed(bytes) => {
@@ -611,6 +644,10 @@ fn open_catalog(root: &PinnedRoot, path: &Path) -> Result<Database> {
         DatabaseMode::Create,
         std::time::Duration::from_secs(2),
     )?;
+    configure_catalog(connection, path)
+}
+
+fn configure_catalog(connection: Database, path: &Path) -> Result<Database> {
     connection
         .execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -747,13 +784,19 @@ fn next_owner(prefix: &str) -> String {
     format!("{prefix}-{}-{sequence}", std::process::id())
 }
 
-fn remove_owner_row(root: &PinnedRoot, sql: &str, first: &str, second: &str) {
-    // Release through the captured root, never a replacement at its pathname.
+fn remove_owner_row(
+    root: &PinnedRoot,
+    generation: &DatabaseLease,
+    sql: &str,
+    first: &str,
+    second: &str,
+) {
+    // Release only through the captured root and main/owner generation.
     // Do not initialize a missing database during Drop; stale owners cannot
     // authorize schema creation or mutation in a newly selected cache root.
-    let Ok(connection) = root.open_database(
+    let Ok(connection) = generation.open(
+        root,
         Path::new(CATALOG_FILE),
-        DatabaseMode::ReadWrite,
         std::time::Duration::from_secs(5),
     ) else {
         return;

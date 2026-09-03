@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+#[cfg(test)]
 use tokio::io::AsyncWriteExt as _;
 
 use crate::{CacheError, Result};
@@ -15,6 +16,42 @@ pub(crate) struct FileStat {
 pub(crate) struct PinnedRoot(platform::Directory);
 
 pub(crate) use platform::Database;
+
+pub(crate) struct DatabaseLease {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    generation: std::sync::Arc<platform::Generation>,
+}
+
+impl DatabaseLease {
+    pub(crate) fn capture(_database: &Database) -> Self {
+        Self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            generation: _database.generation(),
+        }
+    }
+
+    pub(crate) fn open(
+        &self,
+        root: &PinnedRoot,
+        relative: &Path,
+        busy_timeout: std::time::Duration,
+    ) -> Result<Database> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return platform::open_database_leased(&root.0, relative, &self.generation, busy_timeout);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        root.open_database(relative, DatabaseMode::ReadWrite, busy_timeout)
+    }
+
+    pub(crate) fn validate(&self, _root: &PinnedRoot, relative: &Path) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return platform::validate_database_generation(&_root.0, relative, &self.generation);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        Err(CacheError::UnsafeRoot {
+            path: relative.display().to_string(),
+            reason: "private database generation ownership is unavailable on this platform".into(),
+        })
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DatabaseMode {
@@ -241,6 +278,7 @@ impl PendingFile {
         Ok(file)
     }
 
+    #[cfg(test)]
     pub(crate) async fn write(self, data: &[u8]) -> Result<()> {
         let mut writer = self.file()?;
         writer.write_all(data).await?;
@@ -253,14 +291,19 @@ impl PendingFile {
     }
 
     #[cfg(feature = "local-cache")]
-    pub(crate) fn write_sync(self, data: &[u8]) -> Result<()> {
+    pub(crate) fn write_body_sync(&self, data: &[u8]) -> Result<()> {
         use std::io::Write as _;
         let mut writer = self.0.file();
         writer.write_all(data)?;
         writer.sync_all()?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_sync(self) -> Result<()> {
         self.0.commit()
     }
 
+    #[cfg(test)]
     pub(crate) async fn commit(self) -> Result<()> {
         tokio::task::spawn_blocking(move || self.0.commit())
             .await
@@ -316,6 +359,8 @@ mod platform {
     mod database;
     mod scan;
     pub(crate) use database::Database;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) use database::{Generation, open_database_leased, validate_database_generation};
     pub(super) use database::{open_database, open_database_at};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);

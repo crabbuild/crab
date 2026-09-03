@@ -78,6 +78,8 @@ fn catalog_access_rejects_database_links_without_changing_the_target() {
     let root = tmp.path().join("cache");
     ensure_private_cache_directory(&root).unwrap();
     let path = root.join(CATALOG_FILE);
+    let generation = DatabaseLease::capture(&open_catalog(&root).unwrap());
+    std::fs::rename(&path, root.join("retired.sqlite")).unwrap();
     std::os::unix::fs::symlink(&target, &path).unwrap();
     assert!(matches!(
         open_catalog(&root),
@@ -89,6 +91,7 @@ fn catalog_access_rejects_database_links_without_changing_the_target() {
     ));
     remove_owner_row(
         &PinnedRoot::open(&root).unwrap(),
+        &generation,
         "DELETE FROM reservations WHERE id = ?1 AND id = ?2",
         "owner",
         "owner",
@@ -260,7 +263,7 @@ async fn maintenance_keeps_catalog_and_inventory_in_the_same_replaced_root() {
     let catalog = CacheCatalog::new(root.clone(), 200 * 1024);
     catalog
         .record_sync(
-            &PinnedRoot::open(&root).unwrap(),
+            &open_catalog(&root).unwrap(),
             "shard",
             &original,
             "original",
@@ -268,12 +271,13 @@ async fn maintenance_keeps_catalog_and_inventory_in_the_same_replaced_root() {
         )
         .unwrap();
     let pinned = PinnedRoot::open(&root).unwrap();
+    let mut connection = super::open_catalog(&pinned, &root.join(CATALOG_FILE)).unwrap();
     let moved = tmp.path().join("moved");
     std::fs::rename(&root, &moved).unwrap();
     let replacement = payload(&root, 2, 7).await;
     CacheCatalog::new(root.clone(), 1024 * 1024)
         .record_sync(
-            &PinnedRoot::open(&root).unwrap(),
+            &open_catalog(&root).unwrap(),
             "shard",
             &replacement,
             "replacement",
@@ -282,7 +286,9 @@ async fn maintenance_keeps_catalog_and_inventory_in_the_same_replaced_root() {
         .unwrap();
     let before = std::fs::read(root.join(CATALOG_FILE)).unwrap();
 
-    catalog.maintain_locked(&pinned, 0).unwrap();
+    catalog
+        .maintain_locked(&pinned, 0, &mut connection)
+        .unwrap();
 
     assert!(
         std::fs::read(root.join(CATALOG_FILE)).unwrap() == before,
@@ -364,6 +370,168 @@ async fn reserved_fill_publishes_and_registers_in_its_original_root() {
         assert_eq!(stats.reservations_bytes, 0);
         assert_eq!(stats.total_bytes, 7);
     }
+}
+
+#[test]
+fn reservation_keeps_database_generation_leased_after_connection_close() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+    let reservation = catalog
+        .reserve_sync(&root.join("incoming"), 7)
+        .unwrap()
+        .unwrap();
+    let main = root.join(CATALOG_FILE);
+    let retired = root.join("retired.sqlite");
+    std::fs::rename(&main, &retired).unwrap();
+    std::fs::copy(&retired, &main).unwrap();
+
+    assert!(
+        open_catalog(&root).is_err(),
+        "live reservation allowed rebinding"
+    );
+    drop(reservation);
+    assert!(
+        open_catalog(&root).is_ok(),
+        "released generation remained locked"
+    );
+}
+
+#[test]
+fn reopened_generation_connections_exclude_independent_writers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let generation = DatabaseLease::capture(&open_catalog(&root).unwrap());
+    let root = PinnedRoot::open(&root).unwrap();
+    let mut first = generation
+        .open(&root, Path::new(CATALOG_FILE), std::time::Duration::ZERO)
+        .unwrap();
+    let second = generation
+        .open(&root, Path::new(CATALOG_FILE), std::time::Duration::ZERO)
+        .unwrap();
+    second.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let transaction = first
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let error = second.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+    assert!(
+        matches!(error, rusqlite::Error::SqliteFailure(failure, _) if failure.code == rusqlite::ErrorCode::DatabaseBusy)
+    );
+    drop(transaction);
+    second.execute_batch("BEGIN IMMEDIATE; COMMIT").unwrap();
+}
+
+fn replace_catalog_generation(root: &Path, replace_main: bool) {
+    let main = root.join(CATALOG_FILE);
+    let retired = root.join("retired.sqlite");
+    if replace_main {
+        std::fs::rename(&main, &retired).unwrap();
+        std::fs::copy(retired, main).unwrap();
+    }
+    std::fs::rename(
+        root.join(format!("{CATALOG_FILE}-owner")),
+        root.join("retired-owner"),
+    )
+    .unwrap();
+    // A valid new owner bypasses any lock held on the old owner inode. The
+    // copied SQL tokens must not grant old reservations mutation authority.
+    drop(open_catalog(root).unwrap());
+}
+
+#[tokio::test]
+async fn owner_cleanup_preserves_copied_rows_after_main_and_owner_replacement() {
+    for replace_main in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+        let path = root.join("incoming");
+        let lease = catalog.lease(&path).await.unwrap();
+        let reservation = catalog.reserve(&path, 7).await.unwrap().unwrap();
+        replace_catalog_generation(&root, replace_main);
+        let before = std::fs::read(root.join(CATALOG_FILE)).unwrap();
+
+        drop((lease, reservation));
+
+        assert!(
+            std::fs::read(root.join(CATALOG_FILE)).unwrap() == before,
+            "replacement catalog changed"
+        );
+        let owners: u64 = open_catalog(&root)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM leases) + (SELECT COUNT(*) FROM reservations)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owners, 2);
+    }
+}
+
+#[tokio::test]
+async fn stale_generation_cannot_publish_or_register_a_fill() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for stage in ["before-temporary", "before-publish", "before-registration"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+        let path = root.join("incoming");
+        let reservation = catalog.reserve(&path, 7).await.unwrap().unwrap();
+        let result = if stage == "before-temporary" {
+            replace_catalog_generation(&root, true);
+            reservation.write(b"content").await.map(|_| ())
+        } else if stage == "before-publish" {
+            let pending = reservation.pending_file().await.unwrap();
+            let mut writer = pending.file().unwrap();
+            writer.write_all(b"content").await.unwrap();
+            writer.sync_all().await.unwrap();
+            drop(writer);
+            replace_catalog_generation(&root, true);
+            pending.commit().await.map(|_| ())
+        } else {
+            let reservation = reservation.write(b"content").await.unwrap();
+            replace_catalog_generation(&root, true);
+            catalog
+                .record_and_maintain("other", "fixture".into(), 7, reservation)
+                .await
+                .map(|_| ())
+        };
+        assert!(result.is_err(), "{stage}: stale fill accepted");
+        assert_eq!(path.exists(), stage == "before-registration", "{stage}");
+        let stats = CacheCatalog::read_only_stats(&root).unwrap();
+        assert_eq!(stats.entries, 0, "{stage}: replacement registered old fill");
+        assert_eq!(
+            stats.reservations_bytes, 7,
+            "{stage}: replacement owner removed"
+        );
+    }
+}
+
+#[cfg(feature = "local-cache")]
+#[test]
+fn synchronous_fill_rejects_generation_replacement_before_publication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
+    let path = root.join("hints/clean-bloom.bin");
+    let reservation = catalog.reserve_sync(&path, 7).unwrap().unwrap();
+    let pending = reservation.pending_file_sync().unwrap();
+    pending.pending.write_body_sync(b"content").unwrap();
+    replace_catalog_generation(&root, true);
+
+    assert!(pending.commit_sync().is_err());
+    assert!(!path.exists());
+    assert_eq!(
+        std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+        0
+    );
+    assert_eq!(
+        CacheCatalog::read_only_stats(&root)
+            .unwrap()
+            .reservations_bytes,
+        7
+    );
 }
 
 #[cfg(feature = "local-cache")]
@@ -599,13 +767,7 @@ async fn candidate_rechecks_owners_before_deleting() {
     let relative = relative_path(&root, &path).unwrap();
     let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
     catalog
-        .record_sync(
-            &PinnedRoot::open(&root).unwrap(),
-            "shard",
-            &path,
-            "fixture",
-            7,
-        )
+        .record_sync(&open_catalog(&root).unwrap(), "shard", &path, "fixture", 7)
         .unwrap();
     let mut connection = open_catalog(&root).unwrap();
     let pinned = PinnedRoot::open(&root).unwrap();
@@ -645,13 +807,7 @@ async fn candidate_cannot_follow_a_replaced_payload_parent() {
     let relative = relative_path(&root, &path).unwrap();
     let catalog = CacheCatalog::new(root.clone(), 1024 * 1024);
     catalog
-        .record_sync(
-            &PinnedRoot::open(&root).unwrap(),
-            "shard",
-            &path,
-            "fixture",
-            7,
-        )
+        .record_sync(&open_catalog(&root).unwrap(), "shard", &path, "fixture", 7)
         .unwrap();
     let mut connection = open_catalog(&root).unwrap();
     let pinned = PinnedRoot::open(&root).unwrap();
@@ -686,7 +842,7 @@ async fn recorded_family_cannot_authorize_unknown_or_database_deletion() {
                 .unwrap();
         }
         catalog
-            .record_sync(&pinned, "shard", &path, "not-a-payload", 4)
+            .record_sync(&connection, "shard", &path, "not-a-payload", 4)
             .unwrap();
         assert!(matches!(
             catalog
@@ -899,13 +1055,7 @@ fn catalog_keys_reject_non_utf8_without_lossy_aliases() {
     let name = std::ffi::OsString::from_vec(vec![0xff]);
     let catalog = CacheCatalog::new(root.clone(), 1024);
     assert!(matches!(
-        catalog.record_sync(
-            &PinnedRoot::create(&root).unwrap(),
-            "other",
-            &root.join(name),
-            "fixture",
-            1
-        ),
+        catalog.reserve_sync(&root.join(name), 1),
         Err(CacheError::UnsafeRoot { .. })
     ));
     assert!(!root.join(CATALOG_FILE).exists());

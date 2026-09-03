@@ -13,13 +13,24 @@ use crate::{CacheError, Result};
 
 // SQLite's journal headers do not identify the main inode. Keep a separate
 // binding so a new connection cannot replay an old WAL into a replaced main.
-pub(super) struct Generation {
+pub(crate) struct Generation {
     pub(super) main: File,
     owner: File,
     owner_name: CString,
 }
 
 impl Generation {
+    pub(super) fn matches(&self, other: &Self) -> Result<bool> {
+        for (file, expected) in [(&self.main, &other.main), (&self.owner, &other.owner)] {
+            let actual = file.metadata()?;
+            let expected = expected.metadata()?;
+            if actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     // The caller holds the directory mutation lock through initialization.
     pub(super) fn open(directory: &Directory, name: &CStr, mode: DatabaseMode) -> Result<Self> {
         let path = directory.path.join(OsStr::from_bytes(name.to_bytes()));

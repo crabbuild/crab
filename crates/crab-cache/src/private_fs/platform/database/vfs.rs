@@ -3,6 +3,7 @@ use std::fs::File;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ pub(super) struct Context {
     name: CString,
     native: *mut ffi::sqlite3_vfs,
     busy_timeout: Duration,
-    generation: Generation,
+    generation: Arc<Generation>,
 }
 
 impl Context {
@@ -143,10 +144,14 @@ pub(super) struct Registration {
 unsafe impl Send for Registration {}
 
 impl Registration {
+    pub(super) fn generation(&self) -> Arc<Generation> {
+        Arc::clone(&self._context.generation)
+    }
+
     pub(super) fn new(
         directory: Directory,
         name: CString,
-        generation: Generation,
+        generation: Arc<Generation>,
         busy_timeout: Duration,
     ) -> Result<Self> {
         // SAFETY: SQLite initializes and serializes its built-in VFS registry.
@@ -362,8 +367,12 @@ pub(super) unsafe extern "C" fn close(raw: *mut ffi::sqlite3_file) -> c_int {
             raw.base.pMethods = ptr::null();
             Box::from_raw(ptr::replace(&mut raw.state, ptr::null_mut()))
         };
+        // A generation lease can retain the main description after xClose.
+        // Release its OFD byte locks explicitly, including partial acquisitions;
+        // closing this cloned fd alone no longer releases them.
+        let result = super::locking::lock(&state.file, super::locking::UNLOCK, 0, 0);
         drop(state);
-        Ok(())
+        result
     })
 }
 
@@ -487,6 +496,53 @@ unsafe extern "C" fn current_time_int64(vfs: *mut ffi::sqlite3_vfs, output: *mut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_releases_sqlite_locks_even_when_generation_retains_the_main_description() {
+        use super::super::locking::{PENDING, UNLOCK, WRITE_LOCK, conflicting_lock, lock};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let path = root.join("entry");
+        let connection = super::super::open_database(
+            &root,
+            &path,
+            crate::private_fs::DatabaseMode::Create,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let context = &connection.registration._context;
+        let file = context.open(c"entry", false, false, false).unwrap();
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        lock(&file, WRITE_LOCK, PENDING, 1).unwrap();
+        assert_eq!(conflicting_lock(&probe, PENDING, 1).unwrap(), WRITE_LOCK);
+        let state = Box::new(FileState {
+            file,
+            context: ptr::from_ref(context.as_ref()),
+            name: c"entry".to_owned(),
+            locks: DatabaseLock::default(),
+            shm: None,
+            read_only: false,
+            persist_wal: false,
+            sync_directory: false,
+        });
+        let mut raw = SqlFile {
+            base: ffi::sqlite3_file {
+                pMethods: &super::super::file::METHODS,
+            },
+            state: Box::into_raw(state),
+        };
+        // SAFETY: the fixture transfers one complete FileState to the ordinary
+        // close callback; the registration/context and retained main stay live.
+        assert_eq!(
+            unsafe { close(ptr::from_mut(&mut raw).cast()) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(conflicting_lock(&probe, PENDING, 1).unwrap(), UNLOCK);
+    }
 
     #[test]
     fn private_namespace_creation_and_removal_share_the_same_lock() {
