@@ -1022,6 +1022,9 @@ impl From<crab_cache::CacheError> for CrabError {
                 key: "cache.max_bytes".into(),
                 origin: error.to_string(),
             },
+            error @ crab_cache::CacheError::InspectionTimeout { .. } => {
+                Self::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, error))
+            }
             crab_cache::CacheError::HashMismatch { requested, actual } => {
                 Self::HashMismatch { requested, actual }
             }
@@ -3914,6 +3917,19 @@ mod tests {
         };
         assert_eq!(key, "cache.max_bytes");
         assert!(origin.contains("active budget is 1024 bytes, requested 512 bytes"));
+    }
+
+    #[test]
+    fn cache_inspection_timeout_preserves_io_kind() {
+        let error = CrabError::from(crab_cache::CacheError::InspectionTimeout {
+            path: "cache/hints/shard-hints.sqlite".into(),
+            timeout_ms: 5_000,
+        });
+        let CrabError::Io(source) = error else {
+            panic!("cache inspection timeouts must retain I/O attribution");
+        };
+
+        assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

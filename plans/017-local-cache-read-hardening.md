@@ -3640,6 +3640,35 @@ complete all-family physical admission and low-watermark reconciliation. Those
 composition decisions remain Phase 3/6 work and must not be hidden by another
 registry key or fallback manager.
 
+### Bounded shard-hint health checkpoint, 2026-09-03
+
+**Context.** The read-only shard-hint health transaction had a 250 ms lock wait
+and a one-million-row bound, but SQLite integrity and row-shape work had no
+wall-clock or cancellation boundary once the transaction began. A pathological
+database could therefore hold `cache stats` or `doctor` indefinitely despite
+the surrounding filesystem scan's cancellation contract.
+
+**Design.** The private, pinned-root connection installs rusqlite's documented
+SQLite progress callback before opening the deferred inspection transaction.
+Every 1,000 virtual-machine operations it observes the scan cancellation token
+and a five-second monotonic deadline. Cancellation remains `CacheError::Cancelled`;
+deadline interruption becomes a typed `InspectionTimeout` with the database path
+and elapsed budget. The same read-only connection, transaction, schema checks,
+`quick_check(1)`, row-shape query, and no-repair policy remain canonical. No timer
+thread, write transaction, checkpoint, retry loop, or alternate connection is
+introduced.
+
+**Acceptance criteria.** A forced zero-duration deadline interrupts SQLite and
+retains timeout attribution. A pre-cancelled inspection returns cancellation,
+not timeout or generic index failure. Existing healthy, malformed, and busy
+database health tests remain unchanged, and whole-tree before/after snapshots
+continue proving that inspection does not mutate database or side files.
+
+**Remaining work.** Five seconds bounds this one shard-hint database scan; it
+does not yet impose a single deadline across the complete filesystem/catalog
+health operation, inspect other index families, or bound repair, startup, and
+all-family maintenance work.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

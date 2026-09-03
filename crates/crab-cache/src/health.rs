@@ -308,7 +308,7 @@ fn inspect(
     };
     check_cancelled(cancel)?;
     #[cfg(feature = "local-cache")]
-    if let Err(error) = crate::shard_hints::inspect_database_at(&pinned, root) {
+    if let Err(error) = crate::shard_hints::inspect_database_at(&pinned, root, cancel) {
         report.issue(
             Path::new(crate::shard_hints::SHARD_HINTS_DATABASE),
             Some("shard-hint"),

@@ -28,6 +28,10 @@ pub enum CacheError {
         requested_bytes: u64,
     },
 
+    /// A bounded local cache inspection exceeded its wall-clock deadline.
+    #[error("cache inspection timed out after {timeout_ms} ms at {path}")]
+    InspectionTimeout { path: String, timeout_ms: u64 },
+
     /// The cache service returned an invalid or unsupported response.
     #[error("cache service error: {reason}")]
     Service { reason: String },

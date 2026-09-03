@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crab_types::storage::{BucketIdentity, StorageProviderKind};
 use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
@@ -23,6 +23,8 @@ pub const SHARD_HINTS_DATABASE: &str = "hints/shard-hints.sqlite";
 const MAX_SHARD_HINTS_ENTRIES: usize = 1_000_000;
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const DATABASE_INSPECTION_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+const DATABASE_INSPECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const DATABASE_INSPECTION_PROGRESS_OPS: i32 = 1_000;
 
 /// Stable namespace for hints that address one physical global-content view.
 ///
@@ -200,7 +202,27 @@ fn load_scope(database: &Database, path: &Path, scope: &ShardHintScope) -> Resul
     Ok(ShardHintCache { hints })
 }
 
-pub(crate) fn inspect_database_at(root: &PinnedRoot, display_root: &Path) -> Result<()> {
+pub(crate) fn inspect_database_at(
+    root: &PinnedRoot,
+    display_root: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    inspect_database_at_with_limits(
+        root,
+        display_root,
+        cancel,
+        DATABASE_INSPECTION_TIMEOUT,
+        DATABASE_INSPECTION_PROGRESS_OPS,
+    )
+}
+
+fn inspect_database_at_with_limits(
+    root: &PinnedRoot,
+    display_root: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    timeout: Duration,
+    progress_ops: i32,
+) -> Result<()> {
     let path = database_path(display_root);
     let mut database = match root.open_database(
         Path::new(SHARD_HINTS_DATABASE),
@@ -211,13 +233,20 @@ pub(crate) fn inspect_database_at(root: &PinnedRoot, display_root: &Path) -> Res
         Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    let deadline = Instant::now() + timeout;
+    let interrupt_cancel = cancel.clone();
+    database.progress_handler(
+        progress_ops,
+        Some(move || interrupt_cancel.is_cancelled() || Instant::now() >= deadline),
+    );
     let transaction = database
         .transaction_with_behavior(TransactionBehavior::Deferred)
-        .map_err(|source| index_error(&path, source))?;
-    validate_schema(&transaction, &path)?;
+        .map_err(|source| inspection_error(&path, source, cancel, deadline, timeout))?;
+    validate_schema(&transaction, &path)
+        .map_err(|error| inspection_cache_error(&path, error, cancel, deadline, timeout))?;
     let quick_check = transaction
         .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
-        .map_err(|source| index_error(&path, source))?;
+        .map_err(|source| inspection_error(&path, source, cancel, deadline, timeout))?;
     if quick_check != "ok" {
         return Err(CacheError::CorruptObject {
             path: path.display().to_string(),
@@ -237,7 +266,7 @@ pub(crate) fn inspect_database_at(root: &PinnedRoot, display_root: &Path) -> Res
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|source| index_error(&path, source))?;
+        .map_err(|source| inspection_error(&path, source, cancel, deadline, timeout))?;
     if count > MAX_SHARD_HINTS_ENTRIES as i64 {
         return Err(CacheError::CorruptObject {
             path: path.display().to_string(),
@@ -253,6 +282,42 @@ pub(crate) fn inspect_database_at(root: &PinnedRoot, display_root: &Path) -> Res
         });
     }
     Ok(())
+}
+
+fn inspection_error(
+    path: &Path,
+    source: rusqlite::Error,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+    timeout: Duration,
+) -> CacheError {
+    if source.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+        if cancel.is_cancelled() {
+            return CacheError::Cancelled;
+        }
+        if Instant::now() >= deadline {
+            return CacheError::InspectionTimeout {
+                path: path.display().to_string(),
+                timeout_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
+            };
+        }
+    }
+    index_error(path, source)
+}
+
+fn inspection_cache_error(
+    path: &Path,
+    error: CacheError,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Instant,
+    timeout: Duration,
+) -> CacheError {
+    match error {
+        CacheError::Index { source, .. } => {
+            inspection_error(path, source, cancel, deadline, timeout)
+        }
+        error => error,
+    }
 }
 
 fn update_sync(
@@ -485,6 +550,63 @@ mod tests {
         let loaded = ShardHintCache::load_sync(&root, &scope).unwrap();
         assert_eq!(loaded.get(&file_hash), Some(shard_hash));
         assert_eq!(loaded.len(), 1);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn inspection_deadline_interrupts_sqlite_work() {
+        let dir = TempDir::new().unwrap();
+        let root_path = cache_root(&dir);
+        ShardHintCache::update(
+            &root_path,
+            &scope("bucket", ".crab"),
+            vec![(make_hash(1), make_hash(42))],
+        )
+        .await
+        .unwrap();
+        let root = PinnedRoot::open(&root_path).unwrap();
+
+        let error = inspect_database_at_with_limits(
+            &root,
+            &root_path,
+            &tokio_util::sync::CancellationToken::new(),
+            Duration::ZERO,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CacheError::InspectionTimeout { timeout_ms: 0, .. }
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn inspection_interrupt_preserves_cancellation_attribution() {
+        let dir = TempDir::new().unwrap();
+        let root_path = cache_root(&dir);
+        ShardHintCache::update(
+            &root_path,
+            &scope("bucket", ".crab"),
+            vec![(make_hash(1), make_hash(42))],
+        )
+        .await
+        .unwrap();
+        let root = PinnedRoot::open(&root_path).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        let error = inspect_database_at_with_limits(
+            &root,
+            &root_path,
+            &cancel,
+            DATABASE_INSPECTION_TIMEOUT,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CacheError::Cancelled));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
