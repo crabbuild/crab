@@ -11,7 +11,7 @@ fn tree_with_blobs(root: &Path, objects: &[(&str, &str)]) -> String {
         .iter()
         .map(|(oid, name)| format!("100644 blob {oid}\t{name}\0"))
         .collect::<String>();
-    let mut child = git_command_in(root)
+    let mut child = git_command_in(root, GitObjectAccess::LocalOnly)
         .args(["mktree", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -50,7 +50,7 @@ fn tree_scan_rejects_conflicting_sizes_across_aliases() {
     let (dir, oid, mut pointer) = pointer_object_fixture();
     pointer.size += 1;
     std::fs::write(dir.path().join("other.bin"), pointer.serialize()).unwrap();
-    let output = git_command_in(dir.path())
+    let output = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
         .args(["hash-object", "-w", "other.bin"])
         .output()
         .unwrap();
@@ -315,7 +315,7 @@ fn cat_file_batch_stdout_handles_large_object_lists() {
 
 #[test]
 fn repository_commands_clear_remote_helper_git_context() {
-    let command = git_command_in(Path::new("repo/.git"));
+    let command = git_command_in(Path::new("repo/.git"), GitObjectAccess::LocalOnly);
     let overrides: std::collections::HashMap<_, _> = command.get_envs().collect();
 
     assert_eq!(overrides.get(std::ffi::OsStr::new("GIT_DIR")), Some(&None));
@@ -327,6 +327,21 @@ fn repository_commands_clear_remote_helper_git_context() {
         overrides.get(std::ffi::OsStr::new("GIT_COMMON_DIR")),
         Some(&None)
     );
+}
+
+#[test]
+fn inspection_forbids_transports_while_fetch_inherits_caller_restrictions() {
+    for (access, restricted) in [
+        (GitObjectAccess::LocalOnly, true),
+        (GitObjectAccess::PromisorAllowed, false),
+    ] {
+        let command = git_command_in(Path::new("repo"), access);
+        let overrides: HashMap<_, _> = command.get_envs().collect();
+        for (key, value) in [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")] {
+            let expected = restricted.then_some(Some(std::ffi::OsStr::new(value)));
+            assert_eq!(overrides.get(std::ffi::OsStr::new(key)), expected.as_ref());
+        }
+    }
 }
 
 #[test]
@@ -403,7 +418,7 @@ fn discovery_stops_before_admitting_more_records_after_batch_failure() {
 fn pointer_object_fixture() -> (tempfile::TempDir, String, LfsPointer) {
     let dir = tempfile::tempdir().unwrap();
     assert!(
-        git_command_in(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["init", "--quiet"])
             .status()
             .unwrap()
@@ -415,7 +430,7 @@ fn pointer_object_fixture() -> (tempfile::TempDir, String, LfsPointer) {
         extensions: Vec::new(),
     };
     std::fs::write(dir.path().join("asset.bin"), pointer.serialize()).unwrap();
-    let output = git_command_in(dir.path())
+    let output = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
         .args(["hash-object", "-w", "asset.bin"])
         .output()
         .unwrap();
@@ -431,11 +446,18 @@ fn pointer_inventory_budget_is_shared_across_discovery_batches() {
     let mut remaining = pointer_memory("asset.bin", &pointer) as u64;
     let cancel = CancellationToken::new();
     assert_eq!(
-        read_lfs_batch(dir.path(), &records, &cancel, &mut remaining).unwrap(),
+        read_lfs_batch(
+            dir.path(),
+            &records,
+            GitObjectAccess::LocalOnly,
+            &cancel,
+            &mut remaining
+        )
+        .unwrap(),
         [("asset.bin".to_owned(), pointer)]
     );
     assert!(matches!(
-        read_lfs_batch(dir.path(), &records, &cancel, &mut remaining),
+        read_lfs_batch(dir.path(), &records, GitObjectAccess::LocalOnly, &cancel, &mut remaining),
         Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
     ));
 }
@@ -445,7 +467,10 @@ fn range_scans_verify_sha1_and_sha256_and_reject_disguised_pointer_bodies() {
     for format in ["sha1", "sha256"] {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let output = git_command_in(dir.path()).args(args).output().unwrap();
+            let output = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
+                .args(args)
+                .output()
+                .unwrap();
             assert!(
                 output.status.success(),
                 "{}",
@@ -552,6 +577,7 @@ fn discovery_drains_stderr_and_preserves_a_nonzero_exit() {
         &args,
         b'\n',
         parse_rev_list_record,
+        GitObjectAccess::LocalOnly,
         &cancel,
         |_, _| panic!("failed discovery must not emit pointers"),
     );
@@ -590,6 +616,7 @@ fn stalled_discovery_cancels_before_cache_ownership_returns() {
                 &args,
                 b'\n',
                 parse_rev_list_record,
+                GitObjectAccess::LocalOnly,
                 &worker_cancel,
                 |_, _| panic!("incomplete discovery must not emit pointers"),
             )
@@ -610,7 +637,7 @@ fn stalled_discovery_cancels_before_cache_ownership_returns() {
 }
 
 fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>> {
-    let mut command = git_command_in(repo_dir);
+    let mut command = git_command_in(repo_dir, GitObjectAccess::LocalOnly);
     command.args(["cat-file", "--batch"]);
     let output = process::run(
         command,

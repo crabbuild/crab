@@ -651,6 +651,54 @@ mod tests {
     }
 
     #[test]
+    fn fetch_discovery_resolves_promised_git_pointer_blobs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fixture_git(&source, &["init", "-q"]);
+        fixture_git(&source, &["config", "uploadpack.allowFilter", "true"]);
+        let ptr = pointer(b"promised LFS content");
+        fs::write(source.join("asset.bin"), ptr.serialize()).unwrap();
+        commit_fixture(&source);
+        let remote = url::Url::from_file_path(&source).unwrap().to_string();
+        fixture_git(
+            temporary.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                &remote,
+                "reader",
+            ],
+        );
+        let reader = temporary.path().join("reader");
+        let missing = fixture_git(
+            &reader,
+            &["rev-list", "--objects", "--all", "--missing=print"],
+        );
+        assert!(missing.lines().any(|line| line.starts_with('?')));
+
+        let head = fixture_git(&reader, &["rev-parse", "HEAD"]);
+        let cancel = CancellationToken::new();
+        assert!(
+            crate::lfs::discovery::collect_pointers_from_range_in(&reader, &[head], &[], &cancel)
+                .is_err()
+        );
+        assert_eq!(
+            fixture_git(
+                &reader,
+                &["rev-list", "--objects", "--all", "--missing=print"]
+            ),
+            missing
+        );
+
+        let entries = collect_lfs_pointers(&reader, false, false, &[], &cancel)
+            .expect("fetch must resolve promised Git blobs before LFS transfer");
+
+        assert_eq!(entries, [("asset.bin".to_owned(), ptr)]);
+    }
+
+    #[test]
     fn validate_fetch_rejects_json_with_prune() {
         let options = LfsFetchOptions {
             json: true,

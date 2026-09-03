@@ -11,6 +11,12 @@ use crate::git::process::{self, GIT_ENV_REMOVALS, MAX_CAPTURE_BYTES};
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
 use crab_git::pointer_detect::{PointerKind, classify};
 
+#[derive(Clone, Copy)]
+pub(crate) enum GitObjectAccess {
+    LocalOnly,
+    PromisorAllowed,
+}
+
 pub(crate) fn collect_pointers_from_trees_in(
     repo_dir: &Path,
     refs: &[String],
@@ -21,33 +27,39 @@ pub(crate) fn collect_pointers_from_trees_in(
     let mut seen: HashMap<[u8; 32], (u64, HashSet<String>)> = HashMap::new();
     let mut remaining = MAX_CAPTURE_BYTES;
     for revision in refs {
-        visit_lfs_pointers_in_tree(repo_dir, revision, cancel, |path, pointer| {
-            if let Some((size, paths)) = seen.get(&pointer.oid) {
-                if *size != pointer.size {
-                    return Err(CrabError::LfsObjectCorrupt {
-                        oid: hex_encode(&pointer.oid),
-                    });
+        visit_lfs_pointers_in_tree(
+            repo_dir,
+            revision,
+            GitObjectAccess::PromisorAllowed,
+            cancel,
+            |path, pointer| {
+                if let Some((size, paths)) = seen.get(&pointer.oid) {
+                    if *size != pointer.size {
+                        return Err(CrabError::LfsObjectCorrupt {
+                            oid: hex_encode(&pointer.oid),
+                        });
+                    }
+                    if paths.contains(&path) {
+                        return Ok(());
+                    }
                 }
-                if paths.contains(&path) {
-                    return Ok(());
-                }
-            }
-            // Preserve every path until include/exclude and checkout policy run.
-            // Deduplicating by OID here would hide aliases and skip hydration.
-            spend_scan_budget(
-                &mut remaining,
-                pointer_memory(&path, &pointer)
-                    + std::mem::size_of::<([u8; 32], (u64, HashSet<String>))>()
-                    + std::mem::size_of::<String>()
-                    + path.len(),
-            )?;
-            seen.entry(pointer.oid)
-                .or_insert_with(|| (pointer.size, HashSet::new()))
-                .1
-                .insert(path.clone());
-            entries.push((path, pointer));
-            Ok(())
-        })?;
+                // Preserve every path until include/exclude and checkout policy run.
+                // Deduplicating by OID here would hide aliases and skip hydration.
+                spend_scan_budget(
+                    &mut remaining,
+                    pointer_memory(&path, &pointer)
+                        + std::mem::size_of::<([u8; 32], (u64, HashSet<String>))>()
+                        + std::mem::size_of::<String>()
+                        + path.len(),
+                )?;
+                seen.entry(pointer.oid)
+                    .or_insert_with(|| (pointer.size, HashSet::new()))
+                    .1
+                    .insert(path.clone());
+                entries.push((path, pointer));
+                Ok(())
+            },
+        )?;
     }
     Ok(entries)
 }
@@ -109,6 +121,7 @@ pub(crate) fn collect_pointers_from_range_in_with_base_refs(
         &args,
         b'\n',
         parse_rev_list_record,
+        GitObjectAccess::LocalOnly,
         cancel,
         |path, pointer| {
             entries.push((path, pointer));
@@ -121,6 +134,7 @@ pub(crate) fn collect_pointers_from_range_in_with_base_refs(
 pub(crate) fn visit_lfs_pointers_in_tree(
     repo_dir: &Path,
     ref_name: &str,
+    access: GitObjectAccess,
     cancel: &CancellationToken,
     visitor: impl FnMut(String, LfsPointer) -> Result<()>,
 ) -> Result<()> {
@@ -136,6 +150,7 @@ pub(crate) fn visit_lfs_pointers_in_tree(
         &args,
         b'\0',
         parse_ls_tree_record,
+        access,
         cancel,
         visitor,
     )
@@ -148,10 +163,11 @@ fn visit_lfs_blobs_in_git_command(
     args: &[String],
     record_terminator: u8,
     parse_record: DiscoveryParser,
+    access: GitObjectAccess,
     cancel: &CancellationToken,
     mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
 ) -> Result<()> {
-    let mut producer = git_command_in(repo_dir);
+    let mut producer = git_command_in(repo_dir, access);
     producer.args(args);
     let discovery = process::run(
         producer,
@@ -167,7 +183,13 @@ fn visit_lfs_blobs_in_git_command(
                 cancel,
                 MAX_CAPTURE_BYTES,
                 |records| {
-                    pointers.extend(read_lfs_batch(repo_dir, records, cancel, &mut remaining)?);
+                    pointers.extend(read_lfs_batch(
+                        repo_dir,
+                        records,
+                        access,
+                        cancel,
+                        &mut remaining,
+                    )?);
                     Ok(())
                 },
             )?;
@@ -188,10 +210,11 @@ fn visit_lfs_blobs_in_git_command(
 fn read_lfs_batch(
     repo_dir: &Path,
     records: &[(String, String)],
+    access: GitObjectAccess,
     cancel: &CancellationToken,
     remaining: &mut u64,
 ) -> Result<Vec<(String, LfsPointer)>> {
-    let mut batch = git_command_in(repo_dir);
+    let mut batch = git_command_in(repo_dir, access);
     batch.args(["cat-file", "--batch"]);
     let write_stdin = |mut stdin: ChildStdin| {
         for (oid, _) in records {
@@ -383,7 +406,7 @@ fn parse_ls_tree_record(
 }
 
 pub(crate) fn all_ref_names(repo_dir: &Path, cancel: &CancellationToken) -> Result<Vec<String>> {
-    let mut command = git_command_in(repo_dir);
+    let mut command = git_command_in(repo_dir, GitObjectAccess::LocalOnly);
     command.args(["rev-parse", "--all"]);
     let output = process::run(
         command,
@@ -401,15 +424,21 @@ pub(crate) fn all_ref_names(repo_dir: &Path, cancel: &CancellationToken) -> Resu
         .collect())
 }
 
-fn git_command_in(repo_dir: &Path) -> Command {
+fn git_command_in(repo_dir: &Path, access: GitObjectAccess) -> Command {
     let mut command = Command::new("git");
     for key in GIT_ENV_REMOVALS {
         command.env_remove(key);
     }
-    command
-        .arg("--no-replace-objects")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .current_dir(repo_dir);
+    command.arg("--no-replace-objects").current_dir(repo_dir);
+    // Inspection/publication cannot hydrate a source implicitly. Fetch/pull
+    // may resolve promised Git blobs, while preserving caller restrictions.
+    if matches!(access, GitObjectAccess::LocalOnly) {
+        // Git 2.30 ignores NO_LAZY_FETCH; an empty transport allowlist also
+        // prevents implicit fetches on the oldest supported clients.
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "");
+    }
     command
 }
 

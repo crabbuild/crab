@@ -448,6 +448,8 @@ pub(super) async fn collect_source_pointers(
         .current_dir(Some(cache_dir))
         .env_remove(super::GIT_ENV_REMOVALS)
         .env("GIT_NO_LAZY_FETCH", "1".into())
+        // Old Git clients ignore NO_LAZY_FETCH; inspection permits no transport.
+        .env("GIT_ALLOW_PROTOCOL", "".into())
         .verify_blobs(reachable.unchecked_blobs);
         run_required(runner, command, OutputMode::Json)?;
     }

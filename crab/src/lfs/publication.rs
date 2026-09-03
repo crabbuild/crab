@@ -426,7 +426,7 @@ mod tests {
         assert!(
             Command::new("git")
                 .args(["clone", "--quiet", "--filter=blob:none", "--no-checkout",])
-                .arg(format!("file://{}", remote.display()))
+                .arg(url::Url::from_file_path(&remote).unwrap().as_str())
                 .arg(&client)
                 .status()
                 .unwrap()
@@ -443,6 +443,7 @@ mod tests {
         }
         let missing_before = git(&client)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "")
             .args(["cat-file", "-e", &pointer_blob])
             .status()
             .unwrap();
@@ -497,6 +498,7 @@ mod tests {
 
         let missing_after = git(&client)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "")
             .args(["cat-file", "-e", &pointer_blob])
             .status()
             .unwrap();

@@ -2593,6 +2593,37 @@ Do not close those gates from tree-scan tests. Require final-candidate live
 LFS and full native replay plus the original provider/OS/host-CI matrix,
 publication-lifetime and uncertain-result criteria.
 
+### Partial-clone discovery access boundary: 2026-09-03 UTC
+
+**Context and observed failure.** Before publishing the shared-scanner
+refactor, a real partial-clone regression test failed: fetch/pull inherited
+the inspection scanner's `GIT_NO_LAZY_FETCH=1`, preventing Git from resolving
+an omitted LFS pointer blob. This is a compatibility regression, not missing
+LFS payload data. Mirror/native publication must retain local-only inspection.
+
+**Design.** One internal `GitObjectAccess` policy reaches both discovery and
+raw-batch children. Fetch/pull tree selection permits promisor reads while
+inheriting caller restrictions; push/pre-push/range inspection prohibits them.
+No second parser, unverified fallback, public option, or dependency is added.
+All retrieved raw objects still pass framing, identity and checksum checks.
+
+Git's [partial-clone contract](https://git-scm.com/docs/partial-clone)
+allows demand fetching. However, [Git 2.30.9's promisor implementation](https://github.com/git/git/blob/v2.30.9/promisor-remote.c)
+does not honor `GIT_NO_LAZY_FETCH`. Local-only discovery therefore also sets
+an empty transport allowlist, supported by [that version's transport policy](https://github.com/git/git/blob/v2.30.9/transport.c).
+The sibling mirror raw-blob verifier uses the same restriction. Fetch mode
+does not clear or override either restriction supplied by its caller.
+
+**Acceptance and proof.** The formerly failing fixture now proves: a real
+`blob:none` clone lacks its pointer blob; local-only range inspection fails
+without filling the missing-object set; fetch discovery obtains and verifies
+the pointer. Command-policy tests protect inherited restrictions. The native
+publication fixture still proves already-published missing pointer blobs are
+not hydrated. All 450 selected LFS/mirror tests pass locally after this fix.
+Version-specific transport behavior and Windows execution still require the
+exact-candidate CI matrix; dependency-source proof is not an E2E substitute.
+Retain the broader remaining acceptance work above.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

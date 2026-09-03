@@ -12,7 +12,7 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::MAX_CAPTURE_BYTES;
 use crate::lfs::batch::BatchResolver;
 use crate::lfs::discovery::{
-    all_ref_names, collect_pointers_from_range_in_with_base_refs, pointer_memory,
+    GitObjectAccess, all_ref_names, collect_pointers_from_range_in_with_base_refs, pointer_memory,
     spend_scan_budget, visit_lfs_pointers_in_tree,
 };
 use crate::lfs::lock::LockManager;
@@ -364,23 +364,29 @@ fn collect_push_pointers(
     let mut seen = std::collections::HashMap::new();
     let mut remaining = MAX_CAPTURE_BYTES;
     for ref_name in ref_names {
-        visit_lfs_pointers_in_tree(Path::new("."), &ref_name, cancel, |_, pointer| {
-            if let Some(size) = seen.get(&pointer.oid) {
-                if *size != pointer.size {
-                    return Err(CrabError::LfsObjectCorrupt {
-                        oid: hex_encode(&pointer.oid),
-                    });
+        visit_lfs_pointers_in_tree(
+            Path::new("."),
+            &ref_name,
+            GitObjectAccess::LocalOnly,
+            cancel,
+            |_, pointer| {
+                if let Some(size) = seen.get(&pointer.oid) {
+                    if *size != pointer.size {
+                        return Err(CrabError::LfsObjectCorrupt {
+                            oid: hex_encode(&pointer.oid),
+                        });
+                    }
+                } else {
+                    spend_scan_budget(
+                        &mut remaining,
+                        pointer_memory("", &pointer) + std::mem::size_of::<([u8; 32], u64)>(),
+                    )?;
+                    seen.insert(pointer.oid, pointer.size);
+                    pointers.push(pointer);
                 }
-            } else {
-                spend_scan_budget(
-                    &mut remaining,
-                    pointer_memory("", &pointer) + std::mem::size_of::<([u8; 32], u64)>(),
-                )?;
-                seen.insert(pointer.oid, pointer.size);
-                pointers.push(pointer);
-            }
-            Ok(())
-        })?;
+                Ok(())
+            },
+        )?;
     }
     Ok(pointers)
 }
