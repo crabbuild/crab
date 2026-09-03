@@ -8,6 +8,7 @@ on:
       - "crab/scripts/verify-provider-qualification-report.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -20,6 +21,7 @@ on:
       - "crab/scripts/verify-provider-qualification-report.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -61,6 +63,7 @@ jobs:
       - name: Verify evidence schema tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_provider_qualification_report.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_add_commit_push_source.py
           python3 -m py_compile \
             crab/scripts/verify-provider-qualification-report.py \
             crab/scripts/e2e/test_verify_provider_qualification_report.py

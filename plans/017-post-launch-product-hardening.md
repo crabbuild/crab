@@ -2388,6 +2388,76 @@ also running compilation/tests, not an isolated performance comparison.
 The run's remaining full/partial/shallow clone and integrity checks, the
 requested managed-file daily loop, and final-candidate replay remain open.
 
+### Real-history managed-file qualification: 2026-09-03 UTC
+
+**Context.** Native Git replay alone does not exercise `crab add`, a real Git
+commit, managed-object publication, lazy `crab clone`, hydrate, dehydrate,
+and rehydrate. The existing small-file harness covered that loop but started
+from empty Git history and shared its writer cache with the reader.
+
+**Implementation.** Extend `run_add_commit_push_rustfs_smoke.py` in place with
+`--source`. It runs both Crab-porcelain and native-Git staging/push paths on
+disposable clones of the captured source HEAD. The source is read-only and
+checked again on success/failure. Each reader gets an initially empty cache,
+checks its clone tip against the published ref, and verifies payload SHA-256
+identity after hydrate and rehydrate. Unsafe source/output overlap, existing
+runs, payload-path collisions and configuration symlinks are rejected before
+product setup. Early rejection must not write a failure report into the
+source. The default synthetic Git matrix remains a separate profile.
+
+**Evidence.** Nine focused harness tests pass, including real Git cloning at
+a pinned revision without importing uncommitted contents, failure-path source
+checks, and cold-cache environment isolation. Provider evidence tests (six)
+and workflow syntax pass. The optimized `aac1534` binary also passed the fresh
+two-object 65 MiB LFS qualification; its SHA-256 is
+`07902caa8388d2641f34907809555f3b2e78b7a1df98362963846a7e62891386`.
+
+**Observed dependency gap; not a passed large-history gate.** The original
+Kubernetes HEAD `4675851bd198493d2fcd371cf493594ab1933f23` contains locally added
+historical Docker.dmg pointers. The `d38ab28` replay passed import and 917
+incremental pushes, then rejected push 918 on the first unavailable payload.
+A subsequent read observed remote main still at successful push 917,
+`4327fee8d315798d46a63e6f8e7f42d0b9d2a98f`. No remaining clones/fsck/final
+sampling ran. The command misleadingly classified unavailable staging as
+`CRAB-E0081` (locked, with no holder); correcting that diagnostic remains open.
+
+The `aac1534` managed-file run on the same input also rejected publication:
+two historical payloads lacked local staging and destination proofs. It
+published zero refs; direct `ls-remote` returned none. Source HEAD/status were
+unchanged. Both failed reports are retained under
+`Workspace/Github/crab-qualification`, with run IDs
+`phase2-kubernetes-d38ab28-20260903` and
+`phase2-kubernetes-managed-aac1534-20260903`.
+
+**Independent upstream-history result.** Both managed-file workflows passed
+on local upstream revision `160bd16d98b7f688ce4f3b5ab0c5e4c045f36233`: 63
+commands, 48 checks, two 65 MiB payload paths per case, matching published
+refs/clone tips, lazy pointers, cold-cache hydrate, Git connectivity,
+dehydrate and rehydrate. Source HEAD/status and the selected executable digest
+were unchanged. Report run ID:
+`phase2-kubernetes-origin-managed-aac1534-20260903`. This is separate evidence
+from the failed local history above, not a full native replay or performance
+comparison. Documentation link validation also passed (398 pages, 4,297
+fragments).
+
+The original checkout's configured source, `crab://crab/k8s`, is reachable
+read-only and advertises master at `64e363f03f9ac9a338a79a15c550cbd9faa5f521`.
+Its historical payloads have not yet been reconstructed or verified; no
+source-remote writes or cleanup were performed.
+
+**Next acceptance gates.**
+
+1. Recover those historical payloads from an explicitly identified source,
+   verify their content, publish dependencies, then rerun the original input.
+   Do not remove pointers or treat another history as a repaired original.
+2. Preserve the independent upstream-history result and repeat it after any
+   product changes affecting staging, push, clone or reconstruction. Require
+   both workflows, cold-cache hydration, byte identity, source preservation,
+   and an unchanged selected executable before passing.
+3. Repeat final-candidate full native-Git replay and the required provider/OS
+   matrix. Use idle, isolated hosts for performance comparisons; these
+   development runs do not establish a no-regression performance verdict.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

@@ -11,6 +11,10 @@ clone, hydration, and byte identity. A separate ordinary-Git matrix proves
 missing/corrupt manifest handling, update/fetch, deletion, force and
 non-fast-forward behavior, atomic rejection, tag following, shallow history,
 immutable-pack failures, and concurrent push serialization.
+
+With ``--source``, run only the two managed-file workflows on disposable
+clones of a read-only real repository. Use a run root on the workspace volume
+and increase the command timeouts for large histories.
 """
 
 from __future__ import annotations
@@ -240,6 +244,7 @@ class AddCommitPushSmoke:
         self.cache_dir = self.run_root / "cache"
         self.command_index = 0
         self.command_lock = threading.Lock()
+        self.report_initialized = False
         self.crab_bin = str(Path(shutil.which(args.crab_bin) or args.crab_bin).resolve())
         self.env = self.build_env()
         self.report = SmokeReport(
@@ -284,6 +289,7 @@ class AddCommitPushSmoke:
         path = self.artifacts / "report.json"
         payload = asdict(self.report)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self.report_initialized = True
         self.report.artifacts["report"] = str(path)
 
     def credentials(self) -> dict[str, str]:
@@ -350,13 +356,14 @@ class AddCommitPushSmoke:
         *,
         check: bool = True,
         timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CommandRecord:
         start = time.monotonic()
         try:
             proc = subprocess.run(
                 args,
                 cwd=cwd,
-                env=self.env,
+                env={**self.env, **(extra_env or {})},
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -404,6 +411,7 @@ class AddCommitPushSmoke:
         name: str | None = None,
         check: bool = True,
         timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> CommandRecord:
         return self.run_cmd(
             name or "crab " + " ".join(args),
@@ -411,6 +419,7 @@ class AddCommitPushSmoke:
             repo,
             check=check,
             timeout=timeout,
+            extra_env=extra_env,
         )
 
     def run_aws(
@@ -725,9 +734,33 @@ class AddCommitPushSmoke:
     def prepare_repo(self, case_name: str) -> tuple[Path, str, str]:
         case_root = self.run_root / case_name
         repo = case_root / "repo"
-        repo.mkdir(parents=True)
+        case_root.mkdir(parents=True, exist_ok=True)
         remote_url, repo_prefix = self.remote_for_case(case_name)
-        self.run_git(repo, ["init", "-b", "main"])
+        if self.args.source:
+            self.run_git(
+                case_root,
+                ["clone", "--shared", "--no-checkout", str(self.args.source), str(repo)],
+                name=f"{case_name} clone read-only source",
+            )
+            self.run_git(repo, ["remote", "remove", "origin"])
+            source_head = self.report.artifacts["fixture_source_head"]
+            self.run_git(repo, ["checkout", "--detach", source_head])
+            self.run_git(repo, ["switch", "-C", "main", source_head])
+            self.check(
+                f"{case_name}-fixture-paths-unused",
+                not any(
+                    (repo / path).exists() or (repo / path).is_symlink()
+                    for path in ("model.bin", "duplicate.bin", ".crab")
+                )
+                and all(
+                    not (repo / path).is_symlink()
+                    and (not (repo / path).exists() or (repo / path).is_file())
+                    for path in ("crab.toml", ".gitattributes")
+                ),
+            )
+        else:
+            repo.mkdir()
+            self.run_git(repo, ["init", "-b", "main"])
         self.configure_git_identity(repo, case_name)
         self.run_crab(
             repo, ["init", remote_url], name=f"{case_name} crab init"
@@ -1552,10 +1585,23 @@ class AddCommitPushSmoke:
         self.check(f"{case_name}-uploaded-shards", new_shards > 0, {"new_shards": new_shards})
 
         clone_dir = self.run_root / case_name / "clone"
+        clone_cache = self.run_root / case_name / "clone-cache"
+        self.check(f"{case_name}-clone-cache-starts-empty", not clone_cache.exists())
+        clone_env = {"CRAB_CACHE_DIR": str(clone_cache)}
         self.run_cmd(
             f"{case_name} crab clone",
             [self.crab_bin, "clone", remote_url, str(clone_dir), "--jsonl"],
             self.run_root,
+            extra_env=clone_env,
+        )
+        source_tip = self.rev_parse(repo, "HEAD")
+        self.check(
+            f"{case_name}-clone-tip-matches-published-commit",
+            self.rev_parse(clone_dir, "HEAD") == source_tip
+            and self.ls_remote(remote_url, name=f"{case_name} advertised refs").get(
+                "refs/heads/main"
+            ) == source_tip,
+            {"expected_tip": source_tip},
         )
         lazy_pointer = parse_pointer(
             (clone_dir / "model.bin").read_text(encoding="utf-8")
@@ -1566,7 +1612,10 @@ class AddCommitPushSmoke:
             and lazy_pointer.size == file_size,
             {"pointer": asdict(lazy_pointer)},
         )
-        self.run_crab(clone_dir, ["hydrate", "--all"], name=f"{case_name} crab hydrate")
+        self.run_crab(
+            clone_dir, ["hydrate", "--all"], name=f"{case_name} crab hydrate",
+            extra_env=clone_env,
+        )
         hydrated_hash = sha256_file(clone_dir / "model.bin")
         duplicate_hash = sha256_file(clone_dir / "duplicate.bin")
         self.check(
@@ -1585,7 +1634,8 @@ class AddCommitPushSmoke:
             name=f"{case_name} git fsck connectivity",
         )
         self.run_crab(
-            clone_dir, ["dehydrate", "--all"], name=f"{case_name} crab dehydrate"
+            clone_dir, ["dehydrate", "--all"], name=f"{case_name} crab dehydrate",
+            extra_env=clone_env,
         )
         dehydrated_pointer = parse_pointer(
             (clone_dir / "model.bin").read_text(encoding="utf-8")
@@ -1596,7 +1646,8 @@ class AddCommitPushSmoke:
             {"pointer": asdict(dehydrated_pointer)},
         )
         self.run_crab(
-            clone_dir, ["hydrate", "--all"], name=f"{case_name} crab rehydrate"
+            clone_dir, ["hydrate", "--all"], name=f"{case_name} crab rehydrate",
+            extra_env=clone_env,
         )
         self.check(
             f"{case_name}-rehydrate-remains-byte-identical",
@@ -2006,6 +2057,9 @@ class AddCommitPushSmoke:
         )
 
     def run(self) -> None:
+        if self.args.source:
+            self.run_source_workflows()
+            return
         self.preflight()
         if self.args.only_cross_repo_duplicate:
             self.run_cross_repository_remote_duplicate_case()
@@ -2044,6 +2098,46 @@ class AddCommitPushSmoke:
         self.report.status = "passed"
         self.write_report()
 
+    def run_source_workflows(self) -> None:
+        # Never let a fixture checkout or an existing run become a write target.
+        source = self.args.source.resolve()
+        run_root = self.run_root.resolve()
+        workspace = (Path.home() / "Workspace").resolve()
+        if not run_root.is_relative_to(workspace) or run_root == workspace:
+            raise SmokeError("real-repository run root must be beneath the workspace volume")
+        if run_root.is_relative_to(source) or source.is_relative_to(run_root):
+            raise SmokeError("source checkout and run root must not overlap")
+        if run_root.exists():
+            raise SmokeError("real-repository run root already exists")
+        self.args.source = source
+        self.preflight()
+        source_head = self.rev_parse(source, "HEAD")
+        status_args = ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]
+        source_status = self.read_stdout(self.run_git(source, status_args))
+        self.report.artifacts.update({
+            "fixture_source": str(source),
+            "fixture_source_head": source_head,
+            "qualification_scope": "real-repository managed-file workflows; not performance comparison",
+        })
+        self.write_report()
+        try:
+            self.run_case("crab-add-crab-push", use_crab_add=True)
+            self.run_case("git-add-git-push", use_crab_add=False)
+        finally:
+            self.check(
+                "fixture-source-checkout-unchanged",
+                self.rev_parse(source, "HEAD") == source_head
+                and self.read_stdout(self.run_git(source, status_args)) == source_status,
+                {"source_head": source_head},
+            )
+        self.check(
+            "selected-binary-unchanged",
+            sha256_file(Path(self.crab_bin)) == self.report.artifacts["crab_binary_sha256"],
+        )
+        self.check_credential_disclosure()
+        self.report.status = "passed"
+        self.write_report()
+
 
 def parse_args() -> argparse.Namespace:
     def positive_int(value: str) -> int:
@@ -2060,6 +2154,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument(
+        "--source", type=Path,
+        help="read-only repository for the two managed-file workflows (skips synthetic Git matrix)",
+    )
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument(
         "--endpoint-url",
@@ -2091,7 +2189,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-cross-repo-duplicate", action="store_true")
     parser.add_argument("--only-partial-overlap", action="store_true")
     parser.add_argument("--only-committed-restage", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.source and any((args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
+        parser.error("--source cannot be combined with a synthetic-case selector")
+    return args
 
 
 def main() -> int:
@@ -2101,9 +2202,12 @@ def main() -> int:
         smoke.run()
     except SmokeError as exc:
         smoke.report.status = "failed"
-        smoke.write_report()
+        # An unsafe source/run overlap is rejected before any report is created.
+        if smoke.report_initialized:
+            smoke.write_report()
         print(f"FAILED: {exc}", file=os.sys.stderr)
-        print(f"report: {smoke.report.artifacts.get('report', '')}", file=os.sys.stderr)
+        if smoke.report_initialized:
+            print(f"report: {smoke.report.artifacts.get('report', '')}", file=os.sys.stderr)
         return 1
     print("PASS add/commit/push RustFS smoke")
     print(f"report: {smoke.report.artifacts.get('report', '')}")
