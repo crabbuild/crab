@@ -4750,6 +4750,72 @@ gate. Next acceptance: run the exact final release candidate through fresh
 large-repository add/commit/push/hydrate/clone and pointer-byte verification,
 then repeat baseline/candidate measurements in a controlled environment.
 
+### Raw-object qualification evidence: 2026-09-03 UTC
+
+**Gap closed in the runner.** `run_large_repo_rustfs.py` now compares complete
+`cat-file --batch` streams as well as strict object metadata. Both reads disable
+replacement objects and lazy fetching; a missing-object response is rejected
+even when Git exits zero. Acceptance requires equal metadata, SHA-256 digests,
+and the exact stream length implied by every object's header and content size.
+The correctness fingerprint also binds the raw-stream digest; baseline and
+candidate comparisons must be rerun with this stronger producer.
+The existing supervised command path spools binary output to a temporary file
+on the workspace volume, hashes it in fixed-size chunks, and retains only the
+digest and byte count. Raw object bytes never enter text decoding or retained
+logs. Timeout/nonzero exit remains failure, not partial-byte evidence.
+
+**Proof.** All 38 qualification/report tests pass, including real Git objects
+with deliberately altered contents but unchanged ID/type/size output, missing
+objects, binary/non-UTF-8 output, and timeout rejection. A read-only proof slice
+using the retained Kubernetes source/cold clone and 1,000-object sample records
+matching 28,169,810-byte streams with SHA-256
+`5168883b61da07077b6a4214f7e354241e0f61b2c19342a9e722bcfb3fd29572` in
+`phase2-raw-object-proof-6d9fd88-20260903/artifacts/report.json`. The source
+checkout remains unchanged. This slice is explicitly invalid for performance
+comparison and does not replace or rewrite the earlier full-run report.
+
+**Remaining gate.** The report verifier and historical fixture expectations
+are unchanged; old metadata-only reports do not retroactively acquire byte
+proof. Release review must require the new per-check source/clone stream
+digests and lengths alongside the existing checks. A strict versioned verifier
+migration remains separate from this runner correction. These are sampled Git
+representation bytes, not exhaustive managed-payload hydration proof.
+
+### Committed release Kubernetes lifecycle: 2026-09-03 UTC
+
+**Scope and provenance.** The existing `run_add_commit_push_rustfs_smoke.py`
+source workflow completed on release commit `6d9fd88`, binary SHA-256
+`f3b041230b4f6a5d8cfa9f76d710736a4a1acbcb141634903051cba2dc78caee`.
+The read-only upstream Kubernetes input was `160bd16d98b7f688ce4f3b5ab0c5e4c045f36233`
+with 140,777 reachable commits. Each workflow used its own disposable clone and
+isolated remote prefix in local RustFS bucket `crabbuild`.
+
+**Acceptance evidence.**
+`phase2-k8s-lifecycle-6d9fd88-20260903/artifacts/report.json` is `passed`,
+with 63 commands and 48 checks. Both `crab add`/`crab push` and native
+`git add`/`git push` paths use ordinary `git commit`, publish the full input
+history plus the new commit, and pass fresh-cache Crab clone, advertised-tip
+equality, lazy pointer checks, hydrate, dehydrate and rehydrate. Each case has
+two identical 64 MiB managed files, matching pointer hashes and hydrated bytes:
+
+- Crab-command case SHA-256:
+  `27e08265ea6f2060869d69a4f7793f696e8445cbbd4c0cd13c6bac598a93174e`.
+- Native-Git case SHA-256:
+  `4c320548124de32e462e47cdc4ec71c7ab38a7aa9b8541b1fcf698d02c1ab9b4`.
+
+The source checkout and selected binary remain unchanged. Following the
+runner's connectivity checks, both retained clones independently pass
+`crab fsck --json` with zero errors/repairs and offline
+`git --no-replace-objects -c protocol.allow=never fsck --full` with
+`GIT_NO_LAZY_FETCH=1`, exit zero. No repair or GC was requested.
+
+**Not established.** This is functional qualification, explicitly not a
+performance comparison. Bucket-global xorb/shard count deltas cannot attribute
+all concurrent writes to these cases and are not storage-efficiency evidence.
+Controlled baseline/candidate measurements, final-candidate protocol/rollback
+matrix, GC lifetime, protected publication, managed grants and cross-platform
+gates remain open. Do not mark Phase 2 complete from this lifecycle run.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

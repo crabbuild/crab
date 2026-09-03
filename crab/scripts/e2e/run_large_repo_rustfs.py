@@ -457,6 +457,7 @@ class LargeRepositoryQualification:
         timeout: int | None = None,
         input_data: bytes | None = None,
         extra_env: dict[str, str] | None = None,
+        hash_stdout: bool = False,
     ) -> dict[str, Any]:
         with self.report_lock:
             self.command_index += 1
@@ -474,7 +475,13 @@ class LargeRepositoryQualification:
         system_cpu_ms = 0
         timed_out = False
         process: subprocess.Popen[bytes] | None = None
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        # Object contents must never pass through text decoding/redaction or
+        # remain in retained logs. Reuse process supervision, spool on the
+        # workspace volume, and retain only the complete binary stream digest.
+        with (
+            tempfile.TemporaryFile(dir=self.temp_root)
+            if hash_stdout else stdout_path.open("wb")
+        ) as stdout, stderr_path.open("wb") as stderr:
             try:
                 process = subprocess.Popen(
                     args,
@@ -511,6 +518,17 @@ class LargeRepositoryQualification:
                     self.terminate_process(process)
                     process.wait()
                 raise
+            if hash_stdout:
+                stdout.seek(0)
+                digest = hashlib.sha256()
+                byte_count = 0
+                while block := stdout.read(1024 * 1024):
+                    digest.update(block)
+                    byte_count += len(block)
+                stdout_path.write_text(
+                    json.dumps({"sha256": digest.hexdigest(), "bytes": byte_count}) + "\n",
+                    encoding="utf-8",
+                )
         if timed_out:
             exit_code = 124
             with stderr_path.open("a", encoding="utf-8") as stderr:
@@ -1888,12 +1906,38 @@ class LargeRepositoryQualification:
     def batch_check(self, repo: Path, sample: list[str], name: str) -> list[str]:
         record = self.run_git(
             repo,
-            ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+            [
+                "--no-replace-objects", "-c", "protocol.allow=never",
+                "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+            ],
             name,
             input_data=("\n".join(sample) + "\n").encode(),
             timeout=2 * 60 * 60,
+            extra_env={"GIT_NO_LAZY_FETCH": "1"},
         )
-        return [line for line in self.stdout(record).splitlines() if line]
+        rows = self.stdout(record).splitlines()
+        # cat-file can exit zero for missing objects. Matching missing rows in
+        # both repositories must not certify a complete sample.
+        if len(rows) != len(sample) or any(
+            re.fullmatch(rf"{re.escape(oid)} (blob|tree|commit|tag) [0-9]+", row) is None
+            for oid, row in zip(sample, rows)
+        ):
+            raise QualificationError(f"{name} returned missing or invalid object metadata")
+        return rows
+
+    def batch_contents_digest(
+        self, repo: Path, sample: list[str], name: str
+    ) -> dict[str, Any]:
+        record = self.run_git(
+            repo,
+            ["--no-replace-objects", "-c", "protocol.allow=never", "cat-file", "--batch"],
+            name,
+            input_data=("\n".join(sample) + "\n").encode(),
+            timeout=2 * 60 * 60,
+            extra_env={"GIT_NO_LAZY_FETCH": "1"},
+            hash_stdout=True,
+        )
+        return json.loads(self.stdout(record))
 
     def clone_advertised_refs(
         self, clone: Path, advertised: dict[str, str]
@@ -1985,19 +2029,32 @@ class LargeRepositoryQualification:
         sample = self.deterministic_object_sample(source_head)
         source_rows = self.batch_check(self.source, sample, "source object sample")
         clone_rows = self.batch_check(full_clone, sample, "clone object sample")
+        source_bytes = self.batch_contents_digest(self.source, sample, "source object bytes")
+        clone_bytes = self.batch_contents_digest(full_clone, sample, "clone object bytes")
+        expected_bytes = sum(
+            len(row.encode()) + 1 + int(row.rsplit(" ", 1)[1]) + 1
+            for row in source_rows
+        )
         self.check(
             "sampled-objects-byte-identical",
-            source_rows == clone_rows and len(source_rows) == len(sample),
+            source_rows == clone_rows
+            and source_bytes == clone_bytes
+            and source_bytes["bytes"] == expected_bytes,
             {
                 "sample_size": len(sample),
                 "source_rows": len(source_rows),
                 "clone_rows": len(clone_rows),
+                "source_stream": source_bytes,
+                "clone_stream": clone_bytes,
+                "expected_stream_bytes": expected_bytes,
             },
         )
         fingerprint = hashlib.sha256(
             ("\n".join(f"{name} {oid}" for name, oid in sorted(refs.items()))
              + "\n"
-             + "\n".join(source_rows)).encode()
+             + "\n".join(source_rows)
+             + "\n"
+             + source_bytes["sha256"]).encode()
         ).hexdigest()
         sample_path = self.artifacts / "object-sample.txt"
         sample_path.write_text("\n".join(sample) + "\n", encoding="utf-8")
