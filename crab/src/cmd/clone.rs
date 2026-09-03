@@ -214,7 +214,7 @@ pub async fn run_clone_in(
 
     // Step 5: Populate the working tree after crab config is ready.
     let phase = PhaseTimer::start("clone", "checkout");
-    checkout_head(&target_dir, &args.url)?;
+    checkout_head(&target_dir, &args.url, args.mode)?;
     emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
 
     // Historical revisions may predate project configuration. Persist the
@@ -683,14 +683,21 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
 }
 
 /// Populate the worktree from HEAD after crab config is ready.
-fn checkout_head(target: &Path, remote_url: &str) -> Result<()> {
+fn checkout_head(target: &Path, remote_url: &str, mode: OutputMode) -> Result<()> {
     scrub_git_pack_appledouble_files(target)?;
 
+    // Git's branch-status chatter is not part of a clone JSON envelope.
+    // Keep stderr diagnostics and the existing human-readable checkout output.
+    let stdout = if mode.is_machine() {
+        std::process::Stdio::null()
+    } else {
+        std::process::Stdio::inherit()
+    };
     let checkout_status = Command::new("git")
         .args(["checkout", "HEAD"])
         .env(crate::core::config::CLONE_REMOTE_URL_ENV, remote_url)
         .current_dir(target)
-        .stdout(std::process::Stdio::inherit())
+        .stdout(stdout)
         .stderr(std::process::Stdio::inherit())
         .status()?;
 
@@ -1406,7 +1413,7 @@ mod tests {
         git_in(&clone, &["config", "filter.refuse.smudge", "false"]);
         git_in(&clone, &["config", "filter.refuse.required", "true"]);
 
-        let result = checkout_head(&clone, "crab://bucket/repo");
+        let result = checkout_head(&clone, "crab://bucket/repo", OutputMode::Json);
 
         assert!(matches!(result, Err(CrabError::Protocol(_))));
     }

@@ -5165,6 +5165,14 @@ the canonical layout descriptor. The same fixture body is present on current
 `origin/main`; it remains unchanged pending the separate fixture decision.
 Release qualification is pending until recorded below.
 
+The intermediate `31e4032` report
+`phase2-cold-lfs-31e4032-20260903/artifacts/report.json` still fails strict
+JSON parsing: the only prefix is now Git's branch-status message, rather than
+the nested hydration summary. Its eager checkout finishes and independent
+source/clone SHA-256 checks match both LFS files and the Crab payload. The
+follow-up change suppresses checkout stdout only in machine modes, retaining
+stderr diagnostics and text-mode output. The strict parser is unchanged.
+
 **Still open.** The filter error recovery path attempts to drain after the
 request's content flush was already consumed. This explains the observed idle
 wait and needs one request-framing owner across clean, smudge and delayed
