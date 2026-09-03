@@ -5,9 +5,46 @@ import hashlib
 import http.server
 import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 
 from run_mirror_receipt_rustfs_smoke import MarkerProxy, RUNNER
+
+
+def probe_broken_output(command):
+    def packet(data):
+        return f"{len(data) + 4:04x}".encode() + data
+
+    capabilities = b"".join(packet(f"capability={name}\n".encode())
+                            for name in ("clean", "smudge", "delay")) + b"0000"
+    request = packet(b"git-filter-client\n") + packet(b"version=2\n") + b"0000" + capabilities
+    request += packet(b"command=smudge\n") + packet(b"pathname=output-probe.raw\n") + b"0000"
+    body = b"x" * (4 * 1024 * 1024)
+    request += b"".join(packet(body[index:index + 65516]) for index in range(0, len(body), 65516)) + b"0000"
+    expected = packet(b"git-filter-server\n") + packet(b"version=2\n") + b"0000" + capabilities
+    expected += packet(b"status=success\n") + b"0000fff0x"
+    started = time.monotonic()
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        try:
+            process.stdin.write(request)
+            process.stdin.close()
+            prefix = process.stdout.read(len(expected))
+            # Close while the real filter is streaming a body larger than its
+            # output buffer and OS pipe. No injected product configuration.
+            process.stdout.close()
+            exit_code = process.wait(timeout=10)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        errors.seek(0)
+        sys.stderr.buffer.write(errors.read())
+    print(json.dumps({"exit_code": exit_code, "response_started": prefix == expected,
+                      "duration_ms": int((time.monotonic() - started) * 1000)}))
 
 
 class LfsReadProxy(MarkerProxy):
@@ -95,6 +132,14 @@ def run(smoke, proxy):
     smoke.check("failed-clone-emits-error-without-success-data",
                 failure.get("schema") == "clone" and isinstance(failure.get("error"), dict)
                 and "data" not in failure)
+    for label, command in (("native", ["filter-process"]), ("lfs", ["lfs", "filter-process"])):
+        probe = smoke.run_cmd(f"{label} filter broken-output probe",
+                              [sys.executable, str(Path(__file__).resolve()), "--probe-broken-output",
+                               str(smoke.crab_bin), *command], source)
+        evidence = json.loads(smoke.stdout(probe))
+        smoke.check(f"{label}-filter-broken-output-exits-without-success",
+                    evidence["response_started"] and evidence["exit_code"] != 0
+                    and evidence["duration_ms"] < 10_000, evidence)
     smoke.redaction_check()
 
 
@@ -134,4 +179,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--probe-broken-output"]:
+        probe_broken_output(sys.argv[2:])
+        raise SystemExit(0)
     raise SystemExit(main())

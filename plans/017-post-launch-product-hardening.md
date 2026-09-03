@@ -5299,11 +5299,83 @@ release Rust behavior. They remain uncommitted. This is local macOS/RustFS
 functional proof, not a new Kubernetes lifecycle, a clean-checkout release
 qualification, a cross-provider matrix or a controlled performance claim.
 
-**Scope limits.** This change owns input framing, not output-response phase
+**Scope at this checkpoint.** This change owns input framing, not output-response phase
 tracking: a file/output error after success/content has started still needs
 separate fault proof and correct terminal-response handling. Unknown command
 framing, the observed CoW concurrent-publication race, provider/OS matrices,
 controlled performance and the other Phase 2 acceptance gates remain open.
+
+### Filter response completion and failed-transport cleanup, 2026-09-03 UTC
+
+**Context / baseline.** Once a success header or content packet has begun,
+the ordinary pre-response error list is no longer valid. The new
+`partial_response_write_failure_does_not_start_another_response` test fails
+against the prior implementation: after an injected two-byte header write
+failure, the loop attempts another response. File-backed output has a related
+case: an error opening/reading content after the success header needs a
+content flush before its final error status. These are different boundaries,
+not reasons to lower the idle timeout or accumulate whole files in memory.
+
+**Phase A — canonical response owner.** `FilterResponse` records whether a
+response has started or completed and whether its writer failed. All four
+content response paths (clean, spooled passthrough, prefetched file and ordinary
+smudge) use one completion method. A content-read error between complete
+packets produces a content flush and final `status=error`; the original error
+returns to the loop for command/path diagnostics and session reset, without
+a second response. A write/flush failure, zero-byte write or panic after
+response start terminates the session; its framing cannot safely be guessed.
+Delayed and blob-list responses share the same transport guard.
+
+**Phase B — preserve cleanup on failure.** The blocking runner owns the
+buffer explicitly and uses `BufWriter::into_parts` after the loop so destructor
+cleanup cannot retry pending protocol bytes. It catches session-level panics,
+and the async boundary retains errors until prefetch shutdown and staging
+close have run. Normal responses still explicitly flush. No data layout,
+configuration, public signature or whole-file buffering is added.
+
+**Evidence map and design choice.** Both CLI filter entry points reach this
+blocking runner; the loop owns terminal results, while packet/content helpers
+own individual complete packets. `write_content_file` reads before emitting
+each packet, so a source-read error leaves a known packet boundary. A transport
+error has no such guarantee. Git explicitly permits a final error after
+partial content and restart after a terminated/malformed filter
+([Git filter protocol](https://git-scm.com/docs/gitattributes#_long_running_filter_process)).
+Rust documents that dropping a buffered writer attempts a flush, whereas
+`into_parts` does not ([BufWriter contract](https://doc.rust-lang.org/std/io/struct.BufWriter.html#method.into_parts)).
+Is this the best fix rather than just plausible? A shared response owner
+handles every content producer and preserves recoverable file errors; blindly
+closing every failed file or emitting a fresh status list would not enforce
+both contracts. The production increase of 60 lines replaces four independent
+completion sequences and supplies transport/lifecycle state, not a second
+pipeline or compatibility layer.
+
+**Executable acceptance.**
+
+- [x] Filter and clean suites pass, including partial source content, a
+      disappearing verified LFS cache file followed by another request, short
+      writes, zero writes, write panics and flush errors.
+- [x] Public async runner tests prove exactly one failed transport attempt
+      and no destructor retry, for handshake and response failures/panics.
+- [ ] The release cold-LFS RustFS driver passes all prior byte/JSON checks and
+      invokes both filter CLI entry points with a 4 MiB smudge request; closing
+      the response pipe mid-content produces a nonzero exit within ten seconds.
+- [ ] The same release passes native protocol/mirror/tagged rollback and a
+      fresh read-only-source Kubernetes lifecycle through both staging paths.
+
+The cold-LFS driver's private `--probe-broken-output` subprocess mode records
+real CLI termination, not a simulated writer. It is a filter-peer fault test,
+not evidence that every Git version or provider is qualified. Keep the other
+Phase 2 gates open, including unknown command framing, concurrent CoW
+publication, mutable-cache read identity, controlled performance and the full
+platform/provider matrix.
+
+Local proof: 49 filter tests and 54 clean tests pass. One intermediate compile
+ran out of disk space; it is not a test failure or passing evidence. After a
+dry-run verified that release paths were excluded, `cargo clean -p crab
+--profile dev` against this worktree's target removed 367.1 GiB of regenerable
+artifacts. The selected release binary, retained reports, source checkouts and
+other target directories were preserved. Both focused suites passed afterward.
+Release and large-repository qualification remain pending below.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
