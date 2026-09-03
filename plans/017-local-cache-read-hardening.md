@@ -3009,6 +3009,76 @@ At `3484b4b`, cache-service build/test/smoke CI, documentation, and NFS feature
 checks pass; multi-crate guardrails are red, broad CI remains incomplete, and
 native/provider skips are not proof. No phase acceptance or merge permission.
 
+#### Recovery is now a maintained CLI workload
+
+The isolated follow-up moves the single-push recovery sequence into
+`CacheServiceRustfsSmoke.run`, after checks needing the original source ref.
+It reuses the harness-owned source repository, adds/commits an incremental
+version, injects one metadata warming failure after successful negotiation,
+then gates two immutable origin PUTs across cooldown. The existing forwarding
+proxy is reused; no product runtime, config, dependencies, or remote formats
+change. The recovery timeline is embedded in the manifest-bound report even
+on command failure. Normal smoke execution must pass every new recovery check.
+The existing CI Python test step now covers safety/evidence contracts as well.
+
+Acceptance now includes one negotiation, no service request during cooldown,
+successful warming in the same push, a recovered cache **HIT** with bytes equal
+to origin and no origin refetch, independent hydration of the edited version,
+and clean Git status. Unit tests cover selective one-shot injection, auth
+forwarding without retained secrets, sequential metadata-only gates, recorder
+restoration, and cancellation/endpoint teardown. These are not native mounts,
+whole-process limits, or general concurrent-request admission proof.
+
+Installed run group `cache-f410.E7nt8I/maintained-recovery.Lnek9k` uses the same
+availability binary/server hashes recorded above; all buckets are fresh and
+dedicated, prefixed `crabbuild-maintained-recovery-lnek9k-`:
+
+| Run | Evidence |
+|---|---|
+| `recovery-full-v1` / bucket suffix `v1` | Full local continuation: **1,217 checks / 113 commands pass**. First failure 0.170 s, recovery 34.444 s; zero requests during cooldown. Existing cold/warm/restart stages retain 15 hits, zero fetches/payload origin GETs, and 19 metadata/control GETs. Repository audit and installed release-verify (275 checks) pass. |
+| `recovery-large-v1` / `large` | Maintained method selected with **128 MiB**, **41 checks / 22 commands**, `scoped-passed`. Failure 0.163 s, recovery 34.666 s, byte identity and clean Git status pass. |
+| `recovery-baseline-v1` / `baseline` | Pre-suppression installed binary: retained **failed**, 35 checks / 18 commands. Push succeeds, but **32 requests during cooldown** make the new gate fail. This is the negative control, not passing recovery proof. |
+| `recovery-staged-v1` / `staged` | Initial isolated snapshot: 1,192 checks / 89 commands pass. It still precreated unsafe 0755 client roots, yielding 18 hits / 21 metadata GETs. This is not normal private local-cache qualification; retained, not used to claim that acceptance. |
+| `recovery-staged-v2` / `staged-v2` | Isolated snapshot with product-created roots: **1,192 checks / 89 commands pass**. Cold/warm/restart retain 15 hits, zero fetches, and 19 metadata/control GETs. Recovery, verified cache HIT, clean hydrated checkout pass. Local consolidated audit and installed release-verify (275 checks) pass; the old embedded audit still fails on legitimate metadata GETs. |
+| `recovery-staged-v3` / `staged-v3` | Final snapshot, including audit consolidation: **1,192 checks / 89 commands pass** again. Repository-layout and retained-bundle audit entry points pass using the unchanged packaged verifier (1,025 checks); installed Rust release-verify (275 checks) and summary pass. |
+
+Large edited-input SHA-256:
+`fc82f41e6f83f556fd7521cd196cb1c6b24c31d4f3a063966618fc9195b326ad`.
+Full local harness SHA-256:
+`eb29617ec682e26c24a0976c0026f46ff0d065e054731965444ba1c7d749a212`.
+Root-corrected pre-consolidation snapshot SHA-256:
+`8c33d4b652b05dba973934bac0b115eb84005863814ea26e9016d4c3f3dba3e2`.
+Its exact snapshot passes **14 Python tests**; the full local continuation
+passes **25 tests**. Workflow YAML parses; format, docs content audit and
+rendered-link checks pass. The net harness growth supplies one owned HTTP
+fault/gate lifecycle and one real incremental command sequence, reusing
+origin forwarding and the existing source fixture rather than a second push
+implementation. Earlier incomplete-body/
+outage/report-consumer changes remain separate local work; do not attribute
+their extra stages to the isolated recovery slice. Strict Python/Rust evidence
+consumers do not yet require the recovery timeline's presence and semantics;
+versioned release enforcement remains open pending the fixture decision.
+Audit consolidation can ship independently of the stricter fixture decision:
+the unchanged packaged Python verifier accepts `recovery-staged-v2` with
+**1,025 checks**, while the old embedded audit rejects its legitimate
+metadata/control GETs. The final slice deletes the duplicated audit helpers
+and dispatches to that packaged verifier; no verifier assertions or fixtures
+are changed. Both source-tree and retained two-script layouts are present in
+tag `v1.1.0` and remain supported. Code is selected from the trusted package
+layout, never from report-controlled artifact paths. Two new dispatch tests
+pass; the final isolated snapshot has **16 tests**. CI invokes the harness
+audit entry point after the smoke. The artifact-bound `recovery-staged-v3`
+rerun above passes; this closes the duplicate-audit disagreement, not the
+separate stricter-validation/fixture gate. Final harness SHA-256:
+`9fe72662643d4df04e5db1345cd48db59c12fe91589629f06bee02833d13de93`.
+Its push takes 34,751 ms including deliberate gates; first failure at 0.169 s,
+recovery at 34.429 s. Edited-input SHA-256:
+`dcab37b7a7e2beb05a0d450ed2a5de7153344b5f865368cbaffbb16e38e348fa`.
+
+The existing CLI warming test, protected inventories/APIs, native/provider,
+resource, and shared-bucket cleanup gates remain open. No additional phase is
+accepted by this checkpoint.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

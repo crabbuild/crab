@@ -226,6 +226,16 @@ artifact; use it as the redacted evidence bundle when comparing cache hit
 rate, origin fallback rate, push warming, pressure behavior, and admin/metrics
 probes during rollout.
 
+A `cache-recovery-*` stage exercises failure after successful negotiation in
+one push process. It injects one metadata PUT failure, holds two immutable
+origin publications across the client's 30-second cooldown, and requires
+warming to resume without renegotiation. A recovered cache HIT must match
+origin without another origin GET; a fresh clone must hydrate the edited
+version byte-identically and have clean Git status. The report retains the
+HTTP timeline, gate timings, and hashes, including command failure evidence.
+The deliberate holds are not a normal-latency benchmark. This stage does not
+qualify recovery in mounts or every fetch/hydrate cancellation path.
+
 ## Release Evidence Gate
 
 Enterprise releases require retained cache-service RustFS smoke evidence from

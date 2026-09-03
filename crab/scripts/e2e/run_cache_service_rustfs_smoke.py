@@ -16,6 +16,7 @@ real objects observed during this run's push. Existing reports are never reused.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import http.client
 import json
@@ -804,6 +805,103 @@ class CountingProxyHandler(BaseHTTPRequestHandler):
             conn.close()
 
 
+@contextlib.contextmanager
+def recovering_cache_service(origin: OriginProxyState, service_url: str, *, gate_seconds: float = 17):
+    """Fail one metadata warm, then hold two origin publications across cooldown."""
+    lock = threading.Lock()
+    stopping = threading.Event()
+    requests: list[dict[str, Any]] = []
+    gates: list[dict[str, Any]] = []
+    failed = False
+    gate_active = False
+    started = time.monotonic()
+    original_record = origin.record
+    forwarding = OriginProxyState(service_url, "v1")
+
+    def elapsed() -> float:
+        return time.monotonic() - started
+
+    def is_metadata(raw_path: str, bucket: str) -> bool:
+        path = urllib.parse.urlsplit(raw_path).path
+        prefix = f"/{bucket}/"
+        return path.startswith(prefix) and CacheServiceRustfsSmoke.is_versioned_metadb_key(
+            urllib.parse.unquote(path[len(prefix):])
+        )
+
+    def record_origin(method: str, path: str) -> None:
+        nonlocal gate_active
+        original_record(method, path)
+        gate = None
+        with lock:
+            if failed and method == "PUT" and is_metadata(path, origin.bucket) and not gate_active and len(gates) < 2:
+                gate_active = True
+                gate = {"path": urllib.parse.urlsplit(path).path, "start_s": elapsed()}
+                gates.append(gate)
+        if gate is not None:
+            # Two sequential holds leave lease/control traffic live and avoid
+            # making any single origin request exceed its own HTTP deadline.
+            cancelled = stopping.wait(gate_seconds)
+            with lock:
+                gate.update(end_s=elapsed(), cancelled=cancelled)
+                gate_active = False
+
+    class Handler(CountingProxyHandler):
+        state = forwarding
+
+        def handle(self) -> None:
+            try:
+                super().handle()
+            except (ConnectionResetError, BrokenPipeError):
+                # Closing the owned endpoint or a client's keep-alive socket
+                # must not leave handler threads waiting on request headers.
+                pass
+
+        def send_response(self, code: int, message: str | None = None) -> None:
+            self.observed_status = code
+            super().send_response(code, message)
+
+        def proxy_request(self) -> None:
+            nonlocal failed
+            self.observed_status = None
+            entry = {"method": self.command, "path": urllib.parse.urlsplit(self.path).path, "start_s": elapsed()}
+            with lock:
+                inject = not failed and self.command == "PUT" and is_metadata(self.path, "v1")
+                failed = failed or inject
+                requests.append(entry)
+            try:
+                if not inject:
+                    super().proxy_request()
+                    return
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = self.rfile.read(length)
+                with lock:
+                    entry.update(injected=True, body_len=len(body), body_sha256=hashlib.sha256(body).hexdigest())
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                self.wfile.flush()
+            finally:
+                with lock:
+                    entry.update(status=self.observed_status, end_s=elapsed())
+
+    def snapshot() -> dict[str, Any]:
+        with lock:
+            return {"requests": [dict(row) for row in requests], "origin_gates": [dict(row) for row in gates]}
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        origin.record = record_origin
+        try:
+            yield f"http://127.0.0.1:{server.server_port}", snapshot
+        finally:
+            stopping.set()
+            origin.record = original_record
+            server.shutdown()
+            forwarding.close_connections()
+            thread.join(timeout=5)
+
+
 class CacheServiceRustfsSmoke:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -1070,7 +1168,8 @@ class CacheServiceRustfsSmoke:
     def client_env(self, cache_name: str) -> dict[str, str]:
         env = self.env.copy()
         cache_dir = self.run_root / cache_name
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        # Crab owns private-root creation. A precreated 0755 directory makes
+        # local cache I/O bypass rather than qualifying its normal behavior.
         env["CRAB_CACHE_DIR"] = str(cache_dir)
         if self.report.origin_proxy_url:
             env["AWS_ENDPOINT_URL"] = self.report.origin_proxy_url
@@ -4741,6 +4840,78 @@ class CacheServiceRustfsSmoke:
         )
         return remote_url, expected_sha
 
+    def verify_cli_cache_service_recovery(self, remote_url: str, original_sha: str) -> None:
+        repo = self.run_root / "cli-source"
+        model = repo / "model.bin"
+        self.check("cache-recovery-source-is-original", sha256_file(model) == original_sha)
+        data = bytearray(model.read_bytes())
+        offset = len(data) // 2
+        data[offset:offset + 4096] = bytes(value ^ 0xA5 for value in data[offset:offset + 4096])
+        expected_sha = hashlib.sha256(data).hexdigest()
+        model.write_bytes(data)
+        env = self.client_env("cli-source-cache")
+        self.run_cmd("cache recovery add", [self.crab_bin, "add", "--jobs", "0", "model.bin"], repo, env=env, timeout=self.args.push_timeout)
+        self.run_cmd("cache recovery commit", ["git", "commit", "-m", "cache recovery incremental version"], repo, env=env)
+
+        observation: dict[str, Any] = {"cooldown_seconds": 30, "expected_sha256": expected_sha}
+        with recovering_cache_service(self.require_proxy_state(), self.cache_service_url) as (url, snapshot):
+            fault_env = dict(env, CRAB_CACHE_SERVICE_URL=url)
+            try:
+                record = self.run_cmd(
+                    "cache recovery single push", [self.crab_bin, "push", "--json", "origin", "HEAD:refs/heads/main"],
+                    repo, env=fault_env, timeout=self.args.push_timeout,
+                )
+                observation.update(push_duration_ms=record.duration_ms, push_exit_code=record.exit_code)
+            finally:
+                observation.update(snapshot())
+                # Keep the timeline even when the command times out or fails.
+                # Embedding it in the report binds it to the evidence manifest.
+                self.report.checks.append({
+                    "name": "cache-recovery-command-evidence", "ok": observation.get("push_exit_code") == 0,
+                    "detail": observation, "timestamp": utc_now(),
+                })
+                self.write_report()
+
+        requests = observation["requests"]
+        failures = [row for row in requests if row.get("injected")]
+        self.check("cache-recovery-one-injected-failure", len(failures) == 1 and failures[0]["status"] == 503)
+        failure = failures[0]
+        for name in ("health", "capabilities"):
+            rows = [row for row in requests if row["path"] == f"/v1/{name}"]
+            self.check(
+                f"cache-recovery-single-healthy-{name}",
+                len(rows) == 1 and rows[0]["status"] == 200 and rows[0]["end_s"] < failure["start_s"],
+                {"requests": rows},
+            )
+        gates = observation["origin_gates"]
+        self.check("cache-recovery-two-sequential-origin-gates", len(gates) == 2 and all(row.get("cancelled") is False for row in gates))
+        later = [row for row in requests if row["start_s"] > failure["end_s"]]
+        premature = [row for row in later if row["start_s"] < failure["end_s"] + 30]
+        self.check("cache-recovery-no-requests-during-cooldown", not premature, {"requests": premature})
+        recovered = [row for row in later if row["method"] == "PUT" and row["status"] == 201]
+        self.check("cache-recovery-same-push-resumes-warming", bool(recovered), {"first_recovered": recovered[0] if recovered else None})
+
+        key = urllib.parse.unquote(recovered[0]["path"][len("/v1/"):])
+        origin_bytes = self.get_origin_object(key)
+        state = self.require_proxy_state()
+        before = state.count_for_key(key)
+        status, headers, cache_bytes = self.cache_get(key)
+        self.check(
+            "cache-recovery-warmed-bytes-match-origin",
+            status == 200 and headers.get("x-cache") == "HIT" and cache_bytes == origin_bytes and state.count_for_key(key) == before,
+            {"key": key, "sha256": hashlib.sha256(origin_bytes).hexdigest(), "cache_status": headers.get("x-cache")},
+        )
+        clone = self.run_root / "cli-recovery-clone"
+        clone_env = self.client_env("cli-recovery-cache")
+        self.run_cmd("cache recovery clone", [self.crab_bin, "clone", remote_url, str(clone), "--jsonl"], self.run_root, env=clone_env, timeout=self.args.push_timeout)
+        self.configure_repo_cache_service(clone, env=clone_env)
+        self.check("cache-recovery-clone-has-pointer", (clone / "model.bin").stat().st_size < len(data))
+        self.run_cmd("cache recovery hydrate", [self.crab_bin, "hydrate", "--all", "--json"], clone, env=clone_env, timeout=self.args.push_timeout)
+        hydrated_sha = sha256_file(clone / "model.bin")
+        self.check("cache-recovery-hydrated-byte-identical", hydrated_sha == expected_sha, {"expected_sha256": expected_sha, "hydrated_sha256": hydrated_sha})
+        clean = self.run_cmd("cache recovery clean Git status", ["git", "status", "--porcelain", "--untracked-files=no"], clone, env=clone_env)
+        self.check("cache-recovery-hydrated-worktree-clean", not Path(clean.stdout_log).read_text().strip())
+
     def verify_restart_persistence_uses_cache_service(
         self,
         cli_remote_url: str,
@@ -5464,6 +5635,8 @@ class CacheServiceRustfsSmoke:
             self.verify_persisted_cache_integrity_repairs(client_repo)
             self.verify_cache_pressure_keeps_recent_hot_object_warm()
             self.verify_support_bundle(client_repo, "post-traffic")
+            # The incremental version follows checks expecting the original ref.
+            self.verify_cli_cache_service_recovery(cli_remote_url, cli_expected_sha)
             self.verify_origin_outage_serves_cached_objects(client_repo)
             self.check(
                 "cache-server-still-running",
@@ -5502,661 +5675,27 @@ def artifact_path(report_path: Path, report: dict[str, Any], key: str) -> Path:
     return path.resolve()
 
 
-def file_record_ok(record: Any, path: Path, report_path: Path) -> bool:
-    return (
-        isinstance(record, dict)
-        and record.get("path") == artifact_reference(path, report_path.parent)
-        and record.get("sha256") == sha256_file(path)
-        and record.get("bytes") == path.stat().st_size
-    )
-
-
-def audit_require(errors: list[str], ok: bool, name: str, detail: Any = None) -> None:
-    if ok:
-        return
-    suffix = "" if detail is None else f": {detail}"
-    errors.append(f"{name}{suffix}")
-
-
-def audit_named_checks(report: dict[str, Any], errors: list[str]) -> dict[str, dict[str, Any]]:
-    checks = report.get("checks")
-    if not isinstance(checks, list):
-        errors.append("report.checks must be a list")
-        return {}
-
-    by_name: dict[str, dict[str, Any]] = {}
-    failed = []
-    for check in checks:
-        if not isinstance(check, dict):
-            failed.append("<non-object>")
-            continue
-        name = str(check.get("name", ""))
-        by_name[name] = check
-        if check.get("ok") is not True:
-            failed.append(name or "<unnamed>")
-
-    audit_require(errors, not failed, "all report checks passed", failed[:20])
-    for name in [
-        "cache-server-preflight-no-failures",
-        "cache-server-preflight-startup-ok",
-        "cache-server-preflight-origin-ok",
-        "cache-server-preflight-policy-loaded",
-        "cache-server-preflight-enterprise-profile-ok",
-        "cache-server-preflight-policy-diagnostics",
-        "cache-server-preflight-no-enterprise-profile-failures",
-        "cache-server-preflight-secret-redacted",
-        "enterprise-onboarding-rendered",
-        "enterprise-onboarding-check-ok",
-        "enterprise-onboarding-policy-path-wired",
-        "enterprise-onboarding-client-config-cache-dedup",
-        "enterprise-onboarding-client-env-secret-manager-placeholder",
-        "enterprise-onboarding-check-secret-redacted",
-        "enterprise-onboarding-probe-ok-or-warn",
-        "enterprise-onboarding-probe-secret-redacted",
-        "enterprise-onboarding-client-probe-ok",
-        "enterprise-onboarding-client-probe-secret-redacted",
-        "cache-server-health",
-        "cache-server-origin-health-did-not-get-object",
-        "doctor-cache-service-health-ok",
-        "doctor-cache-service-auth-ok",
-        "doctor-cache-service-admin-ok",
-        "cli-dedup-push-cacheable-origin-proof",
-        "cli-dedup-push-manifest-cas-read",
-        "cli-dedup-push-cache-service-mutable-rejections-flat",
-        "cli-hydrates-use-push-warmed-cache-service",
-        "post-traffic-support-bundle-metrics-origin-avoidance",
-        "cache-server-still-running",
-    ]:
-        check = by_name.get(name)
-        audit_require(
-            errors,
-            check is not None and check.get("ok") is True,
-            f"required check passed: {name}",
-            check,
-        )
-    return by_name
-
-
-def audit_evidence_manifest(report_path: Path, report: dict[str, Any], errors: list[str]) -> None:
-    manifest_path = artifact_path(report_path, report, "cache_service_evidence_manifest")
-    audit_require(
-        errors,
-        manifest_path.is_file(),
-        "cache_service_evidence_manifest artifact exists",
-        str(manifest_path),
-    )
-    if not manifest_path.is_file():
-        return
-
-    manifest = load_json_file(manifest_path)
-    artifacts = manifest.get("artifacts")
-    runtime = manifest.get("runtime")
-    parameters = manifest.get("parameters")
-    preflight_path = artifact_path(report_path, report, "cache_server_preflight_json")
-    artifact_paths = {
-        "report": report_path,
-        "cache_server_preflight_json": preflight_path,
-        "rustfs_smoke_script": artifact_path(report_path, report, "rustfs_smoke_script"),
-        "smoke_report_verifier": artifact_path(report_path, report, "smoke_report_verifier"),
-    }
-    for key in (
-        "cache_server_config",
-        "transparent_cache_server_config",
-        "cache_server_policy",
-        "onboarding_check_json",
-        "onboarding_probe_json",
-        "onboarding_client_probe_json",
-        "onboarding_client_config",
-        "onboarding_client_env",
-        "onboarding_readme",
-    ):
-        report_artifacts = report.get("artifacts")
-        if isinstance(report_artifacts, dict) and key in report_artifacts:
-            artifact_paths[key] = artifact_path(report_path, report, key)
-
-    audit_require(
-        errors,
-        manifest.get("schema") == EVIDENCE_MANIFEST_SCHEMA,
-        "evidence manifest schema",
-        manifest.get("schema"),
-    )
-    audit_require(
-        errors,
-        manifest.get("run_id") == report.get("run_id"),
-        "evidence manifest run_id matches report",
-        {"manifest": manifest.get("run_id"), "report": report.get("run_id")},
-    )
-    if not isinstance(artifacts, dict):
-        errors.append("evidence manifest artifacts must be an object")
-        artifacts = {}
-    for key, path in artifact_paths.items():
-        audit_require(
-            errors,
-            path.is_file(),
-            f"evidence manifest {key} file exists",
-            str(path),
-        )
-        if path.is_file():
-            audit_require(
-                errors,
-                file_record_ok(artifacts.get(key), path, report_path),
-                f"evidence manifest {key} hash matches",
-                artifacts.get(key),
-            )
-
-    if not isinstance(runtime, dict):
-        errors.append("evidence manifest runtime must be an object")
-        runtime = {}
-    audit_require(
-        errors,
-        str(runtime.get("crab_version", "")).startswith("crab "),
-        "evidence manifest crab version recorded",
-        runtime,
-    )
-    audit_require(
-        errors,
-        str(runtime.get("cache_server_version", "")).startswith("crab-cache-server "),
-        "evidence manifest cache-server version recorded",
-        runtime,
-    )
-    audit_require(
-        errors,
-        runtime.get("rustfs_bucket") == report.get("bucket"),
-        "evidence manifest bucket matches report",
-        runtime,
-    )
-
-    if not isinstance(parameters, dict):
-        errors.append("evidence manifest parameters must be an object")
-        parameters = {}
-    audit_require(
-        errors,
-        parameters.get("dedup_scope") == "all",
-        "evidence manifest dedup scope",
-        parameters,
-    )
-    audit_require(
-        errors,
-        parameters.get("mutable_path_mode") == "strict",
-        "evidence manifest strict mutable path mode",
-        parameters,
-    )
-
-
-def audit_retained_config_artifacts(report_path: Path, report: dict[str, Any], errors: list[str]) -> None:
-    forbidden_literals = [DEFAULT_PSK, DEFAULT_PSK_BLAKE3, "psk-client"]
-    for key in ("cache_server_config", "transparent_cache_server_config", "cache_server_policy"):
-        path = artifact_path(report_path, report, key)
-        audit_require(errors, path.is_file(), f"{key} retained artifact exists", str(path))
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8")
-        leaked = [literal for literal in forbidden_literals if literal in text]
-        audit_require(errors, not leaked, f"{key} retained artifact secret-free", leaked)
-
-
-def audit_preflight_artifact(report_path: Path, report: dict[str, Any], errors: list[str]) -> None:
-    preflight_path = artifact_path(report_path, report, "cache_server_preflight_json")
-    audit_require(
-        errors,
-        preflight_path.is_file(),
-        "cache_server_preflight_json artifact exists",
-        str(preflight_path),
-    )
-    if not preflight_path.is_file():
-        return
-
-    text = preflight_path.read_text(encoding="utf-8")
-    payload = load_json_file(preflight_path)
-    summary = payload.get("summary")
-    checks = payload.get("checks")
-    if not isinstance(summary, dict):
-        errors.append("preflight.summary must be an object")
-        summary = {}
-    if not isinstance(checks, list):
-        errors.append("preflight.checks must be a list")
-        checks = []
-
-    by_name = {
-        str(check.get("name")): check
-        for check in checks
-        if isinstance(check, dict)
-    }
-    enterprise_check = by_name.get("enterprise profile")
-    issue_codes = {
-        str(check.get("code"))
-        for check in checks
-        if isinstance(check, dict) and check.get("code")
-    }
-    policy_diagnostics = summary.get("policy_diagnostics")
-
-    audit_require(
-        errors,
-        payload.get("status") in ("ok", "warn"),
-        "preflight status ok/warn",
-        payload.get("status"),
-    )
-    audit_require(
-        errors,
-        summary.get("policy") == "configured",
-        "preflight policy configured",
-        summary,
-    )
-    audit_require(
-        errors,
-        summary.get("mutable_path_mode") == "strict",
-        "preflight strict mutable paths",
-        summary,
-    )
-    audit_require(
-        errors,
-        isinstance(summary.get("max_object_bytes"), int) and summary["max_object_bytes"] > 0,
-        "preflight max_object_bytes present",
-        summary.get("max_object_bytes"),
-    )
-    audit_require(
-        errors,
-        enterprise_check is not None and enterprise_check.get("status") == "ok",
-        "preflight enterprise profile ok",
-        enterprise_check,
-    )
-    audit_require(
-        errors,
-        not any(code.startswith("enterprise_") for code in issue_codes),
-        "preflight has no enterprise failure codes",
-        sorted(issue_codes),
-    )
-    audit_require(
-        errors,
-        policy_diagnostics
-        == {
-            "rule_count": 1,
-            "repo_pattern_count": 2,
-            "actions": ["read", "write", "dedup", "admin"],
-        },
-        "preflight policy diagnostics contract",
-        policy_diagnostics,
-    )
-    audit_require(errors, "psk-client" not in text, "preflight omits policy principals")
-    audit_require(errors, DEFAULT_PSK not in text, "preflight omits default PSK")
-    audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "preflight omits default PSK hash")
-
-
-def audit_enterprise_onboarding(report_path: Path, report: dict[str, Any], errors: list[str]) -> None:
-    records = report.get("enterprise_onboarding")
-    if not isinstance(records, list) or not records:
-        errors.append("report.enterprise_onboarding must contain a rendered bundle record")
-        return
-
-    record = next(
-        (item for item in records if isinstance(item, dict) and item.get("name") == "rendered-bundle"),
-        None,
-    )
-    audit_require(errors, record is not None, "enterprise onboarding rendered-bundle record exists")
-    if record is None:
-        return
-
-    audit_require(
-        errors,
-        record.get("check_status") == "ok",
-        "enterprise onboarding check status ok",
-        record,
-    )
-
-    check_path = artifact_path(report_path, report, "onboarding_check_json")
-    probe_path = artifact_path(report_path, report, "onboarding_probe_json")
-    client_probe_path = artifact_path(report_path, report, "onboarding_client_probe_json")
-    client_config_path = artifact_path(report_path, report, "onboarding_client_config")
-    client_env_path = artifact_path(report_path, report, "onboarding_client_env")
-    readme_path = artifact_path(report_path, report, "onboarding_readme")
-    for key, path in {
-        "onboarding_check_json": check_path,
-        "onboarding_probe_json": probe_path,
-        "onboarding_client_probe_json": client_probe_path,
-        "onboarding_client_config": client_config_path,
-        "onboarding_client_env": client_env_path,
-        "onboarding_readme": readme_path,
-    }.items():
-        audit_require(errors, path.is_file(), f"{key} artifact exists", str(path))
-
-    if check_path.is_file():
-        text = check_path.read_text(encoding="utf-8")
-        payload = load_json_file(check_path)
-        audit_require(
-            errors,
-            payload.get("status") == "ok",
-            "onboarding check JSON status ok",
-            payload.get("status"),
-        )
-        audit_require(errors, DEFAULT_PSK not in text, "onboarding check omits default PSK")
-        audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "onboarding check omits default PSK hash")
-        audit_require(errors, "psk-client" not in text, "onboarding check omits policy principal")
-
-    if probe_path.is_file():
-        text = probe_path.read_text(encoding="utf-8")
-        payload = load_json_file(probe_path)
-        audit_require(
-            errors,
-            payload.get("status") in ("ok", "warn"),
-            "onboarding probe JSON status ok/warn",
-            payload.get("status"),
-        )
-        audit_require(
-            errors,
-            payload.get("bundle_check", {}).get("status") == "ok",
-            "onboarding probe bundle check ok",
-            payload.get("bundle_check"),
-        )
-        audit_require(errors, DEFAULT_PSK not in text, "onboarding probe omits default PSK")
-        audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "onboarding probe omits default PSK hash")
-        audit_require(errors, "psk-client" not in text, "onboarding probe omits policy principal")
-
-    if client_probe_path.is_file():
-        text = client_probe_path.read_text(encoding="utf-8")
-        payload = load_json_file(client_probe_path)
-        client_probe = payload.get("client_probe")
-        audit_require(
-            errors,
-            payload.get("status") == "ok",
-            "onboarding active client probe JSON status ok",
-            payload.get("status"),
-        )
-        audit_require(
-            errors,
-            isinstance(client_probe, dict) and client_probe.get("status") == "ok",
-            "onboarding active client probe status ok",
-            client_probe,
-        )
-        audit_require(errors, DEFAULT_PSK not in text, "onboarding active client probe omits default PSK")
-        audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "onboarding active client probe omits default PSK hash")
-        audit_require(errors, "psk-client" not in text, "onboarding active client probe omits policy principal")
-
-    if client_config_path.is_file():
-        text = client_config_path.read_text(encoding="utf-8")
-        for needle in (
-            'service_mode = "cache+dedup"',
-            'service_auth = "psk"',
-            "push_warming = true",
-        ):
-            audit_require(errors, needle in text, f"onboarding client config has {needle}", text)
-        audit_require(errors, DEFAULT_PSK not in text, "onboarding client config omits default PSK")
-        audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "onboarding client config omits default PSK hash")
-
-    if client_env_path.is_file():
-        text = client_env_path.read_text(encoding="utf-8")
-        audit_require(errors, "CRAB_CACHE_SERVICE_URL" in text, "onboarding client env has service URL")
-        audit_require(errors, "CRAB_CACHE_PSK" in text, "onboarding client env has PSK variable")
-        audit_require(errors, DEFAULT_PSK not in text, "onboarding client env omits default PSK")
-        audit_require(errors, DEFAULT_PSK_BLAKE3 not in text, "onboarding client env omits default PSK hash")
-
-    if readme_path.is_file():
-        text = readme_path.read_text(encoding="utf-8")
-        audit_require(
-            errors,
-            "crab-cache-server onboarding check --bundle-dir . --json > onboarding-check.json" in text,
-            "onboarding README retains CI check command",
-        )
-
-
-def audit_cli_hydrates(report: dict[str, Any], errors: list[str]) -> None:
-    hydrates = report.get("cli_hydrates")
-    if not isinstance(hydrates, list):
-        errors.append("report.cli_hydrates must be a list")
-        return
-    by_name = {
-        str(record.get("name")): record
-        for record in hydrates
-        if isinstance(record, dict)
-    }
-    for name in ("cli-cold-hydrate", "cli-warm-hydrate"):
-        record = by_name.get(name)
-        audit_require(errors, record is not None, f"{name} record exists")
-        if record is None:
-            continue
-        audit_require(
-            errors,
-            record.get("origin_get_key_delta") == {},
-            f"{name} origin GET delta flat",
-            record,
-        )
-        audit_require(
-            errors,
-            record.get("origin_fetches_delta") == 0,
-            f"{name} origin fetches flat",
-            record,
-        )
-        audit_require(
-            errors,
-            int(record.get("cache_hits_delta", 0)) > 0,
-            f"{name} cache hits recorded",
-            record,
-        )
-        audit_require(
-            errors,
-            int(record.get("origin_avoided_reads_delta", 0)) > 0,
-            f"{name} origin avoidance recorded",
-            record,
-        )
-        audit_require(
-            errors,
-            record.get("mutable_read_rejections_delta") == 0,
-            f"{name} mutable read rejections flat",
-            record,
-        )
-        audit_require(
-            errors,
-            record.get("mutable_write_rejections_delta") == 0,
-            f"{name} mutable write rejections flat",
-            record,
-        )
-
-
-def audit_cli_dedup(report: dict[str, Any], errors: list[str]) -> None:
-    records = report.get("cli_push_dedup")
-    if not isinstance(records, list):
-        errors.append("report.cli_push_dedup must be a list")
-        return
-    record = next(
-        (item for item in records if isinstance(item, dict) and item.get("name") == "cli-dedup-push"),
-        None,
-    )
-    audit_require(errors, record is not None, "cli-dedup-push record exists")
-    if record is None:
-        return
-    audit_require(
-        errors,
-        int(record.get("dedup_queries_delta", -1)) == 0,
-        "add/push bypassed advisory dedup query",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("dedup_known_chunks_delta", -1)) == 0,
-        "add/push did not consume advisory known chunks",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("dedup_unknown_chunks_delta", -1)) == 0,
-        "add/push did not consume advisory unknown chunks",
-        record,
-    )
-    cacheable_keys = record.get("cacheable_origin_get_key_delta", {})
-    if not isinstance(cacheable_keys, dict):
-        cacheable_keys = {}
-    audit_require(
-        errors,
-        int(record.get("cacheable_origin_gets_delta", 0)) > 0
-        and any(str(key).startswith(".crab/xorbs/") for key in cacheable_keys)
-        and any(str(key).startswith(".crab/shards/") for key in cacheable_keys),
-        "push proved cacheable origin objects",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("xorb_gets_delta", 0)) > 0,
-        "push proved canonical xorb origin",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("shard_gets_delta", 0)) > 0,
-        "push proved canonical shard origin",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("metadata_gets_delta", 0)) > 0,
-        "push read metadata needed for commit",
-        record,
-    )
-    audit_require(
-        errors,
-        int(record.get("mutable_origin_gets_delta", 0)) > 0,
-        "push read mutable commit state",
-        record,
-    )
-    expected_manifest = f"e2e-cache-service/{report.get('run_id')}/cli-dedup/manifest"
-    mutable_keys = record.get("mutable_origin_get_key_delta", {})
-    if not isinstance(mutable_keys, dict):
-        mutable_keys = {}
-    audit_require(
-        errors,
-        int(mutable_keys.get(expected_manifest, 0)) > 0,
-        "push read manifest for CAS",
-        record,
-    )
-    audit_require(
-        errors,
-        record.get("mutable_read_rejections_delta") == 0,
-        "push mutable read rejections flat",
-        record,
-    )
-    audit_require(
-        errors,
-        record.get("mutable_write_rejections_delta") == 0,
-        "push mutable write rejections flat",
-        record,
-    )
-
-
-def audit_support_bundle(report: dict[str, Any], errors: list[str]) -> None:
-    bundles = report.get("support_bundles")
-    if not isinstance(bundles, list) or not bundles:
-        errors.append("report.support_bundles must contain at least one record")
-        return
-    by_name = {
-        item.get("name"): item
-        for item in bundles
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    }
-    for name in ("post-traffic", "origin-outage"):
-        bundle = by_name.get(name)
-        audit_require(errors, isinstance(bundle, dict), f"{name} support bundle exists")
-        if not isinstance(bundle, dict):
-            continue
-        for field_name in ("cache_hit_total", "origin_avoided_reads_total", "origin_fetch_total"):
-            value = bundle.get(field_name)
-            audit_require(
-                errors,
-                isinstance(value, (int, float)) and value > 0,
-                f"{name} support bundle {field_name} positive",
-                bundle,
-            )
-    outage = by_name.get("origin-outage")
-    if isinstance(outage, dict):
-        audit_require(
-            errors,
-            outage.get("health_ok") is False and outage.get("health_status") == 503,
-            "origin-outage support bundle health degraded",
-            outage,
-        )
-        audit_require(
-            errors,
-            outage.get("auth_endpoint") == "/v1/capabilities",
-            "origin-outage support bundle auth probe is control plane",
-            outage,
-        )
-        for probe_name in ("auth", "capabilities", "authz", "admin_stats", "metrics"):
-            audit_require(
-                errors,
-                outage.get(f"{probe_name}_ok") is True
-                and outage.get(f"{probe_name}_status") == 200,
-                f"origin-outage support bundle {probe_name} probe ok",
-                outage,
-            )
-
-
-def audit_origin_outage(report: dict[str, Any], errors: list[str]) -> None:
-    records = report.get("origin_outages")
-    if not isinstance(records, list):
-        errors.append("report.origin_outages must be a list")
-        return
-    record = next(
-        (item for item in records if isinstance(item, dict) and item.get("name") == "origin-outage-cached-read-through"),
-        None,
-    )
-    audit_require(errors, record is not None, "origin outage record exists")
-    if record is None:
-        return
-    audit_require(
-        errors,
-        record.get("health_status") == 503 and record.get("live_status") == 200,
-        "origin outage readiness/liveness split",
-        record,
-    )
-    audit_require(
-        errors,
-        record.get("hot_status") == 200
-        and record.get("hot_cache_status") == "HIT"
-        and record.get("range_status") == 206
-        and record.get("range_cache_status") == "HIT",
-        "origin outage cached hot reads hit",
-        record,
-    )
-    audit_require(
-        errors,
-        record.get("cold_status") == 504 and record.get("cold_cache_status") == "",
-        "origin outage cold read fails closed",
-        record,
-    )
-    audit_require(
-        errors,
-        record.get("hot_origin_gets_after_hot") == record.get("hot_origin_gets_before_outage")
-        and record.get("hot_origin_gets_after_range") == record.get("hot_origin_gets_before_outage")
-        and record.get("cold_origin_gets_after_cold") == record.get("cold_origin_gets_before_outage")
-        and record.get("total_origin_gets_after_cold") == record.get("total_origin_gets_before_outage"),
-        "origin outage origin counters flat",
-        record,
-    )
-
-
 def audit_rustfs_report(report_path: Path) -> dict[str, Any]:
     report_path = report_path.resolve()
-    report = load_json_file(report_path)
-    errors: list[str] = []
-
-    audit_require(
-        errors,
-        report.get("status") == "passed",
-        "report status passed",
-        report.get("status"),
+    script = Path(__file__).resolve()
+    # v1.1.0 ships both this entry point and the retained two-script bundle.
+    # Select code from that trusted package layout, never from report artifacts.
+    verifier = (
+        script.with_name("smoke-report-verifier.py")
+        if script.name == "rustfs-smoke-script.py"
+        else script.parents[1] / "verify-cache-service-smoke-report.py"
     )
-    audit_named_checks(report, errors)
-    audit_evidence_manifest(report_path, report, errors)
-    audit_retained_config_artifacts(report_path, report, errors)
-    audit_preflight_artifact(report_path, report, errors)
-    audit_enterprise_onboarding(report_path, report, errors)
-    audit_cli_hydrates(report, errors)
-    audit_cli_dedup(report, errors)
-    audit_support_bundle(report, errors)
-    audit_origin_outage(report, errors)
+    try:
+        result = subprocess.run(
+            [os.sys.executable, str(verifier), str(report_path)],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeError(f"report verifier could not finish: {exc}") from exc
+    if result.returncode != 0:
+        raise SmokeError(f"report audit failed: {result.stderr.strip()[-2000:]}")
 
-    text = json.dumps(report, sort_keys=True)
-    audit_require(errors, DEFAULT_PSK not in text, "report omits default PSK")
-
-    if errors:
-        raise SmokeError("report audit failed:\n- " + "\n- ".join(errors))
+    report = load_json_file(report_path)
     return {
         "report": str(report_path),
         "run_id": report.get("run_id"),

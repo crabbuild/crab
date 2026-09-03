@@ -360,9 +360,10 @@ Each phase has its own context, acceptance criteria, proof, and STOP conditions.
 
 Qualification tooling is now in progress: the maintained cache-service smoke
 uses fresh dedicated buckets and create-only scoped fixtures. Report-audit
-consolidation and complete cold/warm/restart evidence validation are under
-qualification; the existing incomplete Rust test fixture awaits an approved
-input update. See Plan 017 for retained passes, failures, and the unresolved
+consolidation now delegates to the packaged verifier in source-tree and
+retained-bundle layouts; both entry points pass. Stricter cold/warm/restart
+evidence validation remains local; the incomplete Rust test fixture awaits an
+approved input update. See Plan 017 for retained passes, failures, and the unresolved
 shared-bucket fixture incident. The installed HTTP-503 outage workload now
 proves add/push/dedup and cold/warm hydration, including a focused 128 MiB run;
 slow-service bounds and versioned outage release-gate coverage remain open.
@@ -381,8 +382,15 @@ Follow-up `9dffbe6` shares service failure suppression/recovery across client
 clones while preserving request-local errors and partial-batch dedup. The
 installed candidate reduces failed metadata service attempts from 51 to one;
 sustained-stall hydration completes in 30.4 seconds with verified bytes, and
-the full 1,204-check RustFS smoke passes. Live long-lived recovery, maintained
-latency gates, and the other phase acceptance items remain open.
+the full 1,204-check RustFS smoke passes. Same-process push recovery now has
+installed proof, and `0657359` retains timed-out command records. The
+maintained recovery stage covers successful negotiation, one failed metadata
+PUT, cooldown without requests, recovered cache HITs, and fresh clone/hydrate
+byte identity. Its 128 MiB run passes; the pre-suppression binary fails the
+cooldown gate. Versioned evidence enforcement, other read surfaces, resource
+bounds, and the other phase acceptance items remain open. The existing CLI
+warming test's outage expectation remains red pending approval; no assertion
+was weakened. See Plan 017 for exact artifact/source identities and limits.
 This is not phase acceptance or release proof.
 
 ### Release gates

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import runpy
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,7 +127,142 @@ class OriginFixtureSafetyTests(unittest.TestCase):
         self.smoke.run_aws.assert_not_called()
 
 
+class ReportAuditTests(unittest.TestCase):
+    def test_audit_uses_packaged_verifier_not_report_selected_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            report = root / "report.json"
+            report.write_text(json.dumps({"run_id": "test", "checks": [], "artifacts": {
+                "smoke_report_verifier": "attacker.py",
+                "cache_server_preflight_json": "preflight.json",
+                "cache_service_evidence_manifest": "manifest.json",
+            }}))
+            for script, verifier in (
+                (root / "scripts/e2e/run_cache_service_rustfs_smoke.py", root / "scripts/verify-cache-service-smoke-report.py"),
+                (root / "artifacts/rustfs-smoke-script.py", root / "artifacts/smoke-report-verifier.py"),
+            ):
+                with self.subTest(script=script), patch.object(smoke_module, "__file__", str(script)), patch.object(
+                    smoke_module.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ) as run:
+                    smoke_module.audit_rustfs_report(report)
+                    self.assertEqual(run.call_args.args[0], [sys.executable, str(verifier), str(report)])
+
+    def test_audit_propagates_real_verifier_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            report.write_text('{"status": "failed"}')
+            with self.assertRaisesRegex(smoke_module.SmokeError, "report-status-passed"):
+                smoke_module.audit_rustfs_report(report)
+
+
+class CacheServiceRecoveryTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def upstream(self):
+        seen = []
+
+        class Handler(smoke_module.BaseHTTPRequestHandler):
+            def respond(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                seen.append((self.command, self.path, self.headers.get("X-Cache-PSK"), body))
+                self.send_response(201 if self.command == "PUT" else 200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_PUT = respond
+
+            def log_message(self, *args):
+                pass
+
+        with smoke_module.ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                yield f"http://127.0.0.1:{server.server_port}", seen
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+
+    def request(self, url, method, path):
+        connection = http.client.HTTPConnection(url.removeprefix("http://"), timeout=2)
+        try:
+            connection.request(method, path, body=b"fixture", headers={"X-Cache-PSK": "private-fixture"})
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        finally:
+            connection.close()
+
+    def test_only_first_metadata_put_fails_and_forwarding_preserves_auth(self):
+        origin = SimpleNamespace(bucket="owned", record=Mock())
+        with self.upstream() as (upstream, seen), smoke_module.recovering_cache_service(origin, upstream, gate_seconds=0) as (url, snapshot):
+            for method, path, expected in (
+                ("GET", "/v1/health", 200),
+                ("PUT", "/v1/.crab/xorbs/hash", 201),
+                ("PUT", "/v1/repo/file_index_db/manifest/1.manifest?token=private-query", 503),
+                ("PUT", "/v1/repo/file_index_db/manifest/2.manifest", 201),
+            ):
+                with self.subTest(path=path):
+                    self.assertEqual(self.request(url, method, path), expected)
+            evidence = snapshot()
+            self.assertEqual(len(seen), 3)
+            self.assertTrue(all(row[2:] == ("private-fixture", b"fixture") for row in seen))
+            self.assertEqual(sum(bool(row.get("injected")) for row in evidence["requests"]), 1)
+            self.assertNotIn("private-", json.dumps(evidence))
+
+    def test_origin_gates_are_sequential_metadata_only_and_restore_recorder(self):
+        original = Mock()
+        origin = SimpleNamespace(bucket="owned", record=original)
+        with self.upstream() as (upstream, _), smoke_module.recovering_cache_service(origin, upstream, gate_seconds=0) as (url, snapshot):
+            self.request(url, "PUT", "/v1/repo/file_index_db/manifest/1.manifest")
+            for method, path in (
+                ("PUT", "/other/repo/file_index_db/wal/1.sst"),
+                ("PUT", "/owned/repo/locks/main"),
+                ("GET", "/owned/repo/file_index_db/wal/1.sst"),
+                ("PUT", "/owned/repo/file_index_db/wal/1.sst"),
+                ("PUT", "/owned/.crab/chunk_index_db/manifest/1.manifest"),
+                ("PUT", "/owned/repo/file_index_db/wal/2.sst"),
+            ):
+                origin.record(method, path)
+            gates = snapshot()["origin_gates"]
+            self.assertEqual(len(gates), 2)
+            self.assertTrue(all(row["cancelled"] is False for row in gates))
+            self.assertLessEqual(gates[0]["end_s"], gates[1]["start_s"])
+            self.assertEqual(original.call_count, 6)
+        self.assertIs(origin.record, original)
+
+    def test_failure_teardown_releases_held_origin_and_closes_endpoint(self):
+        original = Mock()
+        origin = SimpleNamespace(bucket="owned", record=original)
+        with self.upstream() as (upstream, _):
+            with self.assertRaisesRegex(RuntimeError, "workload failed"):
+                with smoke_module.recovering_cache_service(origin, upstream, gate_seconds=60) as (url, snapshot):
+                    self.request(url, "PUT", "/v1/repo/file_index_db/manifest/1.manifest")
+                    worker = threading.Thread(target=origin.record, args=("PUT", "/owned/repo/file_index_db/wal/1.sst"))
+                    worker.start()
+                    deadline = time.monotonic() + 2
+                    while not snapshot()["origin_gates"] and time.monotonic() < deadline:
+                        time.sleep(0.001)
+                    self.assertTrue(snapshot()["origin_gates"])
+                    raise RuntimeError("workload failed")
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(snapshot()["origin_gates"][0]["cancelled"])
+            self.assertIs(origin.record, original)
+            with self.assertRaises(ConnectionRefusedError):
+                self.request(url, "GET", "/v1/health")
+
+
 class RunDirectorySafetyTests(unittest.TestCase):
+    def test_client_environment_leaves_private_root_creation_to_crab(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(smoke_module.CacheServiceRustfsSmoke)
+            smoke.env = {}
+            smoke.run_root = Path(directory)
+            smoke.report = SimpleNamespace(origin_proxy_url="http://127.0.0.1:1234")
+            env = smoke.client_env("client-cache")
+            self.assertEqual(Path(env["CRAB_CACHE_DIR"]), smoke.run_root / "client-cache")
+            self.assertFalse(Path(env["CRAB_CACHE_DIR"]).exists())
+
     def test_unexpected_failure_retains_failed_status_and_original_exception(self) -> None:
         smoke = Mock()
         failure = AttributeError("missing integration method")
