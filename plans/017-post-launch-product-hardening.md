@@ -5544,13 +5544,27 @@ contract promises recovery for unknown operations or truncated headers.
 - [x] 52 filter and 54 clean tests pass, including the new invalid-request
       table and missing capability-flush regression, existing recovery,
       bodyless queries, normal EOF, streaming and byte-integrity tests.
-- [ ] Build a committed release; run
+- [x] Build a committed release; run
       `python3 crab/scripts/e2e/run_filter_framing_smoke.py --crab-bin <release> --root <workspace-qualification-root> --run-id <new-id>`.
       Require all 30 exchanges and binary-identity proof to pass. Negative
       exchanges need normal nonzero exit and exact prior handshake bytes,
       without an invalid-request response. Timeouts/signals do not pass.
-- [ ] Re-run real-Git LFS cache-mutation qualification and both broken-output
+- [x] Re-run real-Git LFS cache-mutation qualification and both broken-output
       probes with that same release to protect adjacent output behavior.
+
+Release `c838e5d` builds successfully, binary SHA-256
+`363e41ec34a07c326a194942099c2f58b05c82ea8f7245afd6919fae127d1752`.
+`phase2-filter-header-c838e5d-20260903/report.json` passes all 31 checks using
+the unchanged baseline driver. Both open-input unknown commands exit 1 with
+no request acknowledgment (38 ms native / 36 ms LFS). All other negative
+exchanges fail normally with the exact expected prior output; all four
+positive exchanges remain exact. `phase2-cache-mutation-header-c838e5d-20260903/report.json`
+passes 35 commands / seven checks through real Git across all three smudge
+routes. The framing run's sibling `broken-output-report.json` records exits
+5 in 30 ms native / 28 ms LFS. Binary identity is unchanged throughout.
+The retained `cfg(test)` GC regression and generated web changes were the
+only uncommitted source at build time; this is not clean-checkout CI proof.
+Formatting and diff checks pass. Existing required CI failures remain open.
 
 **Phase C — broader gates.** Restore RustFS and re-run cold clone,
 protocol/mirror, Kubernetes lifecycle, full integrity and raw-byte proof.
