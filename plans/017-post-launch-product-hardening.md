@@ -3109,6 +3109,108 @@ defines old-side selection. Git 2.30 documents
 Git's [merge-option implementation](https://github.com/git/git/blob/v2.50.1/diff-merges.c)
 shows why `-m` alone does not override configured merge display policy.
 
+**Subsequent exact-binary proof.** Optimized `2411cb3` passed the boundary LFS
+driver (44 commands, 13 checks) and native-Git/mirror harness (464 commands,
+133 checks). Reports: `phase2-lfs-boundary-2411cb3-20260903/report.json` and
+`phase2-protocol-mirror-2411cb3-20260903/artifacts/report.json`. SHA-256
+`98622b53b9132f62ba50349176c854526c12b2c4efbe25b0820becc8a144177a`
+was unchanged after both runs. Source/binary identity matched. These remain
+functional-only concurrent-host results, not controlled performance or
+clean-release proof. Exact-commit protocol CI run 33745743645 was still
+running when this next packet was prepared.
+
+### Complete bulk LFS fetch history: 2026-09-03 UTC
+
+**Context and failure proof.** Both current `origin/main` (`e26d139`) and
+`2411cb3` implement `fetch --all` using ref-tip trees. Replaced and deleted
+versions disappear from the inventory unless another ref happens to retain
+their tree. A new one-branch replacement/deletion regression failed before
+the fix. The optimized `2411cb3` RustFS driver also planned only two of four
+reachable 65 MiB payload versions. Its 34-command failure is retained in
+`phase2-lfs-all-before-2411cb3-inventory-20260903/report.json`. Two earlier
+driver attempts stopped at missing remote configuration and a wrong JSON
+envelope lookup respectively; neither is a product-history verdict or pass.
+
+**Design and owner.** The fetch command routes `--all` to one supervised
+full-history `rev-list --objects --stdin` traversal in `lfs::discovery`.
+Explicit operands resolve individually with `rev-parse --verify
+--end-of-options` and object-existence peeling; bounded full IDs feed owned
+stdin. With no explicit refs, Git's `--all` supplies the roots, including
+tags and detached HEAD. No whole-tree-per-commit traversal or retained Git
+graph. The existing record/batch/checksum owner verifies every selected
+object's identity, streams large bodies and retains only a bounded pointer
+inventory. Nonzero producer exits, malformed/truncated records, absent or
+corrupt objects and cancellation fail rather than returning partial success.
+Conflicting LFS sizes fail the shared transfer planner before any payload
+downloads. Promisor reads are allowed for fetch only, preserving the caller's
+transport restrictions.
+
+The bulk parser includes unnamed objects, including pointer blobs reachable
+only through blob tags. Git's optional name is a display hint: it may be
+empty, newline-normalized or one of multiple aliases. It is never a path
+selection authority for `--all`. CLI include/exclude and recent conflicts
+remain rejected; configured path filters do not narrow bulk inventory.
+Default/recent fetch and pull retain their path-preserving tree/old-side
+selection. No new option, dependency, format or alternate batch parser.
+
+**Executable acceptance.**
+
+1. Without old-tip refs, replaced and deleted versions remain in all-ref and
+   explicit-ref inventory. Explicit refs exclude unrelated branches/tags and
+   detached commits; omitted refs include them. Unborn all-ref scans are empty.
+2. Missing operands, revision options/ranges, newline injection and cancelled
+   callers fail. SHA-1/SHA-256 history and corrupt old blobs are covered.
+3. A real blobless partial clone retrieves current and historical pointers;
+   the same source's publication scan fails without implicitly fetching them.
+4. Parser and batch limits reject malformed, oversized and truncated records;
+   repeated batches reuse memory rather than imposing a whole-history limit.
+5. Run the exact optimized candidate through `qualify_all_history_lfs.py` in
+   the dedicated external qualification workspace. Keep the original full
+   clone/fetch/check-out/fsck harness, then qualify all-ref full clone and
+   explicit-ref partial clone. With `lfs.fetchexclude=*`, dry-run JSON must
+   name all four OIDs without payload writes. Real fetch must cache all four
+   SHA-256/size-verified payloads; checking out both commits must reproduce
+   every original file and pass Git/LFS fsck. Retain binary identity/digest.
+6. Run the existing native-Git/mirror RustFS suite and exact-candidate CI.
+   Concurrent-host timings cannot close controlled-performance gates.
+
+**Proof at source checkpoint.** All 111 selected fetch, discovery, recent,
+prune, publication, LFS-push, mirror-command and process-owner tests pass,
+including eight new tests. Production-library correctness/suspicious Clippy,
+formatting and diff checks pass; other warning categories are not claimed
+clean. Existing CI selectors include the new modules.
+The change adds about 81 net production lines for bulk-root selection and
+record framing while reusing process ownership and verified batching.
+Optimized build, fresh candidate RustFS and cross-platform CI remain required.
+
+**Sibling gaps remain explicit.** Standalone `crab lfs push --all` also uses
+tip-tree selection and needs its own local-only full-history gate. Native
+publication and mirror dependency scans already traverse introduced history;
+they remain local-only and their tests pass. Their path-hint/alias lock
+coverage still needs separate proof. Prune's unchecked inventory, retention
+scope and flag contract are unchanged. Default remote resolution in a
+no-checkout clone without `crab.toml`, idle CLI stdin/caller cancellation,
+configured non-bulk filters and selected-remote recent scope remain open.
+
+**Upstream contracts.** The [Git LFS fetch manual](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-fetch.adoc)
+defines complete reachable history for `--all`, including its filter rules.
+The [upstream ref scanner](https://github.com/git-lfs/git-lfs/blob/main/git/rev_list_scanner.go)
+uses `rev-list --objects --stdin` for selected histories and `--all` for
+all-ref history. Git documents [object-name limitations](https://git-scm.com/docs/git-rev-list)
+and [safe single-operand verification](https://git-scm.com/docs/git-rev-parse).
+
+### Original Kubernetes replay remains incomplete: 2026-09-03 UTC
+
+The pinned `56d336a` frozen-preparation replay reached push 918 and failed
+closed with `CRAB-E0086`: a historical 581,598,168-byte pointer lacked local
+staged chunks and remote payload. This is not a 1,000-push pass. Its early
+preparation had independently verified both original payload identities and
+18,080 staged chunks; that does not prove those entries survived intermediate
+push cleanup. Investigate the staging lifecycle before another long replay;
+do not relax dependency admission or silently substitute another history.
+Retain `phase2-kubernetes-frozen-prepared-56d336a-20260903/artifacts/report.json`
+and the push-918 error log. Original external source remains read-only.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

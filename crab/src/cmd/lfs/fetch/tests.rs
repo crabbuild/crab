@@ -1,5 +1,7 @@
 use super::*;
 
+mod all;
+
 #[test]
 fn cancelled_fetch_and_pull_stop_before_repository_resolution() {
     let cancel = CancellationToken::new();
@@ -149,6 +151,34 @@ fn all_ref_fetch_retains_distinct_pointer_versions_and_rejects_partial_inventory
         )
         .is_err()
     );
+}
+
+#[test]
+fn all_fetch_includes_replaced_and_deleted_versions_without_old_tip_refs() {
+    let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fixture_git(root, &["init", "-q", "-b", "main"]);
+    let previous = pointer(b"previous reachable version");
+    fs::write(root.join("asset.bin"), previous.serialize()).unwrap();
+    commit_fixture(root);
+    let current = pointer(b"replacement later deleted");
+    fs::write(root.join("asset.bin"), current.serialize()).unwrap();
+    commit_fixture(root);
+    fixture_git(root, &["rm", "asset.bin"]);
+    commit_fixture(root);
+    let cancel = CancellationToken::new();
+    for refs in [vec![], vec!["main".to_owned()]] {
+        let entries = collect_lfs_pointers(root, true, false, &refs, &cancel).unwrap();
+        assert_eq!(
+            entries
+                .into_iter()
+                .map(|(_, pointer)| pointer.oid)
+                .collect::<HashSet<_>>(),
+            HashSet::from([previous.oid, current.oid]),
+            "refs={refs:?}"
+        );
+    }
 }
 
 #[test]

@@ -3,6 +3,7 @@ use sha2::Digest;
 use std::process::Stdio;
 
 mod previous;
+mod reachable;
 
 fn git_oid(byte: u8) -> String {
     format!("{byte:02x}").repeat(20)

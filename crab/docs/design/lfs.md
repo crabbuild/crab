@@ -670,6 +670,29 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.pruneverifyremotealways` | false | Verify prune candidates remotely unless the CLI overrides it |
 | `lfs.pruneverifyunreachablealways` | false | Also verify unreachable prune candidates unless the CLI overrides it |
 
+### Complete History Fetch
+
+`crab lfs fetch --all <remote> [refs...]` inventories all objects reachable
+from the selected refs, including versions replaced or deleted before their
+tips. With no explicit refs, Git's `--all` also covers tags and detached HEAD.
+Each explicit operand resolves to one object ID before an owned stdin stream
+feeds the traversal; invalid operands cannot turn into revision options or
+silently widen the selected graph.
+
+One `rev-list --objects` traversal feeds the same bounded, checksum-verifying
+batch reader as other LFS discovery. Historical promised blobs may be fetched;
+publication and mirror inspection retain local-only access. Git's reported
+object name is only a display hint (possibly empty or newline-normalized),
+not a canonical path or complete alias list. Unnamed reachable pointer blobs
+are included. Bulk fetch has no path filtering: explicit include/exclude and
+recent flags conflict with `--all`, and configured include/exclude paths do
+not narrow it. Default/recent fetch and pull retain path-preserving tree scans.
+Malformed/truncated records, missing or corrupt objects, exhausted inventory
+budgets and conflicting pointer sizes fail before LFS payload transfers.
+
+The standalone `crab lfs push --all` still scans tips and needs a separately
+qualified history-selection fix; this fetch change does not certify it.
+
 ### Recent Commit Selection
 
 Recent commit selection resolves each requested revision to one commit before

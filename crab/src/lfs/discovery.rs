@@ -74,6 +74,86 @@ pub(crate) fn is_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+pub(crate) fn collect_all_pointers_for_fetch_in(
+    repo_dir: &Path,
+    refs: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<(String, LfsPointer)>> {
+    check_cancelled(cancel)?;
+    let mut roots = Vec::new();
+    let mut remaining = MAX_CAPTURE_BYTES;
+    for revision in refs {
+        // Resolve one operand before feeding stdin: revision options, ranges
+        // and embedded newlines must not alter the selected graph.
+        let mut resolve = git_command_in(repo_dir, GitObjectAccess::PromisorAllowed);
+        resolve.args(["rev-parse", "--verify", "--end-of-options"]);
+        resolve.arg(format!("{revision}^{{object}}"));
+        let output = process::run(
+            resolve,
+            cancel,
+            None::<fn(ChildStdin) -> Result<()>>,
+            |stdout| Ok(process::capture_output(stdout, 65)?),
+        )?;
+        let bytes = successful_git("rev-parse", output)?;
+        let oid = std::str::from_utf8(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let oid = oid
+            .strip_suffix('\n')
+            .filter(|oid| is_git_object_id(oid))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected one resolved object ID",
+                )
+            })?;
+        spend_scan_budget(&mut remaining, std::mem::size_of::<String>() + oid.len())?;
+        roots.push(oid.to_owned());
+    }
+    let mut command = git_command_in(repo_dir, GitObjectAccess::PromisorAllowed);
+    command.args(["rev-list", "--objects", "--stdin"]);
+    if refs.is_empty() {
+        command.arg("--all");
+    }
+    command.arg("--");
+    let output = process::run(
+        command,
+        cancel,
+        Some(|mut stdin: ChildStdin| -> Result<()> {
+            for root in roots {
+                check_cancelled(cancel)?;
+                writeln!(stdin, "{root}")?;
+            }
+            Ok(())
+        }),
+        |stdout| {
+            let (pointers, ()) = read_pointer_inventory(
+                repo_dir,
+                stdout,
+                b'\n',
+                parse_reachable_object,
+                GitObjectAccess::PromisorAllowed,
+                cancel,
+            )?;
+            Ok(pointers)
+        },
+    )?;
+    successful_git("rev-list", output)
+}
+
+fn parse_reachable_object(record: &[u8], _state: &mut ()) -> Result<Option<(String, String)>> {
+    let line = std::str::from_utf8(record)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let (oid, name) = line.split_once(' ').unwrap_or((line, ""));
+    if !is_git_object_id(oid) {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "invalid reachable object ID").into(),
+        );
+    }
+    // Bulk fetch has no path policy. Git's name is only a display hint, not
+    // a complete alias inventory; unnamed blobs (e.g. tagged blobs) count too.
+    Ok(Some((oid.to_owned(), name.to_owned())))
+}
+
 pub(crate) fn collect_lfs_object_ids_from_range_in(
     repo_dir: &Path,
     local_shas: &[String],
