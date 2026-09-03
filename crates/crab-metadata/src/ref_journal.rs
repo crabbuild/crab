@@ -1186,6 +1186,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn planned_multi_ref_retry_recovers_each_precommit_cut() {
+        for (prepared_count, intent_written) in [(0, false), (1, false), (2, false), (2, true)] {
+            let (store, layout) = fixture();
+            let plan_id = "a".repeat(64);
+            let edits = vec![edit("refs/heads/left", 'a'), edit("refs/heads/right", 'b')];
+            let (transaction, heads) = transaction_for(&store, &layout, edits.clone()).await;
+            let transaction_id = transaction.id().unwrap();
+            store
+                .put_exact(
+                    &layout.ref_journal_transaction_path(&transaction_id),
+                    Bytes::from(serialize(&transaction).unwrap()),
+                )
+                .await
+                .unwrap();
+            for head in heads.iter().take(prepared_count) {
+                prepare_head(&store, &layout, head, &transaction_id)
+                    .await
+                    .unwrap();
+            }
+            if intent_written {
+                crate::plan_receipt::prepare_ref_journal_plan_intent(
+                    &store,
+                    &layout,
+                    &plan_id,
+                    &transaction,
+                )
+                .await
+                .unwrap();
+            }
+            let base = Manifest::default_for_repo("refs/heads/left");
+            assert!(materialize(&store, &layout, &base).await.refs.is_empty());
+
+            let (retry, heads) = transaction_for(&store, &layout, edits).await;
+            commit_ref_transaction_for_plan(&store, &layout, &retry, &heads, &plan_id)
+                .await
+                .unwrap();
+            let snapshot = materialize(&store, &layout, &base).await;
+            let receipt = crate::plan_receipt::resolve_plan_receipt(&store, &layout, &plan_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                (snapshot.refs, snapshot.transactions, receipt.attempt),
+                (
+                    BTreeMap::from([
+                        ("refs/heads/left".to_owned(), "a".repeat(40)),
+                        ("refs/heads/right".to_owned(), "b".repeat(40)),
+                    ]),
+                    vec![transaction_id],
+                    1,
+                ),
+                "prepared={prepared_count}, intent={intent_written}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn planned_multi_ref_marker_recovers_before_promotion_and_terminal_write() {
+        let (store, layout) = fixture();
+        let plan_id = "b".repeat(64);
+        let edits = vec![edit("refs/heads/left", 'a'), edit("refs/heads/right", 'b')];
+        let (transaction, heads) = transaction_for(&store, &layout, edits).await;
+        let transaction_id = transaction.id().unwrap();
+        store
+            .put_exact(
+                &layout.ref_journal_transaction_path(&transaction_id),
+                Bytes::from(serialize(&transaction).unwrap()),
+            )
+            .await
+            .unwrap();
+        for head in &heads {
+            prepare_head(&store, &layout, head, &transaction_id)
+                .await
+                .unwrap();
+        }
+        crate::plan_receipt::prepare_ref_journal_plan_intent(
+            &store,
+            &layout,
+            &plan_id,
+            &transaction,
+        )
+        .await
+        .unwrap();
+        let marker = RefJournalActiveMarker {
+            version: REF_JOURNAL_VERSION,
+            transaction_id: transaction_id.clone(),
+        };
+        store
+            .put_exact(
+                &layout.ref_journal_active_path(&transaction_id),
+                Bytes::from(serialize(&marker).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let receipt = crate::plan_receipt::resolve_plan_receipt(&store, &layout, &plan_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = materialize(
+            &store,
+            &layout,
+            &Manifest::default_for_repo("refs/heads/left"),
+        )
+        .await;
+
+        assert!(matches!(
+            receipt.commit,
+            crate::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id: committed, .. }
+                if committed == transaction_id && snapshot.transactions == [transaction_id]
+                    && snapshot.refs == BTreeMap::from([
+                        ("refs/heads/left".to_owned(), "a".repeat(40)),
+                        ("refs/heads/right".to_owned(), "b".repeat(40)),
+                    ])
+        ));
+    }
+
+    #[tokio::test]
     async fn owned_rollback_restores_an_existing_visible_head() {
         let (store, layout) = fixture();
         let ref_name = "refs/heads/main";

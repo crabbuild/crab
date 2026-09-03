@@ -877,7 +877,9 @@ disappear with the caller. Use this sequence after the compatibility decision:
    bind the canonical ref edits and repository/storage identity through the
    plan. They contain no URL credentials, provider tokens or local paths.
    Multiple attempts are bounded and ordered; an uncommitted attempt does not
-   prevent a later safe retry.
+   prevent a later safe retry. An identical immutable candidate reuses its
+   existing intent; only a different candidate consumes another attempt, so
+   lost terminal writes cannot turn one commit into two apparent results.
 3. The existing active marker remains direct mode's atomic ref visibility
    boundary. A direct transaction is attributable only when its exact identity
    is reachable from current journal heads or retained ancestry after
@@ -4459,6 +4461,42 @@ This is post-repair client proof, not a new first-admission pass.
 Then require fresh first-admission fault/success proof,
 the full 1,000-push replay, provider/OS matrix and controlled baseline before
 closing the corresponding original gates. No gate is closed by this note.
+
+### Terminal receipt retry and fault-point checkpoint: 2026-09-03 UTC
+
+The direct ref-journal and managed manifest authorities now persist immutable
+plan intents and terminal receipts. Apply distinguishes historical commit
+attribution from a fresh current-state inspection; equal refs alone cannot
+claim another writer's result. Exact immutable retries reuse one intent,
+while distinct uncommitted candidates consume the bounded attempt budget.
+This prevents a lost terminal write after an identical retry from appearing
+to be two committed results. The generated `mirror.apply` schema includes the
+commit identity and fresh `current` inspection.
+
+Local deterministic tests cover interruption before head preparation, after
+one/all prepares, after intent, and after the active marker but before head
+promotion or terminal publication. They preserve the old batch before commit,
+recover the exact new batch afterward, and retain one transaction identity.
+The real journal compactor is exercised between lost terminal publication and
+read-back; managed read-back is exercised after a successor manifest. This is
+not yet a process-kill or tagged-client/provider qualification table.
+
+Verification: metadata 299 passed/1 ignored; auth server 83 passed; schema
+drift passed. The full Crab library run completed with 4,054 passed, 13 failed
+and 3 ignored. Its initial multi-ref stack overflow was reproduced alone and
+fixed by heap-pinning the independent initial-publication proof futures; the
+existing multi-ref test then passed on the default stack. Remaining failures
+include the known layout/HEAD/casing/schema fixtures and a concurrent Git
+environment-contamination group. LFS discovery (29), recent selection (15),
+and versioned import (1) pass in isolated reruns; this does not make the full
+suite green. Fixture/inventory corrections still require explicit approval.
+
+Draft PR #148 carries the implementation and these follow-up proofs. The
+pinned Kubernetes replay is independent and still running at this checkpoint.
+Managed-service E2E, tagged v1.0.1 compaction,
+backup/restore inventory, publication/GC lifetime, declared-source recovery,
+host protection and the full platform/provider matrix remain open. No Phase 2
+acceptance criterion is closed by this checkpoint.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

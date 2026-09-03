@@ -140,6 +140,11 @@ async fn prepare_plan_intent(
             .into());
         }
     }
+    // One immutable commit needs one intent even across retries. Duplicate
+    // attempts would both appear committed after a lost terminal write.
+    if let Some(intent) = existing.iter().find(|intent| intent.commit == commit) {
+        return Ok(intent.clone());
+    }
     let attempt = (1..=MAX_PLAN_ATTEMPTS)
         .find(|candidate| !existing.iter().any(|intent| intent.attempt == *candidate))
         .ok_or_else(|| StorageError::StateConflict {
@@ -774,6 +779,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_receipt_recovers_after_journal_compaction() {
+        let (store, router) = fixture("receipt/compaction");
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
+        let base = Manifest::default_for_repo("refs/heads/main");
+        crate::manifest_store::create_manifest(&store, &router, &base)
+            .await
+            .unwrap();
+        let plan_id = "d".repeat(64);
+        let (mut transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        transaction.edits[0].visibility_evidence_hash = None;
+        let committed =
+            commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
+                .await
+                .unwrap();
+        store
+            .delete(&router.ref_journal_plan_receipt_path(&plan_id))
+            .await
+            .unwrap();
+
+        crate::manifest_store::compact_ref_journal(
+            &store,
+            &router,
+            "2026-09-03T00:00:00Z".to_owned(),
+            Some("test".to_owned()),
+            "receipt-compaction".to_owned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let receipt = resolve_plan_receipt(&store, &router, &plan_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(receipt_transaction(&receipt), committed.transaction_id);
+    }
+
+    #[tokio::test]
     async fn uncommitted_intent_allows_one_ordered_retry() {
         let (store, router) = fixture("receipt/retry");
         let plan_id = "3".repeat(64);
@@ -797,7 +842,8 @@ mod tests {
                 .is_none()
         );
 
-        let (retry, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        let (mut retry, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        retry.edits[0].visibility_evidence_hash = Some("b".repeat(64));
         commit_ref_transaction_for_plan(&store, &router, &retry, &heads, &plan_id)
             .await
             .unwrap();
@@ -806,6 +852,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(receipt.attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn identical_retry_reuses_the_uncommitted_intent() {
+        let (store, router) = fixture("receipt/identical-retry");
+        let plan_id = "e".repeat(64);
+        let (transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        let transaction_id = transaction.id().unwrap();
+        store
+            .put_exact(
+                &router.ref_journal_transaction_path(&transaction_id),
+                Bytes::from(serde_json::to_vec(&transaction).unwrap()),
+            )
+            .await
+            .unwrap();
+        let first = prepare_ref_journal_plan_intent(&store, &router, &plan_id, &transaction)
+            .await
+            .unwrap();
+
+        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
+            .await
+            .unwrap();
+        store
+            .delete(&router.ref_journal_plan_receipt_path(&plan_id))
+            .await
+            .unwrap();
+        let receipt = resolve_plan_receipt(&store, &router, &plan_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.attempt, 1);
+        assert_eq!(receipt.attempt, 1);
+        assert_eq!(receipt_transaction(&receipt), transaction_id);
     }
 
     #[tokio::test]
@@ -909,7 +989,21 @@ mod tests {
     async fn exhausted_uncommitted_attempts_fail_as_a_state_conflict() {
         let (store, router) = fixture("receipt/exhausted");
         let plan_id = "8".repeat(64);
-        let (candidate, _) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        for value in ['a', 'b', 'c'] {
+            let (candidate, _) = transaction(&store, &router, "refs/heads/main", value).await;
+            let candidate_id = candidate.id().unwrap();
+            store
+                .put_exact(
+                    &router.ref_journal_transaction_path(&candidate_id),
+                    Bytes::from(serde_json::to_vec(&candidate).unwrap()),
+                )
+                .await
+                .unwrap();
+            prepare_ref_journal_plan_intent(&store, &router, &plan_id, &candidate)
+                .await
+                .unwrap();
+        }
+        let (candidate, _) = transaction(&store, &router, "refs/heads/main", 'd').await;
         let candidate_id = candidate.id().unwrap();
         store
             .put_exact(
@@ -918,11 +1012,6 @@ mod tests {
             )
             .await
             .unwrap();
-        for _ in 0..MAX_PLAN_ATTEMPTS {
-            prepare_ref_journal_plan_intent(&store, &router, &plan_id, &candidate)
-                .await
-                .unwrap();
-        }
 
         let error = prepare_ref_journal_plan_intent(&store, &router, &plan_id, &candidate)
             .await
@@ -937,7 +1026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_manifest_commit_publishes_a_resolvable_receipt() {
+    async fn managed_manifest_retry_reuses_intent_and_recovers_receipt() {
         let (store, router) = fixture("receipt/managed");
         let plan_id = "9".repeat(64);
         let base = Manifest::default_for_repo("refs/heads/main");
@@ -951,8 +1040,25 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
         candidate.seal_git_validation();
+        prepare_plan_intent(
+            &store,
+            &router,
+            &plan_id,
+            MirrorPlanCommit::Manifest {
+                base_generation: base.generation,
+                base_digest: manifest_digest(&base).unwrap(),
+                generation: candidate.generation,
+                digest: manifest_digest(&candidate).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
 
         commit_manifest_for_plan(&store, &router, &candidate, &etag, &plan_id)
+            .await
+            .unwrap();
+        store
+            .delete(&router.ref_journal_plan_receipt_path(&plan_id))
             .await
             .unwrap();
         let receipt = resolve_plan_receipt(&store, &router, &plan_id)
@@ -960,10 +1066,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(matches!(
-            receipt.commit,
-            MirrorPlanCommit::Manifest { generation: 1, .. }
-        ));
+        assert!(
+            receipt.attempt == 1
+                && matches!(
+                    receipt.commit,
+                    MirrorPlanCommit::Manifest { generation: 1, .. }
+                )
+        );
     }
 
     #[tokio::test]

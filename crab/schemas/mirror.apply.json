@@ -1,6 +1,91 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "MirrorCheckSummary": {
+      "description": "Read-only mirror integrity result used by text and structured output.",
+      "properties": {
+        "cache_dir": {
+          "description": "Local bare cache used to pin and inspect source objects.",
+          "type": "string"
+        },
+        "ci_passed": {
+          "description": "Whether the result satisfies the required CI policy.",
+          "type": "boolean"
+        },
+        "destination": {
+          "description": "Crab destination URL.",
+          "type": "string"
+        },
+        "destination_identity": {
+          "description": "Resolved storage target and scope, independent of mutable metadata.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "destination_snapshot": {
+          "description": "Complete Crab metadata snapshot bound to its resolved storage namespace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hook": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorHookStatus"
+            }
+          ],
+          "description": "Local pre-push guard state."
+        },
+        "issues": {
+          "description": "Operator-readable reasons the result is not clean.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pointers": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorPointerStatus"
+            }
+          ],
+          "description": "Source-reachable pointer data proof."
+        },
+        "refs": {
+          "description": "Per-ref snapshot and relationship.",
+          "items": {
+            "$ref": "#/definitions/MirrorRefStatus"
+          },
+          "type": "array"
+        },
+        "source": {
+          "description": "Resolved collaboration source.",
+          "type": "string"
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorDriftState"
+            }
+          ],
+          "description": "Aggregate ref relationship."
+        }
+      },
+      "required": [
+        "cache_dir",
+        "ci_passed",
+        "destination",
+        "hook",
+        "issues",
+        "pointers",
+        "refs",
+        "source",
+        "state"
+      ],
+      "type": "object"
+    },
     "MirrorDriftState": {
       "description": "Aggregate relationship between the collaboration source and Crab refs.",
       "enum": [
@@ -11,6 +96,191 @@
         "unverifiable"
       ],
       "type": "string"
+    },
+    "MirrorHookState": {
+      "description": "Local mirror pre-push hook state.",
+      "enum": [
+        "installed",
+        "missing",
+        "not_applicable",
+        "unverifiable"
+      ],
+      "type": "string"
+    },
+    "MirrorHookStatus": {
+      "description": "Result of inspecting the source working tree's pre-push hook.",
+      "properties": {
+        "detail": {
+          "description": "Explanation for non-installed or non-applicable states.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Resolved hook path when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorHookState"
+            }
+          ],
+          "description": "Classified hook state."
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "MirrorPointerIssue": {
+      "description": "One incomplete or unverifiable Crab pointer dependency.",
+      "properties": {
+        "detail": {
+          "description": "Concrete integrity failure.",
+          "type": "string"
+        },
+        "expected_size": {
+          "description": "Size declared by the source pointer.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "file_hash": {
+          "description": "Pointer file hash, or empty when discovery itself failed.",
+          "type": "string"
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorPointerState"
+            }
+          ],
+          "description": "Pointer dependency state."
+        }
+      },
+      "required": [
+        "detail",
+        "expected_size",
+        "file_hash",
+        "state"
+      ],
+      "type": "object"
+    },
+    "MirrorPointerState": {
+      "description": "Availability state for source-reachable Crab pointer data.",
+      "enum": [
+        "verified",
+        "missing",
+        "corrupt",
+        "unverifiable"
+      ],
+      "type": "string"
+    },
+    "MirrorPointerStatus": {
+      "description": "Aggregate proof for all source-reachable Crab pointer blobs.",
+      "properties": {
+        "discovered": {
+          "description": "Unique pointers discovered from source refs.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "issues": {
+          "description": "Per-pointer or discovery failures.",
+          "items": {
+            "$ref": "#/definitions/MirrorPointerIssue"
+          },
+          "type": "array"
+        },
+        "recipe_digest": {
+          "description": "Identity of the exact verified recipes; absent when coverage is incomplete.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorPointerState"
+            }
+          ],
+          "description": "Aggregate pointer proof state."
+        },
+        "verified": {
+          "description": "Pointers whose recipe and immutable data were fully verified.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "discovered",
+        "issues",
+        "state",
+        "verified"
+      ],
+      "type": "object"
+    },
+    "MirrorRefState": {
+      "description": "Relationship between one source ref and its Crab counterpart.",
+      "enum": [
+        "equal",
+        "source_ahead",
+        "crab_ahead",
+        "diverged",
+        "unverifiable"
+      ],
+      "type": "string"
+    },
+    "MirrorRefStatus": {
+      "description": "Snapshot-bound comparison result for one Git ref.",
+      "properties": {
+        "crab_oid": {
+          "description": "Crab object ID, when the ref exists in Crab.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "Failure detail when ancestry could not be proven.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Full Git ref name.",
+          "type": "string"
+        },
+        "source_oid": {
+          "description": "Source object ID, when the ref exists in the source.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorRefState"
+            }
+          ],
+          "description": "Classified relationship between the two values."
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "type": "object"
     }
   },
   "description": "Terminal result of applying a reconciliation plan.",
@@ -31,6 +301,14 @@
       "description": "Whether the exact plan outcome was already present.",
       "type": "boolean"
     },
+    "current": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MirrorCheckSummary"
+        }
+      ],
+      "description": "Fresh inspection kept separate from the historical terminal result."
+    },
     "destination": {
       "description": "Crab destination URL.",
       "type": "string"
@@ -43,6 +321,13 @@
       ],
       "description": "Verified destination relationship after apply."
     },
+    "manifest_digest": {
+      "description": "Canonical manifest digest that durably attributes a managed plan.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "plan_id": {
       "description": "Applied plan identity.",
       "type": "string"
@@ -50,12 +335,20 @@
     "source": {
       "description": "Resolved collaboration source.",
       "type": "string"
+    },
+    "transaction_id": {
+      "description": "Ref-journal transaction that durably attributes a mutating plan.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [
     "actions_applied",
     "actions_planned",
     "already_applied",
+    "current",
     "destination",
     "final_state",
     "plan_id",

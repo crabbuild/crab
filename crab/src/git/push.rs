@@ -9148,9 +9148,9 @@ impl PushPipeline {
             .as_ref()
             .ok_or_else(|| CrabError::Internal("initial manifest requires a store".to_owned()))?;
 
-        // The candidate indexes and the complete visibility proof are
-        // independent immutable objects. Publish both before the manifest
-        // CAS so the manifest remains the only visibility boundary.
+        // Publish independent proofs before the manifest CAS. Heap-pin their
+        // large futures so multi-ref imports cannot exhaust an async worker's
+        // stack; the manifest remains the sole visibility boundary.
         tokio::try_join!(
             Box::pin(upload_segmented_bulk(store, &self.router, bulk)),
             Box::pin(publish_git_visibility_index_from_git_dir(
