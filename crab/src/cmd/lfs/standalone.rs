@@ -131,12 +131,14 @@ fn write_smudged_file(
     file_name: &str,
 ) -> Result<()> {
     if pointer.extensions.is_empty() {
-        let mut file = std::fs::File::open(path).map_err(CrabError::Io)?;
-        io::copy(&mut file, &mut io::stdout().lock()).map_err(CrabError::Io)?;
-        return Ok(());
+        let mut output = io::stdout().lock();
+        return crate::lfs::cache::stream_verified(path, &pointer.oid, pointer.size, |bytes| {
+            output.write_all(bytes).map_err(CrabError::Io)
+        });
     }
 
     let content = std::fs::read(path).map_err(CrabError::Io)?;
+    crate::lfs::cache::verify_bytes(&pointer.oid, pointer.size, &content)?;
     let content = crate::lfs::extension::smudge_content(pointer, content, file_name)?;
     write_stdout(&content)
 }

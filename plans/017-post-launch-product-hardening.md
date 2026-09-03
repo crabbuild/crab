@@ -5395,6 +5395,87 @@ volumes or retained qualification reports have been deleted or reset.
 The RustFS and Kubernetes acceptance rows above remain unchecked and must be
 rerun under new run IDs once the existing service is healthy.
 
+### Verify emitted LFS cache bytes, 2026-09-03 UTC
+
+**Context / reproduced gap.** Both long-running filter entry points and
+standalone `lfs smudge` validate an LFS cache path, then reopen it for output.
+That earlier hash does not identify bytes read after truncation, replacement
+or in-place mutation. The new filter regression rejects empty, same-size
+changed and oversized cache contents after source selection; it failed before
+the change because a truncated file completed successfully. Current
+`origin/main` has the same validate-then-unverified-output behavior.
+
+Retained release `358499f` (SHA-256
+`f5a1d5e2ed6881faeca143db100a5ce373a7aa30015225b369b8428b1febec7c`)
+reproduces this through real Git checkout. Reports
+`phase2-cache-mutation-baseline-358499f-20260903/report.json` and
+`phase2-cache-mutation-red-recheck-358499f-20260903/report.json` each contain
+34 commands and seven checks. All three healthy 4 MiB checkouts are exact;
+after a forwarding peer truncates the cache during content emission, Git
+incorrectly exits zero with 262,144 bytes for each process-filter route and
+106,496 bytes for standalone smudge. These are correctness failures, not
+performance measurements. The earlier `phase2-cache-mutation-before-358499f-20260903`
+report remains invalid behavioral evidence: stat-clean worktree files skipped
+smudge. The driver now changes worktree size to require checkout conversion.
+
+**Phase A — one emitted-byte verifier.** `lfs::cache::stream_verified` opens
+the actual output source once and checks SHA-256 and declared size over the
+same bounded 64 KiB slices delivered to its sink. Oversized chunks are rejected
+before emission. Success is allowed only after EOF and both identity checks;
+read and sink errors propagate. `SmudgeOutput::LfsFile` carries the pointer
+identity into the existing response owner. A late integrity failure therefore
+ends the content with final `status=error`, not a successful truncated result.
+Standalone smudge uses the same verifier and fails the command. Its extension
+path verifies the actual materialized bytes before transforming them.
+
+**Evidence map / design choice.** `main` and `cmd::lfs::filter_process` reach
+the canonical filter engine; `cmd::lfs` dispatches standalone smudge. The
+cache module owns byte identity; the filter response owner and standalone
+command own their terminal result. Materialized `cache::read_pointer` callers
+(checkout, migrate, merge, convert and extension-bearing process smudge)
+already verify their returned vector, so later cache mutation cannot alter it.
+Batch/fetch `is_valid` callers select transfers, not streamed output. Upload's
+`put_stream_with_size` hashes actual file reads in `stream_file_parts` before
+multipart completion and aborts on mismatch. Operation-owned temporary
+reconstruction/spool files are a separate lifecycle, not shared LFS cache
+entries; this slice does not claim all mutable-file paths are qualified.
+
+Is this the best fix rather than just plausible? Checking the pathname twice
+still leaves a race; buffering every object would discard bounded-memory
+streaming. One verifier supplies both existing output paths with the same
+terminal identity check. Initial cache validation remains because an already
+corrupt cache is a miss eligible for remote repair. This adds one SHA-256 pass
+during output; performance neutrality is **not** claimed. The production
+increase is justified by the shared integrity owner and pointer identity,
+without a new mode, configuration, storage format or compatibility path.
+The [LFS pointer contract](https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md)
+defines object hash and byte size;
+[Git's filter contract](https://git-scm.com/docs/gitattributes#_long_running_filter_process)
+permits final errors after partial output and makes required-filter failures
+fail Git. The driver explicitly sets `required=true`.
+
+**Phase B — executable local acceptance.**
+
+- [x] 50 filter, six cache, six extension, two standalone and 54 clean tests
+      pass (118 total), including mid-read
+      mutation, exact empty/large content, bounded chunks, oversized input,
+      sink-error preservation and existing final-error/session recovery.
+- [ ] Build a committed release and run
+      `python3 crab/scripts/e2e/run_lfs_cache_mutation_smoke.py --crab-bin <release> --root <workspace-qualification-root> --run-id <new-id>`.
+      All three healthy checkouts must produce exact 4 MiB content; all three
+      injected truncations must reach a normal nonzero Git exit. Signals and
+      timeouts are failures, not acceptance. Retain binary/driver hashes,
+      Git version, fixture identity, command logs and unchanged-binary proof.
+- [ ] Re-run the real CLI broken-output probe for both process-filter routes.
+
+**Phase C — remaining release gates.** Once Docker/RustFS is restored, use
+fresh run IDs for cold-LFS, native protocol/mirror and Kubernetes lifecycle
+qualification, followed by full Git/Crab fsck and raw-byte checks. Compare
+controlled baseline/candidate throughput and CPU for healthy streaming before
+claiming no performance regression. Supported Git/OS/provider coverage and
+the original Phase 2 acceptance criteria remain open. Do not erase prior
+failed reports or treat this local cache proof as remote-service evidence.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression

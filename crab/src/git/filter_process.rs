@@ -81,7 +81,11 @@ struct FilterWorktreePaths {
 #[derive(Debug)]
 enum SmudgeOutput {
     Bytes(Bytes),
-    File(PathBuf),
+    LfsFile {
+        path: PathBuf,
+        oid: [u8; 32],
+        size: u64,
+    },
     TemporaryFile(tempfile::TempPath),
 }
 
@@ -1308,7 +1312,11 @@ fn try_stream_lfs_smudge(
     };
     let local_path = crate::lfs::cache::object_path(&lfs_dir, &pointer.oid);
     if crate::lfs::cache::is_valid(&lfs_dir, &pointer.oid, pointer.size)? {
-        return Ok(Some(SmudgeOutput::File(local_path)));
+        return Ok(Some(SmudgeOutput::LfsFile {
+            path: local_path,
+            oid: pointer.oid,
+            size: pointer.size,
+        }));
     }
 
     let Some(store) = lfs_store.resolve() else {
@@ -1333,7 +1341,11 @@ fn try_stream_lfs_smudge(
                 pointer.size,
                 temp,
             )?;
-            Ok(Some(SmudgeOutput::File(installed)))
+            Ok(Some(SmudgeOutput::LfsFile {
+                path: installed,
+                oid: pointer.oid,
+                size: pointer.size,
+            }))
         }
         Err(error) if session.should_skip_lfs_download_errors() => {
             tracing::warn!(
@@ -1876,7 +1888,11 @@ fn write_content<W: Write>(output: &mut W, data: &[u8]) -> Result<()> {
 fn write_smudge_output<W: Write>(output: &mut W, content: &SmudgeOutput) -> Result<()> {
     match content {
         SmudgeOutput::Bytes(data) => write_content(output, data),
-        SmudgeOutput::File(path) => write_content_file(output, path),
+        SmudgeOutput::LfsFile { path, oid, size } => {
+            crate::lfs::cache::stream_verified(path, oid, *size, |bytes| {
+                write_content(output, bytes)
+            })
+        }
         SmudgeOutput::TemporaryFile(path) => write_content_file(output, path),
     }
 }
@@ -2102,7 +2118,7 @@ mod tests {
     fn output_bytes(output: &SmudgeOutput) -> Vec<u8> {
         match output {
             SmudgeOutput::Bytes(bytes) => bytes.to_vec(),
-            SmudgeOutput::File(path) => std::fs::read(path).unwrap(),
+            SmudgeOutput::LfsFile { path, .. } => std::fs::read(path).unwrap(),
             SmudgeOutput::TemporaryFile(path) => std::fs::read(path).unwrap(),
         }
     }
@@ -2431,7 +2447,7 @@ mod tests {
         .expect("valid local LFS object should use the file-backed path");
 
         let path = match &result {
-            SmudgeOutput::File(path) => path,
+            SmudgeOutput::LfsFile { path, .. } => path,
             SmudgeOutput::Bytes(_) => {
                 panic!("local LFS object should not be materialized in memory")
             }
@@ -3116,6 +3132,58 @@ size 1048576\n";
                 .await;
                 assert!(result.is_err() && attempts.load(Ordering::SeqCst) == 1);
             }
+        }
+    }
+
+    #[test]
+    fn lfs_stream_rejects_cache_changes_after_validation() {
+        use sha2::{Digest, Sha256};
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_dir = repo.path().join(".git");
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let body = b"verified LFS content";
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: Sha256::digest(body).into(),
+            size: body.len() as u64,
+            extensions: Vec::new(),
+        };
+        let lfs_dir = git_dir.join("lfs");
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        for changed in [Vec::new(), vec![0; body.len()], vec![0; body.len() + 1]] {
+            let path = crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, body)
+                .unwrap();
+            let source = try_stream_lfs_smudge(
+                &pointer.serialize(),
+                "model.bin",
+                &LfsStoreSource::eager(None),
+                &session,
+                false,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            std::fs::write(path, &changed).unwrap();
+            let mut bytes = Vec::new();
+            let result = FilterResponse::new(&mut bytes)
+                .content_response(|output| write_smudge_output(output, &source));
+            assert!(
+                matches!(result, Err(CrabError::LfsObjectCorrupt { .. })),
+                "changed {}-byte cache must not complete successfully",
+                changed.len()
+            );
         }
     }
 
