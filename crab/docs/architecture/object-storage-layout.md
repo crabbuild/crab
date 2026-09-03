@@ -7,6 +7,11 @@ may define additional paths, but they must not redefine the keys below.
 
 The terms **MUST**, **MUST NOT**, **SHALL**, and **MAY** are normative.
 
+The [Repository Object Store Key Layout proposal](../design/object-store-key-layout.md)
+catalogs current implementation details, discrepancies, lifecycle contracts,
+and decisions needed to reconcile and finalize this reference. It is a draft
+for review, not a replacement normative contract.
+
 ## Scope roots
 
 Every repository placement has two independent object-key prefixes:
