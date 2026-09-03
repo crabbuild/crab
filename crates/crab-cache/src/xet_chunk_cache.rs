@@ -46,27 +46,14 @@ impl CrabRangeCache {
         self.root.join(&encoded[..2]).join(encoded)
     }
 
-    async fn remove_bad_entry(&self, path: &Path, error: impl std::fmt::Display) {
-        warn!(
-            family = "decoded-range",
-            operation = "read",
-            path = %path.display(),
-            recovery = "evict-and-use-origin",
-            %error,
-            "local cache read failed"
-        );
-        let _ = crate::catalog::remove_file(self.catalog.root(), path).await;
-    }
-
     async fn read_entry(
         &self,
         path: &Path,
-        item_start: u32,
-        item_end: u32,
-        expected_len: u64,
-        expected_crc: u32,
+        item: (u32, u32, u64, u32),
+        key: &Key,
         requested: &ChunkRange,
     ) -> std::result::Result<CacheRange, ChunkCacheError> {
+        let (item_start, item_end, expected_len, _) = item;
         if item_start >= item_end
             || requested.start < item_start
             || requested.end > item_end
@@ -74,9 +61,74 @@ impl CrabRangeCache {
         {
             return Err(ChunkCacheError::InvalidArguments);
         }
-        let file = crate::private_fs::open_read(self.catalog.root(), path)
+        let display_root = self.catalog.root().to_owned();
+        let relative = path
+            .strip_prefix(&display_root)
+            .map_err(std::io::Error::other)?
+            .to_owned();
+        let read_root = display_root.clone();
+        let read_relative = relative.clone();
+        let (root, original) =
+            crate::private_fs::run_blocking(&CancellationToken::new(), move |_| {
+                let root = PinnedRoot::open(&read_root)?;
+                let file = root.open_read(&read_relative)?;
+                Ok((root, file))
+            })
             .await
-            .map_err(ChunkCacheError::general)?;
+            .map_err(std::io::Error::other)?;
+        // The duplicate is the only reader of the shared cursor. Retain the
+        // original descriptor and root until validation and repair finish;
+        // a later pathname lookup cannot identify the failed read's entry.
+        let file = tokio::fs::File::from_std(original.try_clone()?);
+        let result = Self::read_open_entry(file, item, requested)
+            .await
+            .and_then(|hit| {
+                // Xorb keys name the encoded object, not these decoded bytes.
+                // Only the chunk namespace supplies a decoded content hash;
+                // CRC consistency alone cannot establish that identity.
+                if key.prefix == CHUNK_HASH_PREFIX
+                    && blake3::hash(&hit.data).as_bytes() != key.hash.as_bytes()
+                {
+                    return Err(ChunkCacheError::Parse(
+                        "decoded chunk identity mismatch".into(),
+                    ));
+                }
+                Ok(hit)
+            });
+        if result.is_err() {
+            let repair = Self::discard_read(root, display_root, relative, original).await;
+            if let Err(error) = repair {
+                warn!(family = "decoded-range", operation = "evict", path = %path.display(),
+                    recovery = "bypass-cache", %error, "local cache repair failed");
+            }
+        }
+        result
+    }
+
+    async fn discard_read(
+        root: PinnedRoot,
+        display_root: PathBuf,
+        relative: PathBuf,
+        original: fs::File,
+    ) -> Result<()> {
+        crate::private_fs::run_blocking(&CancellationToken::new(), move |cancel| {
+            let mut removal =
+                crate::catalog::PayloadRemoval::open(Some(&root), &display_root, false)?;
+            removal.remove(&relative, || {
+                check_cancelled(cancel)?;
+                root.remove_read_file(&relative, &original)
+            })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn read_open_entry(
+        file: tokio::fs::File,
+        item: (u32, u32, u64, u32),
+        requested: &ChunkRange,
+    ) -> std::result::Result<CacheRange, ChunkCacheError> {
+        let (item_start, item_end, expected_len, expected_crc) = item;
         let metadata = file.metadata().await?;
         if metadata.len() != expected_len {
             return Err(ChunkCacheError::Parse(
@@ -183,22 +235,18 @@ impl ChunkCache for CrabRangeCache {
                 continue;
             }
             let path = key_directory.join(name);
-            match self.read_entry(&path, start, end, len, crc, range).await {
+            match self
+                .read_entry(&path, (start, end, len, crc), key, range)
+                .await
+            {
                 Ok(hit) => {
-                    // This tagged namespace carries a chunk hash, unlike xorb
-                    // range keys. CRC proves record consistency, not identity;
-                    // discard a wrong chunk here so later fills can repair it.
-                    if key.prefix == CHUNK_HASH_PREFIX
-                        && blake3::hash(&hit.data).as_bytes() != key.hash.as_bytes()
-                    {
-                        self.remove_bad_entry(&path, "decoded chunk identity mismatch")
-                            .await;
-                        continue;
-                    }
                     crate::private_fs::touch(self.catalog.root(), &path).await;
                     return Ok(Some(hit));
                 }
-                Err(error) => self.remove_bad_entry(&path, error).await,
+                Err(error) => {
+                    warn!(family = "decoded-range", operation = "read", path = %path.display(),
+                        recovery = "use-origin", %error, "local cache read failed");
+                }
             }
         }
         Ok(None)
@@ -770,6 +818,9 @@ mod tests {
 
     #[cfg(unix)]
     mod maintenance;
+
+    #[cfg(unix)]
+    mod read_repair;
 
     fn test_key() -> Key {
         Key {

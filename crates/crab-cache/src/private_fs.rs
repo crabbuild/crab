@@ -152,6 +152,20 @@ impl PinnedRoot {
         self.0.remove_relative(relative)
     }
 
+    #[cfg(feature = "xet-chunk-cache")]
+    pub(crate) fn open_read(&self, relative: &Path) -> Result<std::fs::File> {
+        self.0.open_read(relative)
+    }
+
+    #[cfg(feature = "xet-chunk-cache")]
+    pub(crate) fn remove_read_file(
+        &self,
+        relative: &Path,
+        original: &std::fs::File,
+    ) -> Result<Option<u64>> {
+        self.0.remove_read_file(relative, original)
+    }
+
     pub(crate) fn open_lock(&self, relative: &Path) -> Result<std::fs::File> {
         self.0.open_lock(relative)
     }
@@ -235,6 +249,7 @@ pub(crate) async fn entry_names(
 }
 
 /// Open and lease the same file descriptor that the reader will consume.
+#[cfg(any(feature = "local-cache", test))]
 pub(crate) async fn open_read(root: &Path, path: &Path) -> Result<tokio::fs::File> {
     let root = root.to_owned();
     let path = path.to_owned();
@@ -483,6 +498,7 @@ mod platform {
             Ok(Self { file, path })
         }
 
+        #[cfg(test)]
         fn parent(root: &Path, path: &Path, create: bool) -> Result<(Self, CString)> {
             let relative = path
                 .strip_prefix(root)
@@ -520,6 +536,38 @@ mod platform {
         pub(super) fn remove_relative(&self, relative: &Path) -> Result<u64> {
             let (directory, name) = self.descendant_parent(relative, false)?;
             directory.remove_payload(&name, false)
+        }
+
+        pub(super) fn open_read(&self, relative: &Path) -> Result<File> {
+            let (directory, name) = self.descendant_parent(relative, false)?;
+            let path = self.path.join(relative);
+            let file = directory.open_component(&name, libc::O_RDONLY, &path)?;
+            validate_metadata(&file.metadata()?, &path, false)?;
+            if !FileExt::try_lock_shared(&file)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "cache entry is being maintained",
+                )
+                .into());
+            }
+            Ok(file)
+        }
+
+        #[cfg(feature = "xet-chunk-cache")]
+        pub(super) fn remove_read_file(
+            &self,
+            relative: &Path,
+            original: &File,
+        ) -> Result<Option<u64>> {
+            // Release our finished read lease, but retain its descriptor so
+            // the inode cannot be reused. Compare under the candidate's
+            // exclusive lease and parent lock before authorizing unlink.
+            FileExt::unlock(original)?;
+            let original = original.metadata()?;
+            self.remove_relative_if(relative, false, &mut |candidate| {
+                let candidate = candidate.metadata()?;
+                Ok(original.dev() == candidate.dev() && original.ino() == candidate.ino())
+            })
         }
 
         pub(super) fn remove_relative_if(
@@ -676,17 +724,10 @@ mod platform {
     }
 
     pub(super) fn open_read(root: &Path, path: &Path) -> Result<File> {
-        let (directory, name) = Directory::parent(root, path, false)?;
-        let file = directory.open_component(&name, libc::O_RDONLY, path)?;
-        validate_metadata(&file.metadata()?, path, false)?;
-        if !FileExt::try_lock_shared(&file)? {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "cache entry is being maintained",
-            )
-            .into());
-        }
-        Ok(file)
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| unsafe_path(path, "entry is outside cache root"))?;
+        Directory::root(root, false)?.open_read(relative)
     }
 
     pub(super) fn check_directory(path: &Path, create: bool) -> Result<()> {
@@ -1139,6 +1180,18 @@ mod platform {
     impl Directory {
         pub(super) fn root(path: &Path, _create: bool) -> Result<Self> {
             Err(unsupported(path))
+        }
+        #[cfg(feature = "xet-chunk-cache")]
+        pub(super) fn open_read(&self, relative: &Path) -> Result<File> {
+            Err(unsupported(relative))
+        }
+        #[cfg(feature = "xet-chunk-cache")]
+        pub(super) fn remove_read_file(
+            &self,
+            relative: &Path,
+            _original: &File,
+        ) -> Result<Option<u64>> {
+            Err(unsupported(relative))
         }
         #[cfg(feature = "xet-chunk-cache")]
         pub(super) fn root_with_private_parent(path: &Path) -> Result<(Self, Option<Self>)> {

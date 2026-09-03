@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "local-cache")]
 pub(crate) async fn remove_file(root: &Path, path: &Path) -> Result<()> {
     let relative = PathBuf::from(relative_path(root, path)?);
     let display_root = root.to_owned();

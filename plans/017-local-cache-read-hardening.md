@@ -1460,6 +1460,59 @@ the distinction between passing boundary tests and open end-to-end acceptance.
 **STOP if** an error cannot be attributed to cache versus origin, or if repair
 would require deleting authoritative staging/user data.
 
+### Decoded-range read/repair identity execution slice
+
+**Context and evidence map.** At `bc0fe3b`, `CrabRangeCache::get` calls
+`read_entry`, which drops its descriptor before the caller invokes
+`remove_bad_entry(path)`. That callback resolves the path again through
+`catalog::remove_file`; a completed replacement can therefore be removed for
+the old reader's error. Catalog transactions serialize the deletion itself,
+but cannot identify which file failed earlier. `LocalCache` bounded/object/xorb
+reads and `CachingStore::xorb_read_failed` contain sibling pathname invalidation
+paths and remain explicit follow-up work. Maintenance verification already
+checks the same descriptor under an exclusive lease and directory lock.
+Current `origin/main` uses upstream `DiskCache`; this is a race in the branch's
+replacement range implementation, not an established main regression.
+
+**Design and acceptance.** Keep the opened private root and original file
+descriptor until range parsing, CRC, and namespace-specific chunk identity
+validation finish. The async reader uses one duplicate of that description.
+Once that reader finishes, release only its shared lease and compare retained
+device/inode identity against the candidate under the existing parent mutation
+lock and exclusive payload lease. Retaining the original descriptor prevents
+inode reuse during this comparison. Apply the existing catalog transaction to
+that conditional deletion, rolling back the row when a replacement is retained.
+Do not turn a failed open or request-bound rejection into pathname deletion.
+Other active readers must still exclude removal. Exercise real publication
+between failure and cleanup, root replacement, and removal of the original
+corrupt file; repeat installed corruption recovery and warm/offline reuse.
+
+**Implementation checkpoint, 2026-09-03.** The range reader and repair now share
+this lifetime. The old unconditional range `remove_bad_entry` path is deleted;
+private reads share one descriptor-opening primitive. The added production code
+owns the root/descriptor handoff and conditional repair, not a second parser or
+body buffer. Three deterministic regressions split validation from cleanup,
+publish through the real range writer, and prove replacement bytes/rows survive,
+including a root swap. Independent live readers survive and original corrupt
+entries retire their rows. Existing checksum, chunk-identity, bounds, and
+maintenance tests are unchanged. The dependency contracts inspected are
+`fs4` 0.13.1's shared/exclusive advisory locks, Rust Unix device/inode metadata,
+and `xet-client` 1.6.0's decoded range/offset contract. New private-open errors
+retain their typed source through the upstream I/O variant rather than its
+stringifying `general` constructor.
+
+All 268 all-feature tests and the 28 range-only tests passed. A local-only
+private-filesystem run passed 39/40: the existing native/OFD interoperability
+test returned `DatabaseBusy` at its native `BEGIN IMMEDIATE` after dropping a
+raw reservation descriptor. Its isolated rerun and the unchanged 40-test
+parallel repeat passed. This test's raw/native locking path does not call the
+changed payload
+reader, but intermittent lock behavior is not considered resolved or waived.
+Installed requalification is pending. Remaining work includes object/xorb and
+manifest sibling readers, LRU touch identity, complete cancellation/resource
+qualification, catalog generation changes during a read, and external in-place
+mutations; this slice does not establish full Phase 2 acceptance.
+
 ## Phase 3: Enforce one cache budget and lifecycle
 
 **Context**
