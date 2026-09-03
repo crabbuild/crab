@@ -3079,6 +3079,80 @@ The existing CLI warming test, protected inventories/APIs, native/provider,
 resource, and shared-bucket cleanup gates remain open. No additional phase is
 accepted by this checkpoint.
 
+### Read-only stats checkpoint, 2026-09-03
+
+`origin/main` and tag `v1.1.0` both route `cache stats` through the writable
+range-cache constructor, return before showing objects when construction fails,
+and omit object-cache chunk bytes. The installed availability binary reproduces
+missing-root creation in isolated run `cache-f410.E7nt8I/cache-stats.8Awuxx`.
+
+This slice moves command policy out of `main.rs` into `cmd/cache.rs` and deletes
+the old implementation/formatter. Both `cache stats` and `optimize cache stats`
+use it. Configuration errors now fail; range and object scan errors are shown
+independently, followed by a nonzero exit. Chunk payload bytes join the object
+total. Scans are cancellable and do not initialize or repair caches/databases.
+
+A new shared `xet_chunk_cache_stats_in_root` pins the product root before
+scanning `chunks`. The existing standalone range-directory API treats its
+parent as ambient, so using that API directly would follow an aliased product
+root. The new entry point owns that distinct boundary without changing the
+standalone API's tagged contract. It reuses the canonical range-layout
+classifier and pinned streaming traversal; there is no second range format,
+database connection, configuration option, or dependency change.
+
+Proof for this slice:
+
+- **25** focused decoded-range tests pass with only `xet-chunk-cache` enabled;
+  strict all-target Clippy for that feature and minimal-feature check pass.
+  The new product-root test initially exposed a missing top-level `chunks`
+  traversal case; the scanner was fixed and the unchanged test now passes.
+- **11** actual maintenance/cleanup command tests and **4** command-policy
+  unit tests pass. Both stats spellings cover missing roots/directories,
+  payload counts, malformed config, unsafe range/object groups, and root
+  aliases. Snapshots compare contents, identity, mode, length and mtime;
+  read-induced access-time changes are intentionally excluded.
+- Installed via `make install`, isolated prefix and per-worktree external
+  target: `e103bcb-cache-stats-dirty`, built 2026-09-03 13:02:37 UTC; CLI SHA-256
+  `5ba57edc0f5d63b6e744a63c0b21effbe655f2ee84c42a630e5d6868cbc58bf9`.
+  Diff of `cmd/cache.rs`, `main.rs`, and shared `xet_chunk_cache.rs` against
+  `e103bcb`: SHA-256
+  `b05fb9d3e717247700e8151c0e935b52495bf0a27b65bb19e63b71240a13b21b`.
+  `installed-stats-v1/report.json` retains **14 checks / 14 commands**, including
+  expected negative controls against the preceding availability binary:
+  missing-root creation and omitted chunk bytes. Candidate checks pass.
+- Fresh dedicated bucket `crabbuild-cache-stats-8awuxx-v1`, run
+  `stats-smoke-v1`: **1,192 checks / 89 commands pass** with the committed
+  maintained harness snapshot recorded above and the prior installed server.
+  Add/commit/push/dedup/clone/hydrate/recovery stay byte-correct. The three
+  cold/warm/restart stages retain 15 service hits, zero service fetches/payload
+  origin GETs, and 19 metadata/control GETs. Packaged audit and installed Rust
+  release-verify (**275 checks**, plus summary) pass. No shared-bucket cleanup.
+- `real-stats-report.json` retains six additional installed commands against
+  those real hydrated caches. Each reports one 524,336-byte decoded range and
+  1,222 object bytes, matching recognized filesystem payloads; cache contents
+  and the compared metadata remain unchanged. This does not count SQLite or
+  other retained bytes as payloads and is not a full allocation reconciliation.
+- Format/whitespace and docs content audit pass. The existing built-site link
+  check passes (398 pages / 4,292 fragments); it is not a fresh site-build claim.
+
+Broader CLI Clippy remains **red**: eight diagnostics stop it in
+`crates/crab-vfs/src/nfs.rs` (unused async trait implementations and
+`map_or_identity`) and coordinator teardown (`drain_collect`). NFS is identical
+to current main; the coordinator's changed hunks are elsewhere. These are not
+new stats diagnostics, but CLI-wide lint proof is not complete and no lint is
+suppressed or waived. Net runtime growth adds the root-owned inspection
+boundary while deleting the old command/formatter; it does not duplicate
+reconstruction or payload-maintenance policy.
+
+This is **partial Phase 5 scaffolding**, not phase acceptance. Totals count
+recognized payload lengths, not physical allocation. Manifests are counted but
+their bytes, SQLite/side files, bloom/hints, temporaries, and retained state are
+excluded. Independent errors currently separate ranges from the whole object
+group, not each object family. Versioned JSON, non-mutating live-WAL/catalog
+inspection, full accounting, and doctor/verify health remain open. Doctor still
+uses its separate recursive size estimate and does not establish cache health.
+No claim of bounded wall-clock scans, Windows support, or integrity verification.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
@@ -3166,8 +3240,9 @@ contract. Do not ship a warning-only shared cache containing private bytes.
 
 **Context**
 
-Current stats and verify commands see only part of the root. Opening stats can
-initialize the Xet cache. Local xorb-placement rows are written but unused,
+Current stats and verify commands see only part of the root. Stats now uses
+read-only filesystem scans, with range/object-group errors isolated, but lacks
+full-family accounting, per-object-family errors, and JSON. Local xorb-placement rows are written but unused,
 while the live remote proof index shares their database. Shard hints use a
 global JSON read-modify-write that loses updates across processes.
 

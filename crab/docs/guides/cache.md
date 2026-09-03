@@ -37,11 +37,18 @@ service cache data after a successful push cannot affect clone or hydrate.
 
 ### crab cache stats
 
-Print cache statistics: total size, number of objects, and cache directory path.
-The xet-core range-cache walk streams filesystem entries on one blocking worker
-instead of retaining the complete inventory or blocking the async runtime. The
-command currently opens the xet cache first and omits SQLite indexes, hints,
-bloom bytes, and LocalCache chunk bytes from its displayed object total.
+Print recognized payload sizes, object counts, the shared budget, and cache
+paths. Decoded-range and object scans stream entries on blocking workers and
+honor cancellation. Missing roots remain missing; inspection never opens a
+cache database or initializes the writable range cache. A failed group does
+not hide the other group's report, but makes the command fail. Invalid
+configuration fails without substituting defaults.
+
+The object total includes chunk, shard, xorb, and stage payload bytes. Manifest
+counts are shown, but manifest bytes, SQLite/index/hint files, bloom bytes,
+temporaries, and retained state are not part of either byte total. This is not
+full disk accounting or a content-integrity check. Per-object-family error
+isolation and a versioned JSON report remain Plan 017 work.
 
 ```bash
 crab cache stats

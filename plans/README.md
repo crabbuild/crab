@@ -393,6 +393,12 @@ warming test's outage expectation remains red pending approval; no assertion
 was weakened. See Plan 017 for exact artifact/source identities and limits.
 This is not phase acceptance or release proof.
 
+The next Phase 5 slice makes both stats entry points read-only: missing roots
+stay missing, the product root is pinned before range inspection, chunk bytes
+are counted, and range/object-group failures leave the other report visible
+while returning nonzero. Full disk accounting, individual-family errors,
+versioned JSON, non-mutating catalog inspection, and doctor health remain open.
+
 ### Release gates
 
 - One reusable hydrator/store client serves fetch, explicit hydrate, smudge,

@@ -37,10 +37,24 @@ payload I/O independently rejects symlinked or non-private roots.
 
 ### stats
 
-Show the configured size limit, resident bytes, and entry count for the xet
-range cache, plus a size and object-count breakdown for Crab's local object
-cache. Range-cache entries are streamed on a blocking worker, so a large cache
-does not retain its complete file inventory or block the async runtime.
+Show the configured shared cache budget, payload bytes, and entry count for
+decoded ranges, plus chunk, shard, xorb, stage, and manifest counts for the
+object cache. Chunk payload bytes are included in the object total. These are
+recognized payload lengths, not total disk allocation: manifest bytes,
+databases and side files, temporaries, and retained state are excluded.
+
+Inspection leaves missing cache roots and range directories missing. It does
+not open a cache database, initialize the writable range cache, verify content,
+or repair unsafe files. Both groups are inspected independently: a range-scan
+failure does not hide the object report, and vice versa. An unavailable group
+is reported and the command exits unsuccessfully; invalid configuration also
+fails instead of substituting defaults. Independence between individual object
+families and full disk accounting remain hardening work.
+
+Both scans stream recognized entries on blocking workers and honor command
+cancellation, without retaining the complete file inventory. The same behavior
+applies to `crab optimize cache stats`. Stats currently emits human-readable
+text; a versioned JSON report remains planned.
 
 ```bash
 crab cache stats

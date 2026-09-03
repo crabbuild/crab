@@ -73,10 +73,14 @@ are no longer supported.
 crab cache stats
 ```
 
-Shows the xet range-cache limit and usage plus Crab object-cache counts and
-bytes. The current command opens the xet cache before scanning it and does not
-include every SQLite/index/hint file in its total. It does not repair or delete
-entries.
+Shows the shared budget, decoded-range usage, and object-cache counts and
+payload bytes, including chunk payloads. Inspection leaves missing roots
+missing and does not open cache databases, initialize the writable range
+cache, or repair entries. A failed range or object scan is reported without
+hiding the other group's results, and causes an unsuccessful exit. These are
+not full disk-usage totals: manifest bytes, databases, hints, bloom files,
+temporaries, and retained state are excluded. See
+[`crab cache stats`](/docs/cli/reference/crab-cache#stats) for the exact scope.
 
 ## Cleaning the Cache
 

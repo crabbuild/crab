@@ -209,11 +209,17 @@ lifecycle.
 
 ### `crab cache stats`
 
-Reports the decoded-range directory, limit, entry count, and bytes, then shard,
-xorb, stage, and manifest object-cache counts. It currently opens/initializes
-the xet cache before scanning. If that open fails, object-cache stats are not
-shown. SQLite indexes, hints, bloom bytes, and object-cache chunk bytes are not
-included in the displayed object total. No persistent hit rate is reported.
+Reports the decoded-range directory, shared budget, entry count, and payload
+bytes, then chunk, shard, xorb, stage, and manifest object-cache counts. The
+command uses read-only, cancellable filesystem scans: no writable range handle
+or database opens, and no missing-root creation. Range/object group errors
+are independent and cause a nonzero exit after available results are shown.
+Malformed configuration fails without substituting defaults.
+
+Chunk payload bytes now contribute to the object total. Manifest bytes, SQLite
+indexes and side files, hints, bloom bytes, temporaries, and retained state are
+excluded. This is not full disk allocation, content verification, or
+per-object-family health. No persistent hit rate or JSON report is emitted yet.
 
 ### `crab cache verify`
 

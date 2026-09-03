@@ -1,4 +1,4 @@
-//! Local cache cleanup and verification command policy.
+//! Local cache inspection, cleanup, and verification command policy.
 //!
 //! Only recognized private payloads are removed. Unknown state, databases,
 //! retained profiles, and live workspace trees retain their owner's lifecycle.
@@ -17,6 +17,74 @@ pub struct CacheVerifySummary {
     pub objects_checked: u64,
     pub objects_valid: u64,
     pub objects_corrupt: u64,
+}
+
+/// Inspect decoded ranges and object payloads without creating or repairing cache state.
+pub async fn run_cache_stats(cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    let config = Config::resolve_local()?;
+    let root = crate::cache::default_cache_root();
+    let range_directory = config.effective_chunk_cache_dir();
+    let ranges = crab_cache::xet_chunk_cache::xet_chunk_cache_stats_in_root(&root, cancel).await;
+    check_cancelled(cancel)?;
+    let cache = crate::cache::LocalCache::new(root);
+    let objects = tokio::select! {
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = cache.stats() => result,
+    };
+    check_cancelled(cancel)?;
+
+    // Inspect both groups before propagating an error: a broken range entry
+    // must not hide healthy object totals, or vice versa. Neither scan opens
+    // a database; SQLite read-only opens can still write WAL side files.
+    println!("Chunk cache:");
+    println!("  directory:   {}", range_directory.display());
+    println!(
+        "  size_limit:  {} ({} bytes; shared cache budget)",
+        format_bytes(config.cache.max_bytes),
+        config.cache.max_bytes,
+    );
+    match &ranges {
+        Ok(stats) => {
+            println!("  entries:     {}", stats.entries);
+            println!(
+                "  used_bytes:  {} ({} bytes)",
+                format_bytes(stats.total_bytes),
+                stats.total_bytes,
+            );
+        }
+        Err(error) => println!("  unavailable: {error}"),
+    }
+
+    println!();
+    println!("Object cache:");
+    println!("  directory:   {}", cache.root().display());
+    match &objects {
+        Ok(stats) => {
+            let families = [
+                ("chunks", stats.chunk_count, stats.chunk_bytes),
+                ("shards", stats.shard_count, stats.shard_bytes),
+                ("xorbs", stats.xorb_count, stats.xorb_bytes),
+                ("stages", stats.stage_count, stats.stage_bytes),
+            ];
+            let bytes = families.iter().try_fold(0_u64, |total, (_, _, bytes)| {
+                total
+                    .checked_add(*bytes)
+                    .ok_or_else(|| CrabError::Internal("cache payload byte total overflow".into()))
+            })?;
+            println!("  used_bytes:  {} ({bytes} bytes)", format_bytes(bytes));
+            for (family, count, bytes) in families {
+                println!("  {family:8} {count} entries, {}", format_bytes(bytes));
+            }
+            println!("  manifests:   {} entries", stats.manifest_count);
+        }
+        Err(error) => println!("  unavailable: {error}"),
+    }
+    println!();
+    println!("Payload bytes only; excludes manifests, databases, temporary and retained state.");
+    ranges?;
+    objects?;
+    Ok(())
 }
 
 /// Remove eligible payloads through the shared ownership-aware cleanup boundary.
@@ -170,6 +238,16 @@ mod tests {
         let error = validate_destructive_cache_root(&cwd).unwrap_err();
 
         assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[tokio::test]
+    async fn stats_honors_cancellation_before_inspection() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            run_cache_stats(&cancel).await,
+            Err(CrabError::Cancelled)
+        ));
     }
 
     #[cfg(unix)]

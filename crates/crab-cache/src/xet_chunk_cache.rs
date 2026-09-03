@@ -441,6 +441,46 @@ pub async fn xet_chunk_cache_stats_with_cancel(
     .await
 }
 
+/// Inspect decoded ranges beneath a pinned product cache root without creating state.
+///
+/// Unlike a standalone range-directory scan, this rejects an unsafe product
+/// root and keeps its identity pinned while traversing the `chunks` family.
+pub async fn xet_chunk_cache_stats_in_root(
+    root: &Path,
+    cancel: &CancellationToken,
+) -> Result<XetChunkCacheStats> {
+    with_pinned_root(root, cancel, |root, cancel| {
+        let mut stats = XetChunkCacheStats::default();
+        let kind = |relative: &Path| {
+            if relative == Path::new("chunks") {
+                return crate::clean::EntryKind::Directory;
+            }
+            relative
+                .iter()
+                .map(|part| part.to_str())
+                .collect::<Option<Vec<_>>>()
+                .map_or(crate::clean::EntryKind::Retain, |parts| {
+                    crate::clean::range_entry_kind(&parts)
+                })
+        };
+        root.visit_selected_files(
+            &|relative| {
+                check_cancelled(cancel)?;
+                Ok(!matches!(kind(relative), crate::clean::EntryKind::Retain))
+            },
+            &mut |relative, metadata| {
+                if matches!(kind(relative), crate::clean::EntryKind::Payload) {
+                    stats.entries = stats.entries.saturating_add(1);
+                    stats.total_bytes = stats.total_bytes.saturating_add(metadata.size);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(stats)
+    })
+    .await
+}
+
 /// Evict eligible oldest range files toward `max_bytes`, skipping busy entries.
 pub async fn prune_xet_chunk_cache(
     directory: &Path,
@@ -1027,6 +1067,48 @@ mod tests {
         assert_eq!(stats.entries, 0);
         assert_eq!(stats.total_bytes, 0);
         assert!(!cache_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn product_root_stats_count_only_recognized_range_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let ranges = root.join("chunks");
+        write_xet_range(&ranges, b"12345").await;
+        for name in ["chunks/ab", "notes", ".catalog.sqlite"] {
+            crate::private_fs::atomic_write(&root, &root.join(name), b"retained")
+                .await
+                .unwrap();
+        }
+        let stats = xet_chunk_cache_stats_in_root(&root, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            stats,
+            XetChunkCacheStats {
+                entries: 1,
+                total_bytes: 17
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn product_root_stats_preserve_missing_paths_and_honor_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("missing");
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            xet_chunk_cache_stats_in_root(&root, &cancel).await.unwrap(),
+            XetChunkCacheStats::default()
+        );
+        cancel.cancel();
+        assert!(matches!(
+            xet_chunk_cache_stats_in_root(&root, &cancel).await,
+            Err(CacheError::Cancelled)
+        ));
+        assert!(!root.exists());
     }
 
     #[tokio::test]

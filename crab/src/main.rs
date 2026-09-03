@@ -5696,7 +5696,7 @@ async fn run_metadb_command(
 async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<ExitCode> {
     let _span = tracing::info_span!("cache").entered();
     match sub {
-        CacheCmd::Stats => run_cache_stats().await?,
+        CacheCmd::Stats => crab::cmd::cache::run_cache_stats(cancel).await?,
         CacheCmd::Verify => {
             let mode = OutputMode::from_flags(false, false);
             crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
@@ -6006,91 +6006,6 @@ async fn build_filter_process_remote_smudge(
     }
 }
 
-/// Format a byte count with a human-readable unit suffix. Used by the
-/// hydrate and `cache stats` chunk-cache summaries so the two outputs
-/// agree on formatting.
-fn format_bytes_size(bytes: u64) -> String {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "cache sizes fit in f64 without meaningful precision loss"
-    )]
-    let b = bytes as f64;
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut idx = 0;
-    let mut scaled = b;
-    while scaled >= 1024.0 && idx < UNITS.len() - 1 {
-        scaled /= 1024.0;
-        idx += 1;
-    }
-    if idx == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{scaled:.1} {unit}", unit = UNITS[idx])
-    }
-}
-
-/// Implementation of `crab cache stats`. Reports both cache families:
-/// xet-core's range cache for reconstruction reads, and Crab's object
-/// cache for shards, xorbs, manifests, and stages.
-async fn run_cache_stats() -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load config for cache stats, using defaults");
-        Config::default()
-    });
-
-    let handle = match crab::cache::xet_chunk_cache_from_config(&config) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("chunk cache unavailable: {e}");
-            return Ok(());
-        }
-    };
-
-    let stats = handle.stats().await?;
-    println!("Chunk cache:");
-    println!("  directory:   {}", handle.directory.display());
-    println!(
-        "  size_limit:  {} ({} bytes)",
-        format_bytes_size(handle.size_bytes),
-        handle.size_bytes,
-    );
-    println!("  entries:     {}", stats.entries);
-    println!(
-        "  used_bytes:  {} ({} bytes)",
-        format_bytes_size(stats.total_bytes),
-        stats.total_bytes,
-    );
-
-    let object_cache = crab::cache::LocalCache::new(crab::cache::default_cache_root());
-    let object_stats = object_cache.stats().await?;
-    let object_bytes =
-        object_stats.shard_bytes + object_stats.xorb_bytes + object_stats.stage_bytes;
-    println!();
-    println!("Object cache:");
-    println!("  directory:   {}", object_cache.root().display());
-    println!(
-        "  used_bytes:  {} ({} bytes)",
-        format_bytes_size(object_bytes),
-        object_bytes,
-    );
-    println!(
-        "  shards:      {} entries, {}",
-        object_stats.shard_count,
-        format_bytes_size(object_stats.shard_bytes),
-    );
-    println!(
-        "  xorbs:       {} entries, {}",
-        object_stats.xorb_count,
-        format_bytes_size(object_stats.xorb_bytes),
-    );
-    println!(
-        "  stages:      {} entries, {}",
-        object_stats.stage_count,
-        format_bytes_size(object_stats.stage_bytes),
-    );
-    println!("  manifests:   {} entries", object_stats.manifest_count);
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

@@ -164,6 +164,186 @@ fn maintenance_commands_leave_missing_roots_missing() {
     }
 }
 
+const STATS_COMMANDS: &[&[&str]] = &[&["cache", "stats"], &["optimize", "cache", "stats"]];
+
+#[test]
+fn stats_commands_leave_missing_roots_and_range_directories_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("missing");
+    for args in STATS_COMMANDS {
+        command(temp.path(), &root, args);
+        assert!(!root.exists(), "{args:?} created a cache root");
+    }
+    crab_cache::ensure_private_cache_directory(&root).unwrap();
+    for args in STATS_COMMANDS {
+        command(temp.path(), &root, args);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+}
+
+fn cache_tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut tree = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        // Access time is not a mutation contract: a read-only stat/read can
+        // update atime. Preserve contents, identity, mode, length and mtime.
+        let mut state = format!(
+            "{}:{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        )
+        .into_bytes();
+        if metadata.is_file() {
+            state.extend(std::fs::read(&path).unwrap());
+        } else if metadata.is_dir() {
+            pending.extend(
+                std::fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        }
+        tree.insert(path.strip_prefix(root).unwrap().to_owned(), state);
+    }
+    tree
+}
+
+#[tokio::test]
+async fn stats_commands_count_chunk_payloads_without_mutating_cache_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cache");
+    let cache = LocalCache::new(root.clone());
+    cache
+        .put(&CacheKey::Chunk(compute_data_hash(b"data")), b"data")
+        .await
+        .unwrap();
+    cache
+        .put(&CacheKey::Shard(compute_data_hash(b"shard")), b"shard")
+        .await
+        .unwrap();
+    // A corrupt retained database is not opened, repaired, or counted as a
+    // payload by this inspection command.
+    std::fs::write(root.join("shard-hints.db"), b"invalid sqlite").unwrap();
+    let before = cache_tree(&root);
+    for args in STATS_COMMANDS {
+        let output = String::from_utf8(command(temp.path(), &root, args)).unwrap();
+        let objects = output.split_once("Object cache:").unwrap().1;
+        assert!(objects.contains("used_bytes:  9 B (9 bytes)"), "{output}");
+        assert!(
+            objects
+                .lines()
+                .any(|line| line.split_whitespace().collect::<Vec<_>>()
+                    == ["chunks", "1", "entries,", "4", "B"])
+        );
+        assert_eq!(cache_tree(&root), before, "{args:?} mutated cache state");
+    }
+}
+
+#[tokio::test]
+async fn stats_commands_report_healthy_groups_when_the_other_is_unsafe() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for unsafe_family in ["ranges", "shards"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let cache = LocalCache::new(root.clone());
+        let shard_hash = compute_data_hash(b"shard");
+        cache
+            .put(&CacheKey::Shard(shard_hash), b"shard")
+            .await
+            .unwrap();
+        let range_root = root.join("chunks");
+        let range_cache = XetChunkCacheHandle::open(&range_root, 1024 * 1024).unwrap();
+        let key = Key {
+            prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
+            hash: (*blake3::hash(b"data").as_bytes()).into(),
+        };
+        range_cache
+            .cache
+            .put(&key, &ChunkRange::new(0, 1), &[0, 4], b"data")
+            .await
+            .unwrap();
+        let unsafe_path = if unsafe_family == "ranges" {
+            let mut encoded = key.hash.as_bytes().to_vec();
+            encoded.extend_from_slice(key.prefix.as_bytes());
+            let encoded = base64::engine::general_purpose::URL_SAFE.encode(encoded);
+            range_root.join(&encoded[..2]).join(encoded)
+        } else {
+            let hex = shard_hash.hex();
+            root.join("shards").join(&hex[..2]).join(hex)
+        };
+        std::fs::set_permissions(&unsafe_path, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let before = cache_tree(&root);
+        for args in STATS_COMMANDS {
+            let output = command_output(temp.path(), &root, args);
+            assert!(
+                !output.status.success(),
+                "{args:?} hid unsafe {unsafe_family}"
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let (ranges, objects) = stdout.split_once("Object cache:").unwrap();
+            if unsafe_family == "ranges" {
+                assert!(ranges.contains("unavailable:"), "{stdout}");
+                assert!(objects.contains("used_bytes:  5 B (5 bytes)"), "{stdout}");
+            } else {
+                assert!(ranges.contains("used_bytes:  16 B (16 bytes)"), "{stdout}");
+                assert!(objects.contains("unavailable:"), "{stdout}");
+            }
+            assert_eq!(cache_tree(&root), before, "{args:?} repaired unsafe state");
+        }
+    }
+}
+
+#[test]
+fn stats_commands_reject_invalid_configuration_without_creating_a_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join(crab::core::config::REPO_CONFIG_REL);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, "[cache]\nmax_bytes = \"invalid\"\n").unwrap();
+    let root = temp.path().join("missing");
+    for args in STATS_COMMANDS {
+        let output = command_output(temp.path(), &root, args);
+        assert!(
+            !output.status.success(),
+            "{args:?} ignored invalid configuration"
+        );
+        assert!(!root.exists());
+    }
+}
+
+#[tokio::test]
+async fn stats_commands_do_not_inspect_ranges_through_an_aliased_cache_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cache");
+    let range_cache = XetChunkCacheHandle::open(root.join("chunks"), 1024 * 1024).unwrap();
+    let key = Key {
+        prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
+        hash: (*blake3::hash(b"data").as_bytes()).into(),
+    };
+    range_cache
+        .cache
+        .put(&key, &ChunkRange::new(0, 1), &[0, 4], b"data")
+        .await
+        .unwrap();
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    let before = cache_tree(&root);
+    for args in STATS_COMMANDS {
+        let output = command_output(temp.path(), &alias, args);
+        assert!(!output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(stdout.matches("unavailable:").count(), 2, "{stdout}");
+        assert!(!stdout.contains("used_bytes:"), "{stdout}");
+        assert_eq!(cache_tree(&root), before);
+    }
+}
+
 #[tokio::test]
 async fn object_maintenance_commands_preserve_unknown_state_and_remote_proofs() {
     let temp = tempfile::tempdir().unwrap();

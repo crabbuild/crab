@@ -51,6 +51,12 @@ or reported as valid. Dropping an async scan cancels its blocking worker via a
 child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
+Product stats use `xet_chunk_cache_stats_in_root` to pin the configured cache
+root before traversing decoded ranges, rather than treating its parent as
+ambient. Standalone range-directory statistics retain their narrower ownership
+contract. Neither scan opens a database or creates missing paths; this does not
+establish full-family health or physical disk accounting.
+
 Object-cache stats, prune, targeted eviction, and verification use that same
 private boundary. The three eviction loops are consolidated, and stats/verify
 stream recognized objects instead of collecting an inventory first. Object
