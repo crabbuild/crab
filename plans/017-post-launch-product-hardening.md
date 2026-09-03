@@ -4545,6 +4545,60 @@ leaves abrupt-parent-death child supervision open; the passing process-tree
 kill must not be presented as automatic child cleanup. Other crash points,
 GC overlap, managed finalize and production provider rows still require proof.
 
+### Cold-cache inspection requires write admission: 2026-09-03 UTC
+
+**Observed gap.** The local forwarding-proxy qualification denies and records
+every PUT, POST and DELETE during inspection. Equal and source-ahead cases
+pass with zero write attempts. A fresh cache for a Crab-ahead destination
+instead attempts `locks/internal/git-read-admission-*/lock` and reports
+unverifiable when that PUT is denied. The canonical Git objects are intact;
+the source is an older ancestor of the destination. This is a read-permission
+gap, not absent data or a reason to grant a checker mutable credentials.
+
+Evidence: `phase2-mirror-readonly-before-3ed9d1d-20260903/artifacts/report.json`
+passes the equal/source-ahead cases. The stronger cold-cache run
+`phase2-mirror-readonly-cold-3ed9d1d-20260903/artifacts/report.json` retains
+18 commands, three passing checks and the failing Crab-ahead check, plus the
+exact denied operation. Run `crab/scripts/e2e/run_mirror_readonly_rustfs_smoke.py`
+with `--crab-bin`, `--bucket crabbuild`, `--endpoint-url http://127.0.0.1:9000`,
+`--require-existing-bucket`, `--root` on the workspace volume and a fresh
+`--run-id`. The runner is intentionally red until the production gap is fixed.
+The repository-local rerun reproduces the same single failure and denied lock
+write in `phase2-mirror-readonly-runner-3ed9d1d-20260903/artifacts/report.json`.
+
+**Owner trace and next implementation.** `mirror::reconcile::inspect` pins the
+destination snapshot, then `fetch_changed_crab_objects` delegates missing
+destination history to Git. `upload_pack_wire::serve` acquires mutable read
+admission before opening the repository. Skipping that one PUT is insufficient:
+upload-pack may compact journals, repair locator/visibility state and publish
+generated packs. The shared remote-Git opener also requires a current locator;
+metadata locator opens without a published checkpoint can create reader state.
+
+1. **Non-writing canonical read boundary.** Extend the existing shared read
+   owner to consume the caller's authorized, pinned snapshot and immutable
+   pack inventory for inspection. Reuse bounded pack-index/range decoding;
+   do not implement a mirror-only object reader, introduce full-pack fallback,
+   or disable ordinary fetch admission globally. Published acceleration may
+   help, but absent acceleration must not require repair or a checkpoint write.
+   Acceptance: cold equal/source-ahead/Crab-ahead/diverged cases use zero
+   mutation attempts and retain exact graph classification; missing/corrupt
+   canonical objects return unverifiable. All readers close on every exit.
+2. **Lifetime prerequisite.** Resolve the non-mutating GC observation/retention
+   decision already required by the shared proof contract. Permission-safe
+   object reads alone do not prevent an intermediate sweep. Acceptance: a
+   sweep entirely inside the scan, state recreation and old-client maintenance
+   cannot produce a false-clean result; unavailable proof is explicit.
+3. **Caller and release proof.** Route mirror inspection through that owner,
+   retaining local cache ownership, scope/hidden-ref authorization, cancellation
+   and operation budgets. Extend the denied-write runner with absent indexes,
+   corruption, active journals, cancellation and managed read grants. Re-run
+   ordinary fetch, lazy fetch, apply and hook siblings; preserve their existing
+   admission/publication authority. Production provider rows remain separate.
+
+No cache-probe optimization was added: the live source-ahead test proved Git
+already avoids transfer when the needed objects are local. The cold-cache
+failure, not a mocked fetch-call count, defines the remaining implementation.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context
