@@ -4,21 +4,18 @@
 //! via the shared [`super::store_setup`] module.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
 use crate::lfs::batch::{BatchResolver, PatternFilter};
-use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
-use crab_git::pointer_detect::{PointerKind, classify};
+use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::store_setup::resolve_lfs_remote_for_operation_with_remote_sync;
-
-const CAT_FILE_REQUEST_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsFetchOptions {
@@ -52,7 +49,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Re
     validate_fetch_options(&options)?;
     let (remote, refs) = remote_and_refs_from_options(&options)?;
     let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", remote.as_deref())?;
-    let entries = collect_lfs_pointers(options.all, options.recent, &refs)?;
+    let entries = collect_lfs_pointers(Path::new("."), options.all, options.recent, &refs, cancel)?;
     check_cancelled(cancel)?;
 
     if entries.is_empty() {
@@ -376,7 +373,7 @@ fn run_fetch_prune(dry_run: bool, cancel: &CancellationToken) -> Result<()> {
 pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
     let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", options.remote.as_deref())?;
-    let entries = collect_lfs_pointers(false, false, &[])?;
+    let entries = collect_lfs_pointers(Path::new("."), false, false, &[], cancel)?;
     check_cancelled(cancel)?;
 
     if entries.is_empty() {
@@ -453,281 +450,39 @@ fn checkout_paths_for_pull(
         .collect()
 }
 
-/// Collect `(path, LfsPointer)` entries from HEAD (or all refs).
-///
-/// Uses `git ls-tree -r` + `git cat-file --batch` to enumerate blobs
-/// and parse LFS pointers.
 fn collect_lfs_pointers(
+    repo_dir: &Path,
     all: bool,
     recent: bool,
     refs: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
-    let tree_lines = if all {
-        if refs.is_empty() {
-            ls_tree_all_refs()?
+    check_cancelled(cancel)?;
+    let mut selected = if all && refs.is_empty() {
+        crate::lfs::discovery::all_ref_names(repo_dir, cancel)?
+    } else if refs.is_empty() {
+        let repository = gix::discover(repo_dir).map_err(io::Error::other)?;
+        let head = repository.head().map_err(io::Error::other)?;
+        if head.is_unborn() {
+            Vec::new()
         } else {
-            ls_tree_refs(refs)?
+            vec!["HEAD".to_owned()]
         }
-    } else if recent {
-        let mut entries = if refs.is_empty() {
-            ls_tree_head()?
-        } else {
-            ls_tree_refs(refs)?
-        };
-        entries.extend(ls_tree_recent_refs_and_commits(refs)?);
-        entries
-    } else if !refs.is_empty() {
-        ls_tree_refs(refs)?
     } else {
-        ls_tree_head()?
+        refs.to_vec()
     };
-
-    if tree_lines.is_empty() {
-        return Ok(Vec::new());
+    if recent {
+        let recent_refs = crate::lfs::recent::recent_ref_oids_in(repo_dir, 0)?;
+        check_cancelled(cancel)?;
+        let mut roots = selected.clone();
+        roots.extend(recent_refs.iter().cloned());
+        selected.extend(recent_refs);
+        selected.extend(crate::lfs::recent::recent_commit_oids_in(repo_dir, &roots)?);
     }
-
-    let mut child = Command::new("git")
-        .args(["cat-file", "--batch"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| CrabError::Internal(format!("failed to spawn git cat-file: {e}")))?;
-
-    let mut stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CrabError::Internal(
-                "git cat-file stdin unavailable".to_owned(),
-            ));
-        }
-    };
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CrabError::Internal(
-                "git cat-file stdout unavailable".to_owned(),
-            ));
-        }
-    };
-    let mut reader = BufReader::new(stdout);
-    let mut entries = Vec::new();
+    check_cancelled(cancel)?;
     let mut seen = HashSet::new();
-    let scan_result = (|| -> Result<()> {
-        for request_batch in tree_lines.chunks(CAT_FILE_REQUEST_BATCH_SIZE) {
-            for (blob_hash, _) in request_batch {
-                writeln!(stdin, "{blob_hash}").map_err(|e| {
-                    CrabError::Internal(format!("failed to query git cat-file: {e}"))
-                })?;
-            }
-            stdin
-                .flush()
-                .map_err(|e| CrabError::Internal(format!("failed to query git cat-file: {e}")))?;
-
-            for (blob_hash, filename) in request_batch {
-                let mut header = Vec::new();
-                if reader
-                    .read_until(b'\n', &mut header)
-                    .map_err(|e| CrabError::Internal(format!("failed to read git cat-file: {e}")))?
-                    == 0
-                {
-                    return Err(CrabError::Internal(
-                        "git cat-file closed before returning a response".to_owned(),
-                    ));
-                }
-                let header = String::from_utf8_lossy(header.strip_suffix(b"\n").unwrap_or(&header));
-                let parts: Vec<&str> = header.split_whitespace().collect();
-
-                if parts.len() < 2 {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned a malformed response for {blob_hash}"
-                    )));
-                }
-                if parts[1] == "missing" {
-                    continue;
-                }
-                if parts.len() < 3 {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned a malformed response for {blob_hash}"
-                    )));
-                }
-
-                let Ok(obj_size) = parts[2].parse::<u64>() else {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned an invalid object size for {blob_hash}"
-                    )));
-                };
-
-                if parts[1] == "blob" && obj_size <= MAX_LFS_POINTER_SIZE as u64 {
-                    let mut content = vec![0u8; obj_size as usize];
-                    reader.read_exact(&mut content).map_err(|e| {
-                        CrabError::Internal(format!("failed to read Git blob: {e}"))
-                    })?;
-                    if let PointerKind::Lfs(pointer) = classify(&content)
-                        && pointer.size > 0
-                        && seen.insert((filename.clone(), pointer.oid))
-                    {
-                        entries.push((filename.clone(), pointer));
-                    }
-                } else {
-                    io::copy(&mut reader.by_ref().take(obj_size), &mut io::sink()).map_err(
-                        |e| CrabError::Internal(format!("failed to skip Git blob: {e}")),
-                    )?;
-                }
-
-                let mut newline = [0u8; 1];
-                reader
-                    .read_exact(&mut newline)
-                    .map_err(|e| CrabError::Internal(format!("failed to finish Git blob: {e}")))?;
-                if newline[0] != b'\n' {
-                    return Err(CrabError::Internal(
-                        "git cat-file returned an unterminated object body".to_owned(),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    })();
-
-    drop(stdin);
-    drop(reader);
-    if let Err(error) = scan_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CrabError::Internal(format!("git cat-file failed: {e}")))?;
-    if !output.status.success() {
-        return Err(CrabError::Internal(format!(
-            "git cat-file failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(entries)
-}
-
-/// Run `git ls-tree -r HEAD` and return `(blob_hash, filename)` pairs.
-fn ls_tree_head() -> Result<Vec<(String, String)>> {
-    ls_tree_ref("HEAD")
-}
-
-fn ls_tree_ref(ref_name: &str) -> Result<Vec<(String, String)>> {
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "-z", ref_name])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git ls-tree: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Not a valid object name") {
-            return Ok(Vec::new());
-        }
-        return Err(CrabError::Internal(format!(
-            "git ls-tree failed for {ref_name}: {stderr}"
-        )));
-    }
-
-    Ok(parse_ls_tree_output(&output.stdout))
-}
-
-fn ls_tree_refs(refs: &[String]) -> Result<Vec<(String, String)>> {
-    let mut all_entries = Vec::new();
-    for ref_name in refs {
-        all_entries.extend(ls_tree_ref(ref_name)?);
-    }
-    Ok(all_entries)
-}
-
-/// Run `git ls-tree -r` for every local ref.
-fn ls_tree_all_refs() -> Result<Vec<(String, String)>> {
-    let refs_output = Command::new("git")
-        .args(["rev-parse", "--all"])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git rev-parse: {e}")))?;
-
-    if !refs_output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let refs_text = String::from_utf8_lossy(&refs_output.stdout);
-    let mut all_entries = Vec::new();
-
-    for ref_sha in refs_text.lines() {
-        let ref_sha = ref_sha.trim();
-        if ref_sha.is_empty() {
-            continue;
-        }
-
-        let output = Command::new("git")
-            .args(["ls-tree", "-r", "-z", ref_sha])
-            .output()
-            .map_err(|e| {
-                CrabError::Internal(format!("failed to run git ls-tree for {ref_sha}: {e}"))
-            })?;
-
-        if output.status.success() {
-            let entries = parse_ls_tree_output(&output.stdout);
-            all_entries.extend(entries);
-        }
-    }
-
-    Ok(all_entries)
-}
-
-/// Run `git ls-tree -r` for recent refs and recent commits.
-fn ls_tree_recent_refs_and_commits(base_refs: &[String]) -> Result<Vec<(String, String)>> {
-    let recent_refs = crate::lfs::recent::recent_ref_oids(0)?;
-    let mut recent_roots = if base_refs.is_empty() {
-        vec!["HEAD".to_owned()]
-    } else {
-        base_refs.to_vec()
-    };
-    recent_roots.extend(recent_refs.iter().cloned());
-
-    let mut refs = recent_refs;
-    refs.extend(crate::lfs::recent::recent_commit_oids(&recent_roots)?);
-
-    if refs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    ls_tree_refs(&refs)
-}
-
-/// Parse `git ls-tree -r` output into `(blob_hash, filename)` pairs.
-fn parse_ls_tree_output(output: &[u8]) -> Vec<(String, String)> {
-    let mut results = Vec::new();
-
-    for record in output.split(|byte| *byte == 0) {
-        if record.is_empty() {
-            continue;
-        }
-        let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
-            continue;
-        };
-        let (meta, filename) = record.split_at(separator);
-        let meta = String::from_utf8_lossy(meta);
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        if parts.len() < 3 || parts[1] != "blob" {
-            continue;
-        }
-        let filename = &filename[1..];
-        if filename.is_empty() {
-            continue;
-        }
-        results.push((
-            parts[2].to_owned(),
-            String::from_utf8_lossy(filename).into_owned(),
-        ));
-    }
-
-    results
+    selected.retain(|revision| seen.insert(revision.clone()));
+    crate::lfs::discovery::collect_pointers_from_trees_in(repo_dir, &selected, cancel)
 }
 
 #[cfg(test)]
@@ -757,6 +512,142 @@ mod tests {
             size: data.len() as u64,
             extensions: Vec::new(),
         }
+    }
+
+    fn fixture_git(root: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        for key in crate::git::process::GIT_ENV_REMOVALS {
+            command.env_remove(key);
+        }
+        let output = command.current_dir(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit_fixture(root: &Path) {
+        fixture_git(root, &["add", "."]);
+        fixture_git(
+            root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "pointer fixture",
+            ],
+        );
+    }
+
+    #[test]
+    fn unborn_default_fetch_is_empty_but_an_invalid_explicit_ref_fails() {
+        let temporary = tempfile::tempdir().unwrap();
+        fixture_git(temporary.path(), &["init", "-q"]);
+        let cancel = CancellationToken::new();
+        assert!(
+            collect_lfs_pointers(temporary.path(), false, false, &[], &cancel)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            collect_lfs_pointers(
+                temporary.path(),
+                false,
+                false,
+                &["missing-ref".to_owned()],
+                &cancel
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fetch_from_subdirectory_preserves_aliases_until_path_policy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fixture_git(root, &["init", "-q"]);
+        fs::create_dir(root.join("nested")).unwrap();
+        let ptr = pointer(b"shared content");
+        fs::write(root.join("a.bin"), ptr.serialize()).unwrap();
+        fs::write(root.join("nested/z.bin"), ptr.serialize()).unwrap();
+        commit_fixture(root);
+        let entries = collect_lfs_pointers(
+            &root.join("nested"),
+            false,
+            false,
+            &[],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let include = PatternFilter::new("nested/**").unwrap();
+        let transfers = plan_fetch_transfers(
+            &entries,
+            Some(&include),
+            None,
+            &root.join("empty-cache"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            transfers
+                .iter()
+                .map(|transfer| transfer.path.as_str())
+                .collect::<Vec<_>>(),
+            ["nested/z.bin"]
+        );
+        assert_eq!(
+            checkout_paths_for_pull(&entries, None, None),
+            ["a.bin", "nested/z.bin"]
+        );
+    }
+
+    #[test]
+    fn all_ref_fetch_retains_distinct_pointer_versions_and_rejects_partial_inventory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fixture_git(root, &["init", "-q"]);
+        let old = pointer(b"old content");
+        fs::write(root.join("asset.bin"), old.serialize()).unwrap();
+        commit_fixture(root);
+        fixture_git(root, &["branch", "old"]);
+        let new = pointer(b"new content");
+        fs::write(root.join("asset.bin"), new.serialize()).unwrap();
+        commit_fixture(root);
+        let cancel = CancellationToken::new();
+        let entries = collect_lfs_pointers(root, true, false, &[], &cancel).unwrap();
+        let oids = entries
+            .into_iter()
+            .map(|(_, pointer)| pointer.oid)
+            .collect::<HashSet<_>>();
+        assert_eq!(oids, HashSet::from([old.oid, new.oid]));
+        assert!(
+            collect_lfs_pointers(
+                root,
+                false,
+                false,
+                &["HEAD".to_owned(), "missing-ref".to_owned()],
+                &cancel
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cancelled_fetch_discovery_never_opens_a_repository() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            collect_lfs_pointers(Path::new("absent"), false, false, &[], &cancel),
+            Err(CrabError::Cancelled)
+        ));
     }
 
     #[test]
@@ -852,17 +743,6 @@ mod tests {
         assert_eq!(
             href,
             "crab-lfs://repo/path/lfs/objects/01/23/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[test]
-    fn parse_ls_tree_output_preserves_special_path_bytes() {
-        let oid = "0123456789012345678901234567890123456789";
-        let output = format!("100644 blob {oid}\tmodels/line\nname.bin\0");
-
-        assert_eq!(
-            parse_ls_tree_output(output.as_bytes()),
-            vec![(oid.to_owned(), "models/line\nname.bin".to_owned())]
         );
     }
 }

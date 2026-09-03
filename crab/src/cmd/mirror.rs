@@ -145,7 +145,7 @@ pub fn run_mirror(args: &MirrorArgs, cancel: &CancellationToken) -> Result<Mirro
         require_remote_helper: true,
         helper_path,
         crab_binary,
-        lfs_object_id_collector: crate::cmd::lfs::push::collect_lfs_object_ids_from_range_in,
+        lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
     };
     let mut runner = SystemCommandRunner::new(cancel.clone());
     run_mirror_with_runner(args, cancel, options, &mut runner)
@@ -162,7 +162,7 @@ pub async fn run_mirror_integrity(
         require_remote_helper: true,
         helper_path: helper_path_override(),
         crab_binary: crate::cmd::init::crab_binary_path(),
-        lfs_object_id_collector: crate::cmd::lfs::push::collect_lfs_object_ids_from_range_in,
+        lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
     };
     let mut runner = SystemCommandRunner::new(cancel.clone());
     let store = async {

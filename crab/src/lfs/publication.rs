@@ -43,7 +43,7 @@ pub(crate) async fn publish_reachable(
     // locally resolvable remote tips are valid exclusion boundaries here.
     let (scan_remote_tips, entries) = tokio::task::spawn_blocking(move || {
         let scan_remote_tips = locally_available_remote_tips(&scan_dir, &scan_remote_tips);
-        let entries = crate::cmd::lfs::push::collect_pointers_from_range_in(
+        let entries = crate::lfs::discovery::collect_pointers_from_range_in(
             &scan_dir,
             &scan_tips,
             &scan_remote_tips,

@@ -873,7 +873,7 @@ host merge gate rejects the exact missing-data candidate. Dependencies: harness
 work may overlap earlier packets; final acceptance requires all applicable
 packets. An emulator pass or successful unit test cannot close a production row.
 
-LFS discovery packet: `crab/src/cmd/lfs/push.rs` owns discovery through
+LFS discovery packet: `crab/src/lfs/discovery.rs` owns discovery through
 `visit_lfs_blobs_in_git_command`, called by tree scans and exact pre-push ranges;
 mirror consumes `collect_lfs_object_ids_from_range_in`. Preserve local-minus-
 remote/base-manifest exclusions, path-to-pointer lock checks, explicit refs and
@@ -2527,6 +2527,71 @@ are tracked separately as they complete.
    or a busy development host is not a controlled performance comparison.
 4. Require Windows native lifecycle tests and the full provider/OS matrix;
    keep Phase 2 open until all original acceptance criteria are satisfied.
+
+### Shared LFS fetch discovery: 2026-09-03 UTC
+
+**Context.** Push, mirror and native publication already verified raw Git
+objects under the shared subprocess supervisor. Fetch/pull still materialized
+complete `ls-tree` output and used a separate `cat-file` parser: it did not
+verify requested OIDs or checksums, skipped missing objects, and could neither
+cancel blocked pipes nor reject all incomplete scans reliably. Returning an
+empty or partial pointer inventory could falsely report an up-to-date fetch.
+
+**Implementation.** Move the existing verified scanner and its behavioral
+tests into `lfs::discovery`, consumed directly by push/pre-push, mirror,
+native publication and fetch/pull. Delete fetch's alternate tree/batch
+parser. Tree discovery now uses bounded NUL framing, verifies raw SHA-1 or
+SHA-256 identity even when the body is too large to be an LFS pointer, and
+keeps candidates private until producer and batch children complete. Caller
+cancellation reaches these children and joins their pipe workers.
+
+Fetch keeps every unique path/OID association until include/exclude and
+checkout policy run, with a global accounted pointer/path inventory budget.
+Repeated refs do not duplicate the same association; conflicting declared
+sizes for one LFS OID fail closed. Push retains its object-ID deduplication
+and bounded aggregate object inventory, rather than retaining every alias
+across selected refs. `ls-tree --full-tree` keeps repository-relative paths
+when invoked from a subdirectory. Selection policy remains in the commands;
+no new public configuration or dependency is introduced.
+
+**Behavior boundary.** Default fetch from an unborn repository remains an
+empty inventory, proven by gix 0.83.0's typed `Head::is_unborn` contract.
+Explicit invalid refs, absent/corrupt requested Git objects, truncated records
+and failed child commands are errors, never successful empty/partial
+inventories. This intentionally removes the tagged `v1.0.1` diagnostic-string
+shortcut that treated an invalid object name as no data.
+
+**Evidence.** 448 selected LFS and mirror tests passed after consolidation,
+including existing exact-range/base-manifest exclusions and publication
+callers. Added real-Git fixtures cover duplicate paths, NUL-framed newline
+names, subdirectory selection, filter/checkout ordering, distinct ref-tip
+versions, conflicting pointer sizes, invalid-ref rejection and pre-cancelled
+discovery. Both range and tree paths reject checksum-mismatched pointer blobs
+disguised as large non-pointer objects. Moved discovery tests remain enabled
+in Linux and macOS/Windows protocol CI. Thirty-eight final focused rechecks,
+correctness/suspicious Clippy, formatting, workflow syntax and documentation
+link validation passed. Other pre-existing warning categories are not claimed
+clean. Optimized build and fresh live LFS qualification are recorded when
+complete.
+
+**Separate large-repository evidence.** Optimized `d89a152`, before this
+refactor, passed the fresh Kubernetes upstream-history managed-file run:
+63 commands, 48 checks, both Crab and native-Git add/commit/push workflows,
+cold-cache clone/hydrate, dehydrate/rehydrate, exact bytes and unchanged
+source/binary. Report: `phase2-kubernetes-origin-managed-d89a152-20260903`.
+Its live staging diagnostics passed 19 commands and 23 checks. The original
+history replay remains a separate active run with pinned `d89a152`; neither
+result proves a later candidate or a controlled performance comparison.
+
+**Remaining acceptance work.** Recent-ref/config selection still uses its
+existing subprocess path; command stdin, local hashing, storage-request
+cancellation and the custom agent's protocol reader still need complete
+lifecycle work. `--all` selection semantics are not expanded by this packet.
+The range scanner still needs complete path association for lock checking;
+`rev-list --objects` supplies an object name, not every path using that object.
+Do not close those gates from tree-scan tests. Require final-candidate live
+LFS and full native replay plus the original provider/OS/host-CI matrix,
+publication-lifetime and uncertain-result criteria.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
