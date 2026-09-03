@@ -398,7 +398,7 @@ Qualification limits and next actions:
 | 4. Private tenancy | IN PROGRESS; acceptance open | Unix private payload/maintenance paths plus descriptor-bound catalog/xorb-index SQLite connections. Catalog inventory/deletion, reservation release, and fill publication now use the same retained root; non-mutating health, main-file replacement, other index owners, ACLs, and native OS qualification remain open. |
 | 5. Operability/state cleanup | IN PROGRESS; acceptance open | Object/range helpers inspect private payloads without repair; shared health, CLI stats/doctor, scoped hints, and state removal outstanding |
 | 6. Concurrency/startup | IN PROGRESS; acceptance open | Retained xorb results own/charge buffers and keys; four whole-file consumers stream; shared outputs reject size violations and close owned resources on cancellation. Configured output/decode admission, cross-process fills, startup, and resource qualification remain open |
-| 7. Qualification/release docs | TODO | — |
+| 7. Qualification/release docs | IN PROGRESS; acceptance open | Maintained cache-service isolation and report-contract hardening; installed RustFS checkpoints retained. Large-file prototype integration, remaining lifecycle/resource/provider/native proof, and broad release gates remain open. |
 
 ### Design refresh: baseline versus working tree
 
@@ -2418,7 +2418,7 @@ verifier passes 1,025 checks; installed Rust `evidence verify` and `summarize`
 both pass, reporting 249 verified checks. These verify the same evidence,
 not three independent workload repetitions.
 
-The embedded harness `--audit-report` remains **red** on two stale total-origin
+At that checkpoint, embedded harness `--audit-report` remained **red** on two stale total-origin
 GET assertions: its cold/warm check requires an empty complete key map, unlike
 the live harness and standalone Python/Rust consumers, which require zero
 payload GETs and zero service fetches while permitting control-plane traffic.
@@ -2438,6 +2438,483 @@ push/dedup/hydration and multipart metadata warming; integrate the separate
 large-file local-cache qualification prototypes. The dedicated-bucket service
 smoke supplements the earlier requested `crabbuild` command workload and does
 not replace or close the remaining Plan 017 phases.
+
+#### Canonical report audit and complete hydration evidence
+
+Context: the live smoke and standalone Python/Rust verifiers permit metadata
+discovery/checkpoint traffic but require zero warmed xorb/shard origin GETs and
+zero service origin fetches. The embedded audit duplicated a stricter,
+incorrect all-origin-zero assertion. The dependency contract is explicit:
+`CacheAwareObjectStore::get_opts` forwards mutable and conditional requests to
+origin; pinned SlateDB 0.15.0's managed reader creates a checkpoint through
+`StoredManifest::write_checkpoint`. Eliminating that traffic would change
+metadata correctness, not improve cache qualification.
+
+The working change delegates `--audit-report` to the existing Python release
+verifier. It deletes the duplicate audit implementation, transfers all 29
+required named live checks and the extra support metrics, and retains the
+tagged `v1.1.0` audit command/output and two-script artifact layout. Executable
+selection comes only from the trusted script package, never the report's
+artifact paths. Missing verifier, subprocess failure, or timeout fails closed;
+no alternative validator is tried. Report-listed scripts remain data to hash,
+not code to execute. The custom forbidden-secret diagnostic no longer repeats
+the rejected literal into logs.
+
+The audit exposed additional false-pass paths. Both Python and Rust treated a
+missing/malformed per-key traffic map as an empty map; Python accepted a
+different 64-character digest, and Rust omitted the restart stage and digest
+checks. The `b2270bf` Python source reproduces six false accepts: missing maps
+and mismatched digests in all three stages. The strengthened validators:
+
+- Require exactly one cold-named, warm, and restart hydration record.
+- Reject absent/malformed maps, invalid counts, decreasing totals, or per-key
+  totals that do not cover all observed requests. The producer now derives
+  totals from each locked map snapshot, not separate racy counter reads.
+- Require zero payload origin GETs and zero service fetches while permitting
+  attributed metadata traffic. Metadata must not become a blanket zero-read
+  exemption for missing evidence.
+- Require a hexadecimal digest matching both the independently expected hash
+  and the live byte-identity result. Missing identity evidence fails closed.
+- Classify restart failures under the existing hydration doctor category.
+
+Focused proof: 14 Python tests and four Rust evidence tests pass. Each language
+rejects 60 invalid-stage/field combinations; positive metadata traffic remains
+accepted. Python also covers the trusted repository/retained package layouts,
+real subprocess rejection, and non-disclosing forbidden-secret diagnostics.
+The original v3 RustFS report passes the consolidated audit without edits to
+the retained evidence. Format/whitespace, workflow syntax, docs content audit,
+and rendered-link checks pass. Server check and library Clippy pass. All-target
+server Clippy is **red**: 29 library-test diagnostics and five integration-test
+diagnostics, covering unnecessary ownership/borrows, Boolean assertions,
+test-module ordering, and unfulfilled lint expectations. All eight affected
+files are unchanged from current main `e26d139`; no diagnostic points into the
+new evidence implementation/tests. No lint suppression or unrelated edit is
+included.
+
+Installed qualification passes under workspace-volume run
+`cache-f410.E7nt8I/evidence-audit.u1oi4I`. The final candidate in
+`consistent/bin/` was installed with `make install`; both release CLI feature
+shapes and the cache server build successfully. CLI label:
+`b2270bf-evidence-dirty`, built `2026-09-03 10:32:13 UTC`. Fingerprints:
+
+- CLI SHA-256: `6572a81bbe775be7cb5dc4e68930ed750b52c0766f079b94f11d8fa309f29e35`.
+- Server SHA-256: `d1907004efee552890b8064554a75eabda32f73628b9382d5bf03ee2e4d97f8e`.
+- Production Rust patch against `b2270bf`, scoped to `evidence.rs`:
+  `ad6368c4efcefb032955543c4c092fdfbc2f8017d7590753d29df30dd680efc9`.
+- Harness: `7b76db562e7deec105e47a34a25020717dbcb1da52f662f676b9f4567ba8b4fe`.
+- Python verifier: `c7fe891e5b4ffbe73459a142baec82a8f4280dda1b17c6a61a4a13222bb47912`.
+
+Fresh `cache-service-canonical/artifacts/report.json` records **1,179 checks /
+82 commands passing**, in new dedicated bucket `crabbuild-audit-u1oi4i` on the
+unchanged local RustFS service. Each hydration stage has 18 service hits,
+zero service fetches, and zero origin xorb/shard GETs. Its 19 metadata GETs
+exactly reconcile with its per-key total. All three independently match the
+512 KiB fixture SHA-256
+`a10a0556ca2a5fcd3773b111ab3e8c6754403e13db000cc083a4cf8ffc3b45ef`.
+No shared-bucket cleanup or service reset occurred.
+
+Every exercised report entry point passes on this same evidence: standalone
+Python verifier (**1,073 checks**), repository harness audit, retained
+two-script bundle audit, installed Rust verify and summary (**273 checks**),
+release-verify (**275 checks**, including run binding), and doctor (no failure
+categories). These are multiple validations of one workload, not independent
+repetitions. The original v3 report also passes the new installed
+release-verify/summary without editing its retained files. The earlier build
+under this run's top-level `bin/` predates counter reconciliation and is not
+the final qualified artifact; `consistent/bin/` is authoritative here.
+
+**Open integration fixture gate.** The unchanged
+`evidence_verify_accepts_manifest_bundle_without_config` test now fails: its
+`EvidenceFixture::new` contains only two hydration stages and `hydrate_record`
+omits `hydrated_sha256`; its check list also omits live identity results. Real
+retained smoke reports contain these fields. This is not a passing integration
+suite or permission to accept incomplete evidence. The fixture and all existing
+assertions remain untouched; user approval was requested to complete its input
+evidence while preserving those assertions. No baseline, snapshot, inventory,
+dependency, or compatibility bypass is introduced.
+
+Acceptance still open: obtain approval to complete the integration fixture and
+run its full release/summary/doctor regression selection. Fresh installed
+consumer proof above does not waive the retained synthetic-fixture failure.
+This continuation remains local and uncommitted while that input update awaits
+approval. Continue the
+unavailable-service/multipart, large-file tooling, native/provider/resource,
+and lifecycle gates. Shared-bucket incident cleanup remains separately pending
+approval; this read/report work grants no deletion authority.
+
+#### Installed CLI with an unavailable cache service
+
+Context: the candidate-writer test proves real SlateDB publication survives a
+cache PUT returning HTTP 503, but that injected boundary is not a complete
+installed add/push/hydrate workflow. The maintained RustFS harness now includes
+`verify_cli_with_unavailable_cache_service` before its existing origin-outage
+stage. A separately owned loopback endpoint returns HTTP 503 for every request;
+it does not stop or reconfigure the healthy cache service or RustFS.
+
+The workload uses the existing `CRAB_CACHE_SERVICE_URL` process override with
+the normal onboarding config. Fresh source, duplicate repository, and clone
+use separate absent cache roots: Crab creates the private roots itself, so
+warm-hydrate proof cannot accidentally exercise bypass of a permissive
+precreated root. The clone targets the duplicate repository, proving committed
+cross-repository placement is reconstructible. Every command is bounded;
+endpoint cleanup runs on success and exception. The fault endpoint records
+method/path counts, never authentication headers or query strings.
+
+The source contract is explicit: `crab/src/core/config.rs::apply_env_overrides`
+gives the process URL priority. Add/push use
+`CachingStore::try_build_healthy`, which disables an unhealthy remote client
+while retaining local caching; read orchestration uses `CachingStore::new`
+and per-object cache-to-origin fallback. `CacheAwareObjectStore::put_opts`
+commits to origin before best-effort warming. `CacheClient` configures a
+two-second health timeout and a 30-second default request timeout; pinned
+reqwest 0.12.28 `ClientBuilder::timeout` covers connect through response-body
+completion. The immediate-503 experiment does not prove deadline behavior.
+
+Acceptance exercised:
+
+- Real add, Git commit, and push succeed with observed cache HTTP 503s; fresh
+  data produces origin xorb writes. A second repository with identical bytes
+  reads canonical origin xorb/shard proof and produces zero xorb PUT requests.
+- Cold clone/hydration reconstructs the independent fixture hash through
+  healthy origin despite failed cache reads. Dehydrate restores a pointer;
+  warm hydration in a new process reconstructs the same hash with zero origin
+  xorb/shard GETs. Metadata origin traffic is retained, not suppressed.
+- Private-root mode is checked on POSIX. Two real-HTTP fixture tests prove
+  all supported read/write methods reject with 503, no secrets are captured,
+  and the endpoint closes after a failed workload. All 16 Python harness
+  safety/evidence tests pass; prior integration fixture remains untouched.
+
+Retained evidence uses the installed `b2270bf-evidence-dirty` binaries and
+fingerprints recorded above. No product binary changed in this slice. Harness
+SHA-256: `5ffc53ba3ae9b2e10a5333bdb3f13a9d4900e51b0032b3c82cd71d9276e538c0`.
+Both runs are under `cache-f410.E7nt8I/evidence-audit.u1oi4I/`:
+
+| Run / bucket | Proof and scope |
+|---|---|
+| `cache-service-outage-v1` / `crabbuild-outage-u1oi4i-v1` | Full smoke passes **1,199 checks / 104 commands**, including 20 new outage checks on a 512 KiB fixture. Python verifier (1,073), repository/retained audit, and installed Rust release-verify (275) plus summary pass on the same report. |
+| `cache-service-outage-large-v1` / `crabbuild-outage-u1oi4i-large1` | Focused **128 MiB** invocation of the same maintained method passes **47 checks / 28 commands**. Report status is deliberately `scoped-passed`, not full release evidence. External `run-large-outage.py` records the selection and source hash. |
+
+Large-file independent SHA-256:
+`5f19b5b28848d12d4ec42a4a4dcf8aee76ed172b1979198c8d4ba02257fa57c3`.
+Source publication makes 17 xorb PUT requests across **three distinct xorb
+keys** (multipart requests are not 17 separate objects); duplicate publication
+makes zero. Cold hydration sees three origin xorb GETs and one shard GET,
+four failed payload cache requests, and 51 failed metadata cache requests.
+Warm hydration sees zero origin payload GETs and zero payload service attempts,
+but still 27 metadata/control origin GETs and 51 failed metadata service
+requests. Both hashes match; observed cold/warm command times are 578/306 ms on
+this machine, not an SLO or a resource bound.
+
+**Remaining executable slice:** bound repeated unavailable-service work in the
+shared cache-store/client owner. Context: 51 failed metadata probes remain even
+with warm payload; fast 503 responses do not establish behavior under slow or
+stalled service. First qualify refused connection, stalled headers/body, and
+failure after successful health/capabilities negotiation. Retain exact service
+attempt counts, origin counts, bytes, cancellation/elapsed time, and error
+provenance. Then use the existing timeout/policy surfaces to bound work per
+operation; do not add command-specific fallback stacks or bypass origin
+integrity checks. Acceptance: healthy-origin success stays byte-identical,
+invalid origin stays fatal, cancellation releases every in-flight operation,
+and declared latency/attempt ceilings hold across hydrate, fetch, and push.
+Multipart metadata warming remains separately open. Versioned release-gate
+coverage for requiring the new outage stage is also open: existing v1 consumers
+validate passed embedded checks but do not require this newly added stage in
+older reports. Do not count their pass as independent outage validation.
+
+This is additional Phase 2/7 evidence, not acceptance of either phase or the
+full plan. No bucket cleanup, service reset, protected-inventory edit, native/
+provider/resource qualification, or pending fixture approval is implied.
+
+#### Complete remote metadata bodies before exposing a stream
+
+Context: tracing slow-service work found a correctness hole before retry-policy
+work. `CacheAwareObjectStore::get_opts` returned a cache-service stream for
+immutable non-xorb/shard bodies as soon as HTTP headers arrived. Its origin
+fallback covered errors obtaining the response, not failures while a consumer
+read the body. Pinned `object_store` 0.14.1's `GetResult::bytes` collects the
+already-returned stream and propagates its error; it cannot call the store
+again. `CacheObjectStream::into_stream` correctly detects truncation, but the
+error formerly escaped through metadata reconstruction instead of reaching
+origin. The same shared boundary serves immutable metadata and Git packs.
+
+The new `incomplete_cache_stream_uses_complete_origin_body` regression was
+**red** before the fix: a declared 100-byte cache body with an incomplete prefix
+failed despite complete origin data. The installed previous candidate also
+reproduces the failure. Runs `stream-completion.ktIcf7/before-stream-fix` and
+`before-stream-fix-v2` use distinct fresh RustFS buckets and the unchanged
+`b2270bf-evidence-dirty` binary. Each retains 30 checks / 17 commands; hydrate
+exits **5**, reporting `CRAB-E0070` / unexpected EOF. The first run predates
+failure-traffic retention and remains unchanged. The second retains injected
+request counts, origin traffic, and the independent expected hash in
+`truncated-metadata-traffic.json`, even though hydration failed.
+
+Implementation, local/uncommitted:
+
+- `CacheObjectStream::complete` finishes and length-checks the HTTP body before
+  `get_opts` exposes bytes. Incomplete bodies, failed private I/O, and denied
+  admission use the existing whole-object origin path. Origin errors remain
+  origin errors; no partial cache prefix is concatenated with origin bytes.
+- `cache_client/completed_body.rs` owns one anonymous file and its existing
+  `CacheCatalog` reservation. The advertised length must fit the product cache
+  budget; this is not a new independent budget/configuration option. Missing
+  length remains an error. Oversized admission skips cache completion before
+  proportional allocation or disk initialization.
+- The private filesystem creates the file through its pinned directory, then
+  unlinks it before body writes. Once unlinked, there is no payload pathname;
+  the final descriptor close reclaims its bytes. The narrow initial
+  create-to-unlink crash window still needs qualification. Each blocking read/write
+  task owns both file and reservation, retaining the byte charge after its
+  async waiter is cancelled. Output chunks are at most 64 KiB.
+- The caller retains the reservation until stream completion/drop. The object
+  stream's size/range describe the complete chosen response. No public remote
+  format, dependency, lockfile, or CLI configuration changes.
+
+Focused proof: 62 cache-store tests pass on macOS, including the initially red
+metadata/WAL/pack regression and existing healthy cache-only pack reads.
+The regression additionally checks origin-not-found wins after cache failure,
+with one origin attempt per operation. Four completion tests cover bounded
+chunks, admission pressure, successful/early drop, truncated bodies,
+anonymous-file cleanup, and cancellation while a body remains incomplete.
+The new pressure fixture reserves space for catalog files as well as one body;
+its initial payload-only limit incorrectly assumed catalog bytes were free.
+That input was corrected before qualification; no existing test assertion or
+protected fixture was changed. Remote-only and local-only feature checks and
+cache-store library Clippy pass. The complete cache-client selection passes
+30 tests, cache-store without the remote-client feature passes 40, and
+cache-store all-targets Clippy passes. Python fault-fixture tests now total 18.
+
+The maintained RustFS smoke adds `verify_cli_truncated_cache_metadata`: a fresh
+private-cache clone sees HTTP 200 metadata headers followed by a truncated
+body, while other cache operations return 503. It must observe the injected
+bodies, healthy-origin metadata reads, and an independently matching hydrated
+file. Its traffic artifact is written even on command failure.
+
+Installed candidate: `b2270bf-stream-dirty`, built `2026-09-03 11:08:54 UTC`,
+installed by `make install` under `stream-completion.ktIcf7/bin/`. Both release
+CLI feature builds and the server installation pass. Retained fingerprints:
+
+- CLI: `def9a8f99a65bed0113a47341faadc8708d6976a55025a590687d9eb41fef03c`.
+- Server (unchanged): `d1907004efee552890b8064554a75eabda32f73628b9382d5bf03ee2e4d97f8e`.
+- `cache-stream-source.patch`, tracked Rust changes against `b2270bf` plus the
+  new completion module: `2648f4a16ba8de933df317597f664d3dbb1e571fa54b9c434e4a97018e547f05`.
+- Final maintained harness: `90855fd4362b61970a1ce4075674ab3e992dd3a4e33423713dd0b6e87b1c4576`.
+
+| Retained run beneath `stream-completion.ktIcf7/` | Result |
+|---|---|
+| `after-stream-fix-large` | Focused **128 MiB** body-fault workload: **33 checks / 17 commands**, `scoped-passed`. Hydration survives 23 incomplete metadata HTTP responses and reconstructs the independent SHA-256 `316dc3aea86386eef91b2e17c5e7804b8e8e6ac487a38331d98a6a568d89dacf`. Origin receives 31 GETs, including three xorbs and one shard. |
+| `cache-service-stream-full` | Initial full candidate smoke: **1,204 checks / 106 commands**, including HTTP-503 and incomplete-body stages. It exposed two extra metadata origin GETs per warm-service hydrate (21 versus 19). The report is retained unchanged. |
+| `healthy-private-before` / `healthy-private-after` | Controlled installed comparison, **38 checks / 17 commands each**, fresh buckets and Crab-created 0700 roots. Both previous/candidate binaries have 19 origin metadata GETs, 15 service hits, zero service fetches, zero payload origin GETs, and matching independent bytes. No metadata request regression in this scoped valid-root comparison. |
+| `cache-service-stream-private` | Final maintained full smoke: **1,204 checks / 106 commands pass**. Cold-named, warm, and restart stages each have 19 metadata origin GETs, 15 service hits, zero service fetches, and zero payload origin GETs. Incomplete-metadata hydration also passes. |
+
+The two extra reads were caused by the harness precreating client cache roots
+as 0755. The new completion boundary correctly refuses unsafe private scratch,
+then reads origin. `client_env` now only selects the absent root; Crab creates
+it with product permissions. This change improves the qualification input;
+the preceding full smoke already passed, and no existing acceptance assertion
+was weakened. A new helper test checks that environment preparation does not
+create the directory. The initial focused runs retain the earlier harness
+fingerprint `86c40c5f266bbc3f13219977acd8a896f2b20d6b795d93e241750261c5fa1c33`.
+
+Final full-run fixture SHA-256:
+`b799604bf3be885d7dfad20502159538f56b3bdda23f449aba08b44ce5a77081`.
+Repository and retained-script audits pass; installed Rust release-verify
+passes 275 checks and emits the summary. The earlier full candidate report
+also passes standalone Python (1,073), audit, and installed release-verify.
+These report consumers inspect existing evidence; they are not additional
+workload repetitions or independent semantic gates for the new fault stage.
+All runs use distinct fresh dedicated buckets; shared storage and the pending
+cleanup objects remain untouched.
+
+Acceptance remaining for this slice: resource/latency measurement for the
+file-completion cost at scale;
+Linux and other-platform behavior when private scratch admission is unavailable;
+cache-only reads with unavailable local scratch; live cancellation/kill and
+post-handoff anonymous-file I/O errors. This fixes transport/declared-length
+completion, not well-formed but semantically corrupt metadata or decoder
+fallback. Repeated slow-service requests, physical-root accounting, and all
+earlier Phase 2/3/6/7 gates remain open. Do not land a one-platform or merely
+unit-tested result as full cache-failure isolation.
+
+#### Draft checkpoint and installed slow-service diagnosis
+
+At the user's request, production body completion and its focused Rust tests
+were committed/pushed as `04d271b` to draft PR
+[147](https://github.com/crabbuild/crab/pull/147). The latest `origin/main`
+remained integrated. Before push, 62 remote-enabled cache-store tests, 30
+cache-client tests, workspace formatting, and whitespace checks passed again.
+The previous isolated release installation/live proof covers the same
+production completion source. The evidence-validator, maintained Python
+qualification changes, and this expanded ledger remain local pending the
+recorded fixture decision; they are not all present in that commit. The draft
+is not merge-ready. Its current multi-crate guardrail job fails; other broad
+checks are still running, and skipped provider/native jobs remain unproved.
+
+The next qualification used that installed CLI against fresh dedicated RustFS
+buckets, with a real 128 MiB add/commit/push, lazy clone, seed hydration, and
+separate dehydrate/hydrate processes. Payload was warm; origin metadata stayed
+available. The maintained fault endpoint now supports interruptible response
+delays and a bounded number of delayed requests. Header delay occurs before
+HTTP status; body delay occurs after a partial HTTP 200 metadata body. Endpoint
+teardown wakes sleeping handlers. Twenty Python tests pass, including delayed
+headers, bounded fault selection, stalled-body teardown, and existing safety/
+evidence checks. A newly authored timeout assertion initially named the Python
+3.10 alias; it now checks `socket.timeout` directly for the local Python 3.9
+runtime. No existing assertion or protected fixture was weakened.
+
+Retained diagnostic artifacts: `cache-f410.E7nt8I/slow-service.DRzk7r/`.
+The installed CLI SHA-256 remains
+`def9a8f99a65bed0113a47341faadc8708d6976a55025a590687d9eb41fef03c`;
+harness SHA-256 is
+`d75d8be0a25ddad890ccf8a772437cfcd88a5b2620d29dab8a439830724ba9c8`.
+The external selectors are `run-warm-latency.py` and
+`run-warm-latency-v2.py`; this orchestration is not yet a maintained release
+gate. All elapsed times below are observations on this machine, not SLOs.
+
+`warm-latency-v2`, bucket `crabbuild-slow-drzk7r-v2`, passes **51 checks / 27
+commands**, explicitly `scoped-passed`. All five measured hydrations reconstruct
+the independent SHA-256
+`2ed0fac367c55ef7c9c404f5f227f935a27bda31eec2cd81aa29d9cf620234f6`.
+Each has 27 origin metadata/control GETs and **zero origin xorb/shard GETs**.
+
+| Fault during warm hydration | Elapsed | Attempt evidence |
+|---|---:|---|
+| Immediate HTTP 503 | 339 ms | 51 server-observed requests |
+| HTTP 503 delayed 250 ms per request | 7,912 ms | 51 server-observed requests |
+| One request's headers stalled for 31 seconds; later requests fail immediately | 30,507 ms | 51 server-observed requests; client timeout diagnostic |
+| One partial metadata body held for 31 seconds; later bodies truncate immediately | 30,603 ms | 51 server-observed requests; client timeout diagnostic |
+| Verified TCP connection refusal | 335 ms | 51 `crab_cache::cache_client` connection-failure diagnostics; no HTTP server exists to count requests |
+
+The single-stall observations agree with the pinned reqwest 0.12.28 contract:
+the existing 30-second total timeout includes connection, headers, and body.
+Body timeout now reaches whole-object origin fallback. However, neither the
+timeout nor byte identity establishes an aggregate attempt/latency bound.
+Direct `CachingStore::new` in `crab/src/read/mod.rs` does not health-gate the
+client, and subsequent metadata operations independently attempt it again.
+The writer-side `try_build_healthy` only disables it at construction; that is
+not recovery policy for an already-running or long-lived reader.
+
+**Retained failure:** `warm-latency-v1`, bucket `crabbuild-slow-drzk7r-v1`,
+passes the first four hydration cases but its final command exceeds the
+100-second harness deadline and is terminated. Report status is `failed`,
+with 48 checks and 26 completed command records; the timed-out command's
+elapsed time and traffic are retained in `latency-observations.json`, not
+counted as a completed command. The general command recorder does not yet
+record a timeout as a first-class command outcome; that evidence gap remains.
+Its final case was initially named `connection-refused`, but the fixture held
+a bound, non-listening socket. An independent macOS socket probe returned
+timeout/EAGAIN, not ECONNREFUSED. Treat that case as **sustained connection
+stall**, never as refusal proof. The corrected run closes a listener, proves
+ECONNREFUSED before hydration, and requires runtime connection-failure
+diagnostics. Original reports/selectors remain unchanged. Neither run writes
+to the shared bucket or performs cleanup of the pending incident objects.
+
+Next executable slices, in dependency order:
+
+| Slice / owner | Context and change | Acceptance before moving on |
+|---|---|---|
+| Typed failure classification / `crab-cache` | HTTP failures still use a generic service string, while timeout/connect failures retain typed reqwest sources. Classify transport and status at the HTTP boundary; do not parse rendered strings or treat an ordinary cache miss as endpoint failure. Audit public enum consumers/tagged contracts before changing that surface. | Tests distinguish miss, invalid range, authorization, transient HTTP status, refused connection, header/body timeout, and malformed object. Preserve source errors and origin verification; no credential-bearing diagnostic or new product config knob. |
+| Shared failure suppression and recovery / cache client plus `crab-cache-store` | Repeated metadata attempts amplify a failed optional service. Share availability state across clones of the same configured client; keep authoritative fallback in the store. Reuse the existing request deadline. A failure must suppress subsequent sequential attempts, while long-lived readers must have bounded recovery probing rather than permanent disablement. | With sequential access, no new service request after the first qualifying failure until the declared recovery probe. Concurrent callers cannot create a probe stampede; cancellation releases probe ownership. Test success followed by failure and recovery, not only initially unavailable construction. Preserve local cache hits and typed fatal origin errors. Declare the concurrency allowance and recovery interval in tests/design before implementation. |
+| Installed regression and complete timeout evidence / qualification | The sustained-stall failure is not fixed. Current report consumers also do not require these diagnostic stages. Make the selected workloads maintained and record timed-out commands without inventing a successful exit code. | Repeat these five byte-identity/traffic cases plus sustained stalls, mid-operation failure, recovery, cancellation, and origin corruption across hydrate/fetch/push. Show that sequential failures no longer multiply the existing service timeout, and retain request counts and whole-command elapsed time. Require the relevant stages through the approved release evidence contract; scoped reports alone cannot satisfy it. |
+
+These are open Phase 2/7 slices. No circuit-breaker or timeout policy change is
+implemented by this checkpoint; the 100-second sustained-stall failure and
+earlier platform, resource, lifecycle, fixture, and release gates remain open.
+
+#### Shared service failure suppression and recovery checkpoint
+
+Implemented and pushed as `9dffbe6` in draft PR 147. `CacheClient::send` now
+owns one admission path for all methods, replacing nine repeated send blocks.
+Client clones share an in-memory availability owner. A qualifying failure
+suppresses later admissions for the existing 30-second request-timeout
+interval; after that interval, one logical request may probe recovery. A
+response body retains its probe permit until consumption. Cancellation/drop
+reschedules an inconclusive probe. Generation checks prevent an older
+in-flight success from clearing a newer failure, or older failures from
+indefinitely extending cooldown. No mutex is retained across an await.
+Authoritative fallback remains in `crab-cache-store`; no public error variant,
+dependency, configuration knob, persistent state, or command-specific retry
+path was added. Production growth buys this shared lifecycle owner; the new
+module is 99 lines including its test-module declaration, alongside deleted
+duplicate send logic. Tests are in a separate 249-line file.
+
+**Classification proof and corrected first attempt:** transport failures and
+HTTP **429/502/503** suppress new requests. The first implementation treated
+every 5xx as endpoint failure and broke the unchanged
+`dedup_query_preserves_successful_batches_and_duplicate_order` test (61/62
+cache-store tests passed). Reading tag `v1.1.0` confirmed batch-local failure
+handling; the server maps internal/request-local errors to 500, origin failure
+to 504, and write admission to 507. None proves other cache objects or later
+batches are unusable. The shared typed-status classifier was corrected for
+all methods, not exempted only for dedup, and all 62 tests now pass unchanged.
+Misses, caller/auth errors, and those request-local statuses keep their normal
+errors. Raw-body transport errors retain reqwest sources; JSON parse failure
+alone does not declare an endpoint outage. No rendered error is parsed to make
+an admission decision. This preserves useful cached reads when origin fails.
+
+The existing reqwest 0.12.28 protocol-NACK retry policy is unchanged: one
+logical send may internally retry a safe protocol NACK up to twice. Therefore
+the admission claim is **one logical recovery probe**, not universally one
+wire request. Requests admitted before a failure may still finish. Independently
+constructed clients have independent state; this is not a global or
+whole-command resource bound. Health-gated construction can still omit an
+unhealthy service for its operation, as before.
+
+Focused proof passes: **37 cache-client tests**, including seven availability
+tests; **62 cache-store tests unchanged**; **43 real cache-service integration
+tests unchanged**; active-probe-only and remote-client-only checks; cache and
+cache-store all-targets Clippy; workspace formatting/whitespace; twenty Python
+qualification tests; docs audit (192 pages, zero findings) and rendered links
+(398 pages / 4,292 fragments). Tests exercise every client method, separate
+configuration isolation, typed status/timeout sources, thirty-two concurrent
+contenders during a held probe, full-body recovery, dropped bodies, header
+cancellation, and stale-generation completion. Recovery-clock edges in network
+unit tests are advanced explicitly; that is not a live wall-clock recovery
+qualification. The new stream-consumption test initially needed pinning at
+compile time; no existing test was changed to make this implementation pass.
+The concurrency case was subsequently run on a four-worker Tokio runtime;
+all 37 cache-client tests pass again with that multi-threaded qualification.
+
+Release installation under `cache-f410.E7nt8I/availability.JDbrNX/bin/` passes
+both CLI feature builds and server installation. Installed identity:
+`04d271b-availability-dirty`, built `2026-09-03 11:49:11 UTC`, matching the
+production source subsequently committed in `9dffbe6`:
+
+- CLI SHA-256: `3d8ab1e4701024a824a6db1f91b9740c042a7235bcee84a61c901854890ed096`.
+- Server SHA-256, unchanged: `d1907004efee552890b8064554a75eabda32f73628b9382d5bf03ee2e4d97f8e`.
+- `availability-source.patch` SHA-256: `5bef6929120ae37f0e1a40b95a064f82b7b5b1b41d8a69d72c40e7887696a4b9`.
+- Maintained harness SHA-256: `d75d8be0a25ddad890ccf8a772437cfcd88a5b2620d29dab8a439830724ba9c8`.
+
+Retained installed runs beneath that directory use fresh distinct buckets:
+
+| Run / bucket suffix after `crabbuild-availability-jdbrnx-` | Proof |
+|---|---|
+| `warm-baseline` / `baseline` | Previous installed stream-completion binary against a real listener with sustained delayed headers: fails at **100,006 ms**, with four cache requests before harness termination. Report remains `failed`, 32 checks / 18 completed command records; timeout observation is retained separately. This reproduces the stall without the earlier non-listening-socket ambiguity. |
+| `warm-candidate` / `candidate` | **128 MiB**, **55 checks / 29 commands**, `scoped-passed`. Six fault cases reconstruct the same independent hash, with zero origin xorb/shard GETs and 27 metadata/control GETs each. All five HTTP cases make exactly one server-observed request; verified connection refusal yields one typed client diagnostic, not a server count. |
+| `cache-service-availability-full` / `full` | Full maintained smoke **1,204 checks / 106 commands passes**, including add/commit/push/dedup/clone, warm/restart hydration, unavailable service, incomplete metadata, and origin outage. Healthy warm-service stages retain 15 hits, zero fetches, zero payload origin GETs, and 19 metadata/control origin GETs. Repository audit and installed Rust release-verify (275 checks) plus summary pass on that same report. |
+
+Candidate warm-hydrate observations: immediate 503 **353 ms**; 250-ms delayed
+503 **644 ms**; one stalled header **30,389 ms**; one stalled body **30,437 ms**;
+verified refusal **361 ms**; sustained delayed headers **30,399 ms**. Earlier
+delayed-503 evidence took 7,912 ms and 51 attempts; the candidate takes one
+attempt. These are scoped observations, not SLOs or whole-process resource
+limits. The external `run-warm-latency.py` selector is still not a maintained
+release-gate workload. Independent SHA-256 values:
+
+- 128 MiB matrix: `0eb7d0a3aed9276a53649046cd7622a036bd6337023bfc01fdf2ca3c1db5145e`.
+- Full-smoke fixture: `d03e77d42f75c6f4c105ecf0265e5cffcbc7317b5b9fc679d662190794bef4b3`.
+
+This addresses measured sequential outage amplification, not all Phase 2/7
+acceptance. Next: live recovery after cooldown and failure after successful
+negotiation in a long-lived operation; maintained fetch/push/cancellation and
+invalid-origin cases; complete timeout command records and required release
+stages; cross-platform/native and whole-process limits. Slow request-local
+errors are deliberately not blanket-suppressed; operation-level latency policy
+still needs qualification without discarding unrelated usable cache results.
+The broader plan and pending fixture/inventory/API/cleanup decisions remain
+open. The cache-client implementation/tests and client-policy docs were pushed
+first; the follow-up publishes this ledger and the multi-threaded test setting.
+Earlier qualification/validator code remains local pending its fixture
+decision. No shared-bucket cleanup or protected fixture change occurred.
 
 ### Cache-write completion checkpoint
 

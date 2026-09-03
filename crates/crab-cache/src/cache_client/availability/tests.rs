@@ -162,7 +162,7 @@ async fn request_local_errors_do_not_disable_the_endpoint() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn response_body_owns_recovery_and_drop_does_not_strand_it() {
     let endpoint = Endpoint::start(503, false, false).await;
     let client = endpoint.client();

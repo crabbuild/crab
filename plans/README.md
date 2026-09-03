@@ -358,6 +358,33 @@ read runtime, cache-failure isolation, unified budget, private tenancy,
 operability/state cleanup, concurrency/startup, and production qualification.
 Each phase has its own context, acceptance criteria, proof, and STOP conditions.
 
+Qualification tooling is now in progress: the maintained cache-service smoke
+uses fresh dedicated buckets and create-only scoped fixtures. Report-audit
+consolidation and complete cold/warm/restart evidence validation are under
+qualification; the existing incomplete Rust test fixture awaits an approved
+input update. See Plan 017 for retained passes, failures, and the unresolved
+shared-bucket fixture incident. The installed HTTP-503 outage workload now
+proves add/push/dedup and cold/warm hydration, including a focused 128 MiB run;
+slow-service bounds and versioned outage release-gate coverage remain open.
+The latest installed candidate also fixes late cache-body failure escaping
+metadata reads: anonymous budgeted completion restores origin fallback, proven
+with a failing previous binary, a 128 MiB fault workload, and a full smoke.
+The harness now lets Crab create private client roots; platform and resource
+acceptance for response completion remain open.
+Body completion is pushed in draft PR 147 as `04d271b`. Continued installed
+128 MiB qualification passes byte identity under refused connections and
+single header/body stalls, but each stall adds about 30 seconds; sustained
+connection stalls exceed a 100-second harness deadline. Plan 017 retains the
+failure and executable classification, suppression/recovery, and evidence
+slices. The diagnostic pass is not an aggregate latency guarantee.
+Follow-up `9dffbe6` shares service failure suppression/recovery across client
+clones while preserving request-local errors and partial-batch dedup. The
+installed candidate reduces failed metadata service attempts from 51 to one;
+sustained-stall hydration completes in 30.4 seconds with verified bytes, and
+the full 1,204-check RustFS smoke passes. Live long-lived recovery, maintained
+latency gates, and the other phase acceptance items remain open.
+This is not phase acceptance or release proof.
+
 ### Release gates
 
 - One reusable hydrator/store client serves fetch, explicit hydrate, smudge,
