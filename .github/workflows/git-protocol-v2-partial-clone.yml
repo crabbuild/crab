@@ -142,6 +142,8 @@ jobs:
           cargo test -p crab --lib cmd::lfs::fetch::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::lfs::clone::tests --locked --features gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
+          cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
+          cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
@@ -204,6 +206,8 @@ jobs:
           cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::push_staging::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run LFS pre-push contracts
         run: >-

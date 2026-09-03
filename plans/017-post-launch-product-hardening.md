@@ -2419,7 +2419,7 @@ incremental pushes, then rejected push 918 on the first unavailable payload.
 A subsequent read observed remote main still at successful push 917,
 `4327fee8d315798d46a63e6f8e7f42d0b9d2a98f`. No remaining clones/fsck/final
 sampling ran. The command misleadingly classified unavailable staging as
-`CRAB-E0081` (locked, with no holder); correcting that diagnostic remains open.
+`CRAB-E0081` (locked, with no holder); the correction is recorded below.
 
 The `aac1534` managed-file run on the same input also rejected publication:
 two historical payloads lacked local staging and destination proofs. It
@@ -2442,13 +2442,14 @@ fragments).
 
 The original checkout's configured source, `crab://crab/k8s`, is reachable
 read-only and advertises master at `64e363f03f9ac9a338a79a15c550cbd9faa5f521`.
-Its historical payloads have not yet been reconstructed or verified; no
-source-remote writes or cleanup were performed.
+Both historical payloads were subsequently reconstructed in disposable
+checkouts using that source (recovery checkpoint below). No source-remote
+writes or cleanup were performed.
 
 **Next acceptance gates.**
 
-1. Recover those historical payloads from an explicitly identified source,
-   verify their content, publish dependencies, then rerun the original input.
+1. Stage the recovered historical payloads through the canonical add path,
+   publish dependencies, then rerun the original input.
    Do not remove pointers or treat another history as a repaired original.
 2. Preserve the independent upstream-history result and repeat it after any
    product changes affecting staging, push, clone or reconstruction. Require
@@ -2457,6 +2458,75 @@ source-remote writes or cleanup were performed.
 3. Repeat final-candidate full native-Git replay and the required provider/OS
    matrix. Use idle, isolated hosts for performance comparisons; these
    development runs do not establish a no-regression performance verdict.
+
+### Staging admission and historical payload recovery: 2026-09-03 UTC
+
+**Context and ownership.** CLI and remote-helper staging openers discarded
+every failure into `None`; lower push then guessed a lock holder, even for a
+missing directory. `git::push_staging::PushStaging` now owns one classification
+path: missing directory, acquired reader, or observed lock contention.
+Missing-index, corrupt-index and I/O errors retain their original category
+and source. No storage schema or dependency changes are needed.
+
+**Publication rule.** Native discovery may proceed during actual contention
+only for pointer-free pushes, preserving the explicit tagged `v1.0.1`
+behavior. A discovered pointer returns the observed contention error and
+releases acquired remote leases. Truly absent preparation instead returns
+`PointerMissingStaging` before upload/ref publication. Import's lower-pipeline
+caller already supplies its ingest reader; that sibling path is unchanged.
+Protected-push preparation uses the available reader for estimates, while
+native admission remains the pointer-publication guard. Managed-provider
+live proof remains open.
+
+The remote helper opens staging per push batch, never for fetch/list or the
+whole session. A damaged staging index therefore cannot block a read-only
+session. Corrupt staging is an explicit push error, not a fallback to empty
+staging. This checkpoint does not enable remote-only pointer reconciliation
+without local preparation.
+
+**Windows compile correction.** CI on `66b896a` reported `E0133` in
+`git::process::OwnedChild::has_exited`. The installed `process-wrap 10.0.0`
+contract exposes the immediate lower wrapper through safe `inner_mut`.
+Crab constructs exactly one Windows JobObject wrapper; polling its lower
+native child preserves cached leader status without consuming job-completion
+events. Final kill/wait still targets the whole job. No unsafe escape,
+dependency override or policy-budget change is added. Native Windows CI must
+confirm this correction; macOS tests do not prove Windows execution.
+
+**Recovery evidence, not a replay pass.** Optimized `aac1534` hydrated both
+versions from the declared source in separate task-owned checkouts. The
+original Kubernetes checkout remained unchanged. Retained evidence:
+`phase2-k8s-payload-recovery-aac1534-20260903/recovery-evidence.json` beneath
+the qualification workspace.
+
+| Historical checkout | Recovered bytes | Payload SHA-256 |
+| --- | ---: | --- |
+| `4caac343bf4aa0604d921167aae1550b0284bc8d` | 581,598,168 | `94102d4fe056bf3a4fde375d693aae96a429157dad0345af9853d7157d6bd5bd` |
+| `64e363f03f9ac9a338a79a15c550cbd9faa5f521` | 581,598,166 | `3c1ff06b3b0cef48c72404c45631fe10733f1840e5069c7e5288a6f0a96f65e2` |
+
+**Scoped proof.** 209 selected unit tests and 59 integration tests passed,
+covering native/CLI/helper push, missing preparation, exact contention,
+remote-lease release, incremental walks, linked worktrees, add/commit/push,
+hydration and remote-helper transcripts. Correctness/suspicious Clippy gates
+passed; other existing warning categories are not claimed clean. New staging
+contracts run in Linux and macOS/Windows protocol CI. Fifteen additional
+read-session and subprocess tests passed on macOS, including a damaged local
+index, descendant cleanup, cancellation escalation and bounded pipe output.
+Optimized candidate build, live diagnostics and the recovered-history replay
+are tracked separately as they complete.
+
+**Next executable gates.**
+
+1. Build the committed candidate; pin its digest for a fresh run. Re-stage
+   both verified payload versions under distinct task-owned paths without
+   changing source Git history. Require exact staged identities, then all
+   1,000 native pushes, final clone/filter/shallow/fsck/sample checks.
+2. Repeat both managed-file workflows with a cold reader cache; require
+   matching published refs and byte-identical hydrate/rehydrate results.
+3. Retain earlier failed evidence. A functional run with recovery preparation
+   or a busy development host is not a controlled performance comparison.
+4. Require Windows native lifecycle tests and the full provider/OS matrix;
+   keep Phase 2 open until all original acceptance criteria are satisfied.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

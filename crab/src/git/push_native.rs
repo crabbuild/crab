@@ -23,6 +23,7 @@ use crate::git::push::{
     acquire_push_lock_leases, duplicate_destination_result, release_push_lock_leases,
     run_push_batch_with_locks,
 };
+use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::PushSpec;
 use crate::git::walk::PointerBlob;
@@ -74,7 +75,7 @@ pub struct NativePushConfig {
 pub struct NativePushInputs<'a> {
     pub store: Option<Store>,
     pub caching_store: Option<crab_cache_store::CachingStore>,
-    pub staging: Option<Arc<StagingAreaReadOnly>>,
+    pub staging: PushStaging,
     pub router: StoreLayout,
     pub push_state: &'a mut PushState,
     pub remote_name: &'a str,
@@ -89,7 +90,7 @@ impl<'a> NativePushInputs<'a> {
     pub fn new(
         store: Option<Store>,
         caching_store: Option<crab_cache_store::CachingStore>,
-        staging: Option<Arc<StagingAreaReadOnly>>,
+        staging: PushStaging,
         router: StoreLayout,
         push_state: &'a mut PushState,
         remote_name: &'a str,
@@ -360,7 +361,7 @@ pub async fn run_native_push(
     // content gets picked up.
     if !config.mirror_git_only && pointers.is_empty() && config.incremental {
         let staging_has_files = staging
-            .as_ref()
+            .reader()
             .and_then(|s| s.list_files().ok())
             .is_some_and(|files| !files.is_empty());
 
@@ -400,6 +401,22 @@ pub async fn run_native_push(
     if pointers.is_empty() {
         debug!("native push: no pointers discovered, nothing to upload");
     }
+
+    // Tagged v1.0.1 allows pointer-free pushes while an exclusive staging
+    // holder is busy. Pointer publication must instead return that exact lock
+    // outcome and release the remote leases already acquired for discovery.
+    let staging = match staging {
+        PushStaging::Ready(reader) => Some(reader),
+        PushStaging::Missing => None,
+        PushStaging::Locked { .. } if pointers.is_empty() => None,
+        PushStaging::Locked { holder_pid } => {
+            return release_native_locks_on_error(
+                Err(CrabError::StagingLocked { holder_pid }),
+                &mut pre_acquired_locks,
+            )
+            .await;
+        }
+    };
 
     // ── Follow-tags synthesis ──────────────────────────────────────
     //
@@ -1412,7 +1429,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1477,7 +1494,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1521,7 +1538,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1573,7 +1590,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",
@@ -1620,6 +1637,128 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staging_contention_rejects_pointer_push_and_releases_remote_locks() {
+        let fixture = TinyGitFixture::new();
+        let pointer = crab_types::pointer::Pointer {
+            file_hash: [9; 32],
+            size: 1024,
+            shard_hint: None,
+        };
+        fixture.commit_text(
+            "large.bin",
+            &String::from_utf8(pointer.serialize()).unwrap(),
+        );
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let prefix = "staging-contention";
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            ..PushConfig::default()
+        });
+        config.progress = false;
+        let specs = vec![main_push_spec()];
+        let mut state = PushState::default();
+
+        let error = run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Locked {
+                    holder_pid: Some(4321),
+                },
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/staging-contention",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect_err("pointer push must retain contention");
+
+        assert!(matches!(
+            error,
+            CrabError::StagingLocked {
+                holder_pid: Some(4321)
+            }
+        ));
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .unwrap();
+        assert!(
+            snapshot.journal.refs.is_empty(),
+            "contention must not publish a ref"
+        );
+        let reacquired = acquire_push_lock_leases(
+            &store,
+            prefix,
+            &specs,
+            &config.push,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("staging rejection must release every remote lease");
+        release_push_lock_leases(reacquired).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pointer_free_push_ignores_staging_contention() {
+        let fixture = TinyGitFixture::new();
+        let tip = fixture.commit_text("readme.txt", "ordinary Git content");
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "staging-busy-plain-git".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            ..PushConfig::default()
+        });
+        config.push.metadb.chunk_index.local_path =
+            Some(fixture.work_tree.join("metadb/chunks.sqlite"));
+        config.progress = false;
+        config.emit_summary = false;
+        let mut state = PushState::default();
+        let result = run_native_push(
+            &config,
+            &[main_push_spec()],
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Locked { holder_pid: None },
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/staging-busy-plain-git",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("pointer-free push");
+        assert!(
+            result.all_ok(),
+            "pointer-free push must preserve tagged contention behavior"
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.journal.refs.get("refs/heads/main"), Some(&tip));
+    }
+
     #[test]
     fn lock_rejection_retains_failure_stage() {
         let result = push_lock_rejection_result(
@@ -1655,7 +1794,7 @@ mod tests {
             NativePushInputs {
                 store: None,
                 caching_store: None,
-                staging: None,
+                staging: PushStaging::Missing,
                 router,
                 push_state: &mut push_state,
                 remote_name: "origin",

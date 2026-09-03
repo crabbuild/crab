@@ -1407,26 +1407,6 @@ async fn verified_existing_remote_xorbs(
 
 pub use crab_xet::reconstruction::{ChunkPlacementMap, FileTerm};
 
-/// Best-effort lookup of the process currently holding the staging lock.
-///
-/// Resolves the staging root from the git dir and reads the lockfile
-/// PID. Returns `None` when anything goes wrong (no git dir, staging
-/// missing, lockfile empty). Purely diagnostic — used to enrich
-/// [`CrabError::StagingLocked`] with the offending PID so the user
-/// knows which process to investigate.
-fn read_staging_lock_holder_pid(git_dir_override: Option<&Path>) -> Option<u32> {
-    let staging_root = if let Some(crab_dir) = crate::git::discover::resolve_crab_dir() {
-        crab_dir.join("staging")
-    } else if let Some(git_dir) = git_dir_override {
-        shared_staging_dir_from_git_dir(git_dir)?
-    } else {
-        crate::git::worktree::WorktreeContext::resolve()
-            .ok()
-            .map(|ctx| ctx.shared_staging_dir())?
-    };
-    crab_staging::read_lockfile_pid(&staging_root)
-}
-
 fn xorb_upload_payload_permit_units(len: usize) -> u32 {
     let units = len.div_ceil(XORB_UPLOAD_PAYLOAD_PERMIT_BYTES).max(1);
     let max_units = XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT
@@ -1445,12 +1425,6 @@ fn xorb_cache_warm_payload_permit_units(len: usize) -> u32 {
 
 fn should_warm_uploaded_xorb_payloads(total_bytes: u64) -> bool {
     total_bytes <= XORB_CACHE_WARM_SYNC_TOTAL_LIMIT
-}
-
-fn shared_staging_dir_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
-    let common_dir = crate::git::discover::resolve_common_dir(git_dir);
-    let repo_root = common_dir.parent()?;
-    Some(repo_root.join(".crab").join("staging"))
 }
 
 fn shard_format_overflow(field: &str, value: impl fmt::Display) -> CrabError {
@@ -9937,18 +9911,9 @@ impl PushPipeline {
     /// durable structure and defers payload reads to packing only for chunks
     /// that remote receipt proof did not deduplicate.
     ///
-    /// # Error: staging unavailable with work to do
-    ///
-    /// If `self.staging` is `None` but step 1 discovered pointer blobs,
-    /// this step aborts with [`CrabError::StagingLocked`]. Continuing
-    /// would cause steps 4, 5, and 8 to each silently return `Ok(())`
-    /// (classify/pack/build-shard all require staging), after which the
-    /// remaining steps would happily CAS the ref forward to commits
-    /// whose pointers reference xorbs and file-index entries that were
-    /// never uploaded. Any subsequent clone + hydrate would then fail
-    /// with "shard not found". Failing here, before any upload or CAS,
-    /// keeps the remote state consistent: the user sees a precise
-    /// error, fixes the lock holder, and retries.
+    /// Missing staging with discovered pointers fails before upload or ref CAS.
+    /// Lock contention is handled at native admission; absence here is missing
+    /// payload preparation, not evidence that another process owns a lock.
     async fn lookup_staging(&self) -> Result<()> {
         use futures_util::StreamExt;
 
@@ -9964,23 +9929,25 @@ impl PushPipeline {
 
         let Some(staging) = &self.staging else {
             let pointers = self.pointers.lock().await;
-            if pointers.is_empty() {
+            let Some(pointer) = pointers.first() else {
                 debug!(
                     "step 2: no staging area and no pointers discovered; \
                      nothing to verify, proceeding with commit-only push"
                 );
                 return Ok(());
-            }
+            };
             let pointer_count = pointers.len();
-            drop(pointers);
-            let holder_pid = read_staging_lock_holder_pid(self.git_dir_override());
             tracing::error!(
                 pointers = pointer_count,
-                ?holder_pid,
-                "step 2: staging area is unavailable but push discovered \
+                "step 2: staging area is missing but push discovered \
                  pointer blobs; refusing to upload unbacked pointers"
             );
-            return Err(CrabError::StagingLocked { holder_pid });
+            return Err(CrabError::PointerMissingStaging {
+                total: pointer_count,
+                missing: pointer_count,
+                example_file_hash: MerkleHash::from(pointer.file_hash).hex(),
+                example_size: pointer.size,
+            });
         };
 
         if !staging.unresolved_publication_intents()?.is_empty() {
@@ -34032,14 +33999,6 @@ mod tests {
         pipeline.remove_staging_push_snapshot().await;
     }
 
-    /// Regression: when step 1 discovers pointer blobs to push but the
-    /// staging area couldn't be opened (typically because another
-    /// process holds the exclusive write lock), step 2 must abort with
-    /// `StagingLocked` before any upload or CAS happens. The prior
-    /// behavior — silently `Ok(())` on `staging == None` — caused push
-    /// to advance the ref to commits whose pointers referenced xorbs
-    /// and file-index entries that were never uploaded, permanently
-    /// breaking hydration for every other clone.
     #[tokio::test(flavor = "multi_thread")]
     async fn lookup_staging_errors_when_pointers_exist_without_staging() {
         use crate::git::walk::PointerBlob;
@@ -34053,8 +34012,7 @@ mod tests {
         }];
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        // Build a pipeline with no staging (None) — this mirrors the
-        // production path where `StagingAreaReadOnly::open` failed.
+        // No reader means missing local preparation, never a guessed lock.
         let pipeline: PushPipeline = PushPipeline::new(
             config,
             specs,
@@ -34080,10 +34038,15 @@ mod tests {
             .await
             .expect_err("lookup_staging must fail when pointers exist but staging is None");
 
-        match err {
-            CrabError::StagingLocked { .. } => {}
-            other => panic!("expected StagingLocked, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            CrabError::PointerMissingStaging {
+                total: 1,
+                missing: 1,
+                example_size: 1024,
+                ..
+            }
+        ));
     }
 
     /// Counterpart to the guard test: a push with no pointers to upload

@@ -25,6 +25,7 @@ use crate::git::push::{
     configure_active_active_push_coordinator, record_push_audit_event,
 };
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
+use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
@@ -678,7 +679,7 @@ pub async fn run_remote_helper(
             &options,
             &mut writer,
             None,
-            None,
+            &PushStaging::Missing,
             "",
             &mut preflight_cache,
             remote_name,
@@ -727,14 +728,10 @@ pub async fn run_remote_helper(
             }
         };
 
-    // Open the staging area for the push pipeline.
-    let staging = open_staging_for_push().await;
-
     // Load push state for incremental walk (used by native push pipeline).
     let repo_root = push_state_repo_root();
     let context = RemoteHelperContext {
         store: resolved.store,
-        staging,
         prefix: resolved.repository_prefix,
         cache: SessionCache::new(config),
         push_state: PushState::load(&repo_root),
@@ -762,7 +759,6 @@ pub async fn run_remote_helper(
 
 struct RemoteHelperContext {
     store: crate::storage::store::Store,
-    staging: Option<std::sync::Arc<crab_staging::StagingAreaReadOnly>>,
     prefix: String,
     cache: SessionCache,
     push_state: PushState,
@@ -812,7 +808,6 @@ where
 {
     let RemoteHelperContext {
         store,
-        staging,
         prefix,
         mut cache,
         mut push_state,
@@ -916,12 +911,19 @@ where
                 .await?;
             continue;
         }
+        // Fetch/list never need local staging. Open one reader per push batch
+        // so a damaged local index cannot block reads or retain a session lock.
+        let staging = if matches!(batch, Batch::Push(_)) {
+            open_staging_for_push().await?
+        } else {
+            PushStaging::Missing
+        };
         Box::pin(dispatch_batch(
             &batch,
             &options,
             &mut writer,
             Some(&store),
-            staging.as_ref(),
+            &staging,
             &prefix,
             &mut cache,
             remote_name,
@@ -975,36 +977,11 @@ async fn load_replica_discovery_for_session(
     Ok(())
 }
 
-/// Open the staging area for the push pipeline (read-only).
-///
-/// Uses a shared lock so the push can read staged chunks without
-/// blocking concurrent filter-process writers.
-///
-/// A failure to acquire the read lock (e.g. because another process
-/// holds an exclusive write lock) collapses to `None`. The push
-/// pipeline's step 2 (`lookup_staging`) is responsible for refusing
-/// the push when `None` is combined with a non-empty pointer set
-/// discovered in step 1 — otherwise we'd silently advance the ref to
-/// commits whose pointer blobs reference never-uploaded xorbs.
-async fn open_staging_for_push() -> Option<std::sync::Arc<crab_staging::StagingAreaReadOnly>> {
-    let staging_root = push_staging_root()?;
-
-    if !staging_root.exists() {
-        return None;
-    }
-
-    match crab_staging::StagingAreaReadOnly::open_blocking_default(staging_root).await {
-        Ok(sa) => Some(std::sync::Arc::new(sa)),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "staging area unavailable for push; pipeline will refuse to \
-                 upload any new pointer blobs discovered in this push. \
-                 Resolve the lock holder and retry."
-            );
-            None
-        }
-    }
+async fn open_staging_for_push() -> Result<PushStaging> {
+    let Some(root) = push_staging_root() else {
+        return Ok(PushStaging::Missing);
+    };
+    PushStaging::open(root).await
 }
 
 fn push_staging_root() -> Option<std::path::PathBuf> {
@@ -1371,7 +1348,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     options: &HelperOptions,
     writer: &mut W,
     store: Option<&crate::storage::store::Store>,
-    staging: Option<&std::sync::Arc<crab_staging::StagingAreaReadOnly>>,
+    staging: &PushStaging,
     prefix: &str,
     cache: &mut SessionCache,
     remote_name: &str,
@@ -1502,7 +1479,12 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         match store {
                             Some(read_store) => {
                                 match crate::git::protected_push::prepare_managed_push(
-                                    &config, repository, read_store, prefix, &specs, staging,
+                                    &config,
+                                    repository,
+                                    read_store,
+                                    prefix,
+                                    &specs,
+                                    staging.reader(),
                                     cancel,
                                 )
                                 .await
@@ -1608,7 +1590,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         NativePushInputs::new(
                             push_store,
                             caching_store,
-                            staging.cloned(),
+                            staging.clone(),
                             router,
                             push_state,
                             remote_name,
@@ -3156,7 +3138,6 @@ mod tests {
     ) -> RemoteHelperContext {
         RemoteHelperContext {
             store,
-            staging: None,
             prefix: prefix.to_owned(),
             cache: SessionCache::new(crate::core::config::Config::default()),
             push_state: PushState::default(),
@@ -3260,6 +3241,33 @@ mod tests {
     async fn list_for_push_returns_empty_stub() {
         let output = run("list for-push\n").await;
         assert_eq!(output, "\n");
+    }
+
+    #[tokio::test]
+    async fn list_session_does_not_open_a_damaged_staging_index() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let repo = temporary.path();
+        run_git(repo, &["init", "-q"]);
+        let staging = repo.join(".crab/staging");
+        std::fs::create_dir_all(&staging).expect("create staging directory");
+        std::fs::write(staging.join("index.db"), b"not a SQLite database")
+            .expect("write damaged index");
+        let _git_guard = GitEnvCwdGuard::set(repo, &repo.join(".git"), repo);
+        assert!(open_staging_for_push().await.is_err());
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "damaged-staging-read").await;
+        let context = test_context(store, "damaged-staging-read", repo.to_path_buf());
+
+        let (output, result) = run_with_context(
+            "list\nlist for-push\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        result.expect("read-only sessions must ignore local staging damage");
+        assert_eq!(output, "\n\n");
     }
 
     #[test]
@@ -4062,7 +4070,7 @@ mod tests {
             &HelperOptions::default(),
             &mut writer,
             Some(&store),
-            None,
+            &PushStaging::Missing,
             "remote-helper-cancel",
             &mut cache,
             "origin",
@@ -4195,7 +4203,7 @@ mod tests {
             &HelperOptions::default(),
             &mut writer,
             Some(&store),
-            Some(&staging),
+            &PushStaging::Ready(staging),
             "remote-helper-dispatch",
             &mut cache,
             "origin",

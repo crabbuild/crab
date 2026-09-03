@@ -298,7 +298,7 @@ async fn second_native_push_reuses_prepopulated_walk() {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",
@@ -393,7 +393,7 @@ async fn stale_push_state_falls_back_to_full_walk() {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",

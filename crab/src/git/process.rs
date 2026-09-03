@@ -220,12 +220,11 @@ impl OwnedChild {
         if self.finished {
             return Ok(true);
         }
-        // Poll only the leader: JobObject::try_wait consumes completion-port
-        // events needed by its final full-job wait. Windows retains the native
-        // process handle, and termination targets the job rather than a PID.
+        // run installs exactly one JobObject wrapper. Poll its lower child:
+        // polling the job consumes completion events needed by stop's full-job
+        // wait. The native child caches its status for that later wait.
         self.inner
-            .try_inner_child_mut()
-            .ok_or_else(missing_pipe)?
+            .inner_mut()
             .try_wait()
             .map(|status| status.is_some())
     }

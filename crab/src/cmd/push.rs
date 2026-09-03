@@ -29,12 +29,12 @@ use crate::git::push::{
     release_push_lock_leases,
 };
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
+use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::{AGENT_REBASE_FETCH_REF_FILTERING_ENV, PushSpec};
 use crate::git::url::CrabUrl;
 use crate::replication::StoreResolver;
 use crate::storage::StoreLayout;
-use crab_staging::StagingAreaReadOnly;
 
 const INTEGRATION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
 const INTEGRATION_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(3);
@@ -397,7 +397,7 @@ pub(crate) async fn run_push_prepared_refspecs(
     let remote_url = target.url;
     let parsed_url = target.parsed_url;
     let config = crate::core::config::Config::resolve_local()?;
-    let staging = open_optional_staging_for_push(&repo_root).await;
+    let staging = PushStaging::open(repo_root.join(".crab/staging")).await?;
     let specs = resolve_push_specs(refspecs, &remote_name, false)?;
     if let Some(expected) = &expected_refs
         && (expected.len() != specs.len()
@@ -567,15 +567,9 @@ async fn run_push_once(
         crate::core::config::Config::resolve_local()?
     };
 
-    // Open staging area (read-only for push).
-    //
-    // Uses the blocking variant so a concurrent clean filter session
-    // (e.g. `git status` running in parallel) queues the push instead
-    // of failing it — without this, an IDE that polls `git status`
-    // while you push would race and sometimes kill the push with
-    // E0081. Step 2 (`lookup_staging`) still refuses if a timeout
-    // ultimately happens with pointers to upload.
-    let staging = open_optional_staging_for_push(&repo_root).await;
+    // Wait for a concurrent clean filter, retaining the actual lock outcome
+    // until discovery establishes whether this push needs staged payloads.
+    let staging = PushStaging::open(repo_root.join(".crab/staging")).await?;
 
     // Resolve refspecs.
     let specs = resolve_push_specs(&args.refspecs, &remote_name, args.force)?;
@@ -1221,26 +1215,6 @@ fn git_command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
         "no diagnostic output".to_owned()
     } else {
         parts.join("\n")
-    }
-}
-
-async fn open_optional_staging_for_push(repo_root: &Path) -> Option<Arc<StagingAreaReadOnly>> {
-    let staging_root = repo_root.join(".crab").join("staging");
-    if !staging_root.exists() {
-        return None;
-    }
-
-    match StagingAreaReadOnly::open_blocking_default(staging_root).await {
-        Ok(s) => Some(Arc::new(s)),
-        Err(e) => {
-            warn!(
-                error = %e,
-                "staging area unavailable; push will only succeed if this ref \
-                 introduces no new pointer blobs. Resolve the lock holder to \
-                 push new large-file content."
-            );
-            None
-        }
     }
 }
 
@@ -2419,16 +2393,5 @@ mod tests {
         }
 
         assert_eq!(root, expected);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn missing_staging_dir_is_normal_for_commit_only_pushes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".crab")).unwrap();
-
-        let staging = open_optional_staging_for_push(dir.path()).await;
-
-        assert!(staging.is_none());
-        assert!(!dir.path().join(".crab/staging").exists());
     }
 }
