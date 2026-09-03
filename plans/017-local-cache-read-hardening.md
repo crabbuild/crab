@@ -3585,12 +3585,25 @@ the lock. The local-cache health suite passes 10 tests and the range-only build
 retains its seven-test health suite, proving feature-gated callers do not pull in
 the shard-hint database.
 
+**Installed proof.** Make-installed `crab 1.0.1` from `ae3cc72`, CLI SHA-256
+`663cc8fa804d49d40d4210a3390d118aeb1ea6983b9f4c82fa4abb9f704bbef6`,
+uses retained run `installed-hint-health-ae3cc72` beneath the existing
+`cache-f410.E7nt8I/cache-health.F6Bvs2` group. Healthy `cache stats --json`
+reports two private
+hint files and zero issues; before/after inode, mode, mtime, size, and SHA-256
+values are identical. A native-SQLite 32-character TEXT scope produces one
+precise corrupt issue and exit 1; installed `doctor --json` emits the expected
+preserve-and-diagnose warning without repair. While native SQLite holds an
+exclusive rollback-journal transaction, stats reports one busy issue and exit 1
+in 0.33 seconds; after rollback, the same installed command succeeds with zero
+issues. The isolated Make prefix does not replace the user's normal installed
+binary.
+
 **Remaining bounds.** The 250 ms timeout bounds lock admission, not SQLite CPU
 or I/O after a read transaction starts. `quick_check` and the exact global row
 count are explicit operator diagnostics but do not yet have a progress-handler
 deadline. Payload bodies, unrelated indexes, Windows private SQLite ownership,
-all-family repair, and an installed corrupt/contended diagnostic run remain
-open Phase 5 release evidence.
+and all-family repair remain open Phase 5 release evidence.
 
 ### Cache-write completion checkpoint
 
