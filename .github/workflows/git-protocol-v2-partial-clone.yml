@@ -139,6 +139,8 @@ jobs:
           cargo test -p crab --lib cmd::install::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::lfs::install::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::lfs::push::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::fetch::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::clone::tests --locked --features gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
@@ -216,6 +218,8 @@ jobs:
           cargo test -p crab --lib lfs::coordinator::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib lfs::batch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib lfs::transfer_agent::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::fetch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::clone::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run protocol and transcript contracts
         run: >-

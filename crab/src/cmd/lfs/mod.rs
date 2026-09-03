@@ -722,7 +722,7 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
     run_lfs_with_cancel(cmd, &CancellationToken::new())
 }
 
-/// Dispatch an LFS command with cancellation for scans and optimize-owned paths.
+/// Dispatch an LFS command with caller cancellation for supported operations.
 pub fn run_lfs_with_cancel(
     cmd: &LfsCmd,
     cancel: &CancellationToken,
@@ -770,12 +770,15 @@ pub fn run_lfs_with_cancel(
             skip_repo,
             args,
         } => {
-            return clone::run_lfs_clone(clone::LfsCloneOptions {
-                args: args.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-                skip_repo: *skip_repo,
-            });
+            return clone::run_lfs_clone(
+                clone::LfsCloneOptions {
+                    args: args.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                    skip_repo: *skip_repo,
+                },
+                cancel,
+            );
         }
         LfsCmd::Track {
             patterns,
@@ -958,30 +961,36 @@ pub fn run_lfs_with_cancel(
             dry_run,
             json,
         } => {
-            fetch::run_lfs_fetch(fetch::LfsFetchOptions {
-                remote: remote.clone(),
-                refs: refs.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-                recent: *recent,
-                all: *all,
-                stdin: *stdin,
-                prune: *prune,
-                refetch: *refetch,
-                dry_run: *dry_run,
-                json: *json,
-            })?;
+            fetch::run_lfs_fetch(
+                fetch::LfsFetchOptions {
+                    remote: remote.clone(),
+                    refs: refs.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                    recent: *recent,
+                    all: *all,
+                    stdin: *stdin,
+                    prune: *prune,
+                    refetch: *refetch,
+                    dry_run: *dry_run,
+                    json: *json,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Pull {
             remote,
             include,
             exclude,
         } => {
-            fetch::run_lfs_pull(fetch::LfsPullOptions {
-                remote: remote.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-            })?;
+            fetch::run_lfs_pull(
+                fetch::LfsPullOptions {
+                    remote: remote.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Push {
             remote,

@@ -2330,6 +2330,64 @@ Binary SHA-256:
 This precedes the discovery correction and is a development checkpoint,
 not clean-release, full-Kubernetes or production-provider qualification.
 
+### Caller-owned LFS cancellation checkpoint: 2026-09-03 UTC
+
+**Context.** The coordinator could cancel its own queue, but its constructor
+created an independent token. Cancellation of native publication or an LFS
+command therefore did not reach transfers already admitted by that command.
+Porcelain fetch/pull and the LFS clone wrapper also dropped the token at their
+dispatch boundary. This remained a real gap after admission liveness passed.
+
+**Implementation.** `TransferCoordinator::new` now requires a parent token
+and creates a child cancellation domain. Caller cancellation stops admission
+and propagates to attempts; a failed batch can cancel its own siblings without
+cancelling the caller or unrelated sibling operations. `BatchResolver`
+requires the command token, checks it for empty/nonempty batches and local
+inventory loops, and supplies it to each coordinator. Native publication,
+LFS push/pre-push, fetch/pull, clone-to-fetch/pull, and fetch-triggered prune
+now preserve caller ownership. Publication checks cancellation between local
+metadata inspection, upload and post-upload verification. Download cancellation
+after transfer but before cache installation drops the owned temporary path
+instead of installing a result that the caller has rejected.
+
+This uses tokio-util 0.7.18's documented `child_token` contract: parent
+cancellation reaches children; child cancellation does not reach its parent.
+No task is detached and no multipart-owning future is dropped. The shared
+object-store operation still drains before the coordinator returns.
+
+**Acceptance evidence and next boundaries.**
+
+- 379 selected LFS tests passed. Parent cancellation is tested while waiting
+  for object/byte permits and while an active attempt is held open. A first
+  error cancels batch siblings but leaves parent/unrelated child tokens live.
+- Empty/nonempty batch operations reject an already-cancelled caller. New
+  fetch/pull/clone tests prove rejection before repository resolution.
+- A real in-memory object-store download, delayed by the dependency's
+  `ThrottledStore`, is cancelled after creating its temporary path. It drains,
+  returns `Cancelled`, installs no cache object, and removes that temporary
+  file. The test does not assert that an in-flight store request is aborted.
+- Batch tests moved beside the module to keep the production owner readable.
+  Cross-platform protocol CI now includes the affected fetch/clone tests.
+- Still open: bounded cancellation inside storage requests, multipart abort
+  acknowledgement, synchronous local hashing and remaining fetch/clone Git
+  subprocesses. The custom-agent's blocking protocol reader still owns a
+  separate terminate/EOF lifecycle; it has no caller-token contract. It must
+  be made safely cancellable before wiring process cancellation into that
+  session. This checkpoint does not close those obligations or claim complete
+  end-to-end cancellation qualification.
+
+**Kubernetes progress, separate candidate.** The pinned `d38ab28` binary
+passed the formerly failing initial import in 130,051 ms and produced a
+1,227,441,712-byte pack containing 1,608,405 objects. More than 300 sequential
+incremental pushes have since passed in the still-running 1,000-commit run.
+Binary SHA-256:
+`0d29c3151d83beb50a9254168a5962a498cd7a108bd5f62d2cb824cf34a79b87`.
+The source binary is snapshotted in the run directory, so later builds do not
+change the experiment. This is functional development evidence on a host
+also running compilation/tests, not an isolated performance comparison.
+The run's remaining full/partial/shallow clone and integrity checks, the
+requested managed-file daily loop, and final-candidate replay remain open.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

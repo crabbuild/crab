@@ -8,12 +8,13 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
 use crate::lfs::batch::{BatchResolver, PatternFilter};
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
 use crab_git::pointer_detect::{PointerKind, classify};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use super::store_setup::resolve_lfs_remote_for_operation_with_remote_sync;
 
@@ -46,11 +47,13 @@ pub struct LfsPullOptions {
 /// Downloads missing LFS objects from the remote store into the local
 /// `.git/lfs/objects` cache. Supports include/exclude pattern filtering,
 /// `--recent`, `--all`, and `--dry-run`.
-pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
+pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     validate_fetch_options(&options)?;
     let (remote, refs) = remote_and_refs_from_options(&options)?;
     let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", remote.as_deref())?;
     let entries = collect_lfs_pointers(options.all, options.recent, &refs)?;
+    check_cancelled(cancel)?;
 
     if entries.is_empty() {
         if options.json {
@@ -59,7 +62,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             eprintln!("fetch: no LFS objects to fetch");
         }
         if options.prune {
-            run_fetch_prune(options.dry_run)?;
+            run_fetch_prune(options.dry_run, cancel)?;
         }
         return Ok(());
     }
@@ -82,6 +85,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
         &ctx.local_lfs_dir,
         options.refetch,
     )?;
+    check_cancelled(cancel)?;
 
     if transfers.is_empty() {
         if options.json {
@@ -90,7 +94,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             eprintln!("fetch: all objects up to date");
         }
         if options.prune {
-            run_fetch_prune(options.dry_run)?;
+            run_fetch_prune(options.dry_run, cancel)?;
         }
         return Ok(());
     }
@@ -106,7 +110,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             }
         }
         if options.prune {
-            run_fetch_prune(true)?;
+            run_fetch_prune(true, cancel)?;
         }
         return Ok(());
     }
@@ -120,7 +124,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
     let local_lfs_dir_for_json = ctx.local_lfs_dir.clone();
 
     super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
 
         if !options.json {
             eprintln!("fetch: downloading {downloaded_count} object(s)");
@@ -143,7 +147,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
     }
 
     if options.prune {
-        run_fetch_prune(false)?;
+        run_fetch_prune(false, cancel)?;
     }
 
     Ok(())
@@ -348,27 +352,32 @@ fn local_object_path(local_lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(oid_hex)
 }
 
-fn run_fetch_prune(dry_run: bool) -> Result<()> {
-    super::prune::run_lfs_prune(super::prune::LfsPruneOptions {
-        verify_remote: false,
-        no_verify_remote: false,
-        verify_unreachable: false,
-        no_verify_unreachable: false,
-        when_unverified: Some("continue".to_owned()),
-        recent: false,
-        dry_run,
-        force: true,
-        verbose: dry_run,
-    })
+fn run_fetch_prune(dry_run: bool, cancel: &CancellationToken) -> Result<()> {
+    super::prune::run_lfs_prune_with_cancel(
+        super::prune::LfsPruneOptions {
+            verify_remote: false,
+            no_verify_remote: false,
+            verify_unreachable: false,
+            no_verify_unreachable: false,
+            when_unverified: Some("continue".to_owned()),
+            recent: false,
+            dry_run,
+            force: true,
+            verbose: dry_run,
+        },
+        cancel,
+    )
 }
 
 /// Run `crab lfs pull`.
 ///
 /// Fetches missing LFS objects then replaces LFS pointers in the working
 /// tree with the actual file content.
-pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
+pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", options.remote.as_deref())?;
     let entries = collect_lfs_pointers(false, false, &[])?;
+    check_cancelled(cancel)?;
 
     if entries.is_empty() {
         eprintln!("pull: no LFS objects to pull");
@@ -387,7 +396,7 @@ pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
         .transpose()?;
 
     super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
 
         let missing =
             resolver.find_missing_for_fetch(&entries, inc_filter.as_ref(), exc_filter.as_ref())?;
@@ -406,6 +415,7 @@ pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
 
     let checkout_paths =
         checkout_paths_for_pull(&entries, inc_filter.as_ref(), exc_filter.as_ref());
+    check_cancelled(cancel)?;
 
     if checkout_paths.is_empty() {
         eprintln!("pull: updated 0 file(s) in working tree");
@@ -416,7 +426,7 @@ pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
         paths: checkout_paths,
         ..super::checkout::LfsCheckoutOptions::default()
     })?;
-
+    check_cancelled(cancel)?;
     Ok(())
 }
 
@@ -723,6 +733,20 @@ fn parse_ls_tree_output(output: &[u8]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_fetch_and_pull_stop_before_repository_resolution() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            run_lfs_fetch(LfsFetchOptions::default(), &cancel),
+            Err(CrabError::Cancelled)
+        ));
+        assert!(matches!(
+            run_lfs_pull(LfsPullOptions::default(), &cancel),
+            Err(CrabError::Cancelled)
+        ));
+    }
     use sha2::Digest;
     use std::fs;
 

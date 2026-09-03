@@ -70,6 +70,7 @@ pub(crate) async fn publish_reachable(
 
     let mut pointers = HashMap::<[u8; 32], LfsPointer>::new();
     for (_path, pointer) in entries {
+        check_cancelled(cancel)?;
         match pointers.get(&pointer.oid) {
             Some(existing) if existing.size != pointer.size => {
                 return Err(CrabError::LfsObjectCorrupt {
@@ -95,7 +96,7 @@ pub(crate) async fn publish_reachable(
     let missing = Arc::new(Mutex::new(Vec::<TransferRequest>::new()));
     let missing_for_operation = Arc::clone(&missing);
     let remote_for_operation = Arc::clone(&remote);
-    TransferCoordinator::new((&config).into())
+    TransferCoordinator::new((&config).into(), cancel)
         .execute(
             TransferDirection::Upload,
             requests,
@@ -130,7 +131,7 @@ pub(crate) async fn publish_reachable(
     // this phase, matching porcelain and custom-agent transfers.
     let remote_for_operation = Arc::clone(&remote);
     let pointers_for_operation = Arc::clone(&pointers);
-    TransferCoordinator::new((&config).into())
+    TransferCoordinator::new((&config).into(), cancel)
         .execute(
             TransferDirection::Upload,
             missing,
@@ -151,6 +152,7 @@ pub(crate) async fn publish_reachable(
                             CrabError::Io(error)
                         }
                     })?;
+                    check_cancelled(&cancel)?;
                     if metadata.len() != request.size {
                         return Err(CrabError::LfsObjectCorrupt {
                             oid: hex_encode(&request.oid),
@@ -168,6 +170,7 @@ pub(crate) async fn publish_reachable(
                         .put_stream_with_size(&request.oid, Some(request.size), &local_path)
                         .await
                         .map_err(CrabError::from)?;
+                    check_cancelled(&cancel)?;
                     remote
                         .verify_size(&request.oid, request.size)
                         .await

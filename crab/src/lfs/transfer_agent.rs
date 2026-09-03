@@ -350,7 +350,12 @@ where
                 store = Some(Arc::new(resolved_store));
                 let policy = resolved_config.transfer_policy();
                 config = Some(Arc::new(resolved_config));
-                coordinator = Some(Arc::new(TransferCoordinator::new(policy)));
+                // This protocol session has no caller token. Terminate/EOF
+                // still drains admitted transfers before returning.
+                coordinator = Some(Arc::new(TransferCoordinator::new(
+                    policy,
+                    &tokio_util::sync::CancellationToken::new(),
+                )));
 
                 tracing::debug!(
                     %operation,

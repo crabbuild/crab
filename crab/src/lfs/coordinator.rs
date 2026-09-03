@@ -170,14 +170,16 @@ pub(crate) struct TransferCoordinator {
 }
 
 impl TransferCoordinator {
-    pub(crate) fn new(policy: TransferPolicy) -> Self {
+    pub(crate) fn new(policy: TransferPolicy, cancel: &CancellationToken) -> Self {
         let byte_permits = byte_permits_for_budget(policy.in_flight_bytes);
         Self {
             concurrency: Arc::new(Semaphore::new(policy.max_concurrency.max(1))),
             bytes: Arc::new(Semaphore::new(byte_permits as usize)),
             byte_permits,
             rate_limiter: RateLimiter::new(policy.max_bandwidth),
-            cancellation: CancellationToken::new(),
+            // Stop this operation's siblings on failure without cancelling
+            // the caller, while always observing the caller's cancellation.
+            cancellation: cancel.child_token(),
             metrics: Arc::new(CoordinatorMetrics {
                 active_objects: AtomicU64::new(0),
                 active_bytes: AtomicU64::new(0),
@@ -435,10 +437,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn byte_backpressure_keeps_polling_admitted_transfers() {
-        let coordinator = TransferCoordinator::new(TransferPolicy {
-            max_concurrency: 4,
-            ..policy()
-        });
+        let coordinator = TransferCoordinator::new(
+            TransferPolicy {
+                max_concurrency: 4,
+                ..policy()
+            },
+            &CancellationToken::new(),
+        );
         let summary = tokio::time::timeout(
             Duration::from_secs(2),
             coordinator.execute(
@@ -459,10 +464,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_releases_waiting_object_and_byte_admissions() {
         for max_concurrency in [1, 2] {
-            let coordinator = TransferCoordinator::new(TransferPolicy {
-                max_concurrency,
-                ..policy()
-            });
+            let cancel = CancellationToken::new();
+            let coordinator = TransferCoordinator::new(
+                TransferPolicy {
+                    max_concurrency,
+                    ..policy()
+                },
+                &cancel,
+            );
             let permit = coordinator
                 .admit(request(0, 2 * BYTE_PERMIT_UNIT))
                 .await
@@ -474,7 +483,7 @@ mod tests {
                 std::task::Poll::Ready(())
             })
             .await;
-            coordinator.cancellation().cancel();
+            cancel.cancel();
             let result = tokio::time::timeout(Duration::from_secs(2), waiting)
                 .await
                 .unwrap();
@@ -496,10 +505,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_drains_active_attempts_and_never_becomes_skipped_success() {
-        let coordinator = TransferCoordinator::new(TransferPolicy {
-            skip_download_errors: true,
-            ..policy()
-        });
+        let cancel = CancellationToken::new();
+        let coordinator = TransferCoordinator::new(
+            TransferPolicy {
+                skip_download_errors: true,
+                ..policy()
+            },
+            &cancel,
+        );
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let completed = Arc::new(AtomicUsize::new(0));
@@ -532,7 +545,7 @@ mod tests {
             result = &mut execution => panic!("operation finished before release: {result:?}"),
             _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("operation did not start"),
         }
-        coordinator.cancellation().cancel();
+        cancel.cancel();
         std::future::poll_fn(|cx| {
             assert!(execution.as_mut().poll(cx).is_pending());
             std::task::Poll::Ready(())
@@ -556,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_empty_execution_is_not_success() {
-        let coordinator = TransferCoordinator::new(policy());
+        let coordinator = TransferCoordinator::new(policy(), &CancellationToken::new());
         coordinator.cancellation().cancel();
         let result = coordinator
             .execute(TransferDirection::Upload, [], |_, _| async {
@@ -568,14 +581,17 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_bounds_active_objects_and_bytes_for_large_queue() {
-        let coordinator = TransferCoordinator::new(TransferPolicy {
-            max_concurrency: 4,
-            max_retries: 1,
-            max_retry_delay: 1,
-            skip_download_errors: false,
-            max_bandwidth: 0,
-            in_flight_bytes: 8 * BYTE_PERMIT_UNIT,
-        });
+        let coordinator = TransferCoordinator::new(
+            TransferPolicy {
+                max_concurrency: 4,
+                max_retries: 1,
+                max_retry_delay: 1,
+                skip_download_errors: false,
+                max_bandwidth: 0,
+                in_flight_bytes: 8 * BYTE_PERMIT_UNIT,
+            },
+            &CancellationToken::new(),
+        );
         let requests = (0..100_000).map(|index| request((index % 255) as u8, 2 * BYTE_PERMIT_UNIT));
         let active = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -603,14 +619,19 @@ mod tests {
 
     #[tokio::test]
     async fn first_error_stops_admission_and_cancels_remaining_work() {
-        let coordinator = TransferCoordinator::new(TransferPolicy {
-            max_concurrency: 2,
-            max_retries: 1,
-            max_retry_delay: 1,
-            skip_download_errors: false,
-            max_bandwidth: 0,
-            in_flight_bytes: 8 * BYTE_PERMIT_UNIT,
-        });
+        let cancel = CancellationToken::new();
+        let sibling = cancel.child_token();
+        let coordinator = TransferCoordinator::new(
+            TransferPolicy {
+                max_concurrency: 2,
+                max_retries: 1,
+                max_retry_delay: 1,
+                skip_download_errors: false,
+                max_bandwidth: 0,
+                in_flight_bytes: 8 * BYTE_PERMIT_UNIT,
+            },
+            &cancel,
+        );
         let admitted = Arc::new(AtomicUsize::new(0));
         let admitted_for_operation = Arc::clone(&admitted);
         let error = coordinator
@@ -635,6 +656,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, CrabError::Internal(_)));
         assert!(admitted.load(Ordering::Acquire) <= 2);
+        assert!(!cancel.is_cancelled() && !sibling.is_cancelled());
     }
 
     #[test]

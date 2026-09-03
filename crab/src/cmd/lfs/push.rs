@@ -61,7 +61,7 @@ pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Resu
             resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
         let pointers = object_id_pointers(&ctx.local_lfs_dir, &resolved.object_ids)?;
         return super::block_on_runtime(async {
-            let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+            let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
             resolver.upload_missing(&pointers).await?;
             eprintln!("push: uploaded {} object(s)", pointers.len());
             Ok(())
@@ -78,7 +78,7 @@ pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Resu
     }
 
     super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
         let missing = resolver.find_missing_for_push(&pointers).await?;
 
         if missing.is_empty() {
@@ -314,7 +314,7 @@ pub(crate) fn run_lfs_pre_push_batch(
 
         // Upload missing objects.
         let ptrs: Vec<LfsPointer> = pointers.into_iter().map(|(_, p)| p).collect();
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
         let missing = resolver.find_missing_for_push(&ptrs).await?;
 
         if !missing.is_empty() {
