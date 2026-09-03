@@ -8,7 +8,8 @@
 //! identity from serialized metadata instead of hashing the whole object.
 //!
 //! LRU eviction uses file modification time (mtime) as the access
-//! timestamp — every successful read touches the file. Prune sorts
+//! timestamp — object hits touch their retained file descriptor; manifest
+//! reads and metadata-only existence/size probes do not. Prune sorts
 //! by mtime ascending and removes the oldest entries until the cache
 //! fits within its configured byte budget.
 
@@ -352,7 +353,7 @@ impl LocalCache {
     pub async fn get_read_xorb_if_present(&self, hash: &MerkleHash) -> Result<Option<Bytes>> {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
-        let Some(data) =
+        let Some((data, entry)) =
             read_file_bounded_result(&self.root, &path, MAX_XORB_SIZE as u64, |data| {
                 verify_xorb_identity(data, hash)
             })
@@ -360,7 +361,7 @@ impl LocalCache {
         else {
             return Ok(None);
         };
-        crate::private_fs::touch(&self.root, &path).await;
+        entry.touch().await;
         Ok(Some(data))
     }
 
@@ -387,10 +388,10 @@ impl LocalCache {
             CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
                 let limit = max_bytes.unwrap_or(MAX_CACHE_STAGE_BYTES);
-                let data = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
+                let (data, entry) = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
                     .await
                     .ok()??;
-                crate::private_fs::touch(&self.root, &path).await;
+                entry.touch().await;
                 Some(data)
             }
             CacheKey::Manifest { name, etag } => {
@@ -404,7 +405,7 @@ impl LocalCache {
                 // A body-read failure cannot authorize deleting a later ETag
                 // publication. Missing bodies are misses regardless of ETag.
                 let limit = max_bytes.unwrap_or(MAX_CACHE_MANIFEST_BYTES);
-                let data = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
+                let (data, _entry) = read_file_bounded_result(&self.root, &path, limit, |_| Ok(()))
                     .await
                     .ok()??;
                 debug!(manifest = %name, "manifest cache hit (ETag match)");
@@ -751,8 +752,9 @@ impl LocalCache {
             Ok(Some((Bytes::from(buf), bytes)))
         }
         .await;
-        let data = entry.finish(result).await.ok()??;
-        crate::private_fs::touch(&self.root, &path).await;
+        let (data, entry) = entry.finish(result).await.ok()?;
+        let data = data?;
+        entry.touch().await;
         Some(data)
     }
 
@@ -792,8 +794,8 @@ impl LocalCache {
             Ok((chunks, payload_len))
         }
         .await;
-        let metadata = entry.finish(result).await?;
-        crate::private_fs::touch(&self.root, &path).await;
+        let (metadata, entry) = entry.finish(result).await?;
+        entry.touch().await;
         Ok(Some(metadata))
     }
 
@@ -842,12 +844,12 @@ impl LocalCache {
         max_bytes: Option<u64>,
     ) -> Option<Bytes> {
         let max_bytes = max_bytes?;
-        let data = read_file_bounded_result(&self.root, path, max_bytes, |data| {
+        let (data, entry) = read_file_bounded_result(&self.root, path, max_bytes, |data| {
             verify_data_hash(data, expected)
         })
         .await
         .ok()??;
-        crate::private_fs::touch(&self.root, path).await;
+        entry.touch().await;
         Some(data)
     }
 
@@ -860,12 +862,12 @@ impl LocalCache {
         let max_bytes = max_bytes
             .unwrap_or(MAX_XORB_SIZE as u64)
             .min(MAX_XORB_SIZE as u64);
-        let data = read_file_bounded_result(&self.root, path, max_bytes, |data| {
+        let (data, entry) = read_file_bounded_result(&self.root, path, max_bytes, |data| {
             verify_xorb_identity(data, expected)
         })
         .await
         .ok()??;
-        crate::private_fs::touch(&self.root, path).await;
+        entry.touch().await;
         Some(data)
     }
 
@@ -878,11 +880,11 @@ impl LocalCache {
             verify_xorb_file_payload(file, path, bytes, expected).await
         }
         .await;
-        if entry.finish(result).await.is_ok() {
-            crate::private_fs::touch(&self.root, path).await;
-            return true;
-        }
-        false
+        let Ok(((), entry)) = entry.finish(result).await else {
+            return false;
+        };
+        entry.touch().await;
+        true
     }
 
     /// Atomically write `data` to `path` via tempfile + rename.
@@ -1022,7 +1024,7 @@ async fn read_file_bounded_result(
     path: &Path,
     max_bytes: u64,
     validate: impl FnOnce(&Bytes) -> Result<()>,
-) -> Result<Option<Bytes>> {
+) -> Result<Option<(Bytes, PayloadRead)>> {
     let (entry, file) = match PayloadRead::open(root, path).await {
         Ok(opened) => opened,
         Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1658,7 +1660,7 @@ fn decode_fixed_hash(value: &[u8]) -> Option<[u8; HASH_BYTES]> {
 
 /// Read a file to a string, returning `None` on any error.
 async fn read_string_if_exists(root: &Path, path: &Path) -> Option<String> {
-    let bytes = read_file_bounded_result(root, path, 16 * 1024, |_| Ok(()))
+    let (bytes, _entry) = read_file_bounded_result(root, path, 16 * 1024, |_| Ok(()))
         .await
         .ok()??;
     std::str::from_utf8(&bytes).ok().map(str::to_owned)

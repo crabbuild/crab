@@ -1822,6 +1822,57 @@ LRU touch identity, catalog-generation changes during reads, external in-place
 mutation, cancellation/resource/platform qualification, and outstanding approval
 boundaries remain open; this checkpoint does not complete Phase 2.
 
+### Read-recency identity execution slice
+
+**Context.** Object and decoded-range readers previously consumed their
+`PayloadRead` owner after validation, then `private_fs::touch(root, path)`
+reopened the pathname. A concurrent refill could receive a timestamp for bytes
+read from its predecessor; replacing the root could redirect the update into
+the replacement tree. Private permissions and no-follow opens did not preserve
+the identity of the file whose bytes had already been returned.
+
+**Implementation and evidence map.** `catalog/removal.rs::PayloadRead::finish`
+now returns the successful value together with the retained owner. Actual hit
+callers consume that owner with `touch`, which sets mtime through the original
+descriptor on the blocking pool. Failed verification still conditionally
+repairs only its original file and preserves its error. No new descriptor,
+payload copy, configuration, SQL write, or dependency is introduced; the
+pathname-based timestamp helper is deleted. `local_cache.rs` covers bounded
+chunk/shard/stage/xorb reads, xorb metadata/ranges, and full-payload verification;
+`xet_chunk_cache.rs::CrabRangeCache::read_entry` covers decoded ranges. Manifest
+body/ETag reads and existence/size probes remain non-mutating, and invalid xorb
+request bounds drop their owner without touching or deleting the payload.
+
+The installed Rust standard-library source implements `File::set_modified`
+through `set_times`; its Unix implementation calls `futimens` with the owned
+descriptor, not the pathname. The existing shared read lease therefore remains
+live through the optional update. Cancellation can leave an already-started
+blocking timestamp update running, but it has no authority over a replacement
+file; this does not establish bounded filesystem-call cancellation.
+
+**Acceptance and proof.** The deterministic
+`validated_read_updates_only_original_file_recency` test pauses after bytes
+validate, replaces either the leaf or root, and resumes the hit. Against the
+old implementation it failed because the replacement mtime changed. With the
+retained owner, the replacement keeps its old timestamp, the original gets
+the access hint, and the returned bytes are unchanged. Sibling tests exercise
+eight object read surfaces, decoded-range hits/misses, and unchanged timestamps
+for manifest reads, metadata probes, and out-of-bounds xorb requests. Native
+macOS all-feature cache tests pass (278 tests), along with 63 cache-store and
+87 read tests. Strict all-target/all-feature Clippy passes for all three crates.
+Minimal, local-only, and range-only cache builds pass; deleting the pathname
+touch helper also narrows the remaining path-reader's feature gate to its
+actual local-cache/test callers. Installed RustFS and hosted results are
+recorded after execution. The latest pre-change protocol CI run still fails
+`source_reported_cancellation_does_not_become_internal_failure`; passing local
+tests does not resolve that intermittent error-attribution gate.
+
+**Remaining work.** This closes the pathname-reopening recency gap, not Phase 2
+or Phase 3. All-family LRU semantics (including manifest pairing), batched
+catalog access timestamps, bounded reconciliation and resource use,
+catalog-generation changes during reads, external in-place mutation, native
+platform qualification, and the other plan gates remain open.
+
 ## Phase 3: Enforce one cache budget and lifecycle
 
 **Context**

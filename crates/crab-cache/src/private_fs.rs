@@ -354,18 +354,6 @@ impl PendingFile {
     }
 }
 
-/// Update recency through a private file handle; failure only loses an LRU hint.
-pub(crate) async fn touch(root: &Path, path: &Path) {
-    let root = root.to_owned();
-    let path = path.to_owned();
-    let _ = tokio::task::spawn_blocking(move || {
-        let file = platform::open_read(&root, &path)?;
-        file.set_modified(std::time::SystemTime::now())?;
-        Ok::<_, CacheError>(())
-    })
-    .await;
-}
-
 #[cfg(unix)]
 mod platform {
     use std::ffi::{CStr, OsString};
@@ -720,6 +708,7 @@ mod platform {
         Ok(())
     }
 
+    #[cfg(any(feature = "local-cache", test))]
     pub(super) fn open_read(root: &Path, path: &Path) -> Result<File> {
         let relative = path
             .strip_prefix(root)
@@ -1236,6 +1225,7 @@ mod platform {
         Err(unsupported(Path::new("cache")))
     }
 
+    #[cfg(any(feature = "local-cache", test))]
     pub(super) fn open_read(_root: &Path, path: &Path) -> Result<File> {
         Err(unsupported(path))
     }

@@ -1,6 +1,152 @@
 use super::*;
 use crate::CacheCatalog;
 
+#[tokio::test]
+async fn successful_object_read_surfaces_update_recency() {
+    for mode in [
+        "chunk", "shard", "stage", "xorb", "body", "metadata", "range", "payload",
+    ] {
+        let (_temp, cache) = temp_cache();
+        let (hash, xorb) = test_xorb(b"data");
+        let (key, data) = match mode {
+            "chunk" => (
+                CacheKey::Chunk(compute_data_hash(b"data")),
+                Bytes::from_static(b"data"),
+            ),
+            "shard" => (
+                CacheKey::Shard(compute_data_hash(b"data")),
+                Bytes::from_static(b"data"),
+            ),
+            "stage" => (
+                CacheKey::Stage(crab_types::workflow::StageHash([7; 32])),
+                Bytes::from_static(b"data"),
+            ),
+            _ => (CacheKey::Xorb(hash), xorb),
+        };
+        cache.put(&key, &data).await.unwrap();
+        let file = std::fs::File::open(cache.hash_path(&key)).unwrap();
+        let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
+        file.set_modified(old_time).unwrap();
+        let hit = match mode {
+            "body" => cache
+                .get_read_xorb_if_present(&hash)
+                .await
+                .unwrap()
+                .is_some(),
+            "metadata" => cache
+                .get_xorb_metadata_if_present(&hash)
+                .await
+                .unwrap()
+                .is_some(),
+            "range" => cache.get_xorb_range_if_present(&hash, 0..1).await.is_some(),
+            "payload" => cache.contains_verified(&key).await,
+            _ => cache
+                .try_read_key_limited(&key, Some(MAX_XORB_SIZE as u64))
+                .await
+                .is_some(),
+        };
+        assert!(hit, "{mode}");
+        assert!(
+            file.metadata().unwrap().modified().unwrap() > old_time,
+            "{mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn probes_manifest_reads_and_invalid_ranges_do_not_update_recency() {
+    let (_temp, cache) = temp_cache();
+    let (hash, data) = test_xorb(b"data");
+    let xorb = CacheKey::Xorb(hash);
+    let manifest = CacheKey::Manifest {
+        name: "manifest".into(),
+        etag: Some("version".into()),
+    };
+    cache.put(&xorb, &data).await.unwrap();
+    cache.put(&manifest, b"manifest").await.unwrap();
+    let files = [
+        cache.hash_path(&xorb),
+        cache.hash_path(&manifest),
+        cache.manifest_etag_path("manifest"),
+    ]
+    .map(|path| std::fs::File::open(path).unwrap());
+    let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
+    for file in &files {
+        file.set_modified(old_time).unwrap();
+    }
+    assert!(cache.contains(&xorb).await);
+    assert_eq!(
+        cache.cached_size(&xorb).await.unwrap(),
+        Some(data.len() as u64)
+    );
+    assert!(
+        cache
+            .get_xorb_range_if_present(&hash, 0..data.len() as u64 + 1)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        cache.cached_manifest_etag("manifest").await.as_deref(),
+        Some("version")
+    );
+    assert!(cache.try_read_key_limited(&manifest, None).await.is_some());
+    let stale = CacheKey::Manifest {
+        name: "manifest".into(),
+        etag: Some("other".into()),
+    };
+    assert!(cache.try_read_key_limited(&stale, None).await.is_none());
+    for file in files {
+        assert_eq!(file.metadata().unwrap().modified().unwrap(), old_time);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validated_read_updates_only_original_file_recency() {
+    for replace_root in [false, true] {
+        let (temp, cache) = temp_cache();
+        let data = Bytes::from_static(b"data");
+        let key = CacheKey::Chunk(compute_data_hash(&data));
+        cache.put(&key, &data).await.unwrap();
+        let path = cache.hash_path(&key);
+        let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
+        let original = std::fs::File::open(&path).unwrap();
+        original.set_modified(old_time).unwrap();
+        let read_root = cache.root.clone();
+        let read_path = path.clone();
+        let (validated, ready) = tokio::sync::oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let reader = tokio::spawn(async move {
+            let (result, entry) =
+                read_file_bounded_result(&read_root, &read_path, 4, move |bytes| {
+                    verify_data_hash(bytes, &compute_data_hash(b"data"))?;
+                    validated.send(()).unwrap();
+                    wait.recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            entry.touch().await;
+            result
+        });
+        ready.await.unwrap();
+        if replace_root {
+            std::fs::rename(&cache.root, temp.path().join("moved")).unwrap();
+        }
+        cache.put(&key, &data).await.unwrap();
+        let replacement = std::fs::File::open(&path).unwrap();
+        replacement.set_modified(old_time).unwrap();
+        resume.send(()).unwrap();
+        assert_eq!(reader.await.unwrap(), data);
+        assert_eq!(
+            replacement.metadata().unwrap().modified().unwrap(),
+            old_time
+        );
+        assert!(original.metadata().unwrap().modified().unwrap() > old_time);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bounded_validation_cannot_remove_a_later_publication() {
     let (hash, xorb) = test_xorb(b"data");

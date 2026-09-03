@@ -58,24 +58,37 @@ impl PayloadRead {
     pub(crate) async fn finish<T, E: std::fmt::Display>(
         self,
         result: std::result::Result<T, E>,
-    ) -> std::result::Result<T, E> {
+    ) -> std::result::Result<(T, Self), E> {
+        // Keep the successful read's identity until its caller decides whether
+        // it is a hit worth touching or a non-mutating probe/request miss.
+        let error = match result {
+            Ok(data) => return Ok((data, self)),
+            Err(error) => error,
+        };
         // The reader must have finished before releasing its shared lease.
         // Preserve the validation error even when optional cleanup fails.
-        if let Err(error) = &result {
-            let path = self.display_root.join(&self.relative);
-            let family = self
-                .relative
-                .to_str()
-                .map(classify_family)
-                .unwrap_or("other");
-            tracing::warn!(family, operation = "read-and-verify", path = %path.display(),
-                recovery = "discard-read-and-use-origin", %error, "local cache read failed");
-            if let Err(error) = self.discard().await {
-                tracing::warn!(family, operation = "evict", path = %path.display(),
-                    recovery = "bypass-cache", %error, "local cache repair failed");
-            }
+        let path = self.display_root.join(&self.relative);
+        let family = self
+            .relative
+            .to_str()
+            .map(classify_family)
+            .unwrap_or("other");
+        tracing::warn!(family, operation = "read-and-verify", path = %path.display(),
+            recovery = "discard-read-and-use-origin", %error, "local cache read failed");
+        if let Err(error) = self.discard().await {
+            tracing::warn!(family, operation = "evict", path = %path.display(),
+                recovery = "bypass-cache", %error, "local cache repair failed");
         }
-        result
+        Err(error)
+    }
+
+    pub(crate) async fn touch(self) {
+        // Recency belongs to the file just read, never a later publication at
+        // its path. Keep the descriptor/lease; failure only loses an LRU hint.
+        let _ = tokio::task::spawn_blocking(move || {
+            self.original.set_modified(std::time::SystemTime::now())
+        })
+        .await;
     }
 
     pub(crate) async fn discard(self) -> Result<()> {

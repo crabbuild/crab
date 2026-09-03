@@ -79,7 +79,9 @@ impl CrabRangeCache {
                 }
                 Ok(hit)
             });
-        entry.finish(result).await
+        let (hit, entry) = entry.finish(result).await?;
+        entry.touch().await;
+        Ok(hit)
     }
 
     async fn read_open_entry(
@@ -198,10 +200,7 @@ impl ChunkCache for CrabRangeCache {
                 .read_entry(&path, (start, end, len, crc), key, range)
                 .await
             {
-                Ok(hit) => {
-                    crate::private_fs::touch(self.catalog.root(), &path).await;
-                    return Ok(Some(hit));
-                }
+                Ok(hit) => return Ok(Some(hit)),
                 Err(error) => {
                     warn!(family = "decoded-range", operation = "read", path = %path.display(),
                         recovery = "use-origin", %error, "local cache read failed");
@@ -808,6 +807,41 @@ mod tests {
             .await
             .unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn range_hits_update_recency_but_missing_ranges_do_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache/chunks");
+        let path = write_xet_range(&root, b"data").await;
+        let cache = XetChunkCacheHandle::open(&root, 1024 * 1024).unwrap();
+        let key = Key {
+            prefix: String::new(),
+            hash: Default::default(),
+        };
+        let file = std::fs::File::open(path).unwrap();
+        let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(60);
+        file.set_modified(old_time).unwrap();
+        assert!(
+            cache
+                .cache
+                .get(&key, &ChunkRange::new(0, 2))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(file.metadata().unwrap().modified().unwrap(), old_time);
+        assert_eq!(
+            cache
+                .cache
+                .get(&key, &ChunkRange::new(0, 1))
+                .await
+                .unwrap()
+                .unwrap()
+                .data,
+            b"data"
+        );
+        assert!(file.metadata().unwrap().modified().unwrap() > old_time);
     }
 
     #[tokio::test]

@@ -140,8 +140,13 @@ does not delete a separately published manifest ETag. Cache-store decoding can
 outlive the local handle, so its error path freshly verifies the current xorb
 under the existing removal lock and retains healthy replacements. This reuses
 streaming maintenance verification, without an additional full-body buffer.
-Atomic manifest body/ETag pairing, access-time identity, and catalog-generation
-changes during a read remain separate work.
+Successful reads retain that same descriptor through their best-effort recency
+update; a later publication at the pathname cannot receive the old read's mtime.
+Object and decoded-range hits share this owner, without another open or body
+copy. Request-bound misses, existence/size probes, and manifest/ETag reads keep
+their existing no-touch behavior. This fixes recency identity, not all-family
+LRU policy or batched catalog access accounting. Atomic manifest body/ETag
+pairing and catalog-generation changes during a read remain separate work.
 
 Catalog eviction uses the same payload ownership and deletion boundary. Its
 final lease/reservation check and row removal share an immediate SQLite writer
