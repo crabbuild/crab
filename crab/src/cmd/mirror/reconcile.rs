@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use crab_types::pointer::Pointer;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +29,6 @@ use super::types::{
 use crab_cache::lifecycle::CacheUseGuard;
 
 const PLAN_FORMAT_VERSION: u32 = 1;
-const FETCH_BATCH_SIZE: usize = 128;
 const POINTER_SCAN_LIMITS: crab_git::walk::PointerScanLimits = crab_git::walk::PointerScanLimits {
     objects: 2_000_000,
     lookups: 8_000_000,
@@ -51,7 +51,7 @@ pub(super) async fn run_integrity_command(
     let cache_dir = resolve_cache_dir(args, &invocation_dir);
     preflight(runner, &options, false)?;
     check_cancelled(cancel)?;
-    let cache = CacheUseGuard::acquire(&cache_dir, cancel);
+    let cache = CacheUseGuard::acquire(&cache_dir, cancel).map(Arc::new);
     if let Some(plan_path) = &args.apply_plan {
         // Apply owns the cache through the final destination read, not just
         // inspection. A second source refresh must not change its Git objects.
@@ -133,7 +133,7 @@ fn validate_integrity_args(args: &MirrorArgs) -> Result<()> {
 
 async fn inspect(
     args: &MirrorArgs,
-    cache: &CacheUseGuard,
+    cache: &Arc<CacheUseGuard>,
     cancel: &CancellationToken,
     options: &MirrorExecution,
     runner: &mut dyn CommandRunner,
@@ -186,8 +186,14 @@ async fn inspect(
     let destination_snapshot = Some(snapshot_identity(&destination_identity, &snapshot)?);
     check_cancelled(cancel)?;
 
-    if let Err(error) =
-        fetch_changed_crab_objects(cache_dir, &source_refs, crab_refs, options, runner)
+    if let Err(error) = super::history::load_changed_history(
+        Arc::clone(cache),
+        &source_refs,
+        &snapshot,
+        crab_storage::StoreLayout::new(store.as_storage().clone(), parsed.repo_path.clone()),
+        cancel,
+    )
+    .await
     {
         return Ok(unverifiable_check(
             args,
@@ -262,35 +268,6 @@ fn unverifiable_check(
         ci_passed: false,
         issues: vec![detail],
     }
-}
-
-fn fetch_changed_crab_objects(
-    cache_dir: &Path,
-    source: &BTreeMap<String, String>,
-    crab: &BTreeMap<String, String>,
-    options: &MirrorExecution,
-    runner: &mut dyn CommandRunner,
-) -> Result<()> {
-    let refs = source
-        .iter()
-        .filter_map(|(name, oid)| crab.get(name).filter(|other| *other != oid))
-        .cloned()
-        .collect::<Vec<_>>();
-    for chunk in refs.chunks(FETCH_BATCH_SIZE) {
-        let mut args = vec![
-            "fetch".to_owned(),
-            "--no-auto-gc".to_owned(),
-            "--no-tags".to_owned(),
-            CRAB_REMOTE.to_owned(),
-        ];
-        args.extend(chunk.iter().cloned());
-        run_required(
-            runner,
-            git_command_from_vec(args, Some(cache_dir), options, false),
-            options.mode,
-        )?;
-    }
-    Ok(())
 }
 
 fn classify_refs(
@@ -705,7 +682,7 @@ fn read_plan(path: &Path) -> Result<MirrorReconciliationPlan> {
 async fn apply_plan(
     args: &MirrorArgs,
     plan_path: &Path,
-    cache: &CacheUseGuard,
+    cache: &Arc<CacheUseGuard>,
     cancel: &CancellationToken,
     options: MirrorExecution,
     runner: &mut dyn CommandRunner,

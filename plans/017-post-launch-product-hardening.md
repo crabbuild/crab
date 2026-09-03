@@ -4562,7 +4562,8 @@ passes the equal/source-ahead cases. The stronger cold-cache run
 exact denied operation. Run `crab/scripts/e2e/run_mirror_readonly_rustfs_smoke.py`
 with `--crab-bin`, `--bucket crabbuild`, `--endpoint-url http://127.0.0.1:9000`,
 `--require-existing-bucket`, `--root` on the workspace volume and a fresh
-`--run-id`. The runner is intentionally red until the production gap is fixed.
+`--run-id`. At this revision the runner was intentionally red pending the
+production fix.
 The repository-local rerun reproduces the same single failure and denied lock
 write in `phase2-mirror-readonly-runner-3ed9d1d-20260903/artifacts/report.json`.
 
@@ -4598,6 +4599,77 @@ metadata locator opens without a published checkpoint can create reader state.
 No cache-probe optimization was added: the live source-ahead test proved Git
 already avoids transfer when the needed objects are local. The cold-cache
 failure, not a mocked fetch-call count, defines the remaining implementation.
+
+### Canonical history inspection implementation: 2026-09-03 UTC
+
+**Implemented boundary.** `crab-remote-git::OperationContext::from_snapshot`
+uses the caller's authenticated layout and pinned journal-projected inventory.
+It does not construct a full repository handle, open SlateDB, acquire a lease,
+repair acceleration, or expose generated-pack publication. Both individual and
+batch object reads now use the existing verified pack-index/range/delta reader;
+ordinary locator-backed opens retain their publication and coverage checks.
+Snapshot entry counts are bounded before inventory copies. The complete
+snapshot digest participates in runtime cache identity: a journal commit can
+introduce a new pack without incrementing the compacted manifest generation,
+so generation-only negative caching would incorrectly hide a newly added object.
+
+`mirror::history` replaces inspection's child `git fetch crab` with this shared
+reader. It reads missing commit/tag ancestry into the owned local bare cache;
+source objects already present remain local. Cached parents are still walked,
+not trusted as a complete-history frontier. Object hashes are verified before
+ancestry is accepted. Local inflation/parsing/writes execute on a joined blocking
+worker which retains shared ownership of the cache guard, including if its
+awaiting caller is dropped. Existing native Git merge-base classification and
+the final pointer/snapshot verification remain the comparison authority.
+
+**Evidence.** The dirty debug candidate based on `230840e`, binary SHA-256
+`c64a1296f11fa161cdbc65d6b436d19ee8da1ac08dfdd8c75bc26fb776f33c1f`, passes
+`phase2-mirror-readonly-canonical-230840e-20260903/artifacts/report.json`:
+25 commands, six checks, no denied mutation attempts. Cases cover equal,
+source-ahead, cold Crab-ahead, divergence, and a cached destination tip whose
+parent was removed from this run's disposable local cache. The original
+failing reports above are retained unchanged. Shared-reader regressions prove
+REF/OFS/shared-base delta reads without a catalog or storage mutation, and
+isolation of cached misses between same-generation snapshots. The 25 existing
+mirror reconciliation tests pass unchanged.
+
+The expanded response-fault run
+`phase2-mirror-readonly-faults-230840e-20260903/artifacts/report.json` passes
+29 commands and ten checks with zero mutation attempts. Missing and corrupt
+immutable index/pack responses are injected only in the forwarding proxy;
+each cold check reports unverifiable, and stored objects remain unchanged.
+`phase2-protocol-mirror-canonical-230840e-20260903/artifacts/report.json`
+passes 481 commands and 139 checks, including ordinary protocol/lazy fetch,
+mirror check/plan/apply, hooks and tagged v1.0.1 rollback. Both runs use the
+same candidate binary hash above. Seven adjacent read tests and 13 rejection
+tests also pass. `crab-remote-git` library Clippy and touched-package formatting
+pass. CLI-wide Clippy is not green: 488 diagnostics under the installed
+toolchain; the first (`cache/hydrated_pointer.rs:401`, `map_unwrap_or`) is
+unchanged on current `origin/main`. Filtering the diagnostic stream to the
+touched mirror history/reconciliation files produces no diagnostics. This
+does not waive the broader release gate or the previously recorded failures.
+
+**Remaining executable gates.** This is permission-path proof, not completion
+of section 2 or a GC safety claim:
+
+1. Complete the non-writing sweep-observation/retention protocol from the prior
+   subsection. Acceptance remains no false-clean result during an intermediate
+   sweep, ABA recreation, or old-client maintenance.
+2. Extend the passing cold missing/corrupt canonical pack/index response tests
+   with cancellation, then managed read-only grants with scope/hidden-ref
+   boundaries. Acceptance:
+   explicit unverifiable/refusal, no mutation or grant widening, bounded cleanup.
+3. Qualify very long destination-only history and many-pack inventories under
+   the shared read budgets. The current defaults permit 10,000 remote logical
+   reads, 20,000 storage requests and 512 MiB inflated work per operation; the
+   local graph is additionally capped at two million objects and 512 MiB.
+   Exceeding a budget is unverifiable, never partial success. Acceptance for
+   advertised large-repository support requires measured cold/warm bounds and
+   no regression against the baseline, not merely increasing these limits.
+4. Retain ordinary fetch/lazy-fetch, mirror apply, hook, crash/receipt and tagged
+   rollback proof against the final committed release candidate. The ongoing
+   Kubernetes replay uses its earlier pinned release binary and cannot certify
+   this new reader. Production-provider and cross-platform rows stay separate.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

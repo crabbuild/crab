@@ -96,6 +96,17 @@ pub struct GitObjectLocatorSession {
 }
 
 impl GitObjectLocatorSession {
+    /// Represent canonical pack-index reads without opening a locator database.
+    #[must_use]
+    pub fn without_catalog() -> Self {
+        Self {
+            reader: None,
+            identity: None,
+            bindings: HashMap::new(),
+            active_ssts: 0,
+        }
+    }
+
     /// Open the compact locator, treating an absent database as an empty index.
     ///
     /// A published locator checkpoint is opened explicitly so a read-only
@@ -213,12 +224,7 @@ impl GitObjectLocatorSession {
         {
             Ok(reader) => Arc::new(reader),
             Err(error) if is_manifest_missing(&error) => {
-                return Ok(Self {
-                    reader: None,
-                    identity: None,
-                    bindings: HashMap::new(),
-                    active_ssts: 0,
-                });
+                return Ok(Self::without_catalog());
             }
             Err(source) => {
                 return Err(MetadataError::SlateDbOpen {

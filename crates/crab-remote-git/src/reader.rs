@@ -319,6 +319,13 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
+        if !session.is_available() {
+            // Canonical snapshot inspection must not open or repair mutable
+            // acceleration state, including for a single requested object.
+            return self
+                .lookup_batch_from_pack_indexes(requested, budget, cancellation)
+                .await;
+        }
         if requested.len() < PACK_INDEX_LOOKUP_MIN_OBJECTS || self.inventory.is_empty() {
             return self
                 .lookup_batch_from_catalog(session, requested, budget, cancellation)
@@ -1198,18 +1205,10 @@ impl RemoteGitReader {
             .as_bytes()
             .try_into()
             .map_err(|_| Error::UnsupportedObjectFormat)?;
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        tracing::debug!(
-            storage_request = "locator_lookup",
-            storage_bytes = 0u64,
-            "remote Git object-store request"
-        );
         let oid_batch = [oid_bytes];
-        let lookup = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(Error::Cancelled),
-            lookup = session.lookup_batch(&oid_batch, &self.inventory) => lookup?,
-        };
+        let lookup = self
+            .lookup_batch_for_read(session, &oid_batch, budget, cancellation)
+            .await?;
         match lookup.into_iter().next() {
             Some(GitObjectLookup::Hit(locator)) => Ok(locator),
             Some(GitObjectLookup::Corrupt) => Err(Error::Corrupt {

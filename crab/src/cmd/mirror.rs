@@ -21,6 +21,7 @@ use crate::git::process::GIT_ENV_REMOVALS;
 use crate::git::url::CrabUrl;
 
 mod cache;
+mod history;
 mod hook;
 mod pre_push;
 mod process;

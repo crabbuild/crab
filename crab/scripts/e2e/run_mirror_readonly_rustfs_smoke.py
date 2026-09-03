@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Qualify mirror inspection with every remote mutation denied and recorded.
 
-Equal/source-ahead and a cold-cache Crab-ahead case use one isolated prefix.
-The cold-cache case currently exposes the upload-pack read-admission write gap;
-retain a failing report until that production path supports read-only grants.
+Equal/source-ahead, cold-cache Crab-ahead, incomplete-cache recovery, and
+divergence use one isolated prefix with all remote mutations denied.
 """
 
 import importlib.util
@@ -22,6 +21,20 @@ RUNNER = RECEIPT.RUNNER
 
 class ReadOnlyProxy(RECEIPT.MarkerProxy):
     def forward(self):
+        path = self.path.split("?", 1)[0]
+        fault = self.server.read_fault
+        if (fault and self.command == "GET" and path.startswith(self.server.fault_prefix)
+                and path.endswith(fault[1])):
+            self.server.fault_hits.append({"fault": fault[0], "path": path})
+            body = (b"<Error><Code>NoSuchKey</Code></Error>" if fault[2] == 404
+                    else b"injected invalid immutable Git object")
+            self.send_response(fault[2])
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = True
+            return
         if self.server.deny_writes and self.command not in {"GET", "HEAD"}:
             self.server.denied.append({"method": self.command, "path": self.path.split("?", 1)[0]})
             body = b"<Error><Code>AccessDenied</Code><Message>Read-only qualification</Message></Error>"
@@ -52,12 +65,16 @@ def main():
     proxy.armed = False
     proxy.deny_writes = False
     proxy.denied = []
+    proxy.read_fault = None
+    proxy.fault_hits = []
+    proxy.fault_prefix = "/unarmed/"
     worker = threading.Thread(target=proxy.serve_forever, daemon=True)
     worker.start()
     args.endpoint_url = f"http://127.0.0.1:{proxy.server_port}"
     smoke = RUNNER.ProtocolV2PartialCloneSmoke(args)
     smoke.report["schema"] = "crab.mirror-readonly-smoke"
     smoke.report["version"] = "1.0"
+    proxy.fault_prefix = f"/{args.bucket}/{RUNNER.REMOTE_PREFIX}/{smoke.run_id}/packs/"
     try:
         health = smoke.endpoint_health()
         smoke.ensure_bucket()
@@ -93,6 +110,10 @@ def main():
                     ahead.get("state") == "source_ahead"
                     and ahead.get("pointers", {}).get("state") == "verified"
                     and not proxy.denied)
+        intermediate = smoke.git_value(source, ["rev-parse", "HEAD"], name="intermediate revision")
+        (source / "remote-only.txt").write_text("second remote commit\n")
+        smoke.run_git(source, ["add", "remote-only.txt"])
+        smoke.run_git(source, ["commit", "-m", "second remote advance"])
         proxy.deny_writes = False
         smoke.run_git(source, ["push", smoke.remote_url, "main:main"], name="advance Crab destination")
         smoke.run_git(source, ["reset", "--hard", revision], name="restore disposable source's older tip")
@@ -107,6 +128,38 @@ def main():
                     crab_ahead.get("state") == "crab_ahead"
                     and crab_ahead.get("pointers", {}).get("state") == "verified"
                     and not proxy.denied)
+        # Only this run's imported loose object is removed. Retaining its child
+        # models an interrupted import and proves cached tips are not a frontier.
+        cached_parent = (smoke.run_root / "fresh-crab-ahead-cache.git" / "objects"
+                         / intermediate[:2] / intermediate[2:])
+        cached_parent.unlink()
+        recovered = smoke.json_data(
+            smoke.run_cmd("read-only incomplete-cache recovery", fresh, smoke.run_root), "mirror.check")
+        smoke.check("cached-tip-does-not-hide-missing-parent",
+                    recovered.get("state") == "crab_ahead" and cached_parent.is_file()
+                    and not proxy.denied)
+        (source / "local-only.txt").write_text("divergent local commit\n")
+        smoke.run_git(source, ["add", "local-only.txt"])
+        smoke.run_git(source, ["commit", "-m", "divergent source"])
+        diverged = smoke.json_data(
+            smoke.run_cmd("read-only divergent check", [*mirror, "--cache-dir",
+                          str(smoke.run_root / "fresh-diverged-cache.git")], smoke.run_root), "mirror.check")
+        smoke.check("divergent-check-passes-with-zero-write-attempts",
+                    diverged.get("state") == "diverged"
+                    and diverged.get("pointers", {}).get("state") == "verified"
+                    and not proxy.denied)
+        for fault in [("missing-index", ".idx", 404), ("corrupt-index", ".idx", 200),
+                      ("missing-pack", ".pack", 404), ("corrupt-pack", ".pack", 200)]:
+            proxy.read_fault = fault
+            before_faults = len(proxy.fault_hits)
+            failed = smoke.json_data(
+                smoke.run_cmd(f"read-only {fault[0]} refusal", [*mirror, "--cache-dir",
+                              str(smoke.run_root / f"{fault[0]}-cache.git")], smoke.run_root),
+                "mirror.check")
+            smoke.check(f"{fault[0]}-cannot-produce-clean-result",
+                        failed.get("state") == "unverifiable" and not failed.get("ci_passed")
+                        and len(proxy.fault_hits) > before_faults and not proxy.denied)
+        proxy.read_fault = None
         smoke.report["status"] = "passed"
         return 0
     except Exception as error:
@@ -115,6 +168,7 @@ def main():
         return 1
     finally:
         smoke.report["denied_write_attempts"] = proxy.denied
+        smoke.report["injected_read_faults"] = proxy.fault_hits
         smoke.write_report()
         proxy.shutdown()
         proxy.server_close()

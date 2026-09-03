@@ -30,6 +30,7 @@ pub struct RepositoryIdentity {
     provider_namespace: Arc<str>,
     repository_namespace: Arc<str>,
     placement_generation: u64,
+    snapshot_digest: Option<Arc<str>>,
 }
 
 impl RepositoryIdentity {
@@ -55,6 +56,7 @@ impl RepositoryIdentity {
             provider_namespace,
             repository_namespace,
             placement_generation,
+            snapshot_digest: None,
         })
     }
 
@@ -73,6 +75,9 @@ impl RepositoryIdentity {
             hash.update(component);
         }
         hash.update(&self.placement_generation.to_be_bytes());
+        if let Some(digest) = &self.snapshot_digest {
+            hash.update(digest.as_bytes());
+        }
     }
 }
 
@@ -274,6 +279,71 @@ impl fmt::Debug for RemoteGitRepository {
             .field("generation", &self.state.generation)
             .field("pack_count", &self.state.inventory.len())
             .finish()
+    }
+}
+
+impl OperationContext {
+    /// Read canonical immutable packs from a caller-pinned repository snapshot.
+    ///
+    /// No locator, lease, repair, or generated-pack publication is opened. The
+    /// caller must authorize this store and snapshot together, arrange object
+    /// retention, and revalidate snapshot freshness before using its result.
+    /// Finish the returned operation on both success and failure.
+    pub async fn from_snapshot(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        mut identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime.background_cancellation())?;
+        let entries = snapshot
+            .journal
+            .packs
+            .len()
+            .saturating_add(snapshot.journal.refs.len()) as u64;
+        if entries > options.operation_limits().max_entries {
+            return Err(Error::LimitExceeded {
+                limit: "snapshot entries",
+                actual: entries,
+                maximum: options.operation_limits().max_entries,
+            });
+        }
+        // Journal commits can change inventory without incrementing the base
+        // generation. In particular, an old cached miss must not hide a new pack.
+        identity.snapshot_digest = Some(Arc::from(snapshot.digest()?));
+        let manifest = snapshot.materialized_manifest();
+        let refs = parse_refs(&manifest)?;
+        let inventory = parse_inventory(snapshot.journal.packs.clone())?;
+        let reader = RemoteGitReader::from_pinned(
+            layout.store().clone(),
+            layout.repo_prefix(),
+            inventory.values().copied(),
+            ReaderLimits::from_options(options),
+            Arc::clone(&runtime),
+            identity.clone(),
+            manifest.generation,
+        )?;
+        let state = RepositoryState {
+            store: layout.store().clone(),
+            layout,
+            runtime,
+            identity,
+            options,
+            generation: manifest.generation,
+            git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+            manifest_etag: snapshot.manifest_etag.clone(),
+            coverage: None,
+            inventory,
+            refs,
+            reader: Some(Arc::new(reader)),
+            commit_graph: None,
+            shallow_closure: None,
+        };
+        Self::open(Arc::new(state), OperationKind::Repository, cancellation).await
     }
 }
 
