@@ -1581,6 +1581,64 @@ harnesses remain prototypes; maintained qualification tooling, full-disk/read-
 only faults, bounded resource/latency proof, platform/provider coverage, CI
 failures, and the remaining phase requirements are not closed by this slice.
 
+### Reconstruction and broad-CI qualification follow-up
+
+**Context, 2026-09-03.** The direct read-through fix does not explain or fix the
+prior protocol run's missing typed availability source. It also cannot provide
+broad qualification while the main CI job exhausts disk before finishing its
+integration-test build. These are independent acceptance failures; neither is
+waived by the passing installed RustFS workload.
+
+**Execution.** Add a multi-threaded shared-read test that performs 256 actual
+failing Xet reconstructions, rotating memory, streaming, and partial-range
+surfaces. Every failure must retain the availability source; failure output
+identifies the attempt and complete returned error. This is additional
+scheduling/lifecycle coverage, not a deterministic reproduction or a production
+fix. No existing assertion, test selection, retry policy, or source conversion
+is relaxed. Local stress repeats pass 40 times (10,240 reconstructions); the
+original CI failure remains unresolved until its actual failure path is proven.
+
+For the `Rust quality and tests` CI job, set the standard Cargo dev profile's
+debug-info level to `line-tables-only`; the test profile inherits it. Apply it
+at job scope, before artifact restoration, so Clippy, workspace tests, and
+managed-OpenAPI commands use the same debug-info policy. Keep local developer
+defaults, release builds, all test targets/features, optimization, assertions,
+overflow checks, panic behavior, and test-worker stack settings unchanged.
+This removes type/variable debug information, not runtime validation or
+file/line backtraces. It does not delete any checkout/cache or reduce coverage.
+
+**Dependency contracts and focused proof.** The installed Cargo reference
+documents dev-to-test inheritance and the line-tables-only backtrace contract.
+`Swatinem/rust-cache@v2` documents that default environment hashing includes
+`CARGO`-prefixed variables: the new job setting separates its cache identity
+from the earlier full-debug artifacts without a custom cache-key workaround.
+`CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test -p crab-types --locked -v`
+passes all 38 tests; actual rustc invocations include
+`-C debuginfo=line-tables-only`. This narrow probe confirms profile wiring,
+not Linux workspace disk consumption. The changed workflow parses as YAML;
+hosted actionlint and full-job execution remain required proof.
+
+The unrelated-to-runtime Clippy blocker in the existing shallow-tag test is
+also removed: borrow its annotated ref as a one-element slice rather than
+cloning it. The complete test and immutable predicate were inspected; every
+assertion and input value is unchanged. This is a test-code lint correction,
+not a suppression, expected-failure change, or protocol behavior change.
+All 87 shared-read tests and strict all-target/all-feature shared-read Clippy
+now pass. Formatting, whitespace, workflow YAML syntax, and an explicit check
+that the full workspace test command remains present pass. No production Rust
+code changed, so the installed `3b2823e` runtime qualification remains the
+latest artifact evidence; this checkpoint does not claim a new installed run.
+
+**Acceptance and remaining work.** The unchanged full workspace suite and
+managed-OpenAPI gates must run within runner disk/time limits on the new head;
+capture failures without removing targets or suppressing tests. The protocol
+error must be reproduced with its typed returned source or a deterministic
+ordering fixture, then fixed at the responsible ownership boundary with writer,
+origin-integrity, cancellation, and all three reconstruction surfaces covered.
+A subsequent green run alone does not prove the intermittent source-loss
+cause is repaired. Private-tenancy/inventory approvals and the remaining plan
+requirements remain separate gates.
+
 ### Decoded-range read/repair identity execution slice
 
 **Context and evidence map.** At `bc0fe3b`, `CrabRangeCache::get` calls

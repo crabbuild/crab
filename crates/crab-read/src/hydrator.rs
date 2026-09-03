@@ -675,6 +675,39 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_reconstruction_failures_retain_availability_source_on_every_surface() {
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, pointer, _) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let availability = Arc::new(FailingAvailability {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            cancel: None,
+            reports_cancelled: false,
+        });
+        let hydrator = hydrator.with_availability(availability);
+        for attempt in 0..256 {
+            let error = match attempt % 3 {
+                0 => hydrator
+                    .reconstruct_from_pointer(&pointer.serialize())
+                    .await
+                    .unwrap_err(),
+                1 => hydrator
+                    .reconstruct_to_writer(&pointer, std::io::sink())
+                    .await
+                    .unwrap_err(),
+                _ => hydrator
+                    .reconstruct_range_from_pointer(&pointer.serialize(), 0, 1024)
+                    .await
+                    .unwrap_err(),
+            };
+            assert!(
+                source_of::<RestoreDenied>(&error).is_some(),
+                "attempt {attempt} lost the availability source: {error:#?}"
+            );
+        }
+    }
+
     struct FailingWriter(Arc<std::sync::atomic::AtomicBool>);
 
     impl Write for FailingWriter {
