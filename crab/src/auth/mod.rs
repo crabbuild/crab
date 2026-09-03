@@ -336,6 +336,7 @@ pub async fn build_store(
                 signer: built.signer,
                 multipart: built.multipart,
                 multipart_identity: built.multipart_identity,
+                target_identity: built.target_identity,
             })
         });
         let refreshing = Arc::new(RefreshingObjectStore::new(
@@ -348,6 +349,7 @@ pub async fn build_store(
                 signer: built.signer,
                 multipart: built.multipart,
                 multipart_identity: built.multipart_identity,
+                target_identity: built.target_identity,
             },
             builder,
         ));
@@ -364,7 +366,9 @@ pub async fn build_store(
         };
     }
 
-    let mut store = Store::new(built.inner).with_bucket_identity(identity);
+    let mut store = Store::new(built.inner)
+        .with_bucket_identity(identity)
+        .with_target_identity(built.target_identity);
     if let Some(s) = built.signer {
         store = store.with_signer(s);
     }

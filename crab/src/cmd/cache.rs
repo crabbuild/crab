@@ -3,13 +3,14 @@
 //! The local cache lives at `~/.cache/crab/` (or `$XDG_CACHE_HOME/crab/`)
 //! and stores downloaded shards, xorbs, persistent chunk indices, workflow
 //! stage entries, and bloom filters.
-//! This command removes all cached data.
+//! Cleanup retains coordination markers and refuses active mirror owners.
 
 use std::path::{Path, PathBuf};
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::OutputMode;
+use crab_cache::lifecycle::{CacheCleanGuard, cleanup_preview};
 use tokio_util::sync::CancellationToken;
 
 /// Summary of a cache clean operation.
@@ -28,7 +29,7 @@ pub struct CacheVerifySummary {
     pub objects_corrupt: u64,
 }
 
-/// Remove all files under the cache root directory.
+/// Remove cache data while retaining coordination markers.
 ///
 /// When `dry_run` is true, reports what would be removed without deleting.
 pub fn run_cache_clean(dry_run: bool, mode: OutputMode) -> Result<CacheCleanSummary> {
@@ -57,16 +58,14 @@ pub fn run_cache_clean_with_cancel(
         });
     }
 
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    for target in &targets {
-        check_cancelled(cancel)?;
-        let (target_files, target_bytes) = walk_dir_size_with_cancel(target, cancel)?;
-        files = files.saturating_add(target_files);
-        bytes = bytes.saturating_add(target_bytes);
-    }
-
     if dry_run {
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        for target in &targets {
+            let stats = cleanup_preview(target, cancel)?;
+            files = files.saturating_add(stats.files_removed);
+            bytes = bytes.saturating_add(stats.bytes_reclaimed);
+        }
         if !mode.is_machine() {
             println!(
                 "Would remove {} file(s), reclaiming {}",
@@ -81,24 +80,39 @@ pub fn run_cache_clean_with_cancel(
         });
     }
 
-    for target in &targets {
-        check_cancelled(cancel)?;
-        remove_dir_contents_with_cancel(target, cancel)?;
-    }
+    let summary = clean_admitted_targets(&targets, cancel)?;
 
     if !mode.is_machine() {
         println!(
             "Removed {} file(s), reclaimed {}",
-            files,
-            format_bytes(bytes),
+            summary.files_removed,
+            format_bytes(summary.bytes_reclaimed),
         );
     }
 
-    Ok(CacheCleanSummary {
-        files_removed: files,
-        bytes_reclaimed: bytes,
-        dry_run: false,
-    })
+    Ok(summary)
+}
+
+fn clean_admitted_targets(
+    targets: &[PathBuf],
+    cancel: &CancellationToken,
+) -> Result<CacheCleanSummary> {
+    // Admit every configured root before deleting from any of them. A busy
+    // mirror in the second root must not cause partial cleanup of the first.
+    let guards = targets
+        .iter()
+        .map(|target| CacheCleanGuard::acquire(target, cancel))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut summary = CacheCleanSummary::default();
+    for guard in guards {
+        check_cancelled(cancel)?;
+        let stats = guard.clean(cancel)?;
+        summary.files_removed = summary.files_removed.saturating_add(stats.files_removed);
+        summary.bytes_reclaimed = summary
+            .bytes_reclaimed
+            .saturating_add(stats.bytes_reclaimed);
+    }
+    Ok(summary)
 }
 
 fn clean_targets(object_root: PathBuf, chunk_root: PathBuf) -> Result<Vec<PathBuf>> {
@@ -189,74 +203,6 @@ pub async fn run_cache_verify_with_cancel(
     Ok(summary)
 }
 
-/// Walk a directory tree and return (file_count, total_bytes).
-#[cfg(test)]
-fn walk_dir_size(dir: &Path) -> Result<(u64, u64)> {
-    walk_dir_size_with_cancel(dir, &CancellationToken::new())
-}
-
-fn walk_dir_size_with_cancel(dir: &Path, cancel: &CancellationToken) -> Result<(u64, u64)> {
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    walk_dir_size_inner(dir, &mut files, &mut bytes, cancel)?;
-    Ok((files, bytes))
-}
-
-fn walk_dir_size_inner(
-    dir: &Path,
-    files: &mut u64,
-    bytes: &mut u64,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    check_cancelled(cancel)?;
-    let entries = std::fs::read_dir(dir).map_err(|e| {
-        crate::core::error::CrabError::Internal(format!(
-            "failed to read directory {}: {e}",
-            dir.display()
-        ))
-    })?;
-
-    for entry in entries {
-        check_cancelled(cancel)?;
-        let entry = entry.map_err(|e| {
-            crate::core::error::CrabError::Internal(format!("dir entry error: {e}"))
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(CrabError::Io)?;
-        if file_type.is_dir() {
-            walk_dir_size_inner(&path, files, bytes, cancel)?;
-        } else {
-            *files += 1;
-            *bytes = bytes.saturating_add(entry.metadata().map_or(0, |meta| meta.len()));
-        }
-    }
-
-    Ok(())
-}
-
-/// Remove all files and subdirectories inside `dir`, but keep `dir` itself.
-#[cfg(test)]
-fn remove_dir_contents(dir: &Path) -> Result<()> {
-    remove_dir_contents_with_cancel(dir, &CancellationToken::new())
-}
-
-fn remove_dir_contents_with_cancel(dir: &Path, cancel: &CancellationToken) -> Result<()> {
-    check_cancelled(cancel)?;
-    for entry in std::fs::read_dir(dir)? {
-        check_cancelled(cancel)?;
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            remove_dir_contents_with_cancel(&path, cancel)?;
-            check_cancelled(cancel)?;
-            std::fs::remove_dir(&path)?;
-        } else {
-            std::fs::remove_file(&path)?;
-        }
-    }
-    Ok(())
-}
-
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -279,54 +225,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn walk_dir_size_empty_dir() {
+    fn busy_second_root_prevents_deletion_from_first_root() {
         let dir = tempfile::tempdir().unwrap();
-        let (files, bytes) = walk_dir_size(dir.path()).unwrap();
-        assert_eq!(files, 0);
-        assert_eq!(bytes, 0);
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::write(first.join("keep"), b"data").unwrap();
+        let owner = crab_cache::lifecycle::CacheUseGuard::acquire(
+            &second.join("mirror.git"),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let roots = vec![first.clone(), second];
+        let error = clean_admitted_targets(&roots, &CancellationToken::new()).unwrap_err();
+        assert!(
+            matches!(error, CrabError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert!(first.join("keep").exists());
+        drop(owner);
+        let summary = clean_admitted_targets(&roots, &CancellationToken::new()).unwrap();
+        assert_eq!(summary.files_removed, 1);
+        assert_eq!(summary.bytes_reclaimed, 4);
     }
 
     #[test]
-    fn walk_dir_size_counts_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        std::fs::write(dir.path().join("b.txt"), b"world!").unwrap();
-        let (files, bytes) = walk_dir_size(dir.path()).unwrap();
-        assert_eq!(files, 2);
-        assert_eq!(bytes, 11);
-    }
-
-    #[test]
-    fn remove_dir_contents_clears_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        std::fs::write(dir.path().join("sub/b.txt"), b"world").unwrap();
-        remove_dir_contents(dir.path()).unwrap();
-        assert!(dir.path().exists());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn cache_clean_walk_honors_cancellation() {
+    fn cache_clean_admission_honors_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let error = walk_dir_size_with_cancel(dir.path(), &cancel).unwrap_err();
-        assert!(matches!(error, CrabError::Cancelled));
-        assert!(dir.path().join("a.txt").exists());
-    }
-
-    #[test]
-    fn cache_clean_delete_honors_cancellation() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-
-        let error = remove_dir_contents_with_cancel(dir.path(), &cancel).unwrap_err();
+        let error = clean_admitted_targets(&[dir.path().to_owned()], &cancel).unwrap_err();
         assert!(matches!(error, CrabError::Cancelled));
         assert!(dir.path().join("a.txt").exists());
     }
@@ -356,20 +285,5 @@ mod tests {
         let error = validate_destructive_cache_root(&cwd).unwrap_err();
 
         assert!(matches!(error, CrabError::Configuration { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remove_dir_contents_does_not_follow_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("keep"), b"data").unwrap();
-        symlink(outside.path(), root.path().join("link")).unwrap();
-
-        remove_dir_contents(root.path()).unwrap();
-
-        assert!(outside.path().join("keep").exists());
     }
 }

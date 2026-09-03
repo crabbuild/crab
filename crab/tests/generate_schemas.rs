@@ -48,6 +48,7 @@ use crab::cmd::history_recovery::{
 };
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
+use crab::cmd::mirror::{MirrorApplySummary, MirrorCheckSummary, MirrorReconciliationPlan};
 use crab::cmd::optimize::OptimizePayload;
 use crab::cmd::optimize::xorbs::OptimizeXorbsEventPayload;
 use crab::cmd::prune::PruneSummary;
@@ -160,6 +161,12 @@ fn regenerate_schemas() {
     write_schema("import.extension_bucket", &schema_for!(ExtensionBucket));
     write_schema("ls-files", &schema_for!(LsFilesPayload));
     write_schema("ls-files.entry", &schema_for!(LsFileEntry));
+    write_schema("mirror.apply", &schema_for!(MirrorApplySummary));
+    write_schema("mirror.check", &schema_for!(MirrorCheckSummary));
+    write_schema(
+        "mirror.reconciliation_plan",
+        &schema_for!(MirrorReconciliationPlan),
+    );
     write_schema("optimize.apply", &schema_for!(OptimizePayload));
     write_schema("optimize.plan", &schema_for!(OptimizePayload));
     write_schema(

@@ -5,17 +5,18 @@
 //! [`crate::lfs::lock::LockManager`].
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
-#[cfg(test)]
-use std::thread;
+use std::process::{ChildStdin, Command};
+use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
+use crate::git::process::{self, GIT_ENV_REMOVALS, MAX_CAPTURE_BYTES};
 use crate::lfs::batch::BatchResolver;
 use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
 use crab_git::pointer_detect::{PointerKind, classify};
+use crab_git::pre_push::{PrePushUpdate, read_pre_push};
 
 use super::store_setup::{
     git_user_identity, resolve_lfs_remote_for_operation_with_remote_sync, validate_git_push_url,
@@ -43,7 +44,8 @@ struct ResolvedPushArgs {
 /// Uploads missing LFS objects to the remote store. Supports `--all`
 /// to upload every locally-known object, `--object-id` to upload a
 /// single object by OID, and `--dry-run` to preview what would be pushed.
-pub fn run_lfs_push(options: LfsPushOptions) -> Result<()> {
+pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     let resolved = resolve_push_args(&options)?;
 
     if !resolved.object_ids.is_empty() {
@@ -68,7 +70,7 @@ pub fn run_lfs_push(options: LfsPushOptions) -> Result<()> {
 
     let ctx =
         resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
-    let pointers = collect_push_pointers(options.all, &resolved.refs)?;
+    let pointers = collect_push_pointers(options.all, &resolved.refs, cancel)?;
 
     if pointers.is_empty() {
         eprintln!("push: no LFS objects to push");
@@ -237,7 +239,12 @@ fn is_oid_hex(value: &str) -> bool {
 /// Invoked by the pre-push hook. Reads ref updates from stdin, collects
 /// LFS pointers from pushed commits, checks lock conflicts, uploads
 /// missing objects, and exits non-zero on failure.
-pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
+pub fn run_lfs_pre_push(
+    remote: Option<&str>,
+    url: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
     if remote.is_none() && url.is_some() {
         return Err(CrabError::Configuration {
             key: "lfs pre-push".to_owned(),
@@ -247,21 +254,25 @@ pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
     if let (Some(remote), Some(url)) = (remote, url) {
         validate_git_push_url(remote, url)?;
     }
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("push", remote)?;
+    // Validate the complete batch before resolving cloud access. The cap is
+    // local hook admission policy, not a limit on Git repository size.
+    let updates = read_pre_push(std::io::stdin().lock(), 16 * 1024 * 1024)?;
+    run_lfs_pre_push_batch(remote, &updates, cancel)
+}
 
-    // Read ref updates from stdin (git pre-push hook format):
-    // <local-ref> <local-sha> <remote-ref> <remote-sha>
-    let stdin = std::io::stdin();
-    let mut input = String::new();
-    stdin
-        .lock()
-        .read_to_string(&mut input)
-        .map_err(CrabError::Io)?;
-    let (local_shas, remote_shas) = parse_pre_push_input(&input)?;
+pub(crate) fn run_lfs_pre_push_batch(
+    remote: Option<&str>,
+    updates: &[PrePushUpdate],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let (local_shas, remote_shas) = pre_push_revisions(updates);
 
     if local_shas.is_empty() {
         return Ok(());
     }
+
+    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("push", remote)?;
 
     // Ref updates contain only the refs Git is changing. Excluding the
     // compacted manifest's complete ref-tip set prevents a multi-branch push
@@ -270,8 +281,12 @@ pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
     let base_manifest_refs = load_remote_manifest_ref_tips(&ctx)?;
 
     // Collect LFS pointers from the commits being pushed.
-    let pointers =
-        collect_pointers_from_range_with_base_refs(&local_shas, &remote_shas, &base_manifest_refs)?;
+    let pointers = collect_pointers_from_range_with_base_refs(
+        &local_shas,
+        &remote_shas,
+        &base_manifest_refs,
+        cancel,
+    )?;
 
     if pointers.is_empty() {
         return Ok(());
@@ -311,43 +326,19 @@ pub fn run_lfs_pre_push(remote: Option<&str>, url: Option<&str>) -> Result<()> {
     })
 }
 
-fn parse_pre_push_input(input: &str) -> Result<(Vec<String>, Vec<String>)> {
+fn pre_push_revisions(updates: &[PrePushUpdate]) -> (Vec<String>, Vec<String>) {
     let mut local_shas = Vec::new();
     let mut remote_shas = Vec::new();
-
-    for (line_number, line) in input.lines().enumerate() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
+    for update in updates {
+        let Some(local_oid) = &update.local_oid else {
             continue;
-        }
-        if parts.len() != 4 {
-            return Err(CrabError::Configuration {
-                key: "lfs pre-push".to_owned(),
-                origin: format!("invalid ref update on input line {}", line_number + 1),
-            });
-        }
-
-        let local_sha = parts[1];
-        let remote_sha = parts[3];
-        if !is_git_object_id(local_sha) || !is_git_object_id(remote_sha) {
-            return Err(CrabError::Configuration {
-                key: "lfs pre-push".to_owned(),
-                origin: format!("invalid object ID on input line {}", line_number + 1),
-            });
-        }
-
-        // Skip delete ref updates (local SHA all zeros).
-        if local_sha.bytes().all(|c| c == b'0') {
-            continue;
-        }
-
-        local_shas.push(local_sha.to_owned());
-        if !remote_sha.bytes().all(|c| c == b'0') {
-            remote_shas.push(remote_sha.to_owned());
+        };
+        local_shas.push(local_oid.clone());
+        if let Some(remote_oid) = &update.remote_oid {
+            remote_shas.push(remote_oid.clone());
         }
     }
-
-    Ok((local_shas, remote_shas))
+    (local_shas, remote_shas)
 }
 
 fn is_git_object_id(value: &str) -> bool {
@@ -355,10 +346,14 @@ fn is_git_object_id(value: &str) -> bool {
 }
 
 /// Collect LFS pointers from HEAD (or all refs for `--all`).
-fn collect_push_pointers(all: bool, refs: &[String]) -> Result<Vec<LfsPointer>> {
+fn collect_push_pointers(
+    all: bool,
+    refs: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<LfsPointer>> {
     let ref_names = if all {
         if refs.is_empty() {
-            all_ref_names()?
+            all_ref_names(cancel)?
         } else {
             refs.to_vec()
         }
@@ -370,9 +365,14 @@ fn collect_push_pointers(all: bool, refs: &[String]) -> Result<Vec<LfsPointer>> 
 
     let mut pointers = Vec::new();
     let mut seen = HashSet::new();
+    let mut remaining = MAX_CAPTURE_BYTES;
     for ref_name in ref_names {
-        visit_lfs_pointers_in_tree(Path::new("."), &ref_name, |_, pointer| {
+        visit_lfs_pointers_in_tree(Path::new("."), &ref_name, cancel, |_, pointer| {
             if seen.insert(pointer.oid) {
+                spend_scan_budget(
+                    &mut remaining,
+                    pointer_memory("", &pointer) + std::mem::size_of::<[u8; 32]>(),
+                )?;
                 pointers.push(pointer);
             }
             Ok(())
@@ -386,12 +386,14 @@ fn collect_pointers_from_range_with_base_refs(
     local_shas: &[String],
     remote_shas: &[String],
     base_manifest_refs: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
     collect_pointers_from_range_in_with_base_refs(
         Path::new("."),
         local_shas,
         remote_shas,
         base_manifest_refs,
+        cancel,
     )
 }
 
@@ -413,9 +415,10 @@ pub(crate) fn collect_lfs_object_ids_from_range_in(
     repo_dir: &Path,
     local_shas: &[String],
     remote_shas: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<String>> {
     let mut object_ids: Vec<String> =
-        collect_pointers_from_range_in(repo_dir, local_shas, remote_shas)?
+        collect_pointers_from_range_in(repo_dir, local_shas, remote_shas, cancel)?
             .into_iter()
             .map(|(_, pointer)| hex_encode(&pointer.oid))
             .collect();
@@ -428,8 +431,9 @@ pub(crate) fn collect_pointers_from_range_in(
     repo_dir: &Path,
     local_shas: &[String],
     remote_shas: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
-    collect_pointers_from_range_in_with_base_refs(repo_dir, local_shas, remote_shas, &[])
+    collect_pointers_from_range_in_with_base_refs(repo_dir, local_shas, remote_shas, &[], cancel)
 }
 
 fn collect_pointers_from_range_in_with_base_refs(
@@ -437,16 +441,12 @@ fn collect_pointers_from_range_in_with_base_refs(
     local_shas: &[String],
     remote_shas: &[String],
     base_manifest_refs: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
-    // Build rev-list args: local_sha ^remote_sha ...
-    // Git's blob:limit filter omits blobs at least the given size. LFS
-    // pointers are bounded, so the scan never streams ordinary large blobs
-    // through cat-file merely to prove that they are not pointers.
-    let mut args = vec![
-        "rev-list".to_owned(),
-        "--objects".to_owned(),
-        format!("--filter=blob:limit={}", MAX_LFS_POINTER_SIZE + 1),
-    ];
+    check_cancelled(cancel)?;
+    // A size filter can hide a corrupt pointer behind a forged large header.
+    // Verify the introduced range's named objects; large bodies stay streamed.
+    let mut args = vec!["rev-list".to_owned(), "--objects".to_owned()];
     for sha in local_shas {
         args.push(sha.clone());
     }
@@ -464,6 +464,7 @@ fn collect_pointers_from_range_in_with_base_refs(
         &args,
         b'\n',
         parse_rev_list_record,
+        cancel,
         |path, pointer| {
             entries.push((path, pointer));
             Ok(())
@@ -475,6 +476,7 @@ fn collect_pointers_from_range_in_with_base_refs(
 fn visit_lfs_pointers_in_tree(
     repo_dir: &Path,
     ref_name: &str,
+    cancel: &CancellationToken,
     mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
 ) -> Result<()> {
     let args = vec![
@@ -489,6 +491,7 @@ fn visit_lfs_pointers_in_tree(
         &args,
         b'\0',
         parse_ls_tree_record,
+        cancel,
         |path, pointer| {
             if seen.insert(pointer.oid) {
                 visitor(path, pointer)?;
@@ -498,184 +501,149 @@ fn visit_lfs_pointers_in_tree(
     )
 }
 
+type DiscoveryParser = fn(&[u8], &mut Option<String>) -> Result<Option<(String, String)>>;
+
 fn visit_lfs_blobs_in_git_command(
     repo_dir: &Path,
     args: &[String],
     record_terminator: u8,
-    parse_record: fn(&[u8], &mut Option<String>) -> Result<Option<(String, String)>>,
+    parse_record: DiscoveryParser,
+    cancel: &CancellationToken,
     mut visitor: impl FnMut(String, LfsPointer) -> Result<()>,
 ) -> Result<()> {
-    let mut producer = git_command_in(repo_dir)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| CrabError::Internal(format!("failed to spawn git discovery: {error}")))?;
-    let mut cat = git_command_in(repo_dir)
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| CrabError::Internal(format!("failed to spawn git cat-file: {error}")))?;
-
-    let producer_stdout = producer
-        .stdout
-        .take()
-        .ok_or_else(|| CrabError::Internal("git discovery stdout unavailable".to_owned()))?;
-    let mut producer_stdout = BufReader::new(producer_stdout);
-    let mut cat_stdin = BufWriter::new(
-        cat.stdin
-            .take()
-            .ok_or_else(|| CrabError::Internal("git cat-file stdin unavailable".to_owned()))?,
-    );
-    let cat_stdout = cat
-        .stdout
-        .take()
-        .ok_or_else(|| CrabError::Internal("git cat-file stdout unavailable".to_owned()))?;
-    let mut cat_stdout = BufReader::new(cat_stdout);
-
-    let scan_result = (|| -> Result<()> {
-        let mut record = Vec::new();
-        let mut parser_state = None;
-        loop {
-            record.clear();
-            let read = producer_stdout
-                .read_until(record_terminator, &mut record)
-                .map_err(|error| {
-                    CrabError::Internal(format!("failed to read git discovery: {error}"))
-                })?;
-            if read == 0 {
-                break;
-            }
-            let terminated = record.last() == Some(&record_terminator);
-            if terminated {
-                record.pop();
-            }
-            let Some((oid, path)) = parse_record(&record, &mut parser_state)? else {
-                continue;
-            };
-
-            cat_stdin
-                .write_all(oid.as_bytes())
-                .and_then(|_| cat_stdin.write_all(b"\n"))
-                .and_then(|_| cat_stdin.flush())
-                .map_err(|error| {
-                    CrabError::Internal(format!("failed to query git cat-file: {error}"))
-                })?;
-
-            let mut header = Vec::new();
-            cat_stdout.read_until(b'\n', &mut header).map_err(|error| {
-                CrabError::Internal(format!("failed to read git cat-file: {error}"))
-            })?;
-            if header.last() != Some(&b'\n') {
-                return Err(CrabError::Internal(
-                    "git cat-file returned a truncated object header".to_owned(),
-                ));
-            }
-            header.pop();
-            let parts: Vec<&str> = std::str::from_utf8(&header)
-                .map_err(|error| {
-                    CrabError::Internal(format!("git cat-file returned invalid UTF-8: {error}"))
-                })?
-                .split_whitespace()
-                .collect();
-            if parts.len() < 2 || parts[1] == "missing" {
-                return Err(CrabError::Internal(format!(
-                    "git cat-file could not read object {oid}"
-                )));
-            }
-            if parts.len() != 3 || parts[0] != oid {
-                return Err(CrabError::Internal(
-                    "git cat-file returned a malformed object header".to_owned(),
-                ));
-            }
-            let object_size = parts[2].parse::<u64>().map_err(|_| {
-                CrabError::Internal("git cat-file returned an invalid object size".to_owned())
-            })?;
-
-            let content = if object_size <= MAX_LFS_POINTER_SIZE as u64 {
-                let size = usize::try_from(object_size).map_err(|_| {
-                    CrabError::Internal(
-                        "git cat-file object size does not fit in memory".to_owned(),
-                    )
-                })?;
-                let mut content = vec![0; size];
-                cat_stdout.read_exact(&mut content).map_err(|error| {
-                    CrabError::Internal(format!(
-                        "git cat-file returned truncated object content: {error}"
-                    ))
-                })?;
-                Some(content)
-            } else {
-                let mut limited = (&mut cat_stdout).take(object_size);
-                io::copy(&mut limited, &mut io::sink()).map_err(|error| {
-                    CrabError::Internal(format!("failed to discard git object content: {error}"))
-                })?;
-                None
-            };
-            let mut separator = [0u8; 1];
-            cat_stdout.read_exact(&mut separator).map_err(|error| {
-                CrabError::Internal(format!(
-                    "git cat-file returned an unterminated object record: {error}"
-                ))
-            })?;
-            if separator[0] != b'\n' {
-                return Err(CrabError::Internal(
-                    "git cat-file returned an unterminated object record".to_owned(),
-                ));
-            }
-
-            if parts[1] == "blob"
-                && let Some(content) = content
-                && let PointerKind::Lfs(pointer) = classify(&content)
-                && pointer.size > 0
-            {
-                visitor(path, pointer)?;
-            }
-            if !terminated {
-                break;
-            }
+    let mut producer = git_command_in(repo_dir);
+    producer.args(args);
+    let discovery = process::run(
+        producer,
+        cancel,
+        None::<fn(ChildStdin) -> Result<()>>,
+        |stdout| {
+            read_discovery(
+                stdout,
+                record_terminator,
+                parse_record,
+                cancel,
+                MAX_CAPTURE_BYTES,
+            )
+        },
+    )?;
+    let operation = args.first().map_or("discovery", String::as_str);
+    let records = successful_git(operation, discovery)?;
+    if records.is_empty() {
+        return Ok(());
+    }
+    // Discovery is fully joined before batch creation. No half-created pair
+    // can leak a producer, and every diagnostic pipe drains concurrently.
+    let mut batch = git_command_in(repo_dir);
+    batch.args(["cat-file", "--batch"]);
+    let write_stdin = |mut stdin: ChildStdin| {
+        for (oid, _) in &records {
+            check_cancelled(cancel)?;
+            writeln!(stdin, "{oid}")?;
         }
         Ok(())
-    })();
-
-    let scan_failed = scan_result.is_err();
-    drop(cat_stdin);
-    if scan_failed {
-        // A callback or framing error can leave either producer blocked on a
-        // full pipe. Kill both children before waiting so malformed input
-        // cannot turn a bounded scan into a process deadlock.
-        let _ = producer.kill();
-        let _ = cat.kill();
-    }
-    drop(producer_stdout);
-    drop(cat_stdout);
-    let cat_output = cat
-        .wait_with_output()
-        .map_err(|error| CrabError::Internal(format!("git cat-file failed: {error}")))?;
-    let producer_output = producer
-        .wait_with_output()
-        .map_err(|error| CrabError::Internal(format!("git discovery failed: {error}")))?;
-
-    if let Err(error) = scan_result {
-        return Err(error);
-    }
-    if !producer_output.status.success() {
-        let command = args.first().map(String::as_str).unwrap_or("git discovery");
-        return Err(CrabError::Internal(format!(
-            "git {command} failed: {}",
-            String::from_utf8_lossy(&producer_output.stderr).trim()
-        )));
-    }
-    if !cat_output.status.success() {
-        return Err(CrabError::Internal(format!(
-            "git cat-file exited with status {}: {}",
-            cat_output.status,
-            String::from_utf8_lossy(&cat_output.stderr).trim()
-        )));
+    };
+    let read_stdout = |stdout| {
+        let mut pointers = Vec::new();
+        let mut remaining = MAX_CAPTURE_BYTES;
+        crab_git::batch::visit_small_blobs(
+            stdout,
+            records.iter().map(|(oid, _)| oid.as_str()),
+            MAX_LFS_POINTER_SIZE,
+            &|| cancel.is_cancelled(),
+            |index, body| {
+                if let PointerKind::Lfs(pointer) = classify(body)
+                    && pointer.size > 0
+                {
+                    let path = &records[index].1;
+                    spend_scan_budget(&mut remaining, pointer_memory(path, &pointer))?;
+                    pointers.push((path.clone(), pointer));
+                }
+                Ok(())
+            },
+        )?;
+        Ok(pointers)
+    };
+    let output = process::run(batch, cancel, Some(write_stdin), read_stdout)?;
+    // A late checksum/framing/exit failure invalidates the whole inventory.
+    // Never invoke the caller with a prefix from an incomplete batch.
+    for (path, pointer) in successful_git("cat-file", output)? {
+        check_cancelled(cancel)?;
+        visitor(path, pointer)?;
     }
     Ok(())
+}
+
+fn read_discovery(
+    stdout: impl Read,
+    terminator: u8,
+    parse_record: DiscoveryParser,
+    cancel: &CancellationToken,
+    mut remaining: u64,
+) -> Result<Vec<(String, String)>> {
+    const MAX_RECORD_BYTES: u64 = 1024 * 1024;
+    let mut reader = BufReader::new(stdout);
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut state = None;
+    loop {
+        check_cancelled(cancel)?;
+        record.clear();
+        let read = (&mut reader)
+            .take(MAX_RECORD_BYTES + 1)
+            .read_until(terminator, &mut record)?;
+        if read == 0 {
+            break;
+        }
+        if read as u64 > MAX_RECORD_BYTES || record.last() != Some(&terminator) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Git LFS discovery record is oversized or truncated",
+            )
+            .into());
+        }
+        spend_scan_budget(&mut remaining, read)?;
+        record.pop();
+        if let Some((oid, path)) = parse_record(&record, &mut state)? {
+            spend_scan_budget(
+                &mut remaining,
+                std::mem::size_of::<(String, String)>() + oid.len() + path.len(),
+            )?;
+            records.push((oid, path));
+        }
+    }
+    Ok(records)
+}
+
+fn pointer_memory(path: &str, pointer: &LfsPointer) -> usize {
+    std::mem::size_of::<(String, LfsPointer)>()
+        + path.len()
+        + std::mem::size_of_val(pointer.extensions.as_slice())
+        + pointer
+            .extensions
+            .iter()
+            .map(|extension| extension.name.len() + extension.oid_type.len())
+            .sum::<usize>()
+}
+
+fn spend_scan_budget(remaining: &mut u64, bytes: usize) -> io::Result<()> {
+    *remaining = remaining.checked_sub(bytes as u64).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Git LFS scan exceeds inventory limit",
+        )
+    })?;
+    Ok(())
+}
+
+fn successful_git<T>(operation: &str, output: process::Output<T>) -> Result<T> {
+    if !output.status.success() {
+        return Err(CrabError::Internal(format!(
+            "git {operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
 }
 
 fn parse_rev_list_record(
@@ -757,15 +725,17 @@ fn parse_ls_tree_record(
     )))
 }
 
-fn all_ref_names() -> Result<Vec<String>> {
-    let output = git_command_in(Path::new("."))
-        .args(["rev-parse", "--all"])
-        .output()
-        .map_err(|error| CrabError::Internal(format!("failed to run git rev-parse: {error}")))?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
+fn all_ref_names(cancel: &CancellationToken) -> Result<Vec<String>> {
+    let mut command = git_command_in(Path::new("."));
+    command.args(["rev-parse", "--all"]);
+    let output = process::run(
+        command,
+        cancel,
+        None::<fn(ChildStdin) -> Result<()>>,
+        |stdout| Ok(process::capture_output(stdout, MAX_CAPTURE_BYTES)?),
+    )?;
+    let stdout = successful_git("rev-parse", output)?;
+    Ok(String::from_utf8_lossy(&stdout)
         .lines()
         .filter_map(|line| {
             let line = line.trim();
@@ -774,53 +744,14 @@ fn all_ref_names() -> Result<Vec<String>> {
         .collect())
 }
 
-/// Retained for the focused pipe/backpressure regression test.
-#[cfg(test)]
-fn cat_file_batch_stdout(repo_dir: &Path, oids_input: String) -> Result<Vec<u8>> {
-    let mut child = git_command_in(repo_dir)
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| CrabError::Internal(format!("failed to spawn git cat-file: {e}")))?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| CrabError::Internal("git cat-file stdin unavailable".to_owned()))?;
-    let stdin_writer = thread::spawn(move || stdin.write_all(oids_input.as_bytes()));
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CrabError::Internal(format!("git cat-file failed: {e}")))?;
-
-    let write_result = stdin_writer
-        .join()
-        .map_err(|_| CrabError::Internal("git cat-file stdin writer panicked".to_owned()))?;
-    write_result
-        .map_err(|e| CrabError::Internal(format!("failed to write git cat-file input: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CrabError::Internal(format!(
-            "git cat-file exited with status {}: {}",
-            output.status,
-            stderr.trim()
-        )));
-    }
-
-    Ok(output.stdout)
-}
-
 fn git_command_in(repo_dir: &Path) -> Command {
     let mut command = Command::new("git");
-    // Git sets these variables when invoking a remote helper. The scan owns
-    // an explicit repository directory; inherited relative values would be
-    // resolved again after changing directory and point at `.git/.git`.
+    for key in GIT_ENV_REMOVALS {
+        command.env_remove(key);
+    }
     command
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
+        .arg("--no-replace-objects")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .current_dir(repo_dir);
     command
 }
@@ -861,411 +792,4 @@ fn hex_nibble(b: u8) -> std::result::Result<u8, ()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::Digest;
-
-    fn oid(byte: u8) -> String {
-        format!("{byte:02x}").repeat(32)
-    }
-
-    fn git_oid(byte: u8) -> String {
-        format!("{byte:02x}").repeat(20)
-    }
-
-    #[test]
-    fn pre_push_parser_preserves_updates_and_skips_deletes() {
-        let input = format!(
-            "refs/heads/main {} refs/heads/main {}\nrefs/heads/old {} refs/heads/old {}\n",
-            git_oid(1),
-            git_oid(2),
-            "0".repeat(40),
-            git_oid(3),
-        );
-
-        let (local, remote) = parse_pre_push_input(&input).unwrap();
-
-        assert_eq!(local, vec![git_oid(1)]);
-        assert_eq!(remote, vec![git_oid(2)]);
-    }
-
-    #[test]
-    fn pre_push_parser_rejects_malformed_updates() {
-        let error = parse_pre_push_input("refs/heads/main only-three-fields\n").unwrap_err();
-
-        assert!(matches!(error, CrabError::Configuration { .. }));
-    }
-
-    #[test]
-    fn rev_list_parser_accepts_line_delimited_named_objects() {
-        let mut pending = None;
-        let unnamed = git_oid(4);
-        assert!(
-            parse_rev_list_record(unnamed.as_bytes(), &mut pending)
-                .unwrap()
-                .is_none()
-        );
-
-        let named = git_oid(5);
-        let record = format!("{named} path with spaces");
-        assert_eq!(
-            parse_rev_list_record(record.as_bytes(), &mut pending).unwrap(),
-            Some((named, "path with spaces".to_owned()))
-        );
-    }
-
-    #[test]
-    fn range_scan_does_not_fall_back_when_rev_list_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args(["init", "--quiet"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let error =
-            collect_pointers_from_range_in(dir.path(), &["not-a-git-object".to_owned()], &[])
-                .unwrap_err();
-
-        assert!(format!("{error}").contains("git rev-list failed"));
-    }
-
-    #[test]
-    fn missing_remote_manifest_is_an_empty_base_tip_set() {
-        let store =
-            crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
-        let context = crate::cmd::lfs::store_setup::LfsRemoteContext {
-            store: std::sync::Arc::new(crab_lfs::LfsObjectStore::new(
-                store.into(),
-                "org/lfs-pre-push",
-            )),
-            local_lfs_dir: std::path::PathBuf::new(),
-            config: crate::lfs::config::LfsConfig::default(),
-            prefix: "org/lfs-pre-push".to_owned(),
-        };
-
-        assert!(load_remote_manifest_ref_tips(&context).unwrap().is_empty());
-    }
-
-    #[test]
-    fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
-        let dir = tempfile::tempdir().unwrap();
-        for args in [
-            vec!["init", "--quiet"],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            assert!(
-                Command::new("git")
-                    .current_dir(dir.path())
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-
-        let content = b"streamed lfs object";
-        let pointer = LfsPointer {
-            oid: sha2::Sha256::digest(content).into(),
-            size: content.len() as u64,
-            extensions: Vec::new(),
-        };
-        std::fs::write(dir.path().join("asset.bin"), pointer.serialize()).unwrap();
-        std::fs::write(
-            dir.path().join("large.bin"),
-            vec![b'x'; MAX_LFS_POINTER_SIZE + 1024],
-        )
-        .unwrap();
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["add", "."])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["commit", "--quiet", "-m", "fixture"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        let head = String::from_utf8(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_owned();
-
-        let entries = collect_pointers_from_range_in(dir.path(), &[head], &[]).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "asset.bin");
-        assert_eq!(entries[0].1, pointer);
-    }
-
-    #[test]
-    fn range_scan_excludes_all_base_manifest_ref_tips() {
-        let dir = tempfile::tempdir().unwrap();
-        for args in [
-            vec!["init", "--quiet"],
-            vec!["config", "user.email", "test@example.com"],
-            vec!["config", "user.name", "Test"],
-        ] {
-            assert!(
-                Command::new("git")
-                    .current_dir(dir.path())
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-
-        let base_content = b"base lfs object";
-        let base_pointer = LfsPointer {
-            oid: sha2::Sha256::digest(base_content).into(),
-            size: base_content.len() as u64,
-            extensions: Vec::new(),
-        };
-        std::fs::write(dir.path().join("base.bin"), base_pointer.serialize()).unwrap();
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["add", "base.bin"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["commit", "--quiet", "-m", "base"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        let base = String::from_utf8(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_owned();
-
-        let new_content = b"new lfs object";
-        let new_pointer = LfsPointer {
-            oid: sha2::Sha256::digest(new_content).into(),
-            size: new_content.len() as u64,
-            extensions: Vec::new(),
-        };
-        std::fs::write(dir.path().join("new.bin"), new_pointer.serialize()).unwrap();
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["add", "new.bin"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["commit", "--quiet", "-m", "new"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        let head = String::from_utf8(
-            Command::new("git")
-                .current_dir(dir.path())
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_owned();
-
-        let entries =
-            collect_pointers_from_range_in_with_base_refs(dir.path(), &[head], &[], &[base])
-                .unwrap();
-        assert_eq!(entries, vec![("new.bin".to_owned(), new_pointer)]);
-    }
-
-    #[test]
-    fn resolve_push_args_accepts_legacy_single_object_id() {
-        let options = LfsPushOptions {
-            object_id: Some(Some(oid(1))),
-            ..LfsPushOptions::default()
-        };
-
-        let resolved = resolve_push_args(&options).unwrap();
-        assert_eq!(
-            resolved,
-            ResolvedPushArgs {
-                remote: None,
-                refs: Vec::new(),
-                object_ids: vec![oid(1)],
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_push_args_accepts_multiple_object_ids() {
-        let options = LfsPushOptions {
-            remote: Some(oid(2)),
-            args: vec![oid(3)],
-            object_id: Some(Some(oid(1))),
-            ..LfsPushOptions::default()
-        };
-
-        let resolved = resolve_push_args(&options).unwrap();
-        assert_eq!(resolved.remote, None);
-        assert_eq!(resolved.object_ids, vec![oid(1), oid(2), oid(3)]);
-    }
-
-    #[test]
-    fn resolve_push_args_treats_non_oid_object_id_value_as_remote() {
-        let options = LfsPushOptions {
-            remote: Some(oid(4)),
-            object_id: Some(Some("origin".to_owned())),
-            ..LfsPushOptions::default()
-        };
-
-        let resolved = resolve_push_args(&options).unwrap();
-        assert_eq!(resolved.remote.as_deref(), Some("origin"));
-        assert_eq!(resolved.object_ids, vec![oid(4)]);
-    }
-
-    #[test]
-    fn resolve_push_args_keeps_ref_operands() {
-        let options = LfsPushOptions {
-            remote: Some("origin".to_owned()),
-            args: vec!["main".to_owned(), "release".to_owned()],
-            ..LfsPushOptions::default()
-        };
-
-        let resolved = resolve_push_args(&options).unwrap();
-        assert_eq!(resolved.remote.as_deref(), Some("origin"));
-        assert_eq!(resolved.refs, vec!["main", "release"]);
-    }
-
-    #[test]
-    fn resolve_push_args_keeps_object_id_remote_operand() {
-        let options = LfsPushOptions {
-            remote: Some("origin".to_owned()),
-            args: vec![oid(2)],
-            object_id: Some(Some(oid(1))),
-            ..LfsPushOptions::default()
-        };
-
-        let resolved = resolve_push_args(&options).unwrap();
-
-        assert_eq!(resolved.remote.as_deref(), Some("origin"));
-        assert_eq!(resolved.object_ids, vec![oid(1), oid(2)]);
-    }
-
-    #[test]
-    fn object_id_pointers_read_cached_file_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let content = b"object-id upload";
-        let oid: [u8; 32] = sha2::Sha256::digest(content).into();
-        let path = crate::lfs::cache::object_path(dir.path(), &oid);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
-
-        let pointers = object_id_pointers(dir.path(), &[hex_encode(&oid)]).unwrap();
-
-        assert_eq!(pointers.len(), 1);
-        assert_eq!(pointers[0].oid, oid);
-        assert_eq!(pointers[0].size, content.len() as u64);
-    }
-
-    #[test]
-    fn object_id_pointers_reject_missing_cached_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let oid = oid(1);
-
-        let error = object_id_pointers(dir.path(), &[oid.clone()]).unwrap_err();
-
-        assert!(matches!(error, CrabError::LfsObjectMissing { oid: found } if found == oid));
-    }
-
-    #[test]
-    fn cat_file_batch_stdout_handles_large_object_lists() {
-        let dir = tempfile::tempdir().unwrap();
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args(["init", "--quiet"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let blob_dir = dir.path().join("blobs");
-        std::fs::create_dir(&blob_dir).unwrap();
-        let mut paths = String::new();
-        for index in 0..2048 {
-            let file_name = format!("blob-{index:04}.txt");
-            let path = blob_dir.join(&file_name);
-            std::fs::write(path, format!("blob-{index:04}-{}\n", "x".repeat(256))).unwrap();
-            paths.push_str("blobs/");
-            paths.push_str(&file_name);
-            paths.push('\n');
-        }
-
-        let mut child = Command::new("git")
-            .current_dir(dir.path())
-            .args(["hash-object", "-w", "--stdin-paths"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(paths.as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success());
-
-        let object_ids = String::from_utf8(output.stdout).unwrap();
-        let mut cat_file_input = object_ids.trim_end().to_owned();
-        cat_file_input.push('\n');
-        assert!(cat_file_input.len() > 64 * 1024);
-
-        let stdout = cat_file_batch_stdout(dir.path(), cat_file_input).unwrap();
-        let text = String::from_utf8_lossy(&stdout);
-        assert_eq!(text.matches(" blob ").count(), 2048);
-    }
-
-    #[test]
-    fn repository_commands_clear_remote_helper_git_context() {
-        let command = git_command_in(Path::new("repo/.git"));
-        let overrides: std::collections::HashMap<_, _> = command.get_envs().collect();
-
-        assert_eq!(overrides.get(std::ffi::OsStr::new("GIT_DIR")), Some(&None));
-        assert_eq!(
-            overrides.get(std::ffi::OsStr::new("GIT_WORK_TREE")),
-            Some(&None)
-        );
-        assert_eq!(
-            overrides.get(std::ffi::OsStr::new("GIT_COMMON_DIR")),
-            Some(&None)
-        );
-    }
-}
+mod tests;

@@ -722,7 +722,7 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
     run_lfs_with_cancel(cmd, &CancellationToken::new())
 }
 
-/// Dispatch an LFS command while honoring cancellation for optimize-owned paths.
+/// Dispatch an LFS command with cancellation for scans and optimize-owned paths.
 pub fn run_lfs_with_cancel(
     cmd: &LfsCmd,
     cancel: &CancellationToken,
@@ -991,17 +991,20 @@ pub fn run_lfs_with_cancel(
             stdin,
             dry_run,
         } => {
-            push::run_lfs_push(push::LfsPushOptions {
-                remote: remote.clone(),
-                args: args.clone(),
-                all: *all,
-                object_id: object_id.clone(),
-                stdin: *stdin,
-                dry_run: *dry_run,
-            })?;
+            push::run_lfs_push(
+                push::LfsPushOptions {
+                    remote: remote.clone(),
+                    args: args.clone(),
+                    all: *all,
+                    object_id: object_id.clone(),
+                    stdin: *stdin,
+                    dry_run: *dry_run,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::PrePush { remote, url } => {
-            push::run_lfs_pre_push(remote.as_deref(), url.as_deref())?;
+            push::run_lfs_pre_push(remote.as_deref(), url.as_deref(), cancel)?;
         }
         LfsCmd::Checkout {
             paths,

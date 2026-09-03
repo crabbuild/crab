@@ -1909,6 +1909,7 @@ dependencies = [
  "gix-pathspec",
  "gix-prompt",
  "gix-protocol",
+ "gix-quote",
  "gix-ref",
  "gix-refspec",
  "gix-revwalk",
@@ -1936,6 +1937,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parquet",
  "petgraph",
+ "process-wrap",
  "proptest",
  "quick-xml 0.37.5",
  "rand 0.9.4",
@@ -2073,6 +2075,7 @@ dependencies = [
  "crab-xet",
  "crc32fast",
  "filetime",
+ "fs4",
  "futures-util",
  "reqwest 0.12.28",
  "rusqlite",
@@ -2209,6 +2212,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.6",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -6738,6 +6742,17 @@ dependencies = [
  "syn 2.0.117",
  "version_check",
  "yansi",
+]
+
+[[package]]
+name = "process-wrap"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e3f4237d0e4741eb50bc5584db701f1299c85fa31ff0274dd6445e79dc42d12"
+dependencies = [
+ "indexmap 2.14.0",
+ "nix 0.31.3",
+ "windows 0.62.2",
 ]
 
 [[package]]

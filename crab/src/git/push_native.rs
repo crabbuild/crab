@@ -704,7 +704,7 @@ fn collect_followtag_specs(
         return Ok(Vec::new());
     }
 
-    let peeled_tips = crab_git::tag::peeled_tag_refs_at(&git_dirs.common, &direct_tips)?;
+    let peeled_tips = crab_git::tag::peeled_revision_targets_at(&git_dirs.common, &direct_tips)?;
     let mut reachable_commits = std::collections::HashSet::new();
     let mut walked_tips = std::collections::HashSet::new();
     for (ref_name, direct_sha) in &direct_tips {
@@ -809,11 +809,12 @@ fn phase_discover(
     let sha_map = resolve_refs(&src_refs, git_dirs)?;
     let src_tag_targets: BTreeMap<String, String> = sha_map
         .iter()
-        .filter(|(name, _)| name.starts_with("refs/tags/"))
         .map(|(name, sha)| (name.clone(), sha.clone()))
         .collect();
-    let peeled_src_tags = crab_git::tag::peeled_tag_refs_at(&git_dirs.common, &src_tag_targets)
-        .map_err(|error| CrabError::Internal(error.to_string()))?;
+    // Source keys can be frozen OIDs, not only refs/tags names. Preserve the
+    // tag object for publication while walking its captured commit target.
+    let peeled_src_tags =
+        crab_git::tag::peeled_revision_targets_at(&git_dirs.common, &src_tag_targets)?;
 
     // Open the local ODB once so we can probe old_sha validity for each
     // spec. When the probe fails, fall back to a full walk — rewritten
@@ -1281,6 +1282,35 @@ mod tests {
             src: "refs/heads/main".to_owned(),
             dst: "refs/heads/main".to_owned(),
         }
+    }
+
+    #[test]
+    fn frozen_tag_oid_discovers_its_commit_after_local_tag_is_deleted() {
+        let fixture = TinyGitFixture::new();
+        fixture.commit_text("a.txt", "one");
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "-a", "v1", "-m", "tagged"]);
+        let tag_oid =
+            TinyGitFixture::git_output(&fixture.work_tree, &["rev-parse", "refs/tags/v1"]);
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "-d", "v1"]);
+        let git_dirs = NativeGitDirs {
+            per_worktree: fixture.git_dir.clone(),
+            common: fixture.git_dir.clone(),
+        };
+        let spec = PushSpec {
+            force: false,
+            src: tag_oid.clone(),
+            dst: "refs/tags/published".to_owned(),
+        };
+        let (_, entries, resolved) = phase_discover(
+            &[spec],
+            &PushState::default(),
+            "crab://bucket/repo",
+            None,
+            false,
+            &git_dirs,
+        )
+        .unwrap();
+        assert_eq!((entries.len(), resolved.get(&tag_oid)), (1, Some(&tag_oid)));
     }
 
     #[test]

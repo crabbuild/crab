@@ -4,6 +4,7 @@
 //! communicate with remote helpers. Commands are read line-by-line,
 //! batched until a blank line, then dispatched.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
@@ -284,6 +285,8 @@ pub struct HelperOptions {
     /// partial writes when any ref is rejected. Set by git via
     /// `option atomic true` during smart-HTTP receive-pack.
     pub atomic: bool,
+    /// Exact old values supplied by Git's `option cas`; `None` requires absence.
+    pub expected_refs: BTreeMap<String, Option<String>>,
     /// When `true`, Git asked fetch to include annotated tag objects whose
     /// targets are transferred. Crab fetches complete packs, so accepting this
     /// hint requires no separate object-transfer path.
@@ -299,6 +302,7 @@ impl Default for HelperOptions {
             fetch_options: FetchOptions::default(),
             filter_requested: false,
             atomic: false,
+            expected_refs: BTreeMap::new(),
             followtags: false,
         }
     }
@@ -1133,6 +1137,20 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<()> {
     match key {
+        "cas" => {
+            let (name, expected) = parse_ref_lease(value)?;
+            if options
+                .expected_refs
+                .get(&name)
+                .is_some_and(|old| old != &expected)
+            {
+                return Err(CrabError::Protocol(
+                    "conflicting ref lease expectations".to_owned(),
+                ));
+            }
+            options.expected_refs.insert(name, expected);
+            writer.write_all(b"ok\n").await?;
+        }
         "progress" => {
             options.progress = value == "true";
             writer.write_all(b"ok\n").await?;
@@ -1283,6 +1301,35 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     }
     writer.flush().await?;
     Ok(())
+}
+
+fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
+    if value.starts_with('"') && !value.ends_with('"') {
+        return Err(CrabError::Protocol(
+            "unterminated quoted ref lease".to_owned(),
+        ));
+    }
+    let (decoded, consumed) = gix_quote::ansi_c::undo(value.as_bytes().into())
+        .map_err(|error| CrabError::Protocol(format!("invalid quoted ref lease: {error}")))?;
+    if consumed != value.len() {
+        return Err(CrabError::Protocol("trailing data in ref lease".to_owned()));
+    }
+    let decoded = std::str::from_utf8(decoded.as_ref())
+        .map_err(|error| CrabError::Protocol(format!("ref lease is not UTF-8: {error}")))?;
+    let (name, oid) = decoded
+        .rsplit_once(':')
+        .ok_or_else(|| CrabError::Protocol("ref lease requires ref:oid".to_owned()))?;
+    if !name.starts_with("refs/")
+        || crate::git::refname::validate_push_refname(name).is_err()
+        || oid.len() != 40
+        || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CrabError::Protocol(
+            "invalid ref lease name or SHA-1".to_owned(),
+        ));
+    }
+    let expected = (!oid.bytes().all(|byte| byte == b'0')).then(|| oid.to_ascii_lowercase());
+    Ok((name.to_owned(), expected))
 }
 
 async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
@@ -1664,6 +1711,10 @@ fn native_push_config_for_helper(
     native_config.color = options.progress && crate::git::progress::is_tty();
     native_config.emit_summary = false;
     native_config.push.atomic = options.atomic;
+    native_config
+        .push
+        .expected_refs
+        .clone_from(&options.expected_refs);
 
     // Git owns stdout for remote helpers. Human-readable phase progress
     // can go to stderr, but the final stdout summary would be parsed as
@@ -3612,6 +3663,9 @@ mod tests {
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest)
             .await
             .expect("write manifest");
@@ -4424,6 +4478,64 @@ mod tests {
         assert!(!opts.check_connectivity);
         assert_eq!(opts.fetch_options, FetchOptions::default());
         assert!(!opts.fetch_options.has_constraints());
+    }
+
+    #[test]
+    fn ref_lease_parses_absence_existing_and_git_quoted_names() {
+        for (value, name, oid) in [
+            (
+                format!("refs/heads/main:{}", "0".repeat(40)),
+                "refs/heads/main",
+                None,
+            ),
+            (
+                format!("refs/heads/main:{}", "A".repeat(40)),
+                "refs/heads/main",
+                Some("a".repeat(40)),
+            ),
+            (
+                format!(r#""refs/heads/\303\251:{}""#, "b".repeat(40)),
+                "refs/heads/é",
+                Some("b".repeat(40)),
+            ),
+        ] {
+            assert_eq!(parse_ref_lease(&value).unwrap(), (name.to_owned(), oid));
+        }
+    }
+
+    #[test]
+    fn ref_lease_rejects_malformed_values() {
+        for value in [
+            "refs/heads/main",
+            "refs/heads/main:bad",
+            "HEAD:0000000000000000000000000000000000000000",
+            "\"refs/heads/main:0000000000000000000000000000000000000000",
+            "\"refs/heads/main:0000000000000000000000000000000000000000\" trailing",
+        ] {
+            assert!(parse_ref_lease(value).is_err(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ref_lease_option_reaches_native_push_and_rejects_conflicting_repeat() {
+        let mut options = HelperOptions::default();
+        let mut writer = Vec::new();
+        let value = format!("refs/heads/main:{}", "a".repeat(40));
+        handle_option("cas", &value, &mut options, &mut writer)
+            .await
+            .unwrap();
+        let native =
+            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        assert_eq!(
+            native.push.expected_refs.get("refs/heads/main"),
+            Some(&Some("a".repeat(40)))
+        );
+        let conflicting = format!("refs/heads/main:{}", "b".repeat(40));
+        assert!(
+            handle_option("cas", &conflicting, &mut options, &mut writer)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -5522,6 +5634,9 @@ mod tests {
         };
         manifest.seal_git_validation();
 
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         let output = read_remote_refs_for_advertisement(&store, &router, &[])

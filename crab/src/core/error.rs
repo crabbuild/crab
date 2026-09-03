@@ -1728,7 +1728,11 @@ impl From<crab_git::walk::WalkError> for CrabError {
             crab_git::walk::WalkError::LimitExceeded { actual, maximum } => Self::Protocol(
                 format!("Git visibility proof exceeds {maximum} objects (observed {actual})"),
             ),
-            error @ crab_git::walk::WalkError::Git { .. } => Self::Internal(error.to_string()),
+            crab_git::walk::WalkError::Cancelled => Self::Cancelled,
+            error @ crab_git::walk::WalkError::LookupLimitExceeded { .. } => {
+                Self::Protocol(error.to_string())
+            }
+            error @ crab_git::walk::WalkError::Git { .. } => Self::Io(std::io::Error::other(error)),
         }
     }
 }
@@ -4862,6 +4866,40 @@ mod tests {
             "source() should downcast to the wrapped gix type ({}); got: {src}",
             std::any::type_name::<T>()
         );
+    }
+
+    #[test]
+    fn git_walk_preserves_lookup_source_and_scan_outcomes() {
+        let error: CrabError = crab_git::walk::WalkError::Git {
+            operation: "read pointer candidate".to_owned(),
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
+        }
+        .into();
+        let CrabError::Io(wrapper) = &error else {
+            panic!("expected retained I/O source")
+        };
+        let walk = wrapper
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<crab_git::walk::WalkError>()
+            .unwrap();
+        let source = std::error::Error::source(walk)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.code(), "CRAB-E0070");
+        assert!(matches!(
+            CrabError::from(crab_git::walk::WalkError::Cancelled),
+            CrabError::Cancelled
+        ));
+        assert!(matches!(
+            CrabError::from(crab_git::walk::WalkError::LookupLimitExceeded { maximum: 10 }),
+            CrabError::Protocol(_)
+        ));
     }
 
     #[test]

@@ -21,8 +21,10 @@ crab mirror [OPTIONS] <SOURCE> <DESTINATION>
 Crab remote such as `crab://bucket/path`. The command preserves Git commits and
 refs; it does not rewrite history or convert files into Crab-native pointers.
 
-Mirroring is destructive for refs: destination refs that no longer exist in
-the source are deleted. Review the destination before the first run.
+Without an integrity flag, `crab mirror` preserves its original full-mirror
+behavior: destination refs that no longer exist in the source are deleted.
+Review the destination before the first run. For automation and repair, use
+the plan-first workflow below instead of the legacy full-mirror form.
 
 ## Options
 
@@ -32,6 +34,11 @@ the source are deleted. Review the destination before the first run.
 | `--no-atomic` | Push refs without Git's atomic push option |
 | `--skip-lfs` | Do not mirror Git LFS objects |
 | `--force-lfs-check` | Verify all LFS objects even when refs are already synchronized |
+| `--check` | Compare refs and prove source-reachable Crab pointer data without publishing ref updates |
+| `--write-plan <PATH>` | With `--check`, create an immutable reconciliation plan without overwriting an existing file |
+| `--apply-plan <PATH>` | Revalidate and apply a previously written plan |
+| `--allow-delete-refs` | Approve destination-only ref deletion when writing and applying a plan |
+| `--ci` | With `--check`, exit nonzero unless the integrity result passes |
 | `--json` | Emit one structured JSON result |
 | `--jsonl` | Emit streaming JSONL output |
 
@@ -39,12 +46,181 @@ When refs change, Crab mirrors changed LFS objects unless `--skip-lfs` is set,
 then publishes the Git refs. Use `--force-lfs-check` to verify LFS content on a
 no-op ref sync.
 
+`--no-atomic`, `--skip-lfs`, and `--force-lfs-check` belong to legacy
+full-mirror execution and cannot be combined with `--check` or `--apply-plan`.
+Planned reconciliation always pushes its action set atomically.
+
+## Integrity states
+
+`--check` pins the source into a local bare cache, compares every advertised
+ref, and reports each ref as `equal`, `source_ahead`, `crab_ahead`, `diverged`,
+or `unverifiable`. It also scans Crab pointer blobs reachable from the source
+refs and verifies that each pointer has a committed recipe and a hash-valid
+recipe shard. It reads the recipe's xorbs directly from origin, validates the
+serialized payload and selected chunks, and checks the reconstructed file's
+hash and exact length. Cached bytes do not substitute for origin verification.
+This reads all reachable large-file content; budget time and provider requests
+accordingly.
+
+Crab-pointer history inspection is bounded to two million distinct Git objects,
+eight million object header/body lookups across all refs, and Gitoxide's 64 MiB
+single-allocation ceiling for decoded object data. Repeated shared history
+consumes the lookup budget, not additional distinct-object capacity. Annotated
+tags are resolved from captured object IDs; historical pointers remain included
+even when deleted from the latest tree. Missing or corrupt pointer candidates,
+allocation/lookup/object limits, or cancellation prevent a verified result and
+block the plan; partial pointer lists are never accepted as proof.
+
+Cancellation is cooperative between object reads, and the command waits for
+the scan worker before releasing cache ownership. Large Git blobs are then
+streamed through native Git and hashed against their captured object IDs and
+sizes. A plausible oversized header alone cannot hide a corrupt pointer.
+Raw bytes are verified without applying replacement objects, text conversion
+or filters, and without retaining entire blob bodies in Crab's output buffers.
+This adds a complete read of large ordinary Git files during inspection.
+These limits are not a total-memory guarantee or a hard filesystem-I/O deadline;
+native Git's delta reconstruction memory still needs scale qualification.
+LFS discovery now shares the supervised process owner and raw batch verifier,
+with bounded record/pointer inventories and cancellation; see
+[LFS discovery limits](/docs/cli/reference/crab-lfs#discovery-limits-and-cancellation).
+Whole-operation transfer cancellation and maximum-scale qualification remain open.
+
+Recipe lookup uses the captured canonical shard inventory, including committed
+journal additions; a missing acceleration index alone does not mean file data
+is missing. Pointer verification does not create file-index reader checkpoints
+and preserves scoped storage paths. Ref classification and pointer lookup use
+one captured Crab metadata snapshot. Changed Crab objects are fetched by their
+captured object IDs, not mutable ref names. A manifest or journal change before
+verification finishes makes the result unverifiable and requires a fresh check.
+The result includes `destination_snapshot` and a `recipe_digest` that binds
+file hashes, sizes, selected shards and exact recipes; incomplete verification
+has no recipe digest. These identities do not provide continuous GC protection
+or a reservation through publication; that hardening gate remains open.
+Git subprocesses can still require remote read-admission or derived-metadata
+maintenance writes. Do not assume the whole command works with a strictly
+read-only grant until that path is qualified.
+
+Pointer states distinguish `verified`, `missing`, `corrupt`, and
+`unverifiable`. A permission error, expired credential, timeout, or exhausted
+throttle retry is not evidence that an object is missing. Every non-verified
+state blocks planned reconciliation.
+
+The check reports the local pre-push hook separately. A missing local hook is
+a CI failure because hooks are a useful guard, but hooks are not the remote
+integrity authority. A URL or bare source has a `not_applicable` hook state.
+Source, provider, ancestry, or pointer checks that cannot complete are
+`unverifiable`; they are never reported as healthy.
+
+All mirror operations take an exclusive local cache lock before initializing or
+refreshing. Planned apply retains it through the final destination ref check.
+A competing invocation fails promptly: `--check` reports `unverifiable`, and
+legacy mirror/apply refuse to proceed. Retry after the other invocation ends;
+do not delete sibling `.crab-cache-use.lock` or `.crab-cache-clean.lock`
+files to bypass an active owner. `crab cache clean` and
+`crab optimize cache clean` refuse overlapping active mirror caches before
+deleting data. While cleanup holds ownership, new mirror operations refuse
+to start. Locks also cover nested paths and resolve directory symlinks to
+their physical cache location. Cleanup preserves coordination files; the
+next mirror invocation rebuilds a removed, empty, or marker-only cache through
+bare Git initialization and a complete mirror fetch. Nested lock inodes remain
+intact. An unrelated nonempty directory is refused, not overwritten.
+Relative `--cache-dir` paths resolve from your invocation directory. If source
+refresh fails, previously cached refs are not used as a current source snapshot.
+Fetched refs must exactly match the source advertisement. Source movement or
+a fetch that omits refs, including rejected shallow-source refs, makes the
+snapshot unverifiable. Retry from a stable source with complete history;
+Crab does not silently infer source deletions from an incomplete fetch.
+
+While the mirror process is alive, cancellation also supervises its Git/LFS
+subprocesses. Input and output pipes progress concurrently. Captured stdout and
+stderr each have a 64 MiB ceiling; overflow stops the child and fails the command
+instead of accepting truncated output. Raw blob verification streams independently
+of that capture ceiling. On Unix, cancellation
+sends SIGTERM to the child process group, allows up to ten seconds for shutdown,
+then escalates to SIGKILL; on Windows it terminates the associated job. The
+command waits for child cleanup and pipe workers before releasing its cache
+lock. Commands cannot intentionally leave background cache writers behind.
+This does not yet protect against abrupt termination of the mirror parent or
+helpers that escape their Unix process group. Cancellation during publication
+can still leave an uncertain remote outcome; inspect both remotes before retrying.
+
+JSON uses the versioned `mirror.check` schema. Planned apply uses
+`mirror.apply`, and the plan file uses `mirror.reconciliation_plan`.
+
+## Plan-first reconciliation
+
+Create and review a plan:
+
+```bash
+crab mirror SOURCE DESTINATION --check --write-plan mirror-plan.json
+```
+
+The file is created once with an integrity digest, exact source/destination
+ref snapshots, and the captured metadata and recipe digests. Crab refuses to
+overwrite it. Changing metadata or recipes can invalidate a plan even when
+Git ref values have not changed. A plan can advance
+Crab refs only from the named source. It is blocked if pointer data is
+incomplete, a ref is truly diverged, a common ref is ahead in Crab, or any
+required observation is unverifiable.
+
+The plan records a separate `destination_identity` for the resolved storage
+transport and repository scope, not just the bucket name in the URL. Changing
+endpoint, account or addressing context requires a new plan even if the
+destination contains identical refs and metadata. Apply checks this identity
+before accepting an already-converged replay as well as before publication.
+Credential rotation alone does not change that identity; a refresh that
+redirects the target fails before the operation can use it.
+Both destination and snapshot identities bind the validated canonical layout.
+A missing or invalid layout blocks inspection and apply, including empty plans
+and already-converged replay. Reformatting an otherwise identical descriptor
+does not invalidate a plan. Layout is revalidated during snapshot capture and
+after pointer verification; this does not reserve dependencies against GC.
+
+A destination-only ref is recoverable data, not an implicit deletion. To
+include its deletion, approve it while creating the plan:
+
+```bash
+crab mirror SOURCE DESTINATION --check \
+  --allow-delete-refs --write-plan mirror-plan.json
+```
+
+Apply only after review:
+
+```bash
+crab mirror SOURCE DESTINATION \
+  --apply-plan mirror-plan.json --allow-delete-refs
+```
+
+Deletion approval is required again at apply time. Before pushing, Crab
+recomputes pointer integrity and both ref snapshots. A changed plan, changed
+target, blocked plan, or stale snapshot fails closed. Already-converged refs
+produce a successful no-op only if the recipe proof still matches; an empty
+plan also requires its original metadata identity. This is state-based replay,
+not yet a durable receipt proving which invocation committed. Every changed
+ref also carries an explicit Git
+lease for its reviewed old value; the push pipeline checks it again after
+locking, so a concurrent writer cannot turn a reviewed deletion into deletion
+of a newer tip. There is no reverse Crab-to-source update and no
+claim of a distributed transaction across the two remotes.
+
+## Required CI check
+
+```bash
+crab mirror SOURCE DESTINATION --check --ci --json
+```
+
+Exit status is nonzero unless refs are equal, all reachable Crab pointers are
+fully backed by destination data, and any applicable local pre-push hook is
+installed. Keep the JSON artifact for diagnosis; do not infer health from a
+plain `git ls-remote` result.
+
 ## Examples
 
 ```bash
 crab mirror https://github.com/org/repo.git crab://my-bucket/mirrors/org/repo
 crab mirror --skip-lfs git@gitlab.com:org/repo.git crab://my-bucket/org/repo
 crab mirror --force-lfs-check https://github.com/org/repo.git crab://my-bucket/org/repo
+crab mirror https://github.com/org/repo.git crab://my-bucket/org/repo --check --ci
 ```
 
 Use `crab init --mirror <REMOTE>` when you want a normal developer repository

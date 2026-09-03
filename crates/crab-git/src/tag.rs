@@ -187,8 +187,30 @@ pub fn peeled_tag_refs_at(
     git_dir: &Path,
     refs: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
+    peeled_targets_at(
+        git_dir,
+        refs.iter()
+            .filter(|(name, _)| name.starts_with("refs/tags/")),
+    )
+}
+
+/// Find annotated tags among supplied object targets, including raw-OID keys.
+///
+/// Returns peeled commit targets without resolving the keys as local refs.
+pub fn peeled_revision_targets_at(
+    git_dir: &Path,
+    targets: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    peeled_targets_at(git_dir, targets.iter())
+}
+
+fn peeled_targets_at<'a>(
+    git_dir: &Path,
+    targets: impl Iterator<Item = (&'a String, &'a String)>,
+) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    if !refs.keys().any(|name| name.starts_with("refs/tags/")) {
+    let mut targets = targets.peekable();
+    if targets.peek().is_none() {
         return Ok(out);
     }
 
@@ -198,11 +220,7 @@ pub fn peeled_tag_refs_at(
         source: boxed_source(source),
     })?;
 
-    for (ref_name, sha) in refs {
-        if !ref_name.starts_with("refs/tags/") {
-            continue;
-        }
-
+    for (ref_name, sha) in targets {
         let oid = match ObjectId::from_hex(sha.as_bytes()) {
             Ok(oid) => oid,
             Err(error) => {
@@ -347,6 +365,22 @@ mod tests {
         assert_eq!(
             peeled.get("refs/tags/v1").map(String::as_str),
             Some(git(repo.path(), &["rev-parse", "v1^{}"]).as_str())
+        );
+    }
+
+    #[test]
+    fn frozen_revision_peeling_does_not_expand_manifest_tag_ref_scope() {
+        let repo = git_repo_with_tags();
+        let git_dir = repo.path().join(".git");
+        let tag = git(repo.path(), &["rev-parse", "v1"]);
+        let commit = git(repo.path(), &["rev-parse", "v1^{}"]);
+        let targets = BTreeMap::from([(tag.clone(), tag.clone())]);
+        assert_eq!(
+            (
+                peeled_revision_targets_at(&git_dir, &targets).unwrap(),
+                peeled_tag_refs_at(&git_dir, &targets).unwrap()
+            ),
+            (BTreeMap::from([(tag, commit)]), BTreeMap::new()),
         );
     }
 

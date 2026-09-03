@@ -1,14 +1,22 @@
 # Current GC Hardening Roadmap
 
-## Global development cutover policy
+## Compatibility policy
 
-Crab has no user compatibility obligation at this stage. All surviving
-Crab-owned product and serialized contracts are named **v1**. External
-protocol names such as Git protocol v2 are unaffected. New work must hard-cut
-to the best canonical shape: replace readers/writers in place, delete obsolete branches,
-fixtures, aliases, migrations, dual reads/writes, and rollback-only code, and
-require regeneration, restaging, or reinitialization when development state no
-longer matches. Do not introduce v2 to preserve unshipped behavior.
+The hard-cut policy below governed the pre-launch work recorded in Plans
+001-016. Crab now has tagged 1.0 releases, so it applies only to unshipped
+behavior and explicitly disposable local development state. Tagged repository
+formats, object layouts, APIs, configuration, and structured output require a
+compatible reader, an explicit migration/refusal boundary, or an approved
+breaking-release policy. Plan 017 owns the post-launch contract inventory and
+release evidence.
+
+All surviving pre-launch Crab-owned product and serialized contracts were
+named **v1**. External protocol names such as Git protocol v2 were unaffected.
+That work hard-cut to the best canonical shape: it replaced readers/writers in
+place, deleted obsolete branches, fixtures, aliases, migrations, dual
+reads/writes, and rollback-only code, and required regeneration, restaging, or
+reinitialization for disposable development state. Do not apply that historical
+rule to reset repositories written by a tagged release.
 
 Breaking changes must earn the cutover through a simpler canonical path or a
 demonstrable correctness, durability, security, or performance improvement.
@@ -177,6 +185,27 @@ implementation includes real Kubernetes/RustFS replay, clone, shallow-fetch,
 and 100-client coordination proof; the roadmap records those completed gates
 separately from the pending 10,000-push, fault, provider, retention, failover,
 and canary acceptance evidence.
+
+## Post-launch product hardening track
+
+[`017-post-launch-product-hardening.md`](017-post-launch-product-hardening.md)
+is the P0 product roadmap after Crab 1.0.1. It orders the remaining work into
+five priorities: authoritative integrity/recovery, native Git and mirror
+correctness, metadata/maintenance scale, performance/cloud-cost SLOs, and team
+adoption through the managed control plane. It reuses this GC track and the
+large-repository roadmap as detailed owners, and adds a mandatory compatibility
+and exact-release-evidence foundation.
+
+Status: **IN PROGRESS** — Phase 2 implementation and local proof are recorded;
+full Phase 2 acceptance and the other phase outcomes remain open. The plan
+includes accountable roles, first execution packets, dependency gates and
+decisions required before delivery estimates. Product rationale, issue-ready
+ticket fields, verification entry points and managed-stage acceptance gates
+make the roadmap executable without treating all five priorities as one release.
+Existing implementation does not
+satisfy Plan 017 merely because a subsystem's code or unit tests exist; each
+claimed row needs its own acceptance criteria and retained release-shaped
+evidence.
 
 ## Add/push hardening track
 

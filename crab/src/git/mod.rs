@@ -17,6 +17,7 @@ pub mod pack;
 #[cfg(feature = "gix-pack-native")]
 pub mod pack_native;
 pub mod prefetch;
+pub(crate) mod process;
 pub mod progress;
 pub(crate) mod protected_push;
 pub mod push;

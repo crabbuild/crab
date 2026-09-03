@@ -34,7 +34,17 @@ The main surfaces are:
   Git objects and pack mechanics;
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
   pointer-aware repository behavior;
-- `tag` and `push_state` for annotated refs and push bookkeeping.
+- `tag` and `push_state` for annotated refs and push bookkeeping;
+- `pre_push` for bounded, whole-batch hook input decoding, including exact
+  object IDs, destination mappings, deletions, and duplicate-ref rejection.
+  The caller chooses the byte limit and publication policy. Parsing SHA-256
+  records does not establish SHA-256 support in the transport or object store.
+
+`tag::peeled_revision_targets_at` inspects captured object IDs even when the
+map keys are revisions or raw OIDs. `tag::peeled_tag_refs_at` deliberately
+keeps the narrower `refs/tags/` scope used for manifest peeling hints. Both
+return commit targets; neither implies support for arbitrary non-commit tag
+targets in the product's push path.
 
 ## Usage
 
@@ -57,6 +67,40 @@ match classify(blob_bytes) {
 For a local repository, use `discover_git_dir_from` and the ref helpers before
 walking objects. `walk_reachable` returns the Git objects and Crab pointers
 needed by the push pipeline; it does not upload anything.
+
+`walk::scan_pointers` uses the same traversal with explicit distinct-object,
+lookup-work and Gitoxide single-allocation limits. It consumes one ref closure
+at a time and returns unique pointer candidates plus outstanding large-blob
+headers, instead of retaining a full closure for every ref. Shared history consumes lookup work even when its objects are
+already in the distinct-object union. Cancellation is cooperative between
+object reads; callers must await their worker before releasing its local ODB.
+Tags are resolved from the captured OIDs, including chains ending in commits,
+trees or blobs; this does not extend the product's publication support profile.
+
+Pointer discovery reads blob headers before bodies. Large ordinary blobs are
+not inflated just to classify them. Missing/unreadable/wrong-kind blob objects
+fail the shared walker; small candidate bodies must match their Git checksum.
+The bounded scanner additionally verifies decoded commit/tree/tag checksums and
+passes its allocation ceiling to the ODB for loose objects and packed deltas.
+The returned `unchecked_blobs` are required work, not verified non-pointers.
+`batch::verify_blob_batch` verifies native Git's ordered raw `cat-file --batch`
+response against their captured OIDs, kinds and sizes, hashing bodies through a
+64 KiB buffer with Git-compatible collision detection. Missing, reordered,
+truncated, extra and checksum-invalid responses fail. The caller owns the
+process, disables replacements/filters and supervises blocked I/O; the parser
+does not spawn or detach workers. Mirror inspection/pre-push use this second
+step before trusting the pointer inventory. Other reachable-set APIs retain
+their documented narrower behavior. Neither the ODB allocation ceiling nor
+the parser buffer is a total-process RSS guarantee; native Git delta memory,
+pack-index mappings and filesystem I/O still need qualification.
+
+`batch::visit_small_blobs` uses the same framing and checksum reader for LFS
+discovery. It hashes every requested object's raw body and visits only blobs
+within the caller's capture ceiling, retaining original request ordinals.
+Both SHA-1 and SHA-256 Git OIDs are accepted here; this does not enable native
+SHA-256 Crab transport. The parser reuses one 64 KiB body buffer per batch.
+Callers must discard accumulated candidates after any later framing, checksum,
+I/O, cancellation or child-exit failure, and enforce aggregate inventory limits.
 
 ## Feature flags and boundaries
 

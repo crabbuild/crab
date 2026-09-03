@@ -5,7 +5,6 @@
 //! task for a request that has not acquired both object and byte capacity.
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -14,7 +13,7 @@ use futures_util::StreamExt;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::lfs::config::LfsConfig;
 
 /// Default logical in-flight transfer-byte budget.
@@ -198,19 +197,19 @@ impl TransferCoordinator {
         if self.cancellation.is_cancelled() {
             return Err(CrabError::Cancelled);
         }
-        let concurrency = self
-            .concurrency
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| CrabError::Cancelled)?;
+        let concurrency = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = self.concurrency.clone().acquire_owned() =>
+                result.map_err(|_| CrabError::Cancelled)?,
+        };
         let units = byte_permits_for_request(request.size, self.byte_permits);
-        let bytes = self
-            .bytes
-            .clone()
-            .acquire_many_owned(units)
-            .await
-            .map_err(|_| CrabError::Cancelled)?;
+        let bytes = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = self.bytes.clone().acquire_many_owned(units) =>
+                result.map_err(|_| CrabError::Cancelled)?,
+        };
         self.rate_limiter
             .acquire(request.size, &self.cancellation)
             .await?;
@@ -255,35 +254,62 @@ impl TransferCoordinator {
         F: Fn(TransferRequest, CancellationToken) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<TransferOutcome>> + Send,
     {
+        check_cancelled(&self.cancellation)?;
         let mut requests = requests.into_iter();
-        let operation = Arc::new(operation);
         let mut active = futures_util::stream::FuturesUnordered::new();
+        let mut admission = futures_util::stream::FuturesUnordered::new();
         let mut summary = TransferSummary::default();
         let mut first_error = None;
         let mut admitting = true;
-        let policy = self.policy;
 
-        while admitting && active.len() < self.policy.max_concurrency.max(1) {
-            let Some(request) = requests.next() else {
+        loop {
+            if admitting
+                && admission.is_empty()
+                && active.len() < self.policy.max_concurrency.max(1)
+            {
+                match requests.next() {
+                    Some(request) => {
+                        // Keep one admission future alive while polling transfers.
+                        // Recreating it loses the semaphore queue position and can
+                        // reserve the same rate-limited slot more than once.
+                        admission.push(async move { (request, self.admit(request).await) });
+                    }
+                    None => admitting = false,
+                }
+            }
+            if active.is_empty() && admission.is_empty() {
                 break;
+            }
+            let (request, result) = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled(), if first_error.is_none() => {
+                    first_error = Some(CrabError::Cancelled);
+                    admitting = false;
+                    admission.clear();
+                    continue;
+                }
+                Some(completed) = active.next(), if !active.is_empty() => completed,
+                Some((request, result)) = admission.next(), if !admission.is_empty() => {
+                    match result {
+                        Ok(permit) => {
+                            summary.requested += 1;
+                            let operation = &operation;
+                            active.push(async move {
+                                let result = self.run_admitted(request, permit, |cancel| {
+                                    operation(request, cancel)
+                                }).await;
+                                (request, result)
+                            });
+                        }
+                        Err(error) => {
+                            first_error = Some(error);
+                            admitting = false;
+                            self.cancellation.cancel();
+                        }
+                    }
+                    continue;
+                }
             };
-            let permit = self.admit(request).await?;
-            summary.requested += 1;
-            let operation = Arc::clone(&operation);
-            let cancellation = self.cancellation();
-            active.push(Box::pin(async move {
-                let result =
-                    run_with_policy(policy, cancellation, |cancel| operation(request, cancel))
-                        .await;
-                drop(permit);
-                (request, result)
-            })
-                as Pin<
-                    Box<dyn Future<Output = (TransferRequest, Result<TransferOutcome>)> + Send>,
-                >);
-        }
-
-        while let Some((request, result)) = active.next().await {
             match result {
                 Ok(TransferOutcome::Transferred) => {
                     summary.transferred += 1;
@@ -296,36 +322,17 @@ impl TransferCoordinator {
                 Ok(TransferOutcome::Skipped) => summary.skipped += 1,
                 Err(error) => {
                     summary.failed += 1;
-                    if direction == TransferDirection::Download && self.policy.skip_download_errors
+                    if direction == TransferDirection::Download
+                        && self.policy.skip_download_errors
+                        && !matches!(error, CrabError::Cancelled)
                     {
                         summary.skipped += 1;
                     } else if first_error.is_none() {
                         first_error = Some(error);
                         admitting = false;
                         self.cancellation.cancel();
+                        admission.clear();
                     }
-                }
-            }
-
-            if admitting {
-                if let Some(next) = requests.next() {
-                    let permit = self.admit(next).await?;
-                    summary.requested += 1;
-                    let operation = Arc::clone(&operation);
-                    let cancellation = self.cancellation();
-                    active.push(Box::pin(async move {
-                        let result =
-                            run_with_policy(policy, cancellation, |cancel| operation(next, cancel))
-                                .await;
-                        drop(permit);
-                        (next, result)
-                    })
-                        as Pin<
-                            Box<
-                                dyn Future<Output = (TransferRequest, Result<TransferOutcome>)>
-                                    + Send,
-                            >,
-                        >);
                 }
             }
         }
@@ -335,6 +342,7 @@ impl TransferCoordinator {
         if let Some(error) = first_error {
             return Err(error);
         }
+        check_cancelled(&self.cancellation)?;
         Ok(summary)
     }
 }
@@ -353,7 +361,12 @@ where
         if cancellation.is_cancelled() {
             return Err(CrabError::Cancelled);
         }
-        match operation(cancellation.clone()).await {
+        // Adapters may own multipart aborts or temporary-file cleanup across
+        // awaits. Drain the attempt rather than dropping it on cancellation,
+        // but never report success or begin a retry after cancellation.
+        let result = operation(cancellation.clone()).await;
+        check_cancelled(&cancellation)?;
+        match result {
             Ok(outcome) => return Ok(outcome),
             Err(error) if error.is_retryable() && retries < policy.max_retries => {
                 retries += 1;
@@ -407,6 +420,150 @@ mod tests {
             oid: [index; 32],
             size,
         }
+    }
+
+    fn policy() -> TransferPolicy {
+        TransferPolicy {
+            max_concurrency: 2,
+            max_retries: 0,
+            max_retry_delay: 0,
+            skip_download_errors: false,
+            max_bandwidth: 0,
+            in_flight_bytes: 2 * BYTE_PERMIT_UNIT,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn byte_backpressure_keeps_polling_admitted_transfers() {
+        let coordinator = TransferCoordinator::new(TransferPolicy {
+            max_concurrency: 4,
+            ..policy()
+        });
+        let summary = tokio::time::timeout(
+            Duration::from_secs(2),
+            coordinator.execute(
+                TransferDirection::Upload,
+                (0..4).map(|index| request(index, 2 * BYTE_PERMIT_UNIT)),
+                |_, _| async {
+                    tokio::task::yield_now().await;
+                    Ok(TransferOutcome::Transferred)
+                },
+            ),
+        )
+        .await
+        .expect("byte admission must not prevent active transfers from releasing permits")
+        .unwrap();
+        assert_eq!((summary.transferred, summary.peak_active_objects), (4, 1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_releases_waiting_object_and_byte_admissions() {
+        for max_concurrency in [1, 2] {
+            let coordinator = TransferCoordinator::new(TransferPolicy {
+                max_concurrency,
+                ..policy()
+            });
+            let permit = coordinator
+                .admit(request(0, 2 * BYTE_PERMIT_UNIT))
+                .await
+                .unwrap();
+            let waiting = coordinator.admit(request(1, 2 * BYTE_PERMIT_UNIT));
+            tokio::pin!(waiting);
+            std::future::poll_fn(|cx| {
+                assert!(waiting.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            coordinator.cancellation().cancel();
+            let result = tokio::time::timeout(Duration::from_secs(2), waiting)
+                .await
+                .unwrap();
+            assert!(matches!(result, Err(CrabError::Cancelled)));
+            drop(permit);
+            assert_eq!(
+                (
+                    coordinator.concurrency.available_permits(),
+                    coordinator.bytes.available_permits()
+                ),
+                (max_concurrency, 2),
+            );
+            assert_eq!(
+                coordinator.metrics.active_objects.load(Ordering::Acquire),
+                0
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_drains_active_attempts_and_never_becomes_skipped_success() {
+        let coordinator = TransferCoordinator::new(TransferPolicy {
+            skip_download_errors: true,
+            ..policy()
+        });
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(AtomicUsize::new(0));
+        let execution = coordinator.execute(
+            TransferDirection::Download,
+            [
+                request(0, 2 * BYTE_PERMIT_UNIT),
+                request(1, 2 * BYTE_PERMIT_UNIT),
+            ],
+            {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                let completed = Arc::clone(&completed);
+                move |_, _| {
+                    let started = Arc::clone(&started);
+                    let release = Arc::clone(&release);
+                    let completed = Arc::clone(&completed);
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        completed.fetch_add(1, Ordering::AcqRel);
+                        Ok(TransferOutcome::Transferred)
+                    }
+                }
+            },
+        );
+        tokio::pin!(execution);
+        tokio::select! {
+            _ = started.notified() => {}
+            result = &mut execution => panic!("operation finished before release: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("operation did not start"),
+        }
+        coordinator.cancellation().cancel();
+        std::future::poll_fn(|cx| {
+            assert!(execution.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            coordinator.metrics.active_objects.load(Ordering::Acquire),
+            1
+        );
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), execution)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+        assert_eq!(completed.load(Ordering::Acquire), 1);
+        assert_eq!(
+            coordinator.metrics.active_objects.load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_empty_execution_is_not_success() {
+        let coordinator = TransferCoordinator::new(policy());
+        coordinator.cancellation().cancel();
+        let result = coordinator
+            .execute(TransferDirection::Upload, [], |_, _| async {
+                panic!("cancelled operation must not start")
+            })
+            .await;
+        assert!(matches!(result, Err(CrabError::Cancelled)));
     }
 
     #[tokio::test]

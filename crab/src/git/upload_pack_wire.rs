@@ -716,6 +716,16 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
+                let Some(proof) = proof.as_ref() else {
+                    // Empty manifests have no catalog or reachable objects. Ref
+                    // discovery is valid, but no want may start pack production.
+                    return reject_protocol_request(
+                        writer,
+                        protocol("fetch requested an object from an empty repository"),
+                        cancellation,
+                    )
+                    .await;
+                };
                 if let Err(error) = validate_fetch_admission_catalog(
                     &repository,
                     proof.as_catalog().ok_or_else(|| {
@@ -749,7 +759,7 @@ where
                         write_fetch_response(
                             writer,
                             &repository,
-                            &proof,
+                            proof,
                             &visible_ref_names,
                             &fetch,
                             negotiation_rounds,
@@ -765,7 +775,7 @@ where
                 write_fetch_response(
                     writer,
                     &repository,
-                    &proof,
+                    proof,
                     &visible_ref_names,
                     &fetch,
                     negotiation_rounds,
@@ -883,7 +893,7 @@ async fn open_repository_with_visibility_requirement(
     prefix: &str,
     cancellation: &CancellationToken,
     requirement: VisibilityRequirement,
-) -> Result<(RemoteGitRepository, UploadPackVisibilityProof)> {
+) -> Result<(RemoteGitRepository, Option<UploadPackVisibilityProof>)> {
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
@@ -955,6 +965,13 @@ async fn open_repository_with_visibility_requirement(
         let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
             Ok(repository) => {
+                // The validated empty manifest is the complete ref snapshot;
+                // inventing a catalog would create a nonexistent object authority.
+                if matches!(requirement, VisibilityRequirement::Catalog)
+                    && repository.refs().is_empty()
+                {
+                    return Ok((repository, None));
+                }
                 let visibility = match requirement {
                     #[cfg(test)]
                     VisibilityRequirement::Materialized => repository
@@ -967,7 +984,7 @@ async fn open_repository_with_visibility_requirement(
                         .map(UploadPackVisibilityProof::Catalog),
                 };
                 match visibility {
-                    Ok(visibility) => return Ok((repository, visibility)),
+                    Ok(visibility) => return Ok((repository, Some(visibility))),
                     Err(error) if visibility_index_needs_repair(&error) => {
                         let generation = repository.generation();
                         visibility_error = Some(error);
@@ -1076,6 +1093,7 @@ pub(crate) async fn open_repository_with_catalog_visibility(
         VisibilityRequirement::Catalog,
     )
     .await?;
+    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
     Ok((repository, proof.into_catalog()?))
 }
 
@@ -1092,7 +1110,7 @@ pub(crate) async fn open_repository_with_visibility(
         VisibilityRequirement::Materialized,
     )
     .await?;
-    let UploadPackVisibilityProof::Materialized(visibility) = proof else {
+    let Some(UploadPackVisibilityProof::Materialized(visibility)) = proof else {
         return Err(CrabError::Internal(
             "materialized upload-pack proof was not returned".to_owned(),
         ));
@@ -2545,6 +2563,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_repository_serves_unborn_refs_but_rejects_object_wants() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/empty".to_owned());
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .unwrap();
+        for (command, arguments, hidden_refs, expected, succeeds) in [
+            ("ls-refs", vec!["symrefs"], vec![], "00000002", true),
+            (
+                "ls-refs",
+                vec!["symrefs", "unborn"],
+                vec![],
+                "unborn HEAD symref-target:refs/heads/main\n",
+                true,
+            ),
+            (
+                "ls-refs",
+                vec!["unborn"],
+                vec!["refs/heads/main".to_owned()],
+                "00000002",
+                true,
+            ),
+            (
+                "fetch",
+                vec!["want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "done"],
+                vec![],
+                "fetch requested an object from an empty repository",
+                false,
+            ),
+        ] {
+            let mut request = packet(format!("command={command}\n").as_bytes());
+            request.extend_from_slice(b"0001");
+            for argument in arguments {
+                request.extend(packet(format!("{argument}\n").as_bytes()));
+            }
+            request.extend_from_slice(b"0000");
+            let mut reader = BufReader::new(Cursor::new(request));
+            let mut output = Vec::new();
+            let result = serve(
+                &mut reader,
+                &mut output,
+                &store,
+                "org/empty",
+                &hidden_refs,
+                &FetchAdmissionPolicy::default(),
+                false,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeeds, "{command}: {result:?}");
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(expected), "{output}");
+            if !succeeds {
+                assert!(output.contains("ERR "));
+            }
+            assert!(!output.contains("packfile\n") && !output.contains("fallback\n"));
+            if !hidden_refs.is_empty() {
+                assert!(!output.contains("symref-target:refs/heads/main"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn snapshot_capability_rejects_refs_without_a_visibility_proof() {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
@@ -2664,6 +2746,25 @@ mod tests {
         ])
         .expect_err("unsupported filters must fail in the wire parser");
         assert!(error.to_string().contains("unsupported filter"));
+    }
+
+    #[test]
+    fn rejects_every_unadvertised_fetch_argument_before_planning() {
+        for argument in [
+            "deepen-since 1",
+            "deepen-not refs/heads/main",
+            "want-ref refs/heads/main",
+            "packfile-uris https",
+            "wait-for-done",
+            "server-option trace=1",
+        ] {
+            let error = parse_fetch(&[format!("want {}", "a".repeat(40)), argument.to_owned()])
+                .expect_err("unadvertised fetch arguments must fail in the wire parser");
+            assert!(
+                error.to_string().contains("unsupported fetch argument"),
+                "{argument} unexpectedly produced {error}"
+            );
+        }
     }
 
     #[test]

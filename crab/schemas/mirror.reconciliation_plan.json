@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "MirrorPlanAction": {
+      "additionalProperties": false,
+      "description": "One exact source-to-Crab ref mutation bound to both snapshots.",
+      "properties": {
+        "expected_crab_oid": {
+          "description": "Expected Crab object ID before apply.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_source_oid": {
+          "description": "Expected source object ID before apply.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MirrorPlanActionKind"
+            }
+          ],
+          "description": "Mutation kind."
+        },
+        "ref_name": {
+          "description": "Full destination ref name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "ref_name"
+      ],
+      "type": "object"
+    },
+    "MirrorPlanActionKind": {
+      "description": "Mutation permitted by a reconciliation plan.",
+      "enum": [
+        "update_crab_ref",
+        "delete_crab_ref"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Immutable, content-identified mirror reconciliation contract.",
+  "properties": {
+    "actions": {
+      "description": "Ordered, source-to-Crab mutations.",
+      "items": {
+        "$ref": "#/definitions/MirrorPlanAction"
+      },
+      "type": "array"
+    },
+    "allow_delete_refs": {
+      "description": "Whether the plan explicitly permits destination-only ref deletion.",
+      "type": "boolean"
+    },
+    "blocked": {
+      "description": "Whether safety checks prevent apply.",
+      "type": "boolean"
+    },
+    "blockers": {
+      "description": "Reasons the plan cannot be applied.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "crab_refs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Exact Crab ref snapshot.",
+      "type": "object"
+    },
+    "destination": {
+      "description": "Crab destination URL.",
+      "type": "string"
+    },
+    "destination_identity": {
+      "description": "Resolved storage target and scope, required even for converged replay.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "destination_snapshot": {
+      "description": "Exact namespace-bound Crab metadata identity, absent only in blocked plans.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "format_version": {
+      "description": "Plan format version.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "plan_id": {
+      "description": "Blake3 identity of the canonical plan body.",
+      "type": "string"
+    },
+    "pointer_count": {
+      "description": "Number of source-reachable pointers proved before planning.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "recipe_digest": {
+      "description": "Exact verified recipe identity, absent only in blocked plans.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "description": "Resolved collaboration source.",
+      "type": "string"
+    },
+    "source_refs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Exact source ref snapshot.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "actions",
+    "allow_delete_refs",
+    "blocked",
+    "blockers",
+    "crab_refs",
+    "destination",
+    "format_version",
+    "plan_id",
+    "pointer_count",
+    "source",
+    "source_refs"
+  ],
+  "title": "MirrorReconciliationPlan",
+  "type": "object"
+}

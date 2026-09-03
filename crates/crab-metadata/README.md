@@ -50,6 +50,27 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 Keep each SlateDB session's lifecycle explicit: every opened reader or writer
 must be closed on success and error paths.
 
+Integrity callers use `FileIndexLookupSession::from_snapshot` with an already
+captured `RepositorySnapshot` and its scoped storage layout. This constructor
+does not open SlateDB, refresh metadata, or write reader checkpoints. Lookup
+uses canonical shards, including committed journal additions; duplicate recipes
+select the smallest shard hash deterministically. The caller still owns
+freshness revalidation and protection against concurrent GC. This path scans
+the captured shard inventory, so it is not an acceleration-index performance
+claim.
+
+`RepositorySnapshot` also captures the validated canonical layout descriptor.
+The reader validates it around metadata materialization, and the snapshot
+digest binds its semantic content along with the complete manifest, CAS token,
+and journal frontier. Equivalent JSON formatting or a new layout ETag does not
+change this identity; missing, malformed, unsupported or oversized descriptors
+fail closed. A missing manifest still returns its ordinary not-found error;
+neither snapshot reads nor raw manifest creation initialize a layout.
+
+The snapshot digest does not replace the manifest's Git-only validation digest.
+Callers bind the repository namespace separately and revalidate the snapshot;
+neither digest reserves physical dependencies against GC.
+
 ## Usage
 
 Create and validate a manifest payload without enabling any storage runtime:

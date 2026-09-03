@@ -139,7 +139,7 @@ pub struct RefJournalFrontier {
 }
 
 /// Fully materialized repository state after applying committed ref transactions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RefJournalSnapshot {
     pub refs: BTreeMap<String, String>,
     pub peeled_refs: BTreeMap<String, String>,

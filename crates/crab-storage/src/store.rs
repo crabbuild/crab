@@ -63,6 +63,7 @@ pub struct Store {
     /// [`BucketIdentity::local_unset`] for wrappers built without an
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
+    target_identity: Option<[u8; 32]>,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
     /// provider builders for S3 backends (the only backend that
@@ -134,6 +135,7 @@ impl Store {
             inner,
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
+            target_identity: None,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -156,6 +158,7 @@ impl Store {
             inner,
             retry,
             identity: BucketIdentity::local_unset(),
+            target_identity: None,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -176,6 +179,19 @@ impl Store {
     pub fn with_bucket_identity(mut self, identity: BucketIdentity) -> Self {
         self.identity = identity;
         self
+    }
+
+    /// Attach the resolved transport identity from the provider construction owner.
+    #[must_use]
+    pub fn with_target_identity(mut self, identity: [u8; 32]) -> Self {
+        self.target_identity = Some(identity);
+        self
+    }
+
+    /// Return the bound transport identity; raw wrappers have no target proof.
+    #[must_use]
+    pub fn target_identity(&self) -> Option<&[u8; 32]> {
+        self.target_identity.as_ref()
     }
 
     /// Attaches a URL-signer handle so [`Self::signed_url`] can

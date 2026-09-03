@@ -238,6 +238,9 @@ enum Cmd {
     },
     /// Mirror a Git remote into a Crab remote.
     Mirror(crab::cmd::mirror::MirrorArgs),
+    /// Publish the frozen ref batch supplied by Git's mirror-mode hook.
+    #[command(hide = true)]
+    MirrorPrePush(crab::cmd::mirror::MirrorPrePushArgs),
     /// Download selected files from a Crab repository without cloning it.
     #[command(visible_alias = "get")]
     Download {
@@ -2271,6 +2274,7 @@ impl Cmd {
             Self::Reset { .. } => "reset",
             Self::Clone { .. } => "clone",
             Self::Mirror(_) => "mirror",
+            Self::MirrorPrePush(_) => "mirror.pre-push",
             Self::Download { .. } => "download",
             Self::Worktree {
                 command: crab::cmd::worktree::WorktreeCommand::Add(_),
@@ -3492,9 +3496,26 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             Ok(ExitCode::SUCCESS)
         }
+        Some(Cmd::MirrorPrePush(ref args)) => {
+            crab::cmd::mirror::run_mirror_pre_push(args, &cancel).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Mirror(ref args)) => {
             let _span = tracing::info_span!("mirror", source = %args.source).entered();
             let mode = args.output_mode();
+            if args.is_integrity_operation() {
+                let outcome = crab::cmd::mirror::run_mirror_integrity(args, &cancel).await?;
+                match mode {
+                    OutputMode::Json => outcome.emit_json(),
+                    OutputMode::Jsonl => outcome.emit_jsonl(),
+                    OutputMode::Text => {}
+                }
+                if args.ci && !outcome.ci_passed() {
+                    return Ok(ExitCode::from(1));
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+
             let summary = crab::cmd::mirror::run_mirror(args, &cancel)?;
 
             match mode {
@@ -4098,7 +4119,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Optimize(sub)) => run_optimize_command(sub, &cancel).await,
         Some(Cmd::Tier(sub)) => run_tier_command(sub, &cancel).await,
         Some(Cmd::Metadb(sub)) => run_metadb_command(sub, &cancel).await,
-        Some(Cmd::Cache(sub)) => run_cache_command(sub).await,
+        Some(Cmd::Cache(sub)) => run_cache_command(sub, &cancel).await,
         Some(Cmd::Config(sub)) => {
             let _span = tracing::info_span!("config").entered();
             match sub {
@@ -4813,7 +4834,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let mut cmd = Cli::command();
                 return crab::cmd::lfs::completion::run_lfs_completion(shell, &mut cmd);
             }
-            let exit = crab::cmd::lfs::run_lfs(&sub)?;
+            let exit = crab::cmd::lfs::run_lfs_with_cancel(&sub, &cancel)?;
             Ok(exit)
         }
         Some(Cmd::LfsTransferAgent) => {
@@ -5291,9 +5312,9 @@ async fn run_optimize_command(
         } => run_compact_command(repo, bucket, dry_run, max_shard_size, cancel).await,
         OptimizeCmd::Tiers { command } => run_tier_command(command, cancel).await,
         OptimizeCmd::Cache(command) => match command {
-            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats).await,
-            OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify).await,
-            OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean).await,
+            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats, cancel).await,
+            OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
+            OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean, cancel).await,
             OptimizeCacheCmd::Prune {
                 dry_run,
                 verbose,
@@ -5701,17 +5722,17 @@ async fn run_metadb_command(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_cache_command(sub: CacheCmd) -> Result<ExitCode> {
+async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<ExitCode> {
     let _span = tracing::info_span!("cache").entered();
     match sub {
         CacheCmd::Stats => run_cache_stats().await?,
         CacheCmd::Verify => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_verify(mode).await?;
+            crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
         }
         CacheCmd::Clean => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_clean(false, mode)?;
+            crab::cmd::cache::run_cache_clean_with_cancel(false, mode, cancel)?;
         }
     }
     Ok(ExitCode::SUCCESS)

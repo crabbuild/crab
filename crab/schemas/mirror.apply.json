@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "MirrorDriftState": {
+      "description": "Aggregate relationship between the collaboration source and Crab refs.",
+      "enum": [
+        "equal",
+        "source_ahead",
+        "crab_ahead",
+        "diverged",
+        "unverifiable"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Terminal result of applying a reconciliation plan.",
+  "properties": {
+    "actions_applied": {
+      "description": "Number of actions submitted by this invocation.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "actions_planned": {
+      "description": "Number of actions encoded in the plan.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "already_applied": {
+      "description": "Whether the exact plan outcome was already present.",
+      "type": "boolean"
+    },
+    "destination": {
+      "description": "Crab destination URL.",
+      "type": "string"
+    },
+    "final_state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MirrorDriftState"
+        }
+      ],
+      "description": "Verified destination relationship after apply."
+    },
+    "plan_id": {
+      "description": "Applied plan identity.",
+      "type": "string"
+    },
+    "source": {
+      "description": "Resolved collaboration source.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "actions_applied",
+    "actions_planned",
+    "already_applied",
+    "destination",
+    "final_state",
+    "plan_id",
+    "source"
+  ],
+  "title": "MirrorApplySummary",
+  "type": "object"
+}

@@ -11,6 +11,11 @@ on:
       - "crab/Cargo.toml"
       - "crab/src/git/**"
       - "crab/src/cmd/lfs/**"
+      - "crab/src/cmd/mirror.rs"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/cache.rs"
+      - "crab/src/main.rs"
+      - "crates/crab-cache/**"
       - "crab/src/lfs/**"
       - "crab/src/core/error.rs"
       - "crab/src/core/config.rs"
@@ -24,6 +29,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/scripts/verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_verify_git_capability_matrix.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
@@ -33,6 +40,8 @@ on:
       - "crates/crab-storage/**"
       - "crates/crab-vfs/**"
       - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/architecture/git-capability-matrix.json"
+      - "crab/docs/architecture/git-capability-matrix.md"
       - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
       - "plans/013-add-git-protocol-v2-and-partial-clone.md"
       - "plans/designs/client-side-git-v2-partial-clone.md"
@@ -45,6 +54,11 @@ on:
       - "crab/Cargo.toml"
       - "crab/src/git/**"
       - "crab/src/cmd/lfs/**"
+      - "crab/src/cmd/mirror.rs"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/cache.rs"
+      - "crab/src/main.rs"
+      - "crates/crab-cache/**"
       - "crab/src/lfs/**"
       - "crab/src/core/error.rs"
       - "crab/src/core/config.rs"
@@ -58,6 +72,8 @@ on:
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
+      - "crab/scripts/verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_verify_git_capability_matrix.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
@@ -67,6 +83,8 @@ on:
       - "crates/crab-storage/**"
       - "crates/crab-vfs/**"
       - "crab/docs/architecture/git-protocol-v2.md"
+      - "crab/docs/architecture/git-capability-matrix.json"
+      - "crab/docs/architecture/git-capability-matrix.md"
       - "crab/docs/design/adr-git-protocol-v2-local-helper.md"
       - "plans/013-add-git-protocol-v2-and-partial-clone.md"
       - "plans/designs/client-side-git-v2-partial-clone.md"
@@ -111,9 +129,26 @@ jobs:
           # becoming a stack-overflow false negative.
           RUST_MIN_STACK: "8388608"
         run: |
+          cargo test -p crab-cache --features local-cache --locked
+          cargo test -p crab --lib cmd::mirror --locked --features gix-transport
+          cargo test -p crab --lib git::process::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::coordinator::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::batch::tests --locked --features gix-transport
+          cargo test -p crab --lib lfs::transfer_agent::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::install::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::install::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::lfs::push::tests --locked --features gix-transport
+          cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
+          cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
-            --test v2_fetch_transport --test remote_helper_transcript
+            --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
+
+      - name: Verify executable compatibility matrix
+        run: |
+          python3 crab/scripts/verify_git_capability_matrix.py
+          python3 crab/scripts/tests/test_verify_git_capability_matrix.py
 
       - name: Check protocol formatting
         run: |
@@ -127,6 +162,66 @@ jobs:
             crates/crab-remote-git/src/operation.rs \
             crates/crab-remote-git/src/reader.rs \
             crates/crab-remote-git/src/repository.rs
+
+  cross-platform-contract:
+    name: Protocol contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Record native Git version
+        run: git --version
+
+      - name: Run native cache lifecycle contracts
+        run: cargo test -p crab-cache --features local-cache --locked
+
+      - name: Run native mirror and subprocess contracts
+        run: >-
+          cargo test -p crab --lib cmd::mirror --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run complete pre-push batch decoder contracts
+        run: |
+          cargo test -p crab-git --locked pre_push
+          cargo test -p crab-git --locked tag::tests
+
+      - name: Run visibility deletion contracts
+        run: cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+
+      - name: Run hook composition and frozen-ref discovery contracts
+        run: |
+          cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::push_native::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run LFS pre-push contracts
+        run: >-
+          cargo test -p crab --lib cmd::lfs::push::tests --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run shared subprocess and LFS publication contracts
+        run: |
+          cargo test -p crab --lib cmd::mirror::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::publication::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::coordinator::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::batch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib lfs::transfer_agent::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+
+      - name: Run protocol and transcript contracts
+        run: >-
+          cargo test -p crab --locked --no-default-features
+          --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
 
   release-build:
     name: Build shared protocol release artifact
@@ -271,6 +366,7 @@ jobs:
             --git-bin "$GIT_BIN" \
             --bucket "${CRAB_E2E_BUCKET}" \
             --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --mirror-reconciliation \
             --root "${CRAB_E2E_ROOT}" \
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"

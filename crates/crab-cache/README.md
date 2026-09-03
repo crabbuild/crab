@@ -33,6 +33,23 @@ The remote client is intentionally optional. The service contracts describe
 auth modes, cache/dedup modes, limits, health, and known chunks without making
 every local consumer depend on `reqwest`.
 
+The `local-cache` feature also exposes directory lifecycle guards. Mutable
+directory owners such as mirror reconciliation hold `CacheUseGuard`; both
+`LocalCache::clean` and CLI cleanup hold `CacheCleanGuard`. Ownership is
+exclusive across overlapping physical paths. Admission announces its lock
+before probing existing owners, so a concurrent cleaner and user cannot both
+proceed. Recursive cleanup retains sibling coordination files and their parent
+directories, even when idle, to avoid splitting a lock between old and new
+inodes. These are cooperative local locks, not distributed leases or protection
+against uncooperative external deletion. Ordinary immutable cache fills do not
+hold directory ownership.
+
+Owners, cleaners and temporary admission probes explicitly unlock before
+closing their file handles. On Unix, a descriptor inherited by a concurrent
+fork must not prolong ownership until that unrelated child executes or exits.
+Callers still must join their own cache workers before dropping the guard;
+explicit unlock does not make a detached writer safe.
+
 ## Usage
 
 Enable the local implementation and cache a verified chunk:

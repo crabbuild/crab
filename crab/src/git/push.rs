@@ -2991,6 +2991,9 @@ pub struct PushConfig {
     /// Flipped by the remote-helper `option atomic true` from git's
     /// `push --atomic` invocation.
     pub atomic: bool,
+    /// Exact ref values required by the caller, rechecked after locking and on retry.
+    /// A present key with `None` requires that the ref does not exist.
+    pub expected_refs: BTreeMap<String, Option<String>>,
     /// Maximum size of each generated pack, in bytes. Mirrors git's
     /// `receive.maxInputSize`. Aggregate closures are split into bounded
     /// packs; a single object that cannot fit is rejected. `0` disables
@@ -3110,6 +3113,7 @@ impl Default for PushConfig {
             shard_chunk_index_table_max_size: 64 * 1024 * 1024,
             max_cas_retries: DEFAULT_MAX_CAS_RETRIES,
             atomic: false,
+            expected_refs: BTreeMap::new(),
             receive_max_input_size: 2 * 1024 * 1024 * 1024,
             receive_deny_deletes: false,
             receive_deny_non_fast_forwards: false,
@@ -3157,6 +3161,7 @@ impl PushConfig {
             shard_chunk_index_table_max_size: config.shard_chunk_index_table_max_size,
             max_cas_retries: config.push_max_cas_retries,
             atomic: false,
+            expected_refs: BTreeMap::new(),
             receive_max_input_size: config.receive_max_input_size,
             receive_deny_deletes: config.receive_deny_deletes,
             receive_deny_non_fast_forwards: config.receive_deny_non_fast_forwards,
@@ -7891,6 +7896,31 @@ impl PushPipeline {
         let mut decisions = HashMap::with_capacity(self.specs.len());
         for spec in &self.specs {
             let current_sha = base_refs.get(&spec.dst).cloned();
+            // Check the lease before granting its conditional force. This
+            // precondition must survive re-evaluation of a changed locked base.
+            let lease_current =
+                self.config
+                    .protected_push
+                    .as_ref()
+                    .map_or(current_sha.as_deref(), |session| {
+                        session
+                            .ref_updates
+                            .iter()
+                            .find(|update| update.ref_name == spec.dst)
+                            .and_then(|update| update.old_oid.as_deref())
+                    });
+            if self
+                .config
+                .expected_refs
+                .get(&spec.dst)
+                .is_some_and(|expected| expected.as_deref() != lease_current)
+            {
+                decisions.insert(
+                    spec.dst.clone(),
+                    RefUpdateDecision::Reject(PushRejectReason::StaleInfo),
+                );
+                continue;
+            }
             let spec_kind = SpecKind::classify(spec, current_sha.as_deref());
 
             // ---- Receive-policy gate (runs before FF/new-ref checks) ----
@@ -7949,7 +7979,10 @@ impl PushPipeline {
                             ref_name: spec.dst.clone(),
                             old_sha: current_sha.clone(),
                             new_sha: new_sha.clone(),
-                            force: spec.force,
+                            // Git emits `option cas` without necessarily adding
+                            // `+` to its push command. A matched lease authorizes
+                            // the rewrite, still subject to receive policy below.
+                            force: spec.force || self.config.expected_refs.contains_key(&spec.dst),
                         };
                         let window =
                             usize::try_from(policy.ff_summary_window_commits).unwrap_or(usize::MAX);
@@ -16679,6 +16712,7 @@ impl PushPipeline {
                 self.common_git_dir()?,
                 tips,
                 remote_tips,
+                &self.cancel,
             )
             .await;
             self.at_stage(PushFailureStage::Preflight, publication)?;
@@ -19443,6 +19477,7 @@ mod tests {
             .await
             .expect("upload base graph");
         base_manifest.commit_graph_hash = Some(base_write.descriptor_hash);
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &base_manifest)
             .await
             .expect("publish base graph manifest");
@@ -22234,6 +22269,7 @@ mod tests {
             .insert("refs/heads/main".to_owned(), commit.clone());
         manifest.pack_index_hash = pack_index_hash;
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &manifest)
             .await
             .expect("publish ref-tip fast-path manifest");
@@ -23229,6 +23265,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("cas-retry-non-atomic");
         let initial = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -23342,6 +23379,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("cas-retry-unrelated-ref");
         let initial = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -23436,6 +23474,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-busy-compactor");
         let initial = non_initial_empty_manifest();
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -23588,6 +23627,7 @@ mod tests {
             .insert("refs/heads/main".to_owned(), commit.clone());
         manifest.pack_index_hash = pack_index_hash;
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &manifest)
             .await
             .expect("publish visibility admission manifest");
@@ -23675,6 +23715,7 @@ mod tests {
     async fn compactor_defers_locator_publication_to_claimed_same_ref_successor() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("journal-locator-successor");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
             .await
             .expect("create initial manifest");
@@ -23764,6 +23805,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let repo_prefix = "generation-owner-locator-handoff";
         let (store, router) = test_store_router(repo_prefix);
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
             .await
             .expect("create initial manifest");
@@ -23865,6 +23907,7 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "cancel-after-cas".to_owned());
         let initial = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -23929,6 +23972,7 @@ mod tests {
             ));
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
             .await
             .expect("create initial manifest");
@@ -24214,6 +24258,7 @@ mod tests {
         });
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "push-locator-owner-boundary".to_owned());
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
             .await
             .expect("create initial manifest");
@@ -24446,6 +24491,7 @@ mod tests {
         let repo_prefix = "upload-pack-visibility-repair";
         let (store, router) = test_store_router(repo_prefix);
         let initial = non_initial_empty_manifest();
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -24575,6 +24621,7 @@ mod tests {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("under-lock-refresh");
         let initial = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
@@ -24641,6 +24688,156 @@ mod tests {
         assert!(pipeline.chunk_placement.lock().await.is_empty());
         assert!(pipeline.uploaded_packs.lock().await.is_empty());
         pipeline.stop_heartbeat_and_release_lock().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ref_lease_rejects_delete_when_tip_changes_before_lock() {
+        let (store, router) = test_store_router("delete-ref-lease");
+        let name = "refs/heads/recoverable";
+        let mut initial = Manifest::default_for_repo(name);
+        initial.refs.insert(name.to_owned(), "a".repeat(40));
+        initial.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .unwrap();
+        let config = PushConfig {
+            atomic: true,
+            expected_refs: BTreeMap::from([(name.to_owned(), Some("a".repeat(40)))]),
+            ..PushConfig::default()
+        };
+        let pipeline = PushPipeline::new(
+            config,
+            vec![PushSpec {
+                force: false,
+                src: String::new(),
+                dst: name.to_owned(),
+            }],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&HashMap::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            decisions.get(name),
+            Some(RefUpdateDecision::Proceed { .. })
+        ));
+
+        let (mut changed, etag) = read_manifest(&store, &router).await.unwrap();
+        changed.generation += 1;
+        changed.refs.insert(name.to_owned(), "b".repeat(40));
+        changed.seal_git_validation();
+        write_manifest_cas(&store, &router, &changed, &etag)
+            .await
+            .unwrap();
+        pipeline.acquire_push_lock().await.unwrap();
+        let result = pipeline
+            .refresh_base_bound_plan_after_lock(&HashMap::new(), &decisions)
+            .await;
+        pipeline.stop_heartbeat_and_release_lock().await;
+        let CrabError::PushPartialOutcome { outcomes, .. } = result.unwrap_err() else {
+            panic!("lease mismatch must be a ref rejection");
+        };
+        assert_eq!(
+            outcomes.outcomes.get(name),
+            Some(&RefPushOutcome::Rejected(PushRejectReason::StaleInfo))
+        );
+        assert_eq!(
+            read_manifest(&store, &router)
+                .await
+                .unwrap()
+                .0
+                .refs
+                .get(name),
+            Some(&"b".repeat(40))
+        );
+    }
+
+    #[tokio::test]
+    async fn ref_lease_conditionally_forces_rewrites_without_bypassing_receive_policy() {
+        let _guard = GitDirGuard::new();
+        let first = crate::test::git_repo::TEST_GIT_REPO.commit_sha.clone();
+        let output = Command::new("git")
+            .args([
+                "commit-tree",
+                "HEAD^{tree}",
+                "-p",
+                &first,
+                "-m",
+                "lease fixture child",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let second = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        for (expected, force, deny, decision) in [
+            (
+                Some(second.clone()),
+                false,
+                false,
+                RefUpdateDecision::Proceed { etag: None },
+            ),
+            (
+                Some(first.clone()),
+                true,
+                false,
+                RefUpdateDecision::Reject(PushRejectReason::StaleInfo),
+            ),
+            (
+                None,
+                true,
+                false,
+                RefUpdateDecision::Reject(PushRejectReason::StaleInfo),
+            ),
+            (
+                Some(second.clone()),
+                false,
+                true,
+                RefUpdateDecision::Reject(PushRejectReason::DenyNonFastForward),
+            ),
+        ] {
+            let (store, router) = test_store_router("force-ref-lease");
+            let name = "refs/heads/main";
+            let config = PushConfig {
+                expected_refs: BTreeMap::from([(name.to_owned(), expected)]),
+                receive_deny_non_fast_forwards: deny,
+                ..PushConfig::default()
+            };
+            let pipeline = PushPipeline::new(
+                config,
+                vec![PushSpec {
+                    force,
+                    src: first.clone(),
+                    dst: name.to_owned(),
+                }],
+                Some(store),
+                None,
+                None,
+                router.repo_prefix().to_owned(),
+                router,
+                None,
+                CancellationToken::new(),
+                None,
+            );
+            let mut base = Manifest::default_for_repo(name);
+            base.refs.insert(name.to_owned(), second.clone());
+            base.seal_git_validation();
+            *pipeline.base_manifest.lock().await = Some(base);
+            let decisions = pipeline
+                .evaluate_decisions_with_sha_map(&HashMap::from([(first.clone(), first.clone())]))
+                .await
+                .unwrap();
+            assert_eq!(decisions.get(name), Some(&decision));
+        }
     }
 
     #[tokio::test]
@@ -24720,6 +24917,7 @@ mod tests {
     #[tokio::test]
     async fn acquire_push_lock_leases_reclaims_visible_transaction_holder() {
         let (store, router) = test_store_router("committed-holder-recovery");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(
             &store,
             &router,
@@ -24788,6 +24986,7 @@ mod tests {
     #[tokio::test]
     async fn acquire_push_lock_leases_preserves_unrelated_visible_holder() {
         let (store, router) = test_store_router("unrelated-holder-recovery");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(
             &store,
             &router,
@@ -24906,6 +25105,7 @@ mod tests {
     async fn same_ref_waiter_does_not_touch_repository_admission() {
         let _guard = GitDirGuard::new();
         let (store, router) = test_store_router("admission-after-ref-owner");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(
             &store,
             &router,
@@ -25253,6 +25453,7 @@ mod tests {
             make_spec("refs/heads/dev"),
         ];
         let (store, router) = test_store_router("preflight-non-atomic");
+        ensure_test_layout(&store, &router).await;
         create_manifest_with_etag(&store, &router, &non_initial_empty_manifest())
             .await
             .expect("create initial manifest");
@@ -25993,6 +26194,7 @@ mod tests {
         manifest.generation = 1;
         manifest.pack_index_hash = pack_index_hash.hex();
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish current manifest");
@@ -26048,6 +26250,7 @@ mod tests {
         manifest.generation = 1;
         manifest.pack_index_hash = pack_index_hash.hex();
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish current manifest");
@@ -26233,6 +26436,7 @@ mod tests {
         manifest.generation = 7;
         manifest.pack_index_hash = pack_index_hash.clone();
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish manifest");
@@ -26495,6 +26699,7 @@ mod tests {
         manifest.generation = 11;
         manifest.pack_index_hash = pack_index_hash.clone();
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish owner manifest");
@@ -26683,6 +26888,7 @@ mod tests {
         manifest.generation = 9;
         manifest.pack_index_hash = pack_index_hash.clone();
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("publish concurrent manifest");
@@ -32603,6 +32809,7 @@ mod tests {
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.generation = 1;
         base.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &base)
             .await
             .unwrap();
@@ -34268,6 +34475,7 @@ mod tests {
         manifest.generation = 1;
         manifest.shard_index_hash = shard_index_hash;
         manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         crate::metadata::manifest::create_manifest(&store, &router, &manifest)
             .await
             .expect("create manifest");
@@ -35139,6 +35347,7 @@ mod tests {
         let router = StoreLayout::new(store.clone(), "org/repo".to_string());
 
         let init_manifest = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &init_manifest)
             .await
             .unwrap();
@@ -35195,6 +35404,7 @@ mod tests {
         // here would point at objects that were never uploaded as segmented
         // indexes, which is not a state production ever produces.
         let init_manifest = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &init_manifest)
             .await
             .unwrap();
@@ -35253,6 +35463,7 @@ mod tests {
         // stores a non-empty hash without first uploading the matching
         // segmented index object.
         let init_manifest = Manifest::default_for_repo("refs/heads/main");
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &init_manifest)
             .await
             .unwrap();
@@ -35740,6 +35951,7 @@ mod tests {
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs.insert("refs/heads/main".into(), old_sha.into());
         base.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &base).await.unwrap();
 
         let config = PushConfig {
@@ -36015,6 +36227,7 @@ mod tests {
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs.insert("refs/heads/main".into(), old_sha.into());
         base.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &base).await.unwrap();
 
         let config = PushConfig {
@@ -36120,6 +36333,7 @@ mod tests {
             .refs
             .insert("refs/heads/feature".to_string(), "a".repeat(40));
         init_manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &init_manifest)
             .await
             .unwrap();
@@ -36169,6 +36383,7 @@ mod tests {
         let mut init_manifest = Manifest::default_for_repo("refs/heads/main");
         init_manifest.generation = 42;
         init_manifest.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &init_manifest)
             .await
             .unwrap();

@@ -33,6 +33,7 @@ crab init --mirror=origin crab://my-bucket/my-repo
 ```
 
 This command:
+
 1. Validates that the `origin` remote exists
 2. Adds a `crab` remote pointing to your bucket
 3. Installs `pre-push`, `post-checkout`, and `post-merge` hooks
@@ -59,6 +60,7 @@ crab init
 ```
 
 Running `crab init` with no URL detects the `[mirror]` section in `crab.toml` and automatically:
+
 - Adds the `crab` remote
 - Installs mirror hooks
 - Hydrates files per `[hydrate]` settings
@@ -73,11 +75,36 @@ needs the mirror remote and hooks installed locally.
 
 ```bash
 #!/bin/sh
-# Crab mirror: push published pointer recipes before refs go to origin
-crab push --remote crab --quiet 2>/dev/null
+# Crab mirror: publish the exact pre-push ref batch
+crab mirror-pre-push "$@" || exit $?
 ```
 
-Ensures large-file content reaches your bucket before pointer blobs reach GitHub. If the Crab push fails, the git push is aborted — preventing dangling pointers.
+The development-line hook reads Git's complete stdin batch and publishes its
+exact object IDs and destination refs to Crab before allowing the GitHub
+push. It handles differently named branches, annotated tags, revision
+expressions, rewrites, and explicit deletions; it does not substitute the
+current branch. Empty batches do nothing. Direct `crab://` pushes skip mirror
+publication to avoid recursion.
+
+The guard validates the batch, resolves the configured destination, and
+captures an independent Crab expected-old ref snapshot. A Crab ref that differs
+from both Git's advertised old value and the proposed new value blocks the
+whole batch. An unchanged snapshot permits an explicitly requested rewrite;
+a concurrent Crab writer still causes its lease check to fail. Unmentioned
+refs are retained. After publication, the guard verifies reachable Crab
+pointer bytes at origin and checks the resulting refs. A failure prevents
+the collaboration push but does not undo a Crab commit.
+
+The hook accepts SHA-1 publication batches up to 16 MiB. Malformed input and
+duplicate destinations fail before publication. The supplied collaboration
+URL must match the configured source's push URLs; the Crab remote must have
+exactly one push URL. Fix mismatched configuration rather than bypassing the
+guard. Re-run `crab init` to update a recognized older Crab hook.
+
+These changes are not yet a release-qualified guarantee across all Git
+versions, platforms, and providers. Continuous snapshot protection against
+GC and the remaining failure matrix are still qualification work. Run the
+remote integrity check below and retain the evidence for your environment.
 
 The two remote updates are not one distributed transaction. Crab can be ahead
 if its push succeeds and GitHub later rejects the push. Server-side merges,
@@ -104,9 +131,29 @@ crab hydrate . 2>/dev/null || true
 
 Same behavior as post-checkout, triggered by `git pull` and `git merge`.
 
-### Existing hooks preserved
+### LFS and existing hooks
 
-Crab appends its lines to existing hooks — it never overwrites your custom hooks. Installation is idempotent.
+`crab lfs install` and mirror installation compose into one input owner:
+
+```bash
+#!/bin/sh
+# Crab LFS: publish objects before refs
+# Crab mirror: publish the exact pre-push ref batch
+crab mirror-pre-push --lfs "$@" || exit $?
+```
+
+Both guards use the same decoded object IDs. LFS uploads use the configured
+Crab destination, not the GitHub/GitLab URL. Either install order produces
+this hook; uninstalling LFS preserves the mirror guard.
+
+Installation honors `core.hooksPath` and is idempotent for recognized Crab
+hooks. An unknown/custom pre-push hook is left unchanged and installation
+fails with manual-composition guidance. Do not simply append two commands
+that both read stdin: the first can consume the batch and leave the second
+with nothing to check. A manual wrapper must retain and supply the complete
+batch to every input consumer and propagate every failure. Status only
+attests exact recognized Crab hook contents, not arbitrary custom wrappers.
+Post-checkout and post-merge installation preserves adjacent custom commands.
 
 ## Checking Status
 
@@ -114,13 +161,54 @@ Crab appends its lines to existing hooks — it never overwrites your custom hoo
 crab status
 ```
 
-With mirror mode active, you'll see:
+`crab status` reports local configuration, pending staging work, and the
+installed pre-push guard. It deliberately does not call either provider or
+claim that the remotes are healthy. Run the integrity check for authoritative
+remote state:
 
-```text
-Mirror: origin ↔ crab (crab://my-bucket/my-repo) | healthy
-  Crab remote: reachable
-  Pending push: 0 files
+```bash
+crab mirror origin crab://my-bucket/my-repo --check
 ```
+
+The result distinguishes equal refs, source-ahead refs, Crab-ahead recoverable
+state, true divergence, unavailable observations, missing hooks, and missing
+pointer recipes or data.
+
+### Enforce pointer availability in CI
+
+Make the collaboration remote URL available to the job, configure Crab
+credentials, and run:
+
+```bash
+crab mirror "$COLLABORATION_REMOTE" crab://my-bucket/my-repo \
+  --check --ci --json > mirror-check.json
+```
+
+The command exits nonzero if collaboration refs and Crab refs differ, any
+source-reachable Crab pointer lacks its committed recipe or immutable data,
+origin bytes fail hash/length verification, or verification is incomplete.
+The check reads reachable large-file content directly from origin; allow for
+that time and provider cost. Retain `mirror-check.json` as the status-check
+artifact. Required CI can block a protected merge or deployment; it cannot
+undo a ref already accepted by GitHub/GitLab.
+
+### Reconcile without implicit deletion
+
+Generate, review, and then apply an immutable plan:
+
+```bash
+crab mirror origin crab://my-bucket/my-repo \
+  --check --write-plan mirror-plan.json
+crab mirror origin crab://my-bucket/my-repo \
+  --apply-plan mirror-plan.json
+```
+
+Plans only publish source-ahead refs to Crab. Crab-ahead common refs and true
+divergence remain blocked until an operator chooses the source of truth.
+Destination-only refs are retained unless `--allow-delete-refs` is passed
+both while writing and applying the reviewed plan. Apply revalidates the plan
+digest, targets, ref snapshots, and pointer data; a stale plan fails instead
+of guessing.
 
 ## Configuration
 
@@ -154,9 +242,9 @@ crab_remote = "crab"        # Crab storage remote name
   and least-privilege bucket policy instead of shared static keys.
 - Install hooks on every developer and automation clone, then enforce pointer
   availability in CI because client hooks are bypassable.
-- Use `crab mirror SOURCE DESTINATION` only as a scheduled one-way full-ref DR
-  sync. It uses `git push --mirror`, which deletes destination-only refs; never
-  schedule it in both directions.
+- Existing `crab mirror SOURCE DESTINATION` invocations remain a one-way,
+  destructive full-ref sync. New automation should use `--check`, an immutable
+  plan, and `--apply-plan`; never schedule either form in both directions.
 - Before using Crab as the sole Git backbone, qualify multi-node storage
   failures and prove monitoring, backup restore, RPO, and RTO in your own
   environment.
@@ -166,9 +254,10 @@ crab_remote = "crab"        # Crab storage remote name
 ### Hooks not firing
 
 Verify hooks are installed:
+
 ```bash
-ls -la .git/hooks/pre-push
-cat .git/hooks/pre-push | grep "Crab mirror"
+git rev-parse --git-path hooks/pre-push
+crab status
 ```
 
 Re-run `crab init` to reinstall if missing.

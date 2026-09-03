@@ -9,8 +9,12 @@ receive-pack service, HTTP smart endpoint, callback, queue, or protocol
 gateway.
 
 This document describes the implemented profile on the current development
-line. RustFS qualification is green, but provider and release qualification
-remain before this becomes a released support claim.
+line. The machine-readable support authority is
+[`git-capability-matrix.json`](git-capability-matrix.json), with the generated
+human view in
+[`git-capability-matrix.md`](git-capability-matrix.md). Only matrix cells marked
+`supported` are compatibility promises; provider and platform rows marked
+`preview` remain qualification work rather than inferred support.
 
 The ownership decision is recorded in
 [ADR: Keep Git protocol v2 inside the local helper](../design/adr-git-protocol-v2-local-helper.md).
@@ -33,6 +37,11 @@ visibility coverage. The session supports:
   producer emits a self-contained, non-delta pack because no external base is
   required or assumed;
 - standard local Git pack installation on the v2 path.
+
+An empty manifest is a valid ref snapshot without a catalog. Empty clones and
+`ls-remote` complete through v2; clients requesting `unborn` receive the
+configured HEAD target unless hidden. Object wants against that empty snapshot
+are rejected before pack production, without inventing locator coverage.
 
 The filter forms are parsed and planned before object bytes are read.
 `blob:limit` uses Git's binary `k`, `m`, and `g` suffixes and retains blobs

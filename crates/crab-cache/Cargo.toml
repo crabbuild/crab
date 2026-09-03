@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [features]
 default = []
 active-probe = ["dep:reqwest"]
-local-cache = ["dep:filetime", "dep:rusqlite", "dep:tokio"]
+local-cache = ["dep:filetime", "dep:fs4", "dep:rusqlite", "dep:tokio", "dep:tokio-util"]
 remote-client = ["active-probe", "dep:futures-util", "dep:tokio"]
 xet-chunk-cache = [
     "dep:base64",
@@ -32,6 +32,7 @@ crab-types = { workspace = true }
 crab-xet = { workspace = true }
 crc32fast = { version = "1", optional = true }
 filetime = { version = "0.2", optional = true }
+fs4 = { version = "0.13", optional = true }
 futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"], optional = true }
 rusqlite = { workspace = true, optional = true }

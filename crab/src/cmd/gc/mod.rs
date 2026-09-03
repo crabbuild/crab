@@ -3759,6 +3759,9 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         // Read reachable bulk objects.
@@ -3853,6 +3856,9 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(
             &store,
             &router,
@@ -3968,6 +3974,9 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(
             &store,
             &router,
@@ -4074,6 +4083,9 @@ mod tests {
         manifest.pack_index_hash = pack_hash;
         manifest.generation = 1;
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         let (_manifest, reachable) = reachable_repo_objects_from_manifest(&store, &router)
@@ -4110,6 +4122,9 @@ mod tests {
             .refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
         let head = read_ref_journal_head(&store, &router, "refs/heads/side")
             .await
@@ -4208,6 +4223,9 @@ mod tests {
         old.shard_index_hash = old_shard_hash;
         old.pack_index_hash = old_pack_hash;
         old.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &old).await.unwrap();
         let (_, etag) = read_manifest(&store, &router).await.unwrap();
 
@@ -4256,6 +4274,9 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(
             &store,
             &router,
@@ -4296,6 +4317,9 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_string());
         let manifest = Manifest::default_for_repo("refs/heads/main");
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         let protected_key = "org/repo/packs/pack-protected.pack";
@@ -4352,6 +4376,9 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(
             &store,
             &router,
@@ -4517,6 +4544,9 @@ mod tests {
         manifest.pack_index_hash = pack_hash;
         manifest.generation = 1;
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         // Compact: only keep shard "a" and pack "pack_1".

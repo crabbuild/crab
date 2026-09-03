@@ -48,6 +48,22 @@ Remove cached data to free disk space.
 crab cache clean
 ```
 
+Cleanup checks all configured cache roots before removing data. An active
+mirror using an overlapping cache causes a nonzero, retryable refusal without
+deletion from any configured root. New mirror operations also refuse to start
+while cleanup owns the cache. Wait for the active operation and retry; do not
+delete its lock files.
+
+Cleanup retains `.crab-cache-use.lock` and `.crab-cache-clean.lock` markers
+and the directories needed to contain them. Reported file and byte counts
+exclude these markers. An idle mirror cache can be removed or emptied; the
+next mirror invocation rebuilds it, including when only nested coordination
+markers remain. Cloud objects and repository refs are not
+deleted. This coordination covers mirror directory owners, not arbitrary
+external programs or every concurrent cache fill. Cancellation or an I/O
+error during deletion stops further work but does not restore removed cache
+data.
+
 The current cache subcommands do not add command-specific selection flags;
 use `crab cache <command> --help` for global logging options.
 
@@ -55,8 +71,7 @@ use `crab cache <command> --help` for global logging options.
 
 Validate content-addressed chunks, shards, and xorbs plus xet range filenames,
 lengths, offset headers, and CRCs, then evict corrupt entries. Range entries are
-verified as they are scanned. I/O failures fail the command. For a non-mutating
-cleanup preview, use `crab optimize cache clean --dry-run`.
+verified as they are scanned. I/O failures fail the command.
 
 ## Remote Cache Service
 

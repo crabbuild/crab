@@ -55,6 +55,51 @@ For exact options, run `crab lfs <subcommand> --help`.
 merge the printed LFS command manually or pass `--force` to replace the hook.
 Crab composes its LFS gate with its own mirror-mode hook automatically.
 
+## Pre-push input
+
+`crab lfs pre-push` is a Git hook command. It validates the complete stdin
+batch before resolving cloud access or uploading objects, and uses Git's
+supplied object IDs rather than resolving the current branch. Branches,
+tags, and differently named destinations can appear in the same batch;
+deletions do not require LFS uploads.
+
+The input limit is 16 MiB. Malformed records, duplicate destination refs,
+mixed object-ID formats, invalid UTF-8, and a missing final newline fail the
+command. Empty and deletion-only batches do not require cloud credentials.
+This is input validation, not atomic publication across collaboration and
+Crab remotes.
+
+With Crab's mirror hook installed, the generated hook invokes
+`crab mirror-pre-push --lfs` instead. One owner reads the batch and passes the
+same object IDs to LFS upload and mirror publication. The LFS store is the
+configured Crab destination, not the collaboration host. Do not concatenate
+two stdin-consuming hook commands; see [Mirror Mode](/docs/cli/getting-started/mirror-mode)
+for installation, failure, and qualification boundaries.
+
+## Discovery limits and cancellation
+
+Push/pre-push LFS discovery, including mirror and canonical Git publication,
+uses supervised Git subprocesses. Discovery finishes before the raw batch
+reader starts; stderr drains concurrently in both stages. Each discovery scan
+has a 64 MiB accounting budget for input records and retained object/path
+entries, with a 1 MiB maximum record. Retained pointer inventories have a
+separate 64 MiB accounting budget; captured diagnostics are capped at 64 MiB.
+Exhaustion or malformed/truncated output fails the command, never returning an
+empty successful scan or publishing a partial pointer inventory.
+
+The scanner preserves local-minus-remote/base-ref ranges and verifies raw Git
+object identity before accepting LFS pointers. It does not use a blob-size
+filter: a corrupt pointer could otherwise be hidden behind a large header.
+Large introduced objects are streamed and hashed through a reused 64 KiB
+buffer, adding a full read even when they are ordinary Git files. The scanner
+accepts SHA-1 and SHA-256 Git OIDs; this does not extend Crab's native remote
+support profile. Zero-size LFS pointers retain their existing no-upload behavior.
+
+Cancellation waits for scan processes and pipe workers before cache ownership
+returns. These are scan/accounting limits, not a total-process RSS guarantee
+or whole-transfer cancellation guarantee. Native Git delta memory, large-scale
+latency and every provider/platform combination still require qualification.
+
 ## Related Commands
 
 - [`crab mount`](/docs/cli/reference/crab-mount) - mount repositories for on-demand reads.

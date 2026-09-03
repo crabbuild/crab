@@ -291,6 +291,7 @@ class Qualification:
         self.save()
 
     def verify_source(self) -> None:
+        self.run_crab([*self.args.crab_args, "lfs", "push", "origin", "main"], self.repo, "crab lfs push")
         self.run_lfs(["push", "origin", "main"], self.repo, "git lfs push")
         self.run_git(["push", "origin", "main"], self.repo, "git push")
         local_ref = self.run_git(["rev-parse", "refs/heads/main"], self.repo, "local ref").strip()
@@ -308,6 +309,7 @@ class Qualification:
             clone,
             "clone LFS install",
         )
+        self.run_crab([*self.args.crab_args, "lfs", "fetch", "origin", "main"], clone, "crab lfs fetch")
         self.run_lfs(["fetch", "origin", "main"], clone, "git lfs fetch")
         self.run_lfs(["checkout"], clone, "git lfs checkout")
         self.run_lfs(["fsck"], clone, "cloned git lfs fsck")

@@ -18,6 +18,8 @@ use crate::provider_options::{
 };
 use crate::store::Store;
 
+mod target;
+
 pub const STATIC_ENV_PROVIDER_ENV: &str = "CRAB_STORAGE_PROVIDER";
 
 /// Provider credentials consumed by object-store builders.
@@ -74,6 +76,8 @@ pub struct BuiltObjectStore {
     pub multipart_identity: Option<BucketIdentity>,
     pub signer: Option<Arc<dyn object_store::signer::Signer>>,
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
+    /// Credential-free identity of the resolved transport configuration.
+    pub target_identity: [u8; 32],
 }
 
 /// Object-store handle parsed from a URL plus the path prefix embedded in that URL.
@@ -374,6 +378,7 @@ fn build_object_store_inner(
                 .with_bucket_name(bucket)
                 .with_credentials(credential_provider)
                 .with_client_options(default_client_options());
+            let (builder, target_identity) = target::gcs(builder, bucket)?;
             let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
             let gcs = builder
                 .build()
@@ -385,6 +390,7 @@ fn build_object_store_inner(
                 multipart_identity: Some(multipart_identity),
                 signer: None,
                 multipart: Some(gcs),
+                target_identity,
             })
         }
         ObjectStoreCredentials::Azure { account, token } => {
@@ -402,6 +408,7 @@ fn build_object_store_inner(
                     builder.with_sas_authorization(parse_sas_query_pairs(&sas))
                 }
             };
+            let target_identity = target::azure(&builder, bucket)?;
             let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
@@ -411,6 +418,7 @@ fn build_object_store_inner(
                 multipart_identity: None,
                 signer: None,
                 multipart: None,
+                target_identity,
             })
         }
     }
@@ -420,7 +428,9 @@ fn build_object_store_inner(
 pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Result<Store> {
     let built = build_object_store(bucket, ObjectStoreCredentials::StaticEnv { provider })?;
     let identity = BucketIdentity::new(built.provider, bucket, bucket);
-    let mut store = Store::new(built.inner).with_bucket_identity(identity);
+    let mut store = Store::new(built.inner)
+        .with_bucket_identity(identity)
+        .with_target_identity(built.target_identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
     }
@@ -437,16 +447,17 @@ pub fn build_static_env_azure_account_container_store(
     container: &str,
 ) -> Result<Store> {
     let provider = StorageProviderKind::Azure;
-    let azure = MicrosoftAzureBuilder::from_env()
+    let builder = MicrosoftAzureBuilder::from_env()
         .with_account(account)
         .with_container_name(container)
-        .with_client_options(default_client_options())
-        .build()
-        .map_err(|source| {
-            provider_config_error(provider, &format!("{account}/{container}"), source)
-        })?;
+        .with_client_options(default_client_options());
+    let target_identity = target::azure(&builder, container)?;
+    let azure = builder.build().map_err(|source| {
+        provider_config_error(provider, &format!("{account}/{container}"), source)
+    })?;
     Ok(Store::new(Arc::new(azure))
-        .with_bucket_identity(BucketIdentity::new(provider, account, container)))
+        .with_bucket_identity(BucketIdentity::new(provider, account, container))
+        .with_target_identity(target_identity))
 }
 
 /// Builds a Crab store for a normalized static-env target.
@@ -501,6 +512,7 @@ fn build_static_env_object_store(
             let builder = GoogleCloudStorageBuilder::from_env()
                 .with_bucket_name(bucket)
                 .with_client_options(default_client_options());
+            let (builder, target_identity) = target::gcs(builder, bucket)?;
             let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
             let gcs = builder
                 .build()
@@ -512,12 +524,15 @@ fn build_static_env_object_store(
                 multipart_identity: Some(multipart_identity),
                 signer: None,
                 multipart: Some(gcs),
+                target_identity,
             })
         }
         StorageProviderKind::Azure => {
-            let azure = MicrosoftAzureBuilder::from_env()
+            let builder = MicrosoftAzureBuilder::from_env()
                 .with_container_name(bucket)
-                .with_client_options(default_client_options())
+                .with_client_options(default_client_options());
+            let target_identity = target::azure(&builder, bucket)?;
+            let azure = builder
                 .build()
                 .map_err(|source| provider_config_error(provider, bucket, source))?;
             Ok(BuiltObjectStore {
@@ -526,6 +541,7 @@ fn build_static_env_object_store(
                 multipart_identity: None,
                 signer: None,
                 multipart: None,
+                target_identity,
             })
         }
         StorageProviderKind::Local => Err(StorageError::UnsupportedProvider { provider }),
@@ -551,6 +567,7 @@ fn build_s3_object_store(
         builder = builder.with_token(session_token);
     }
     let multipart_identity = s3_multipart_identity(&builder, bucket);
+    let target_identity = target::s3(&builder, bucket)?;
     let s3 = builder
         .with_copy_if_not_exists(S3CopyIfNotExists::Multipart)
         .build()
@@ -562,6 +579,7 @@ fn build_s3_object_store(
         multipart_identity: Some(multipart_identity),
         signer: Some(s3.clone() as Arc<dyn object_store::signer::Signer>),
         multipart: Some(s3),
+        target_identity,
     })
 }
 

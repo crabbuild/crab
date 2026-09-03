@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::lfs::config::LfsConfig;
 use crate::lfs::coordinator::{
     TransferCoordinator, TransferDirection, TransferOutcome, TransferRequest,
@@ -13,6 +13,7 @@ use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use crab_lfs::{LfsError, LfsObjectStore};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Publishes and verifies each LFS dependency introduced after `remote_tips`.
 ///
@@ -25,7 +26,9 @@ pub(crate) async fn publish_reachable(
     git_dir: PathBuf,
     tips: Vec<String>,
     remote_tips: Vec<String>,
+    cancel: &CancellationToken,
 ) -> Result<()> {
+    check_cancelled(cancel)?;
     if tips.is_empty() {
         return Ok(());
     }
@@ -33,6 +36,7 @@ pub(crate) async fn publish_reachable(
     let scan_dir = git_dir.clone();
     let scan_tips = tips.clone();
     let scan_remote_tips = remote_tips.clone();
+    let scan_cancel = cancel.clone();
     // A partial clone can advertise remote refs whose tips are absent from
     // this local ODB. Such tips cannot be passed as `^<tip>` boundaries to
     // `git rev-list`; Git rejects the whole scan with "bad object". Only
@@ -43,11 +47,13 @@ pub(crate) async fn publish_reachable(
             &scan_dir,
             &scan_tips,
             &scan_remote_tips,
+            &scan_cancel,
         )?;
         Ok::<_, CrabError>((scan_remote_tips, entries))
     })
     .await
-    .map_err(|error| CrabError::Internal(format!("LFS dependency scan failed: {error}")))??;
+    .map_err(|error| CrabError::Io(std::io::Error::other(error)))??;
+    check_cancelled(cancel)?;
     if scan_remote_tips.len() != remote_tips.len() {
         tracing::debug!(
             remote_tips = remote_tips.len(),
@@ -332,6 +338,7 @@ mod tests {
             git_dir,
             vec![head],
             Vec::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -354,6 +361,7 @@ mod tests {
             repo.path().join(".git"),
             vec![head],
             Vec::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -377,6 +385,7 @@ mod tests {
             repo.path().join(".git"),
             vec![head],
             vec!["f".repeat(40)],
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -478,6 +487,7 @@ mod tests {
             client.join(".git"),
             vec![local_tip],
             vec![remote_tip],
+            &CancellationToken::new(),
         )
         .await
         .unwrap();

@@ -2754,6 +2754,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incomplete_git_objects_cannot_publish_visibility() {
+        let dir = tempfile::tempdir().expect("Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(dir.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .expect("Git fixture command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output")
+                .trim()
+                .to_owned()
+        };
+        git(&["init"]);
+        std::fs::write(dir.path().join("file"), b"small blob").expect("fixture blob");
+        git(&["add", "file"]);
+        git(&["commit", "-m", "fixture"]);
+        let blob = git(&["rev-parse", "HEAD:file"]);
+        let git_dir = dir.path().join(".git");
+        let blob_path = git_dir.join("objects").join(&blob[..2]).join(&blob[2..]);
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), git(&["rev-parse", "HEAD"]));
+        manifest.seal_git_validation();
+        let refs = manifest
+            .refs
+            .iter()
+            .map(|(name, oid)| (name.clone(), oid.clone()))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            build_git_visibility_from_git_dir(&git_dir, &refs, &BTreeMap::new()).await,
+            Ok(MaterializedGitVisibility::Exact(_))
+        ));
+
+        std::fs::remove_file(&blob_path).expect("remove only fixture blob");
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(&blob_path, b"invalid object").expect("corrupt fixture blob");
+            }
+            let store = store();
+            let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            assert!(matches!(
+                publish_git_visibility_index_from_git_dir(&store, &router, &manifest, &git_dir)
+                    .await,
+                Err(AuthServerError::GitVisibilityWalk { .. })
+            ));
+            assert!(matches!(
+                store
+                    .head(&router.git_visibility_path(&manifest.git_validation_digest))
+                    .await,
+                Err(StorageError::NotFound { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn materialized_visibility_must_match_candidate_manifest() {
         let store = store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());

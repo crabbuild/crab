@@ -379,13 +379,15 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
 
 /// Push explicit refspecs without emitting command output.
 ///
-/// Used by recovery flows after they have staged verified replacement
-/// bytes. The normal push pipeline still owns every remote mutation:
+/// Used after recovery staging or mirror batch admission. Expected refs,
+/// when provided, require an atomic full-walk batch with exact destination
+/// coverage. The normal push pipeline still owns every remote mutation:
 /// xorb uploads, shard/index writes, manifest CAS, ref CAS, push-state
 /// update, and audit logging.
-pub(crate) async fn run_push_repair_refspecs(
+pub(crate) async fn run_push_prepared_refspecs(
     remote: Option<&str>,
     refspecs: &[String],
+    expected_refs: Option<BTreeMap<String, Option<String>>>,
     cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
     let start = Instant::now();
@@ -397,6 +399,14 @@ pub(crate) async fn run_push_repair_refspecs(
     let config = crate::core::config::Config::resolve_local()?;
     let staging = open_optional_staging_for_push(&repo_root).await;
     let specs = resolve_push_specs(refspecs, &remote_name, false)?;
+    if let Some(expected) = &expected_refs
+        && (expected.len() != specs.len()
+            || specs.iter().any(|spec| !expected.contains_key(&spec.dst)))
+    {
+        return Err(CrabError::Protocol(
+            "prepared push requires one expected-old value per destination".to_owned(),
+        ));
+    }
     if specs.is_empty() {
         return Ok(PushSummaryPayload {
             refs_pushed: 0,
@@ -415,6 +425,11 @@ pub(crate) async fn run_push_repair_refspecs(
 
     let mut push_state = PushState::load(&repo_root);
     let mut push_config = PushConfig::from_config(&config);
+    let leased_batch = expected_refs.is_some();
+    if let Some(expected_refs) = expected_refs {
+        push_config.atomic = true;
+        push_config.expected_refs = expected_refs;
+    }
     configure_active_active_push_coordinator(
         &config,
         Some(&remote_url),
@@ -441,7 +456,7 @@ pub(crate) async fn run_push_repair_refspecs(
         (store, router)
     } else {
         let selection = StoreResolver::new(&config, &parsed_url, cancel)
-            .write_store("recover.repair_remote")
+            .write_store("push.prepared_refs")
             .await?;
         (selection.store, selection.router)
     };
@@ -453,7 +468,11 @@ pub(crate) async fn run_push_repair_refspecs(
     .await;
 
     let mut native_config = NativePushConfig::new(push_config);
+    // A hook must enumerate its supplied snapshot, not just changes since
+    // the last local push-state entry. Origin-byte proof is a separate guard.
+    native_config.incremental = !leased_batch;
     native_config.progress = false;
+    native_config.emit_summary = false;
     native_config.color = false;
     let result = run_native_push(
         &native_config,
@@ -480,12 +499,12 @@ pub(crate) async fn run_push_repair_refspecs(
         &result,
         Some(start.elapsed().as_millis() as u64),
     ) {
-        warn!(%err, "failed to append recovery push audit event");
+        warn!(%err, "failed to append prepared push audit event");
     }
 
     if !result.all_ok() {
         return Err(CrabError::Internal(
-            "remote recovery push failed for one or more refs".to_owned(),
+            "prepared push failed for one or more refs".to_owned(),
         ));
     }
 

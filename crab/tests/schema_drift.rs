@@ -43,6 +43,7 @@ use crab::cmd::history_recovery::{
 };
 use crab::cmd::hydrate::HydrateSummaryPayload;
 use crab::cmd::ls_files::{LsFileEntry, LsFilesPayload};
+use crab::cmd::mirror::{MirrorApplySummary, MirrorCheckSummary, MirrorReconciliationPlan};
 use crab::cmd::optimize::OptimizePayload;
 use crab::cmd::optimize::xorbs::OptimizeXorbsEventPayload;
 use crab::cmd::prune::PruneSummary;
@@ -138,6 +139,12 @@ fn schemas_up_to_date() {
         ("import.extension_bucket", schema_value::<ExtensionBucket>()),
         ("ls-files", schema_value::<LsFilesPayload>()),
         ("ls-files.entry", schema_value::<LsFileEntry>()),
+        ("mirror.apply", schema_value::<MirrorApplySummary>()),
+        ("mirror.check", schema_value::<MirrorCheckSummary>()),
+        (
+            "mirror.reconciliation_plan",
+            schema_value::<MirrorReconciliationPlan>(),
+        ),
         ("optimize.apply", schema_value::<OptimizePayload>()),
         ("optimize.plan", schema_value::<OptimizePayload>()),
         (
