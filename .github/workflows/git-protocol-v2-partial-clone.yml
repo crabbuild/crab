@@ -31,6 +31,7 @@ on:
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/scripts/verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_protocol_qualification_logs.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
@@ -74,6 +75,7 @@ on:
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/scripts/verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_verify_git_capability_matrix.py"
+      - "crab/scripts/tests/test_protocol_qualification_logs.py"
       - "crab/tests/**"
       - "crates/crab-git/**"
       - "crates/crab-auth-server/**"
@@ -154,6 +156,7 @@ jobs:
         run: |
           python3 crab/scripts/verify_git_capability_matrix.py
           python3 crab/scripts/tests/test_verify_git_capability_matrix.py
+          python3 crab/scripts/tests/test_protocol_qualification_logs.py
 
       - name: Check protocol formatting
         run: |

@@ -2655,6 +2655,42 @@ Clippy pass on macOS; other warning categories are not claimed clean.
 Require the next exact-commit Windows/macOS CI run before declaring the
 cross-platform failure resolved. No broad Phase 2 acceptance gate is closed.
 
+### Qualification evidence-path boundary: 2026-09-03 UTC
+
+**Observed failure.** The `d89a152` current-Git CI job stopped while writing
+command 377's log: a default label containing two absolute checkout paths
+exceeded the filesystem filename limit. No failed product check was recorded
+at that point, but the incomplete run is not a pass. The retained artifact is
+`git-protocol-v2-git-current-33729717072-1`.
+
+**Correction and acceptance.** Bound only log-label UTF-8 bytes to 120; keep
+the monotonically increasing command index for uniqueness and preserve full
+command names/arguments in the report. Text and binary command paths share
+this logger. Performance fixture labels and other qualification runners are
+unchanged; this is not a claim that their separate log owners are bounded.
+Two filesystem tests fail before the correction and pass afterward: long
+ASCII/multibyte labels remain writable, repeated/truncated labels do not
+overwrite logs, and short labels stay readable. The protocol CI job runs
+these tests; ten existing matrix-verifier tests and workflow syntax pass.
+No expected-failure list, check inventory or evidence baseline is weakened.
+Require a fresh terminal current-Git matrix run to close this failure.
+
+**Separate local evidence.** Optimized `87cbfda` passed full and partial Git
+clone LFS qualification on RustFS: 36 commands, 8 checks, two 65 MiB objects,
+promised Git pointer retrieval, Git/LFS fsck, checkout and exact payload
+SHA-256 bytes. Binary SHA-256:
+`dab272482a5965ca676d2906eb7a69c7a0510e4482eace6ab079e459f122ff76`.
+Report: `phase2-lfs-partial-87cbfda-20260903/report.json`; functional-only.
+
+The separate recovered-history `d89a152` replay passed initial import and
+917 incremental pushes, then its diagnostic driver failed before push 918.
+It selected a hidden payload directory excluded by add's existing walker;
+add selected no files and the driver's subsequent SQLite probe failed.
+Retain that failed report and unchanged-source proof. Correct the fixture to
+explicitly track visible paths, assert two staged identities and unchanged
+Git index before any long replay, then rerun in a new namespace. This failure
+neither proves a native push regression nor completes original-history proof.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

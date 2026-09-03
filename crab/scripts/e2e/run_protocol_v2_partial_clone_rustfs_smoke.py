@@ -562,7 +562,10 @@ class ProtocolV2PartialCloneSmoke:
 
     def log_paths(self, name: str) -> tuple[Path, Path]:
         self.command_index += 1
-        base = f"{self.command_index:03d}-{slug(name)}"
+        # Full command labels stay in the report. Bound UTF-8 filename bytes;
+        # the monotonic index distinguishes truncated or repeated labels.
+        label = slug(name).encode("utf-8")[:120].decode("utf-8", errors="ignore")
+        base = f"{self.command_index:03d}-{label}"
         self.logs.mkdir(parents=True, exist_ok=True)
         return self.logs / f"{base}.stdout.log", self.logs / f"{base}.stderr.log"
 
