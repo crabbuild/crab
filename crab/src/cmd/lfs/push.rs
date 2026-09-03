@@ -518,26 +518,43 @@ fn visit_lfs_blobs_in_git_command(
         cancel,
         None::<fn(ChildStdin) -> Result<()>>,
         |stdout| {
+            let mut pointers = Vec::new();
+            let mut remaining = MAX_CAPTURE_BYTES;
             read_discovery(
                 stdout,
                 record_terminator,
                 parse_record,
                 cancel,
                 MAX_CAPTURE_BYTES,
-            )
+                |records| {
+                    pointers.extend(read_lfs_batch(repo_dir, records, cancel, &mut remaining)?);
+                    Ok(())
+                },
+            )?;
+            Ok(pointers)
         },
     )?;
     let operation = args.first().map_or("discovery", String::as_str);
-    let records = successful_git(operation, discovery)?;
-    if records.is_empty() {
-        return Ok(());
+    // Each bounded batch is joined inside the discovery worker. Keep every
+    // candidate private until discovery also exits successfully: a late
+    // framing, checksum or producer failure invalidates the entire scan.
+    for (path, pointer) in successful_git(operation, discovery)? {
+        check_cancelled(cancel)?;
+        visitor(path, pointer)?;
     }
-    // Discovery is fully joined before batch creation. No half-created pair
-    // can leak a producer, and every diagnostic pipe drains concurrently.
+    Ok(())
+}
+
+fn read_lfs_batch(
+    repo_dir: &Path,
+    records: &[(String, String)],
+    cancel: &CancellationToken,
+    remaining: &mut u64,
+) -> Result<Vec<(String, LfsPointer)>> {
     let mut batch = git_command_in(repo_dir);
     batch.args(["cat-file", "--batch"]);
     let write_stdin = |mut stdin: ChildStdin| {
-        for (oid, _) in &records {
+        for (oid, _) in records {
             check_cancelled(cancel)?;
             writeln!(stdin, "{oid}")?;
         }
@@ -545,7 +562,6 @@ fn visit_lfs_blobs_in_git_command(
     };
     let read_stdout = |stdout| {
         let mut pointers = Vec::new();
-        let mut remaining = MAX_CAPTURE_BYTES;
         crab_git::batch::visit_small_blobs(
             stdout,
             records.iter().map(|(oid, _)| oid.as_str()),
@@ -556,7 +572,7 @@ fn visit_lfs_blobs_in_git_command(
                     && pointer.size > 0
                 {
                     let path = &records[index].1;
-                    spend_scan_budget(&mut remaining, pointer_memory(path, &pointer))?;
+                    spend_scan_budget(remaining, pointer_memory(path, &pointer))?;
                     pointers.push((path.clone(), pointer));
                 }
                 Ok(())
@@ -565,13 +581,7 @@ fn visit_lfs_blobs_in_git_command(
         Ok(pointers)
     };
     let output = process::run(batch, cancel, Some(write_stdin), read_stdout)?;
-    // A late checksum/framing/exit failure invalidates the whole inventory.
-    // Never invoke the caller with a prefix from an incomplete batch.
-    for (path, pointer) in successful_git("cat-file", output)? {
-        check_cancelled(cancel)?;
-        visitor(path, pointer)?;
-    }
-    Ok(())
+    successful_git("cat-file", output)
 }
 
 fn read_discovery(
@@ -579,13 +589,15 @@ fn read_discovery(
     terminator: u8,
     parse_record: DiscoveryParser,
     cancel: &CancellationToken,
-    mut remaining: u64,
-) -> Result<Vec<(String, String)>> {
+    batch_bytes: u64,
+    mut visit_batch: impl FnMut(&[(String, String)]) -> Result<()>,
+) -> Result<()> {
     const MAX_RECORD_BYTES: u64 = 1024 * 1024;
     let mut reader = BufReader::new(stdout);
     let mut records = Vec::new();
     let mut record = Vec::new();
     let mut state = None;
+    let mut remaining = batch_bytes;
     loop {
         check_cancelled(cancel)?;
         record.clear();
@@ -602,17 +614,22 @@ fn read_discovery(
             )
             .into());
         }
-        spend_scan_budget(&mut remaining, read)?;
         record.pop();
         if let Some((oid, path)) = parse_record(&record, &mut state)? {
-            spend_scan_budget(
-                &mut remaining,
-                std::mem::size_of::<(String, String)>() + oid.len() + path.len(),
-            )?;
+            let bytes = std::mem::size_of::<(String, String)>() + oid.len() + path.len();
+            if bytes as u64 > remaining && !records.is_empty() {
+                visit_batch(&records)?;
+                records.clear();
+                remaining = batch_bytes;
+            }
+            spend_scan_budget(&mut remaining, bytes)?;
             records.push((oid, path));
         }
     }
-    Ok(records)
+    if !records.is_empty() {
+        visit_batch(&records)?;
+    }
+    Ok(())
 }
 
 fn pointer_memory(path: &str, pointer: &LfsPointer) -> usize {

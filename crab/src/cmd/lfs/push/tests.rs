@@ -432,7 +432,19 @@ fn repository_commands_clear_remote_helper_git_context() {
 fn discovery_rejects_truncation_budget_exhaustion_and_cancellation() {
     let record = format!("{} asset.bin\n", git_oid(3));
     let read = |bytes: &[u8], budget, cancel: &CancellationToken| {
-        read_discovery(bytes, b'\n', parse_rev_list_record, cancel, budget)
+        let mut entries = Vec::new();
+        read_discovery(
+            bytes,
+            b'\n',
+            parse_rev_list_record,
+            cancel,
+            budget,
+            |batch| {
+                entries.extend_from_slice(batch);
+                Ok(())
+            },
+        )?;
+        Ok(entries)
     };
     let cancel = CancellationToken::new();
     assert_eq!(read(record.as_bytes(), 1024, &cancel).unwrap().len(), 1);
@@ -443,6 +455,87 @@ fn discovery_rejects_truncation_budget_exhaustion_and_cancellation() {
     assert!(matches!(
         read(record.as_bytes(), 1024, &cancel),
         Err(CrabError::Cancelled)
+    ));
+}
+
+#[test]
+fn discovery_streams_history_larger_than_its_retained_batch_budget() {
+    let record = format!("{} asset.bin\n", git_oid(3));
+    let bytes = std::mem::size_of::<(String, String)>() + 40 + "asset.bin".len();
+    let input = record.repeat(100);
+    let mut batch_sizes = Vec::new();
+    read_discovery(
+        input.as_bytes(),
+        b'\n',
+        parse_rev_list_record,
+        &CancellationToken::new(),
+        (bytes * 3) as u64,
+        |batch| {
+            batch_sizes.push(batch.len());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(batch_sizes, [vec![3; 33], vec![1]].concat());
+}
+
+#[test]
+fn discovery_stops_before_admitting_more_records_after_batch_failure() {
+    let record = format!("{} asset.bin\n", git_oid(3));
+    let input = record.repeat(10);
+    let mut batches = 0;
+    let result = read_discovery(
+        input.as_bytes(),
+        b'\n',
+        parse_rev_list_record,
+        &CancellationToken::new(),
+        128,
+        |_| {
+            batches += 1;
+            Err(CrabError::Cancelled)
+        },
+    );
+    assert!(matches!(result, Err(CrabError::Cancelled)));
+    assert_eq!(batches, 1);
+}
+
+fn pointer_object_fixture() -> (tempfile::TempDir, String, LfsPointer) {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        git_command_in(dir.path())
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let pointer = LfsPointer {
+        oid: [4; 32],
+        size: 42,
+        extensions: Vec::new(),
+    };
+    std::fs::write(dir.path().join("asset.bin"), pointer.serialize()).unwrap();
+    let output = git_command_in(dir.path())
+        .args(["hash-object", "-w", "asset.bin"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let oid = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    (dir, oid, pointer)
+}
+
+#[test]
+fn pointer_inventory_budget_is_shared_across_discovery_batches() {
+    let (dir, oid, pointer) = pointer_object_fixture();
+    let records = [(oid, "asset.bin".to_owned())];
+    let mut remaining = pointer_memory("asset.bin", &pointer) as u64;
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        read_lfs_batch(dir.path(), &records, &cancel, &mut remaining).unwrap(),
+        [("asset.bin".to_owned(), pointer)]
+    );
+    assert!(matches!(
+        read_lfs_batch(dir.path(), &records, &cancel, &mut remaining),
+        Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
     ));
 }
 
@@ -528,7 +621,7 @@ fn cancelled_range_scan_does_not_open_a_repository() {
 #[cfg(unix)]
 #[test]
 fn discovery_drains_stderr_and_preserves_a_nonzero_exit() {
-    let dir = tempfile::tempdir().unwrap();
+    let (dir, oid, _) = pointer_object_fixture();
     let cancel = CancellationToken::new();
     let timeout = cancel.clone();
     let (done, receiver) = std::sync::mpsc::channel::<()>();
@@ -542,7 +635,9 @@ fn discovery_drains_stderr_and_preserves_a_nonzero_exit() {
     });
     let args = vec![
         "-c".into(),
-        "alias.discovery=!head -c 131072 /dev/zero >&2; exit 7".into(),
+        format!(
+            "alias.discovery=!printf '%s asset.bin\\n' {oid}; head -c 131072 /dev/zero >&2; exit 7"
+        ),
         "discovery".into(),
     ];
     let result = visit_lfs_blobs_in_git_command(

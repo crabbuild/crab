@@ -2263,6 +2263,73 @@ complete. The LFS qualification runner now exercises Crab batch push/fetch
 as well as the Git LFS adapters; a two-object workload above the shared byte
 budget will qualify the scheduler through real storage.
 
+### Bounded large-history discovery checkpoint: 2026-09-03 UTC
+
+**Observed failure.** Draft PR [#148](https://github.com/crabbuild/crab/pull/148)
+is open at `30ce1fb`. The optimized build and post-rebase provider (28), auth
+store (16), LFS (372), mirror (64), fsck-store (32), and bounded pack
+publication (3) tests passed. The fresh RustFS `crabbuild` Kubernetes run
+`phase2-kubernetes-30ce1fb-20260903` then failed its initial import with
+`Git LFS scan exceeds inventory limit`. The seed has 138,136 commits; the
+HEAD reachable-object listing alone is 113,109,576 bytes / 1,647,929 rows.
+The old scan charged both cumulative output and retained records against
+64 MiB. It rejected valid large histories before publication. Failure logs,
+the run-owned source clone and the report remain under
+`Workspace/Github/crab-qualification`; the original Kubernetes checkout was
+used only as read-only input.
+
+**Design correction.** `crab/src/cmd/lfs/push.rs` processes discovery in
+bounded record batches. One supervised `cat-file --batch` runs per batch;
+the discovery process remains owned while its pipe applies backpressure.
+No whole-history spool, unbounded vector, size-filter shortcut or alternate
+scanner is added. Every object response is still streamed and checksum
+verified through `crates/crab-git/src/batch.rs`. The pointer-result budget is
+shared across batches, not reset for each subprocess. The 1 MiB record limit
+and bounded diagnostics remain. The record budget bounds logical retained
+data, not total process RSS; allocator capacity and Git's own memory still
+require measurement.
+
+The outer discovery worker owns and joins each batch worker. It returns
+candidate pointers only after discovery itself has also exited successfully.
+A late process, framing, checksum, cancellation or result-budget failure
+invalidates all candidates, including earlier successful batches. This
+preserves the mirror/cache-owner lifetime boundary and all-or-error callers.
+Canonical publication, mirror LFS discovery and porcelain/pre-push share
+this scanner. Fetch uses its existing separate scanner and remains covered
+by the LFS sibling tests; this change does not claim to close every fetch
+resource or cancellation gap.
+
+**Phased acceptance.**
+
+1. Unit/integration: oversized and truncated records still fail; history can
+   exceed the retained-batch budget; batch failure stops further admission;
+   the result budget spans batches; a nonzero discovery exit cannot emit
+   valid pointers collected before that exit. All 375 selected LFS tests and
+   64 mirror tests pass after the correction.
+2. Exact-binary live replay: rebuild the optimized candidate, retain its
+   hash, and rerun Kubernetes against a fresh `crabbuild` prefix. Initial
+   import must pass the formerly failing discovery gate, then complete real
+   publication, native full/partial/incremental reads and byte verification.
+   Add the requested Crab add / Git commit / Crab push / clone / hydrate
+   sequence on run-owned data. This phase is still open.
+3. CI/release: rerun supported-platform and exact-candidate evidence gates.
+   The first PR run found an invalid job-level `runner.temp` expression;
+   its path now follows adjacent jobs' `github.workspace` convention. Cache
+   dependency-budget admission and the release check's blanket rollback-flag
+   prohibition remain pending explicit policy approval. Do not edit those
+   expectations merely to turn CI green.
+
+**Fresh storage proof, separate from Kubernetes.** The existing LFS harness
+passed 27 commands and three checks against `crabbuild`, fixture credentials
+`crab` / `crab`, with two 65 MiB objects. It exercised Crab LFS push/fetch,
+Git LFS adapters, Git push/clone, ref equality, both fsck implementations,
+and SHA-256 byte identity. Peak child RSS was 179,634,176 bytes. Report:
+`Workspace/Github/crab-qualification/phase2-lfs-30ce1fb-20260903/report.json`.
+Binary SHA-256:
+`e37e5101f541dc489d5856b4dac93818ee7855050c8a9598a74b9b6a8d61c0f6`.
+This precedes the discovery correction and is a development checkpoint,
+not clean-release, full-Kubernetes or production-provider qualification.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

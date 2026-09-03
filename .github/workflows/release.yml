@@ -1077,7 +1077,7 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ runner.temp }}/crab-protocol-v2-release-${{ matrix.label }}
+      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-${{ matrix.label }}
       CRAB_E2E_RUN_ID: release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
