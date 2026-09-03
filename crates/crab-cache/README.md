@@ -35,9 +35,18 @@ SQLite databases and side files, profiles, and unpublished temporaries. Active
 read descriptors and concurrent publishers are skipped using nonblocking locks.
 Reports count actual removals (or eligible files in a dry run) and separately
 count retained, busy, and unsafe entries. It does not create missing roots.
-Unix parent-directory locks coordinate payload publication and deletion; native
-Windows support, SQLite ownership, and reservation protection across all
-maintenance entry points remain open.
+Unix parent-directory locks coordinate payload publication and deletion.
+Object/range prune and verify, clean, targeted eviction, and read-side corrupt
+entry removal now share catalog row retirement. A healthy catalog's immediate
+writer transaction excludes lease/reservation changes through deletion and
+commit; declined or failed filesystem operations roll back the row deletion.
+Dry runs do not open SQLite. Busy catalogs stop removal rather than bypass
+owners. Missing/corrupt disposable indexes do not require repair before safe
+payload cleanup; unavailable accounting emits a warning. Commit failure can
+still leave an overcharged catalog and requires later reconciliation.
+Standalone private range directories remain usable without a private parent;
+only a captured private parent may supply a catalog. Windows support, crash
+recovery, side-file ownership, and complete byte accounting remain open.
 
 Decoded-range stats, prune, and verify now use pinned private directories and
 the same fixed range-layout ownership policy as cleanup. Unknown files,

@@ -30,8 +30,11 @@ impl LocalCache {
             move |root, cancel| {
                 let mut entries = collect_objects(root, cancel)?;
                 entries.sort_unstable_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)));
+                let mut removal =
+                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
                 evict_oldest(
                     root,
+                    &mut removal,
                     &root_path,
                     &entries,
                     target_bytes,
@@ -65,12 +68,29 @@ impl LocalCache {
                 let boundary =
                     entries.partition_point(|entry| entry.kind != PruneObjectKind::Shard);
                 let (large, shards) = entries.split_at(boundary);
+                let mut removal =
+                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, options.dry_run)?;
                 let target = total_bytes(large)?.saturating_sub(large_max);
-                let mut stats = evict_oldest(root, &root_path, large, target, options, cancel)?;
+                let mut stats = evict_oldest(
+                    root,
+                    &mut removal,
+                    &root_path,
+                    large,
+                    target,
+                    options,
+                    cancel,
+                )?;
                 if let Some(max) = shard_max {
                     let target = total_bytes(shards)?.saturating_sub(max);
-                    let shard_stats =
-                        evict_oldest(root, &root_path, shards, target, options, cancel)?;
+                    let shard_stats = evict_oldest(
+                        root,
+                        &mut removal,
+                        &root_path,
+                        shards,
+                        target,
+                        options,
+                        cancel,
+                    )?;
                     stats.shards_evicted = shard_stats.shards_evicted;
                     stats.bytes_freed = stats.bytes_freed.saturating_add(shard_stats.bytes_freed);
                     stats.entries.extend(shard_stats.entries);
@@ -87,19 +107,24 @@ impl LocalCache {
     /// failures return errors; they do not authorize deletion. Manifests and
     /// workflow stages have logical keys and are not content-hash verified here.
     pub async fn verify(&self) -> Result<VerifyReport> {
+        let root_path = self.root.clone();
         with_pinned_root(
             &self.root,
             &CancellationToken::new(),
             move |root, cancel| {
+                let mut removal =
+                    crate::catalog::PayloadRemoval::open(Some(root), &root_path, false)?;
                 let mut report = VerifyReport::default();
                 visit_objects(root, OBJECT_FAMILIES, cancel, &mut |path, _| {
                     let Some(kind) = object_kind(path) else {
                         return Ok(());
                     };
-                    let result = root.remove_file_if(path, false, &mut |file| {
-                        let valid = verify_file(file, path, kind, cancel)?;
-                        check_cancelled(cancel)?;
-                        Ok(!valid)
+                    let result = removal.remove(path, || {
+                        root.remove_file_if(path, false, &mut |file| {
+                            let valid = verify_file(file, path, kind, cancel)?;
+                            check_cancelled(cancel)?;
+                            Ok(!valid)
+                        })
                     });
                     let removed = match result {
                         Ok(removed) => removed.is_some(),
@@ -260,6 +285,7 @@ fn unavailable(error: &std::io::Error) -> bool {
 
 fn evict_oldest(
     root: &PinnedRoot,
+    removal: &mut crate::catalog::PayloadRemoval,
     root_path: &Path,
     entries: &[ObjectEntry],
     target: u64,
@@ -272,9 +298,11 @@ fn evict_oldest(
         if stats.bytes_freed >= target {
             break;
         }
-        let removed = root.remove_file_if(&entry.path, options.dry_run, &mut |_| {
-            check_cancelled(cancel)?;
-            Ok(true)
+        let removed = removal.remove(&entry.path, || {
+            root.remove_file_if(&entry.path, options.dry_run, &mut |_| {
+                check_cancelled(cancel)?;
+                Ok(true)
+            })
         });
         let bytes = match removed {
             Ok(Some(bytes)) => bytes,

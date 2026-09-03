@@ -5,21 +5,17 @@ use crate::clean::{EntryKind, entry_kind};
 use crate::{CacheCleanReport, CacheError, Result};
 
 pub(in crate::private_fs) fn clean(
-    root: &Path,
+    directory: &Directory,
     dry_run: bool,
     cancel: &CancellationToken,
+    remove: &mut crate::private_fs::RemovePayload<'_>,
 ) -> Result<CacheCleanReport> {
     let mut report = CacheCleanReport {
         dry_run,
         ..Default::default()
     };
     check_cancelled(cancel)?;
-    let directory = match Directory::root(root, false) {
-        Ok(directory) => directory,
-        Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(report),
-        Err(error) => return Err(error),
-    };
-    clean_directory(&directory, Path::new(""), &mut report, cancel)?;
+    clean_directory(directory, Path::new(""), &mut report, cancel, remove)?;
     Ok(report)
 }
 
@@ -36,6 +32,7 @@ fn clean_directory(
     relative: &Path,
     report: &mut CacheCleanReport,
     cancel: &CancellationToken,
+    remove: &mut crate::private_fs::RemovePayload<'_>,
 ) -> Result<()> {
     // Fixed layout depth bounds both descriptors and memory. Unknown subtrees
     // are never traversed, so a mirror/workspace cannot become a cleanup target.
@@ -50,17 +47,21 @@ fn clean_directory(
             }
             EntryKind::Directory => directory
                 .child(&name, false)
-                .and_then(|child| clean_directory(&child, &relative, report, cancel)),
+                .and_then(|child| clean_directory(&child, &relative, report, cancel, remove)),
             EntryKind::Payload => {
                 let name = component_name(&name)?;
                 // Cancellation is checked again immediately before mutation.
                 check_cancelled(cancel)?;
-                directory
-                    .remove_payload(&name, report.dry_run)
-                    .map(|bytes| {
+                remove(&relative, &mut || {
+                    check_cancelled(cancel)?;
+                    directory.remove_payload(&name, report.dry_run).map(Some)
+                })
+                .map(|removed| {
+                    if let Some(bytes) = removed {
                         report.files_removed += 1;
                         report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
-                    })
+                    }
+                })
             }
         };
         match result {
@@ -103,6 +104,7 @@ mod tests {
             Path::new(""),
             &mut report,
             &CancellationToken::new(),
+            &mut |_, operation| operation(),
         )
         .unwrap();
         assert_eq!(report.files_removed, 1);

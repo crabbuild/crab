@@ -4,7 +4,6 @@ use std::path::{Component, Path};
 
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
 use crate::CacheError;
 use crate::Result;
 
@@ -30,7 +29,20 @@ pub async fn clean_cache(
 ) -> Result<CacheCleanReport> {
     let root = root.to_owned();
     crate::private_fs::run_blocking(cancel, move |cancel| {
-        crate::private_fs::clean(&root, dry_run, cancel)
+        let pinned = match crate::private_fs::PinnedRoot::open(&root) {
+            Ok(pinned) => pinned,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(CacheCleanReport {
+                    dry_run,
+                    ..Default::default()
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let mut removal = crate::catalog::PayloadRemoval::open(Some(&pinned), &root, dry_run)?;
+        pinned.clean(dry_run, cancel, &mut |relative, operation| {
+            removal.remove(relative, operation)
+        })
     })
     .await
 }

@@ -55,7 +55,7 @@ impl CrabRangeCache {
             %error,
             "local cache read failed"
         );
-        let _ = crate::private_fs::remove_file(self.catalog.root(), path).await;
+        let _ = crate::catalog::remove_file(self.catalog.root(), path).await;
     }
 
     async fn read_entry(
@@ -475,8 +475,27 @@ pub async fn prune_xet_chunk_cache_with_cancel(
     cancel: &CancellationToken,
 ) -> Result<XetChunkCachePruneStats> {
     let report_directory = directory.to_owned();
-    with_pinned_root(directory, cancel, move |root, cancel| {
-        let mut entries = collect_xet_chunk_cache_entries(root, cancel)?;
+    let parent = directory.parent().ok_or_else(|| CacheError::UnsafeRoot {
+        path: directory.display().to_string(),
+        reason: "range directory has no cache parent".into(),
+    })?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| CacheError::UnsafeRoot {
+            path: directory.display().to_string(),
+            reason: "range directory has no name".into(),
+        })?
+        .to_owned();
+    let display_root = parent.to_owned();
+    crate::private_fs::run_blocking(cancel, move |cancel| {
+        let (root, catalog_root) = match PinnedRoot::open_with_private_parent(&report_directory) {
+            Ok(roots) => roots,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(XetChunkCachePruneStats::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut entries = collect_xet_chunk_cache_entries(&root, cancel)?;
         let total = entries
             .iter()
             .fold(0u64, |total, entry| total.saturating_add(entry.bytes));
@@ -486,14 +505,19 @@ pub async fn prune_xet_chunk_cache_with_cancel(
         entries.sort_by_key(|entry| entry.modified);
         let target = total - max_bytes;
         let mut stats = XetChunkCachePruneStats::default();
+        let mut removal =
+            crate::catalog::PayloadRemoval::open(catalog_root.as_ref(), &display_root, dry_run)?;
         for entry in entries {
             check_cancelled(cancel)?;
             if stats.bytes_freed >= target {
                 break;
             }
-            let removed = root.remove_file_if(&entry.path, dry_run, &mut |_| {
-                check_cancelled(cancel)?;
-                Ok(true)
+            let relative = Path::new(&name).join(&entry.path);
+            let removed = removal.remove(&relative, || {
+                root.remove_file_if(&entry.path, dry_run, &mut |_| {
+                    check_cancelled(cancel)?;
+                    Ok(true)
+                })
             });
             let bytes = match removed {
                 Ok(Some(bytes)) => bytes,
@@ -533,13 +557,38 @@ pub async fn verify_xet_chunk_cache_with_cancel(
     directory: &Path,
     cancel: &CancellationToken,
 ) -> Result<XetChunkCacheVerifyStats> {
-    with_pinned_root(directory, cancel, |root, cancel| {
+    let parent = directory.parent().ok_or_else(|| CacheError::UnsafeRoot {
+        path: directory.display().to_string(),
+        reason: "range directory has no cache parent".into(),
+    })?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| CacheError::UnsafeRoot {
+            path: directory.display().to_string(),
+            reason: "range directory has no name".into(),
+        })?
+        .to_owned();
+    let display_root = parent.to_owned();
+    let directory = directory.to_owned();
+    crate::private_fs::run_blocking(cancel, move |cancel| {
+        let (root, catalog_root) = match PinnedRoot::open_with_private_parent(&directory) {
+            Ok(roots) => roots,
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(XetChunkCacheVerifyStats::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut removal =
+            crate::catalog::PayloadRemoval::open(catalog_root.as_ref(), &display_root, false)?;
         let mut stats = XetChunkCacheVerifyStats::default();
-        visit_xet_chunk_cache_entries(root, cancel, |entry| {
-            let result = root.remove_file_if(&entry.path, false, &mut |file| {
-                let valid = verify_xet_chunk_cache_entry(file, &entry.path, cancel)?;
-                check_cancelled(cancel)?;
-                Ok(!valid)
+        visit_xet_chunk_cache_entries(&root, cancel, |entry| {
+            let relative = Path::new(&name).join(&entry.path);
+            let result = removal.remove(&relative, || {
+                root.remove_file_if(&entry.path, false, &mut |file| {
+                    let valid = verify_xet_chunk_cache_entry(file, &entry.path, cancel)?;
+                    check_cancelled(cancel)?;
+                    Ok(!valid)
+                })
             });
             let corrupt = match result {
                 Ok(removed) => removed.is_some(),

@@ -1563,7 +1563,8 @@ full-root reconciliation after each deleted range: that increases work and can
 fail on unrelated retained state. Preserve the tagged `v1.1.0` cleanup contract
 that payload cleanup does not require a usable disposable index; any optional
 accounting path needs explicit error reporting and must not hide stale totals.
-This design still needs implementation and lifecycle review, not only wiring.
+The implementation checkpoint below still needs installed and lifecycle review,
+not only wiring.
 
 **Acceptance.** Repeat the retained installed probe against the new binary with
 the same reconciliation assertion. Add sibling regressions for object/range
@@ -1577,6 +1578,30 @@ honest accounting diagnostics. Repeat the larger RustFS byte/dedup/denied-warm
 workflow after the canonical deletion change. Physical database/temp allocation,
 global low-watermark policy, and all-family lifecycle acceptance remain separate
 requirements, not waived by passing this slice.
+
+**Implementation checkpoint, 2026-09-03.** A shared `catalog/removal.rs` owner
+now wraps successful payload removal and row retirement. Automatic catalog
+eviction reuses its final owner-check/row-deletion transaction. Explicit object
+and range prune/verify, clean, targeted eviction, and read-side corrupt-entry
+removal use the same transaction contract. Cleanup traversal retains filesystem
+mechanics and calls upward-owned removal policy through a callback. No full
+reconciliation scan, schema/config change, dependency, or payload-copy buffer is
+added. The new module increases non-test code because it owns transaction/error
+handling and couples multiple existing deletion paths; the prior raw async
+deletion entry point and duplicate automatic owner-check SQL are removed.
+
+The first broad run rejected standalone range directories under ambient
+non-private parents. The source now captures the range leaf and optional private
+parent together; it never opens an ambient parent catalog. All seven previously
+failing tests pass unchanged. New tests cover sibling row retirement, failed/
+declined operation rollback, writer exclusion until commit, missing/corrupt/busy
+catalogs, and root/database replacement. All 265 cache tests and strict cache
+Clippy pass; the seven local-only and eight range-only removal tests also pass.
+Installed requalification of this implementation is pending. Filesystem unlink
+and SQLite commit are not jointly crash-atomic: a failed commit warns and may
+retain an overcharge, while a later generation/transaction error stops removal.
+Crash recovery, bounded verification lock tenure, stale read-decision races,
+old stale-row reconciliation, and full physical-budget acceptance remain open.
 
 **STOP if** cataloging requires a repository-sized in-memory map, an active
 lease can be evicted, or any budgeted subtree is not provably disposable.

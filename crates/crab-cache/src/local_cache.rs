@@ -435,7 +435,7 @@ impl LocalCache {
                                     error = %error,
                                     "local cache read failed"
                                 );
-                                let _ = crate::private_fs::remove_file(&self.root, &path).await;
+                                let _ = crate::catalog::remove_file(&self.root, &path).await;
                                 return None;
                             }
                         }
@@ -469,8 +469,8 @@ impl LocalCache {
                                     error = %error,
                                     "local cache read failed"
                                 );
-                                let _ = crate::private_fs::remove_file(&self.root, &path).await;
-                                let _ = crate::private_fs::remove_file(
+                                let _ = crate::catalog::remove_file(&self.root, &path).await;
+                                let _ = crate::catalog::remove_file(
                                     &self.root,
                                     &self.manifest_etag_path(name),
                                 )
@@ -797,7 +797,7 @@ impl LocalCache {
             }
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
-        crate::private_fs::remove_file(&self.root, &path).await?;
+        crate::catalog::remove_file(&self.root, &path).await?;
         Ok(())
     }
 
@@ -843,7 +843,7 @@ impl LocalCache {
                     error = %e,
                     "cached xorb range identity check failed — evicting"
                 );
-                let _ = crate::private_fs::remove_file(&self.root, &path).await;
+                let _ = crate::catalog::remove_file(&self.root, &path).await;
                 return None;
             }
         };
@@ -970,7 +970,7 @@ impl LocalCache {
                     error = %error,
                     "local cache read failed"
                 );
-                let _ = crate::private_fs::remove_file(&self.root, path).await;
+                let _ = crate::catalog::remove_file(&self.root, path).await;
                 return None;
             }
         };
@@ -984,7 +984,7 @@ impl LocalCache {
             expected = %expected.hex(),
             "cache hash mismatch — evicting"
         );
-        let _ = crate::private_fs::remove_file(&self.root, path).await;
+        let _ = crate::catalog::remove_file(&self.root, path).await;
         None
     }
 
@@ -1009,7 +1009,7 @@ impl LocalCache {
                     error = %error,
                     "local cache read failed"
                 );
-                let _ = crate::private_fs::remove_file(&self.root, path).await;
+                let _ = crate::catalog::remove_file(&self.root, path).await;
                 return None;
             }
         };
@@ -1024,7 +1024,7 @@ impl LocalCache {
             expected = %expected.hex(),
             "cached xorb identity mismatch — evicting"
         );
-        let _ = crate::private_fs::remove_file(&self.root, path).await;
+        let _ = crate::catalog::remove_file(&self.root, path).await;
         None
     }
 
@@ -1048,7 +1048,7 @@ impl LocalCache {
             expected = %expected.hex(),
             "cached xorb payload check failed — evicting"
         );
-        let _ = crate::private_fs::remove_file(&self.root, path).await;
+        let _ = crate::catalog::remove_file(&self.root, path).await;
         false
     }
 

@@ -15,6 +15,9 @@ use crate::private_fs::open_database;
 use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
 
+mod removal;
+pub(crate) use removal::{PayloadRemoval, remove_file};
+
 const CATALOG_FILE: &str = ".catalog.sqlite";
 const MAINTENANCE_LOCK: &str = ".maintenance.lock";
 const LOW_WATERMARK_PERCENT: u64 = 90;
@@ -655,22 +658,14 @@ impl CacheCatalog {
         }
         let path = self.root.join(relative);
         let catalog_path = self.root.join(CATALOG_FILE);
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|source| index_error(&catalog_path, source))?;
-        // Hold the writer transaction through unlink and row removal so a
-        // lease/reservation cannot be inserted after this final owner check.
-        let protected = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM leases WHERE relative_path = ?1)
-                 OR EXISTS(SELECT 1 FROM reservations WHERE relative_path = ?1)",
-                [relative],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(|source| index_error(&catalog_path, source))?;
-        if protected {
-            return Ok(Eviction::Retained);
-        }
+        let transaction =
+            match removal::removal_transaction(connection, &catalog_path, Path::new(relative)) {
+                Ok(transaction) => transaction,
+                Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(Eviction::Retained);
+                }
+                Err(error) => return Err(error),
+            };
         let outcome = match root.remove_file(Path::new(relative)) {
             Ok(bytes) => Eviction::Removed(bytes),
             Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -688,12 +683,6 @@ impl CacheCatalog {
                 return Ok(Eviction::Retained);
             }
         };
-        transaction
-            .execute(
-                "DELETE FROM cache_entries WHERE relative_path = ?1",
-                [relative],
-            )
-            .map_err(|source| index_error(&catalog_path, source))?;
         transaction
             .commit()
             .map_err(|source| index_error(&catalog_path, source))?;

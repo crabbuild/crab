@@ -22,6 +22,9 @@ pub(crate) struct EntryStat {
 
 pub(crate) struct PinnedRoot(platform::Directory);
 
+pub(crate) type RemovePayload<'a> =
+    dyn FnMut(&Path, &mut dyn FnMut() -> Result<Option<u64>>) -> Result<Option<u64>> + 'a;
+
 pub(crate) use platform::Database;
 
 pub(crate) struct DatabaseLease {
@@ -78,6 +81,21 @@ pub(crate) fn open_database(
 }
 
 impl PinnedRoot {
+    pub(crate) fn clean(
+        &self,
+        dry_run: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+        remove: &mut RemovePayload<'_>,
+    ) -> Result<crate::CacheCleanReport> {
+        platform::clean(&self.0, dry_run, cancel, remove)
+    }
+
+    #[cfg(feature = "xet-chunk-cache")]
+    pub(crate) fn open_with_private_parent(path: &Path) -> Result<(Self, Option<Self>)> {
+        platform::Directory::root_with_private_parent(path)
+            .map(|(root, parent)| (Self(root), parent.map(Self)))
+    }
+
     pub(crate) fn open(root: &Path) -> Result<Self> {
         platform::Directory::root(root, false).map(Self)
     }
@@ -188,14 +206,6 @@ pub(crate) fn check_cancelled(cancel: &tokio_util::sync::CancellationToken) -> R
     } else {
         Ok(())
     }
-}
-
-pub(crate) fn clean(
-    root: &Path,
-    dry_run: bool,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<crate::CacheCleanReport> {
-    platform::clean(root, dry_run, cancel)
 }
 
 pub(crate) fn ensure_directory(path: &Path) -> Result<()> {
@@ -331,19 +341,6 @@ impl PendingFile {
     }
 }
 
-/// Remove one cache entry without following a replaced parent or leaf symlink.
-pub(crate) async fn remove_file(root: &Path, path: &Path) -> Result<()> {
-    let root = root.to_owned();
-    let path = path.to_owned();
-    let result = tokio::task::spawn_blocking(move || platform::remove_file(&root, &path))
-        .await
-        .map_err(|error| CacheError::Io(std::io::Error::other(error)))?;
-    match result {
-        Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result.map(|_| ()),
-    }
-}
-
 /// Update recency through a private file handle; failure only loses an LRU hint.
 pub(crate) async fn touch(root: &Path, path: &Path) {
     let root = root.to_owned();
@@ -424,6 +421,24 @@ mod platform {
             parent.child(name, create)
         }
 
+        #[cfg(feature = "xet-chunk-cache")]
+        pub(super) fn root_with_private_parent(path: &Path) -> Result<(Self, Option<Self>)> {
+            let absolute = std::path::absolute(path)?;
+            let name = absolute
+                .file_name()
+                .ok_or_else(|| unsafe_path(path, "cache root has no name"))?;
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| unsafe_path(path, "cache root has no parent"))?;
+            let parent = Self::ambient_parent(parent, false)?;
+            let root = parent.child(name, false)?;
+            // Standalone range maintenance owns only the private leaf. A
+            // private captured parent may own its catalog; never reopen the
+            // ambient pathname to find that sibling database after a rename.
+            let private = validate_metadata(&parent.file.metadata()?, &parent.path, true).is_ok();
+            Ok((root, private.then_some(parent)))
+        }
+
         fn ambient_parent(path: &Path, create: bool) -> Result<Self> {
             // Ambient ancestors can include OS aliases such as macOS /var.
             // Only the configured root and its descendants are cache-owned;
@@ -449,7 +464,7 @@ mod platform {
             }
         }
 
-        fn child(&self, name: &OsStr, create: bool) -> Result<Self> {
+        pub(super) fn child(&self, name: &OsStr, create: bool) -> Result<Self> {
             let path = self.path.join(name);
             let name = component_name(name)?;
             if create {
@@ -752,6 +767,7 @@ mod platform {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn remove_file(root: &Path, path: &Path) -> Result<u64> {
         let (directory, name) = Directory::parent(root, path, false)?;
         directory.remove_payload(&name, false)
@@ -1124,6 +1140,10 @@ mod platform {
         pub(super) fn root(path: &Path, _create: bool) -> Result<Self> {
             Err(unsupported(path))
         }
+        #[cfg(feature = "xet-chunk-cache")]
+        pub(super) fn root_with_private_parent(path: &Path) -> Result<(Self, Option<Self>)> {
+            Err(unsupported(path))
+        }
         pub(super) fn visit_files(
             &self,
             _visitor: &mut dyn FnMut(&Path, super::FileStat) -> Result<()>,
@@ -1160,11 +1180,12 @@ mod platform {
     }
 
     pub(super) fn clean(
-        root: &Path,
+        _root: &Directory,
         _dry_run: bool,
         _cancel: &tokio_util::sync::CancellationToken,
+        _remove: &mut super::RemovePayload<'_>,
     ) -> Result<crate::CacheCleanReport> {
-        Err(unsupported(root))
+        Err(unsupported(Path::new("cache")))
     }
 
     pub(super) fn open_read(_root: &Path, path: &Path) -> Result<File> {
@@ -1184,6 +1205,7 @@ mod platform {
         Err(unsupported(path))
     }
 
+    #[cfg(test)]
     pub(super) fn remove_file(_root: &Path, path: &Path) -> Result<u64> {
         Err(unsupported(path))
     }
