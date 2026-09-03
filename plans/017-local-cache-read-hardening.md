@@ -3738,7 +3738,41 @@ independent-family health regression also pass separately with local-only and
 range-only features. Strict all-target cache Clippy, workspace formatting, and
 whitespace checks pass. The marker tests prove absent/zero/maximum-u64 values
 remain distinguishable and invalid values retain a typed `ParseIntError`.
-The earlier installed RustFS run is not evidence for this diagnostic change.
+
+**Installed proof.** `make install` rebuilt the CLI at
+`863911c217e579e4edbe245bab3686ea6de39417` using the Makefile's normal release
+feature sets; CLI SHA-256
+`1878e02dff6446243c6edaa5ece5cf8bd6474fa054b8062f2ea2ec7ef25fc360`.
+The existing RustFS instance matched the requested local credentials and image
+identity recorded above. Fresh run `generation-863911c.Y3FZQO` uses remote
+`crab://crabbuild/cache-qualification/cache-f410.E7nt8I/generation-863911c.Y3FZQO`.
+Its `report.json` passes 63 checks / 53 commands with 1,481 recorded gateway
+requests. Add/commit/push, exact-duplicate zero-new-xorb reuse, one-MiB delta
+below four MiB, lazy clone, cold/warm hydrate, fetch-to-hydrate reuse, range
+corruption, unavailable/unsafe cache bypass, clean/prune, fsck, and independent
+file hashes pass. Cold hydrate uses nine xorb GETs and cold fetch uses eleven;
+both warmed denial stages use zero xorb GETs. Cold origin denial returns
+nonzero and preserves pointers; restoring origin reconstructs the expected
+bytes. Prior and new remote objects remain retained.
+
+The installed diagnostic extension
+`catalog-diagnostics-bfa3vnsu/report.json` passes 33 checks / 12 commands.
+It inserts negative reservations masked by a positive sum and an invalid
+maintenance marker into this run's catalog. Both stats spellings, in human and
+JSON modes, report the additional catalog issue; doctor reports it too.
+Independent shard counts remain visible. Every inspection preserves the whole
+cache tree's names, device/inode identities, modes, lengths, mtimes, and bytes.
+The fixture then restores its original SQL values and observes the original
+catalog totals and warning. No runtime repair is inferred from fixture cleanup.
+
+The first diagnostic attempt remains in `catalog-diagnostics/report.json`:
+its healthy-baseline exit-code expectation failed before any injection because
+the workload intentionally retained a non-private sentinel. The corrected
+harness explicitly expects that independent warning; it does not chmod/delete
+the sentinel or weaken the product's check. Harness hashes are retained in the
+reports. The Make installer also refreshed the standard local binary layout.
+Unrelated cache-server evidence edits were present but remain uncommitted and
+unstaged; this qualifies the committed CLI source, not the cache-server binary.
 
 **Remaining work.** This is diagnostic validation, not full catalog integrity or
 admission acceptance. Runtime admission still uses its existing aggregate path;
