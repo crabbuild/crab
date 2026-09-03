@@ -30,6 +30,19 @@ common Git directory, so linked worktrees share the same cache. Crab also
 accepts the legacy `lfs.lfsdir` and `GIT_LFS_DIR` aliases; use `lfs.storage`
 when sharing a cache with an unmodified Git LFS client.
 
+Remote setup for push, object-ID push, pre-push, fetch and pull uses the
+command's cancellation token. Named-remote Git lookups stop and join their
+owned subprocess on cancellation; cancellation is not reported as a missing
+remote or reinterpreted as a revision. Captured lookup stdout and stderr are
+bounded independently at 64 MiB. Pending client setup also stops before
+transfer discovery when cancelled. Conversion and remote-verified pruning
+pass their existing cancellation token through the same setup owner.
+
+This is not whole-command cancellation coverage: idle stdin, identity and
+other Git queries, transfer-agent sessions, and some transfer/verification
+awaits still require separate lifecycle work. Commands without a caller token
+continue to use the existing public setup entry points.
+
 ## Subcommands Overview
 
 | Command | Description |
@@ -270,6 +283,12 @@ actions describe Crab's object-store path instead of a Git LFS HTTP endpoint.
 `lfs.fetchrecentrefsdays` / `lfs.fetchrecentremoterefs` and commits selected by
 `lfs.fetchrecentcommitsdays`.
 
+With `--stdin`, refs come only from the input stream; command-line refs cannot
+be mixed with it. Empty input selects no refs unless `--all` or `--recent`
+explicitly requests broader selection. An empty successful `--json` fetch
+returns an empty transfer list. Explicit `--prune` still runs after an empty
+fetch. Input framing and limits are shared with [push](#crab-lfs-push).
+
 Git subprocesses used for recent-ref selection honor command cancellation and
 cap captured stdout and stderr independently at 64 MiB. Oversized output is
 an error, not a truncated selection. This bound does not cover total command
@@ -311,16 +330,49 @@ crab lfs push [OPTIONS] [REMOTE] [REF...]
 
 | Option | Description |
 |--------|-------------|
-| `REMOTE` | Git remote name whose URL points at a Crab remote; omitted uses Crab's configured default |
-| `REF...` | Upload LFS objects referenced by these refs |
-| `--all`, `-a` | Upload all locally-known LFS objects |
+| `REMOTE` | Git remote name or Crab remote URL; omitted uses Crab's configured default |
+| `REF...` | Select reachable history; omitted defaults to `HEAD` without `--all` or `--stdin` |
+| `--all`, `-a` | Scan complete selected history; omitted refs select local branches and tags |
 | `--object-id`, `-o` | Upload specific LFS object IDs |
 | `--stdin` | Read refs or object IDs from stdin |
 | `--dry-run`, `-d` | Report what would be pushed without uploading |
 
-With `--object-id`, Crab reads the object size from the standard local LFS
-cache before uploading and reports a missing cached object without contacting
-the remote.
+Ordinary push includes historical versions replaced or deleted before the
+selected tip, excluding objects reachable from the selected named remote's
+local tracking refs. Other remotes do not narrow the upload. A direct URL or
+Crab's configured default has no named tracking set, so no tracking-history
+exclusion is applied. Omitted refs defaulting to `HEAD` is a Crab extension;
+[Git LFS 3.8](https://github.com/git-lfs/git-lfs/blob/v3.8.0/commands/command_push.go)
+requires explicit refs for ordinary non-stdin push.
+
+Use `--all` to scan complete selected history without remote-tracking
+exclusions, including when restoring missing remote payloads. Its omitted-ref
+scope excludes remote-only refs and detached history; select those explicitly.
+This differs from `crab lfs fetch --all`, whose omitted-ref scope is all refs.
+Both upload modes inspect local Git objects only: missing promised blobs,
+corrupt objects or conflicting pointer sizes fail instead of returning a
+partial inventory or implicitly fetching source history.
+
+With `--object-id`, every operand must be a 64-character hexadecimal SHA-256
+object ID. Invalid trailing IDs are errors, not silently skipped. For actual
+uploads, Crab reads sizes from the standard local LFS cache and rejects missing
+files before transferring payloads. Object-ID `--dry-run` validates syntax but
+does not yet check local payload availability.
+
+`--stdin` accepts one ref or object ID per line, including CRLF and a final
+line without a newline. Empty lines are ignored; other whitespace is preserved.
+Invalid UTF-8 and control bytes are errors. Command-line refs/IDs cannot be
+mixed with stdin; incompatible flags are rejected before waiting for input.
+Empty input is a successful no-op, except `--all` still selects local branches
+and tags. It never implicitly changes object-ID mode into a `HEAD` upload.
+
+Push and fetch share fixed admission limits: 1 MiB per encoded line, 64 MiB
+total encoded input, and a separate 64 MiB logical operand-inventory budget
+(string descriptors plus operand bytes). Line terminators count toward encoded
+limits. Exceeding a limit rejects the whole request; no partial operand list
+is transferred. These are admission bounds, not a total process RSS guarantee.
+Cancellation is checked between reads; a producer holding an incomplete line
+open can still block the reader. Interruptible idle input remains unqualified.
 
 ---
 

@@ -4185,6 +4185,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reachable_repo_objects_retain_mirror_plan_intent_and_receipt() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use object_store::memory::InMemory;
+
+        use crate::metadata::manifest::{
+            Manifest, RefJournalEdit, RefJournalTransaction,
+            commit_ref_journal_transaction_for_plan, create_manifest, read_ref_journal_head,
+        };
+        use crate::storage::StoreLayout;
+        use crate::storage::store::Store;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let ref_name = "refs/heads/main";
+        let head = read_ref_journal_head(&store, &router, ref_name)
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let plan_id = "b".repeat(64);
+        commit_ref_journal_transaction_for_plan(&store, &router, &transaction, &[head], &plan_id)
+            .await
+            .unwrap();
+
+        let (_, reachable) = reachable_repo_objects_from_manifest(&store, &router)
+            .await
+            .unwrap();
+
+        assert!(
+            [
+                router.ref_journal_plan_intent_path(&plan_id, 1),
+                router.ref_journal_plan_receipt_path(&plan_id),
+            ]
+            .iter()
+            .all(|path| reachable.contains(path.as_ref()))
+        );
+    }
+
+    #[tokio::test]
     async fn reachable_repo_objects_include_history_only_pack_objects() {
         use crate::metadata::manifest::{
             BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,

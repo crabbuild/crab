@@ -212,3 +212,72 @@ async fn duplicate_recipe_selection_is_stable_across_sessions() {
     }
     assert_eq!(selected, vec![Some(first_hash.min(second_hash)); 12]);
 }
+
+#[tokio::test]
+async fn accelerated_snapshot_lookup_preserves_capture_and_scoped_read_only_access() {
+    for scoped in [false, true] {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let file_hash = hash_from_seed(70);
+        let (body, shard_hash) = shard_with_file(file_hash);
+        seed_file_index(
+            Arc::clone(&inner),
+            "captured/accelerated",
+            &[(file_hash, shard_hash)],
+        )
+        .await;
+        let storage = crab_storage::Store::new(Arc::clone(&inner));
+        let router =
+            crab_storage::StoreLayout::new(storage.clone(), "captured/accelerated".to_owned());
+        storage
+            .put(&router.shard_path(&shard_hash), Bytes::from(body))
+            .await
+            .unwrap();
+        let snapshot = crate::manifest_store::read_repository_snapshot(&storage, &router)
+            .await
+            .unwrap();
+        let mut next = snapshot.manifest.clone();
+        next.generation += 1;
+        next.shard_index_hash.clear();
+        next.seal_git_validation();
+        crate::manifest_store::write_manifest_cas(
+            &storage,
+            &router,
+            &next,
+            &snapshot.manifest_etag,
+        )
+        .await
+        .unwrap();
+        let readonly = Arc::new(ReadOnlyStore {
+            inner,
+            writes: AtomicUsize::new(0),
+        });
+        let lookup_storage = if scoped {
+            crab_storage::Store::new(readonly.clone()).with_storage_scope(
+                crab_storage::StorageScope {
+                    repo_prefix: "captured/accelerated".to_owned(),
+                    global_prefix: ".crab".to_owned(),
+                    source_repo: "logical/repo".to_owned(),
+                    scope_hash: "read-scope".to_owned(),
+                },
+            )
+        } else {
+            storage
+        };
+        let lookup_router =
+            crab_storage::StoreLayout::new(lookup_storage, "captured/accelerated".to_owned());
+        let session = FileIndexLookupSession::open_from_snapshot(lookup_router, &snapshot)
+            .await
+            .unwrap();
+        let accelerated = session.reader.is_some();
+        let result = session.lookup_batch(&[file_hash, hash_from_seed(99)]).await;
+        session.close().await.unwrap();
+        assert_eq!(
+            (
+                result.unwrap(),
+                accelerated,
+                readonly.writes.load(Ordering::Relaxed)
+            ),
+            (vec![Some(shard_hash), None], !scoped, 0),
+        );
+    }
+}

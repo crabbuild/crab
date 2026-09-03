@@ -18,9 +18,10 @@ pub(crate) enum GitObjectAccess {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum HistoryOperation {
+pub(crate) enum HistoryOperation<'a> {
     Fetch,
-    Push,
+    PushAll,
+    Push { remote: Option<&'a str> },
 }
 
 pub(crate) fn collect_pointers_for_fetch_in(
@@ -83,13 +84,19 @@ pub(crate) fn is_git_object_id(value: &str) -> bool {
 pub(crate) fn collect_pointers_from_history_in(
     repo_dir: &Path,
     refs: &[String],
-    operation: HistoryOperation,
+    operation: HistoryOperation<'_>,
     cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
     check_cancelled(cancel)?;
     let access = match operation {
         HistoryOperation::Fetch => GitObjectAccess::PromisorAllowed,
-        HistoryOperation::Push => GitObjectAccess::LocalOnly,
+        HistoryOperation::PushAll | HistoryOperation::Push { .. } => GitObjectAccess::LocalOnly,
+    };
+    let head = ["HEAD".to_owned()];
+    let refs = if refs.is_empty() && matches!(operation, HistoryOperation::Push { .. }) {
+        &head
+    } else {
+        refs
     };
     let mut roots = Vec::new();
     let mut remaining = MAX_CAPTURE_BYTES;
@@ -121,17 +128,24 @@ pub(crate) fn collect_pointers_from_history_in(
         roots.push(oid.to_owned());
     }
     let mut command = git_command_in(repo_dir, access);
-    command.args(["rev-list", "--objects", "--stdin"]);
-    if refs.is_empty() {
-        // Bulk upload covers local branches/tags, unlike fetch's all-ref
-        // backup scope. Remote-only and detached history requires explicit
-        // upload selection; inspecting it must never hydrate a source.
-        match operation {
-            HistoryOperation::Fetch => command.arg("--all"),
-            HistoryOperation::Push => command.args(["--branches", "--tags"]),
-        };
+    command.args(["rev-list", "--objects"]);
+    match operation {
+        HistoryOperation::Fetch if refs.is_empty() => {
+            command.arg("--all");
+        }
+        HistoryOperation::PushAll if refs.is_empty() => {
+            command.args(["--branches", "--tags"]);
+        }
+        HistoryOperation::Push {
+            remote: Some(remote),
+        } => {
+            // Git LFS excludes the selected remote's tracking refs. Command-line
+            // --not does not invert the individually verified stdin roots.
+            command.arg("--not").arg(format!("--remotes={remote}"));
+        }
+        _ => {}
     }
-    command.arg("--");
+    command.args(["--stdin", "--"]);
     let output = process::run(
         command,
         cancel,

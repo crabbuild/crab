@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
+use crate::git::process::{self, MAX_CAPTURE_BYTES};
 use crate::lfs::config::LfsConfig;
 use crab_lfs::LfsObjectStore;
 
@@ -47,70 +49,94 @@ pub async fn resolve_lfs_remote_for_operation_with_remote_from(
     remote: Option<&str>,
     repo_root: &Path,
 ) -> Result<LfsRemoteContext> {
+    // The tagged Rust API has no caller token. Keep that entry point while
+    // command owners use the same resolver with their cancellation domain.
+    resolve_lfs_remote_context(operation, remote, repo_root, &CancellationToken::new()).await
+}
+
+/// Resolve operation-scoped LFS clients using the command's root and cancellation domain.
+pub(crate) async fn resolve_lfs_remote_context(
+    operation: &str,
+    remote: Option<&str>,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<LfsRemoteContext> {
+    check_cancelled(cancel)?;
     let worktree = crate::git::worktree::WorktreeContext::resolve_from_path(repo_root)?;
     let repo_root = &worktree.current_worktree_root;
-    let url = resolve_lfs_remote_url(remote, repo_root)?;
+    let url = resolve_lfs_remote_url(remote, repo_root, cancel)?;
     let config = crate::core::config::Config::resolve_for_repo(repo_root)?;
-    let cancel = tokio_util::sync::CancellationToken::new();
+    check_cancelled(cancel)?;
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
     let managed_resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
     let locator = managed_resolver.classify(&url)?;
-    let (lfs_store, prefix) = match locator {
-        crab_git::RepositoryLocator::Managed(repository) => {
-            if !is_lfs_read_operation(operation) {
-                return Err(CrabError::LfsUnsupported {
-                    command: operation.to_owned(),
-                    reason: "managed LFS writes require the protected-push protocol".to_owned(),
-                });
-            }
-            let managed = managed_resolver
-                .resolve(&repository, crab_auth::TransferOperation::Hydrate, &cancel)
-                .await?;
-            let prefix = managed.repository_prefix;
-            (
-                Arc::new(LfsObjectStore::new(managed.store, &prefix)),
-                prefix,
-            )
-        }
-        crab_git::RepositoryLocator::Direct(repository) => {
-            let parsed = crate::git::url::CrabUrl {
-                bucket: repository.bucket,
-                repo_path: repository.repo_prefix,
-            };
-            let resolver = crate::replication::StoreResolver::new(&config, &parsed, &cancel);
-            if is_lfs_read_operation(operation) {
-                let selection = resolver.read_store(operation).await?;
-                let prefix = selection.router.repo_prefix().to_owned();
-                let store = if matches!(
-                    &selection.source,
-                    crate::replication::ReadSource::Replica { .. }
-                ) {
-                    let primary = resolver.write_store("lfs-read-primary-fallback").await?;
-                    let primary_prefix = primary.router.repo_prefix().to_owned();
-                    LfsObjectStore::new_with_primary_fallback(
-                        selection.store.into_storage(),
-                        &prefix,
-                        primary.store.into_storage(),
-                        &primary_prefix,
-                    )
-                } else {
-                    LfsObjectStore::new(selection.store.into_storage(), &prefix)
-                };
-                (Arc::new(store), prefix)
-            } else {
-                let selection = resolver.write_store(operation).await?;
-                let prefix = selection.router.repo_prefix().to_owned();
+    let open_store = async {
+        Ok(match locator {
+            crab_git::RepositoryLocator::Managed(repository) => {
+                if !is_lfs_read_operation(operation) {
+                    return Err(CrabError::LfsUnsupported {
+                        command: operation.to_owned(),
+                        reason: "managed LFS writes require the protected-push protocol".to_owned(),
+                    });
+                }
+                let managed = managed_resolver
+                    .resolve(&repository, crab_auth::TransferOperation::Hydrate, cancel)
+                    .await?;
+                let prefix = managed.repository_prefix;
                 (
-                    Arc::new(LfsObjectStore::new(selection.store.into_storage(), &prefix)),
+                    Arc::new(LfsObjectStore::new(managed.store, &prefix)),
                     prefix,
                 )
             }
-        }
+            crab_git::RepositoryLocator::Direct(repository) => {
+                let parsed = crate::git::url::CrabUrl {
+                    bucket: repository.bucket,
+                    repo_path: repository.repo_prefix,
+                };
+                let resolver = crate::replication::StoreResolver::new(&config, &parsed, cancel);
+                if is_lfs_read_operation(operation) {
+                    let selection = resolver.read_store(operation).await?;
+                    let prefix = selection.router.repo_prefix().to_owned();
+                    let store = if matches!(
+                        &selection.source,
+                        crate::replication::ReadSource::Replica { .. }
+                    ) {
+                        let primary = resolver.write_store("lfs-read-primary-fallback").await?;
+                        let primary_prefix = primary.router.repo_prefix().to_owned();
+                        LfsObjectStore::new_with_primary_fallback(
+                            selection.store.into_storage(),
+                            &prefix,
+                            primary.store.into_storage(),
+                            &primary_prefix,
+                        )
+                    } else {
+                        LfsObjectStore::new(selection.store.into_storage(), &prefix)
+                    };
+                    (Arc::new(store), prefix)
+                } else {
+                    let selection = resolver.write_store(operation).await?;
+                    let prefix = selection.router.repo_prefix().to_owned();
+                    (
+                        Arc::new(LfsObjectStore::new(selection.store.into_storage(), &prefix)),
+                        prefix,
+                    )
+                }
+            }
+        })
+    };
+    // Setup acquires clients/grants and probes read readiness, not repository
+    // publication ownership. Dropping a pending setup must not acknowledge a
+    // transfer or proceed into discovery after command cancellation.
+    let (lfs_store, prefix) = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(CrabError::Cancelled),
+        result = open_store => result?,
     };
 
     let lfs_config = LfsConfig::resolve(repo_root)?;
 
     let local_lfs_dir = lfs_config.storage_dir(&worktree.common_git_dir);
+    check_cancelled(cancel)?;
 
     Ok(LfsRemoteContext {
         store: lfs_store,
@@ -194,10 +220,15 @@ fn is_lfs_read_operation(operation: &str) -> bool {
 
 /// Resolve the Git LFS `remote` field, which may be either a Git remote name
 /// or a repository URL supplied directly by the client.
-fn resolve_lfs_remote_url(remote: Option<&str>, repo_root: &Path) -> Result<String> {
+fn resolve_lfs_remote_url(
+    remote: Option<&str>,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    check_cancelled(cancel)?;
     match remote.map(str::trim) {
         Some(value) if value.contains("://") => Ok(value.to_owned()),
-        Some(name) if !name.is_empty() => read_git_remote_url_from(name, repo_root),
+        Some(name) if !name.is_empty() => read_git_remote_url_from(name, repo_root, cancel),
         _ => read_repo_remote_url_from(repo_root),
     }
 }
@@ -214,15 +245,12 @@ pub(super) fn read_repo_remote_url_from(repo_root: &Path) -> Result<String> {
     crate::core::project_config::ProjectConfig::remote_url(repo_root)
 }
 
-fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {
-    let output = git_command(repo_root)
-        .args(["remote", "get-url", name])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| CrabError::Configuration {
-            key: format!("failed to read git remote \"{name}\": {e}"),
-            origin: "git remote get-url".into(),
-        })?;
+fn read_git_remote_url_from(
+    name: &str,
+    repo_root: &Path,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let output = git_remote_url_output(repo_root, name, false, cancel)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -242,7 +270,12 @@ fn read_git_remote_url_from(name: &str, repo_root: &Path) -> Result<String> {
     Ok(url)
 }
 
-pub(super) fn validate_git_push_url(name: &str, expected_url: &str) -> Result<()> {
+pub(super) fn validate_git_push_url(
+    name: &str,
+    expected_url: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
     if expected_url.is_empty() {
         return Err(CrabError::Configuration {
             key: format!("git remote \"{name}\" has an empty push URL"),
@@ -253,13 +286,7 @@ pub(super) fn validate_git_push_url(name: &str, expected_url: &str) -> Result<()
     let cwd = std::env::current_dir().map_err(CrabError::Io)?;
     let repo_root =
         crate::git::worktree::WorktreeContext::resolve_from_path(&cwd)?.current_worktree_root;
-    let output = git_command(&repo_root)
-        .args(["remote", "get-url", "--push", name])
-        .output()
-        .map_err(|e| CrabError::Configuration {
-            key: format!("failed to read git remote \"{name}\" push URL: {e}"),
-            origin: "git remote get-url --push".into(),
-        })?;
+    let output = git_remote_url_output(&repo_root, name, true, cancel)?;
 
     if !output.status.success() {
         return Err(CrabError::Configuration {
@@ -282,19 +309,27 @@ pub(super) fn validate_git_push_url(name: &str, expected_url: &str) -> Result<()
     })
 }
 
-fn git_command(repo_root: &Path) -> std::process::Command {
+pub(super) fn git_remote_url_output(
+    repo_root: &Path,
+    name: &str,
+    push: bool,
+    cancel: &CancellationToken,
+) -> Result<process::Output<Vec<u8>>> {
     let mut command = std::process::Command::new("git");
-    command
-        .current_dir(repo_root)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_QUARANTINE_PATH")
-        .env_remove("GIT_NAMESPACE");
-    command
+    command.current_dir(repo_root).args(["remote", "get-url"]);
+    if push {
+        command.arg("--push");
+    }
+    command.arg(name).env_remove("GIT_QUARANTINE_PATH");
+    for key in process::GIT_ENV_REMOVALS {
+        command.env_remove(key);
+    }
+    process::run(
+        command,
+        cancel,
+        None::<fn(std::process::ChildStdin) -> Result<()>>,
+        |stdout| Ok(process::capture_output(stdout, MAX_CAPTURE_BYTES)?),
+    )
 }
 
 /// Get the current user identity from git config for lock operations.
@@ -329,6 +364,37 @@ pub fn git_user_identity() -> Result<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_setup_stops_before_repository_or_remote_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-a-repository");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        for remote in [None, Some("origin"), Some("crab://bucket/repository")] {
+            assert!(matches!(
+                resolve_lfs_remote_context("push", remote, &missing, &cancel).await,
+                Err(CrabError::Cancelled)
+            ));
+        }
+    }
+
+    #[test]
+    fn cancelled_lookup_is_not_a_missing_remote_or_changed_push_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        for push in [false, true] {
+            assert!(matches!(
+                git_remote_url_output(dir.path(), "origin", push, &cancel),
+                Err(CrabError::Cancelled)
+            ));
+        }
+        assert!(matches!(
+            validate_git_push_url("origin", "crab://bucket/repository", &cancel),
+            Err(CrabError::Cancelled)
+        ));
+    }
+
     #[test]
     fn read_git_remote_url_from_reads_named_remote() {
         let dir = tempfile::tempdir().unwrap();
@@ -343,7 +409,8 @@ mod tests {
             .status()
             .unwrap();
 
-        let url = read_git_remote_url_from("archive", dir.path()).unwrap();
+        let url =
+            read_git_remote_url_from("archive", dir.path(), &CancellationToken::new()).unwrap();
 
         assert_eq!(url, "crab://bucket/repo");
     }
@@ -352,7 +419,12 @@ mod tests {
     fn standalone_remote_url_is_used_without_git_remote_lookup() {
         let dir = tempfile::tempdir().unwrap();
 
-        let url = resolve_lfs_remote_url(Some("crab://bucket/repo"), dir.path()).unwrap();
+        let url = resolve_lfs_remote_url(
+            Some("crab://bucket/repo"),
+            dir.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
 
         assert_eq!(url, "crab://bucket/repo");
     }
@@ -366,7 +438,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let result = read_git_remote_url_from("missing", dir.path());
+        let result = read_git_remote_url_from("missing", dir.path(), &CancellationToken::new());
 
         assert!(result.is_err());
     }

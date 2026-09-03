@@ -4,7 +4,6 @@
 //! [`crate::lfs::batch::BatchResolver`] and
 //! [`crate::lfs::lock::LockManager`].
 
-use std::io::BufRead;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -12,17 +11,14 @@ use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::process::MAX_CAPTURE_BYTES;
 use crate::lfs::batch::BatchResolver;
 use crate::lfs::discovery::{
-    GitObjectAccess, HistoryOperation, collect_pointers_from_history_in,
+    HistoryOperation, collect_pointers_from_history_in,
     collect_pointers_from_range_in_with_base_refs, pointer_memory, spend_scan_budget,
-    visit_lfs_pointers_in_tree,
 };
 use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use crab_git::pre_push::{PrePushUpdate, read_pre_push};
 
-use super::store_setup::{
-    git_user_identity, resolve_lfs_remote_for_operation_with_remote_sync, validate_git_push_url,
-};
+use super::store_setup::{git_user_identity, resolve_lfs_remote_context, validate_git_push_url};
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsPushOptions {
@@ -48,9 +44,24 @@ struct ResolvedPushArgs {
 /// single object by OID, and `--dry-run` to preview what would be pushed.
 pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
-    let resolved = resolve_push_args(&options)?;
+    let mut resolved = resolve_push_args(&options)?;
+    if options.stdin {
+        let values = super::input::read_stdin_lines(cancel)?;
+        if options.object_id.is_some() {
+            validate_object_ids(&values)?;
+            resolved.object_ids = values;
+        } else {
+            resolved.refs = values;
+        }
+    }
 
-    if !resolved.object_ids.is_empty() {
+    if options.object_id.is_some() {
+        // An empty object-ID stream is an empty request, never an implicit
+        // HEAD upload. Keep its mode even when the selected set is empty.
+        if resolved.object_ids.is_empty() {
+            eprintln!("push: no LFS objects to push");
+            return Ok(());
+        }
         if options.dry_run {
             eprintln!("push: would upload {} object(s)", resolved.object_ids.len());
             for oid_hex in &resolved.object_ids {
@@ -59,8 +70,12 @@ pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Resu
             return Ok(());
         }
 
-        let ctx =
-            resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
+        let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+            "push",
+            resolved.remote.as_deref(),
+            Path::new("."),
+            cancel,
+        ))?;
         let pointers = object_id_pointers(&ctx.local_lfs_dir, &resolved.object_ids)?;
         return super::block_on_runtime(async {
             let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
@@ -70,9 +85,29 @@ pub fn run_lfs_push(options: LfsPushOptions, cancel: &CancellationToken) -> Resu
         });
     }
 
-    let ctx =
-        resolve_lfs_remote_for_operation_with_remote_sync("push", resolved.remote.as_deref())?;
-    let pointers = collect_push_pointers(Path::new("."), options.all, &resolved.refs, cancel)?;
+    if options.stdin && resolved.refs.is_empty() && !options.all {
+        eprintln!("push: no LFS objects to push");
+        return Ok(());
+    }
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "push",
+        resolved.remote.as_deref(),
+        Path::new("."),
+        cancel,
+    ))?;
+    // A direct URL or project-default URL has no named remote-tracking set.
+    // Do not guess origin or exclude another remote's published history.
+    let remote = resolved
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty() && !remote.contains("://"));
+    let operation = if options.all {
+        HistoryOperation::PushAll
+    } else {
+        HistoryOperation::Push { remote }
+    };
+    let pointers = collect_push_pointers(Path::new("."), operation, &resolved.refs, cancel)?;
 
     if pointers.is_empty() {
         eprintln!("push: no LFS objects to push");
@@ -136,12 +171,6 @@ fn object_id_pointers(lfs_dir: &Path, object_ids: &[String]) -> Result<Vec<LfsPo
 }
 
 fn resolve_push_args(options: &LfsPushOptions) -> Result<ResolvedPushArgs> {
-    let stdin_values = if options.stdin {
-        read_stdin_lines()?
-    } else {
-        Vec::new()
-    };
-
     if options.object_id.is_some() {
         if options.all {
             return Err(CrabError::Configuration {
@@ -164,28 +193,24 @@ fn resolve_push_args(options: &LfsPushOptions) -> Result<ResolvedPushArgs> {
                 object_ids.push(remote_or_oid.clone());
             } else if remote.is_none() {
                 remote = Some(remote_or_oid.clone());
-            }
-        }
-        object_ids.extend(
-            options
-                .args
-                .iter()
-                .filter(|value| is_oid_hex(value))
-                .cloned(),
-        );
-
-        if !stdin_values.is_empty() {
-            if !object_ids.is_empty() {
+            } else {
                 return Err(CrabError::Configuration {
                     key: "lfs push".to_owned(),
-                    origin: "--stdin reads object IDs instead of command-line object IDs"
-                        .to_owned(),
+                    origin: "multiple remote operands for --object-id".to_owned(),
                 });
             }
-            object_ids.extend(stdin_values);
+        }
+        object_ids.extend(options.args.iter().cloned());
+        validate_object_ids(&object_ids)?;
+
+        if options.stdin && !object_ids.is_empty() {
+            return Err(CrabError::Configuration {
+                key: "lfs push".to_owned(),
+                origin: "--stdin reads object IDs instead of command-line object IDs".to_owned(),
+            });
         }
 
-        if object_ids.is_empty() {
+        if object_ids.is_empty() && !options.stdin {
             return Err(CrabError::Configuration {
                 key: "lfs push".to_owned(),
                 origin: "--object-id requires at least one object ID or --stdin".to_owned(),
@@ -206,30 +231,24 @@ fn resolve_push_args(options: &LfsPushOptions) -> Result<ResolvedPushArgs> {
         });
     }
 
-    let refs = if options.stdin {
-        stdin_values
-    } else {
-        options.args.clone()
-    };
-
     Ok(ResolvedPushArgs {
         remote: options.remote.clone(),
-        refs,
+        refs: options.args.clone(),
         object_ids: Vec::new(),
     })
 }
 
-fn read_stdin_lines() -> Result<Vec<String>> {
-    let stdin = std::io::stdin();
-    stdin
-        .lock()
-        .lines()
-        .map(|line| {
-            line.map(|line| line.trim().to_owned())
-                .map_err(CrabError::Io)
-        })
-        .filter(|line| !matches!(line, Ok(value) if value.is_empty()))
-        .collect()
+fn validate_object_ids(object_ids: &[String]) -> Result<()> {
+    if let Some(index) = object_ids.iter().position(|value| !is_oid_hex(value)) {
+        return Err(CrabError::Configuration {
+            key: "lfs push".to_owned(),
+            origin: format!(
+                "invalid object ID at position {}: expected 64 hexadecimal characters",
+                index + 1
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn is_oid_hex(value: &str) -> bool {
@@ -254,7 +273,7 @@ pub fn run_lfs_pre_push(
         });
     }
     if let (Some(remote), Some(url)) = (remote, url) {
-        validate_git_push_url(remote, url)?;
+        validate_git_push_url(remote, url, cancel)?;
     }
     // Validate the complete batch before resolving cloud access. The cap is
     // local hook admission policy, not a limit on Git repository size.
@@ -274,7 +293,12 @@ pub(crate) fn run_lfs_pre_push_batch(
         return Ok(());
     }
 
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("push", remote)?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "push",
+        remote,
+        Path::new("."),
+        cancel,
+    ))?;
 
     // Ref updates contain only the refs Git is changing. Excluding the
     // compacted manifest's complete ref-tip set prevents a multi-branch push
@@ -345,7 +369,7 @@ fn pre_push_revisions(updates: &[PrePushUpdate]) -> (Vec<String>, Vec<String>) {
 
 fn collect_push_pointers(
     repo_dir: &Path,
-    all: bool,
+    operation: HistoryOperation<'_>,
     refs: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<LfsPointer>> {
@@ -370,25 +394,9 @@ fn collect_push_pointers(
         }
         Ok(())
     };
-    if all {
-        for (path, pointer) in
-            collect_pointers_from_history_in(repo_dir, refs, HistoryOperation::Push, cancel)?
-        {
-            check_cancelled(cancel)?;
-            retain(path, pointer)?;
-        }
-    } else {
-        let head = ["HEAD".to_owned()];
-        let refs = if refs.is_empty() { &head } else { refs };
-        for ref_name in refs {
-            visit_lfs_pointers_in_tree(
-                repo_dir,
-                ref_name,
-                GitObjectAccess::LocalOnly,
-                cancel,
-                &mut retain,
-            )?;
-        }
+    for (path, pointer) in collect_pointers_from_history_in(repo_dir, refs, operation, cancel)? {
+        check_cancelled(cancel)?;
+        retain(path, pointer)?;
     }
     Ok(pointers)
 }

@@ -133,6 +133,150 @@ fn plan_identity_binds_metadata_and_recipe_proofs_with_unchanged_refs() {
 }
 
 #[tokio::test]
+async fn receipt_for_a_different_ref_edit_cannot_satisfy_the_plan() {
+    let plan = build_plan(
+        &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
+        false,
+    )
+    .unwrap();
+    let store = memory_store();
+    let router = StoreLayout::new(store.clone(), "repo".to_owned());
+    let ref_name = "refs/heads/main";
+    let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
+        .await
+        .unwrap();
+    let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+        BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+        vec![crate::metadata::manifest::RefJournalEdit {
+            ref_name: ref_name.to_owned(),
+            old_oid: None,
+            new_oid: Some("f".repeat(40)),
+            peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: None,
+        }],
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
+        &store,
+        &router,
+        &transaction,
+        &[head],
+        &plan.plan_id,
+    )
+    .await
+    .unwrap();
+
+    let error = resolve_plan_commit(&store, &router, &plan)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, CrabError::Protocol(message) if message.contains("reviewed ref edits"))
+    );
+}
+
+#[tokio::test]
+async fn managed_receipt_binds_the_reviewed_base_and_result_snapshots() {
+    let plan = build_plan(
+        &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
+        false,
+    )
+    .unwrap();
+    let store = memory_store();
+    let router = StoreLayout::new(store.clone(), "repo".to_owned());
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let mut base = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
+    base.refs
+        .insert("refs/heads/main".to_owned(), "b".repeat(40));
+    base.seal_git_validation();
+    crate::metadata::manifest::create_manifest(&store, &router, &base)
+        .await
+        .unwrap();
+    let (_, etag) = crate::metadata::manifest::read_manifest(&store, &router)
+        .await
+        .unwrap();
+    let mut committed = base;
+    committed.generation += 1;
+    committed
+        .refs
+        .insert("refs/heads/main".to_owned(), "a".repeat(40));
+    committed.seal_git_validation();
+    crab_metadata::plan_receipt::commit_manifest_for_plan(
+        store.as_storage(),
+        &storage_router,
+        &committed,
+        &etag,
+        &plan.plan_id,
+    )
+    .await
+    .unwrap();
+
+    let resolved = resolve_plan_commit(&store, &router, &plan)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(resolved.manifest_digest.is_some() && resolved.transaction_id.is_none());
+}
+
+#[tokio::test]
+async fn managed_receipt_for_another_result_cannot_satisfy_the_plan() {
+    let plan = build_plan(
+        &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
+        false,
+    )
+    .unwrap();
+    let store = memory_store();
+    let router = StoreLayout::new(store.clone(), "repo".to_owned());
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let mut base = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
+    base.refs
+        .insert("refs/heads/main".to_owned(), "b".repeat(40));
+    base.seal_git_validation();
+    crate::metadata::manifest::create_manifest(&store, &router, &base)
+        .await
+        .unwrap();
+    let (_, etag) = crate::metadata::manifest::read_manifest(&store, &router)
+        .await
+        .unwrap();
+    let mut unrelated = base;
+    unrelated.generation += 1;
+    unrelated
+        .refs
+        .insert("refs/heads/main".to_owned(), "f".repeat(40));
+    unrelated.seal_git_validation();
+    crab_metadata::plan_receipt::commit_manifest_for_plan(
+        store.as_storage(),
+        &storage_router,
+        &unrelated,
+        &etag,
+        &plan.plan_id,
+    )
+    .await
+    .unwrap();
+
+    let error = resolve_plan_commit(&store, &router, &plan)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, CrabError::Protocol(message) if message.contains("reviewed ref snapshots"))
+    );
+}
+
+#[tokio::test]
 async fn snapshot_identity_requires_and_binds_the_resolved_transport() {
     let raw = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let router = StoreLayout::new(raw.clone(), "repo".to_owned());
@@ -562,16 +706,31 @@ async fn plan_replay_requires_the_same_verified_repository_identity() {
         assert!(!plan.blocked);
         assert_eq!(!plan.actions.is_empty(), nonempty);
         if nonempty {
-            // Model the state-based replay path after publication. It must retain
-            // destination binding even though its pre-publication snapshot advanced.
-            let mut snapshot = read_repository_snapshot(&store, &router).await.unwrap();
-            snapshot.manifest.refs = plan.source_refs;
-            snapshot.manifest.seal_git_validation();
-            crate::metadata::manifest::write_manifest_cas(
+            let ref_name = "refs/heads/main";
+            let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
+                .await
+                .unwrap();
+            let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+                BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+                vec![crate::metadata::manifest::RefJournalEdit {
+                    ref_name: ref_name.to_owned(),
+                    old_oid: None,
+                    new_oid: plan.source_refs.get(ref_name).cloned(),
+                    peeled_oid: None,
+                    lock_holder: None,
+                    visibility_evidence_hash: None,
+                }],
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
                 &store,
                 &router,
-                &snapshot.manifest,
-                &snapshot.manifest_etag,
+                &transaction,
+                &[head],
+                &plan.plan_id,
             )
             .await
             .unwrap();
@@ -760,7 +919,11 @@ async fn unavailable_source_never_reuses_cached_refs_or_applies_a_plan() {
 struct ApplyOwnershipRunner {
     cache: std::path::PathBuf,
     destination_ref: bool,
-    final_read: bool,
+    push_count: usize,
+    store: Store,
+    router: StoreLayout,
+    plan_id: String,
+    lose_push_response: bool,
 }
 
 impl CommandRunner for ApplyOwnershipRunner {
@@ -774,30 +937,81 @@ impl CommandRunner for ApplyOwnershipRunner {
             );
         }
         let mut stdout = String::new();
+        let mut success = true;
+        let mut stderr = String::new();
         if command.args == ["ls-remote", "--refs", CRAB_REMOTE] {
             if self.destination_ref {
                 stdout = format!("{}\trefs/heads/recover\n", "b".repeat(40));
-            } else {
-                self.final_read = true;
             }
         } else if command.args.first().is_some_and(|arg| arg == "push") {
+            let store = self.store.clone();
+            let router = self.router.clone();
+            let plan_id = self.plan_id.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                runtime.block_on(async move {
+                    let ref_name = "refs/heads/recover";
+                    let head =
+                        crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
+                            .await
+                            .unwrap();
+                    let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+                        BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+                        vec![crate::metadata::manifest::RefJournalEdit {
+                            ref_name: ref_name.to_owned(),
+                            old_oid: Some("b".repeat(40)),
+                            new_oid: None,
+                            peeled_oid: None,
+                            lock_holder: None,
+                            visibility_evidence_hash: None,
+                        }],
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .unwrap();
+                    crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
+                        &store,
+                        &router,
+                        &transaction,
+                        &[head],
+                        &plan_id,
+                    )
+                    .await
+                    .unwrap();
+                });
+            })
+            .join()
+            .unwrap();
             self.destination_ref = false;
+            self.push_count += 1;
+            if self.lose_push_response {
+                self.lose_push_response = false;
+                success = false;
+                stderr = "injected lost push response".to_owned();
+            }
         } else if !command.args.first().is_some_and(|arg| arg == "fetch") {
             return SystemCommandRunner::default().run(command, mode);
         }
         Ok(ProcessOutput {
             status: ProcessStatus {
-                success: true,
-                code: Some(0),
+                success,
+                code: Some(if success { 0 } else { 1 }),
             },
             stdout,
-            stderr: String::new(),
+            stderr,
         })
     }
 }
 
-#[tokio::test]
-async fn apply_keeps_one_cache_owner_through_final_destination_read() {
+async fn run_delete_apply(
+    lose_push_response: bool,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    ApplyOwnershipRunner,
+    MirrorApplySummary,
+) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.git");
     run_local_git(&["init", "--bare", source.to_str().unwrap()]);
@@ -831,11 +1045,16 @@ async fn apply_keeps_one_cache_owner_through_final_destination_read() {
     observed.destination_identity = Some(identity);
     observed.pointers =
         verify_pointer_data(&store, "repo", &snapshot, &[], &CancellationToken::new()).await;
-    write_plan(&plan_path, &build_plan(&observed, true).unwrap()).unwrap();
+    let plan = build_plan(&observed, true).unwrap();
+    write_plan(&plan_path, &plan).unwrap();
     let mut runner = ApplyOwnershipRunner {
         cache: path.clone(),
         destination_ref: true,
-        final_read: false,
+        push_count: 0,
+        store: store.clone(),
+        router,
+        plan_id: plan.plan_id,
+        lose_push_response,
     };
     let outcome = run_integrity_command(
         &args,
@@ -849,8 +1068,25 @@ async fn apply_keeps_one_cache_owner_through_final_destination_read() {
     let MirrorCommandOutcome::Apply(summary) = outcome else {
         panic!("expected apply")
     };
+    (dir, path, runner, summary)
+}
+
+#[tokio::test]
+async fn apply_keeps_one_cache_owner_through_final_destination_read() {
+    let (_dir, path, runner, summary) = run_delete_apply(false).await;
     assert_eq!(summary.actions_applied, 1);
-    assert!(runner.final_read);
+    assert_eq!(runner.push_count, 1);
+    assert!(summary.transaction_id.is_some());
     CacheUseGuard::acquire(&path, &CancellationToken::new())
         .expect("apply must release cache ownership after its final destination read");
+}
+
+#[tokio::test]
+async fn lost_success_response_recovers_the_plan_receipt_without_another_push() {
+    let (_dir, _path, runner, summary) = run_delete_apply(true).await;
+
+    assert_eq!(summary.actions_applied, 1);
+    assert_eq!(runner.push_count, 1);
+    assert!(summary.transaction_id.is_some());
+    assert_eq!(summary.current.state, MirrorDriftState::Equal);
 }

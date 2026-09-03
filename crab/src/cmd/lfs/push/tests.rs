@@ -136,6 +136,97 @@ fn resolve_push_args_keeps_object_id_remote_operand() {
 }
 
 #[test]
+fn malformed_object_id_operands_are_not_silently_dropped() {
+    let options = LfsPushOptions {
+        object_id: Some(Some("origin".to_owned())),
+        remote: Some(oid(1)),
+        args: vec!["not-an-oid".to_owned()],
+        ..LfsPushOptions::default()
+    };
+    assert!(matches!(
+        resolve_push_args(&options),
+        Err(CrabError::Configuration { .. })
+    ));
+}
+
+#[test]
+fn ambiguous_object_id_remotes_are_rejected() {
+    let options = LfsPushOptions {
+        object_id: Some(Some("origin".to_owned())),
+        remote: Some("other".to_owned()),
+        args: vec![oid(1)],
+        ..LfsPushOptions::default()
+    };
+    assert!(matches!(
+        resolve_push_args(&options),
+        Err(CrabError::Configuration { .. })
+    ));
+}
+
+#[test]
+fn stdin_conflicts_are_rejected_without_reading_input() {
+    for options in [
+        LfsPushOptions {
+            all: true,
+            object_id: Some(None),
+            ..LfsPushOptions::default()
+        },
+        LfsPushOptions {
+            args: vec!["main".to_owned()],
+            ..LfsPushOptions::default()
+        },
+        LfsPushOptions {
+            object_id: Some(Some(oid(1))),
+            ..LfsPushOptions::default()
+        },
+    ] {
+        let options = LfsPushOptions {
+            stdin: true,
+            ..options
+        };
+        assert!(matches!(
+            resolve_push_args(&options),
+            Err(CrabError::Configuration { .. })
+        ));
+    }
+}
+
+#[test]
+fn object_id_stdin_defers_selection_without_defaulting_to_refs() {
+    let options = LfsPushOptions {
+        remote: Some("origin".to_owned()),
+        object_id: Some(None),
+        stdin: true,
+        ..LfsPushOptions::default()
+    };
+    assert_eq!(
+        resolve_push_args(&options).unwrap(),
+        ResolvedPushArgs {
+            remote: Some("origin".to_owned()),
+            refs: Vec::new(),
+            object_ids: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn object_id_validation_rejects_non_ascii_and_malformed_values() {
+    for invalid in [
+        "",
+        "not-an-oid",
+        "éééééééééé",
+        &"a".repeat(63),
+        &"a".repeat(65),
+    ] {
+        assert!(matches!(
+            validate_object_ids(&[oid(1), invalid.to_owned()]),
+            Err(CrabError::Configuration { .. })
+        ));
+    }
+    assert!(validate_object_ids(&[oid(1), "AB".repeat(32)]).is_ok());
+}
+
+#[test]
 fn object_id_pointers_read_cached_file_size() {
     let dir = tempfile::tempdir().unwrap();
     let content = b"object-id upload";

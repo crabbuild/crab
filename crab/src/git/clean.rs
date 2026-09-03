@@ -3157,6 +3157,9 @@ mod tests {
         rt.block_on(async {
             let storage = crab_storage::Store::new(Arc::clone(&store));
             let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+            crab_metadata::layout_descriptor::ensure_canonical_layout(&storage, &router)
+                .await
+                .expect("initialize canonical layout");
             let (shard_index_hash, _, shard_write) = crab_metadata::manifests::append_shard_index(
                 crab_metadata::segmented::SegmentIndex::default(),
                 1,

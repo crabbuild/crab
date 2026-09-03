@@ -366,6 +366,9 @@ mod tests {
         let store = Store::new(Arc::new(InMemory::new()));
         let repo_prefix = "org/repo/acl-views/v1/scope/view";
         let router = super::super::view_store_layout(&store, repo_prefix);
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
         let content = b"allowed bytes that stay behind a view-local pointer".to_vec();
         let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
 

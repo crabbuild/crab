@@ -37,6 +37,28 @@ pub async fn commit_receive_manifest(
     commit: ReceiveManifestCommit<'_>,
 ) -> Result<Option<CommitOutcome>> {
     validate_manifest_payload(commit.manifest)?;
+    if let Some(plan_id) = commit.plan.mirror_plan_id.as_deref() {
+        if commit.active_active.is_some() {
+            return Err(AuthServerError::Internal(
+                "mirror plan receipts are not supported by active-active finalize".to_owned(),
+            ));
+        }
+        let base_etag = commit.base_etag.ok_or_else(|| {
+            AuthServerError::Internal(
+                "managed mirror finalize requires a base manifest CAS token".to_owned(),
+            )
+        })?;
+        crab_metadata::plan_receipt::commit_manifest_for_plan(
+            store,
+            router,
+            commit.manifest,
+            base_etag,
+            plan_id,
+        )
+        .await
+        .map_err(AuthServerError::from)?;
+        return Ok(None);
+    }
     if let Some(active_active) = commit.active_active {
         return commit_active_active_manifest(
             store,
@@ -231,6 +253,7 @@ mod tests {
     fn plan_with_candidate(candidate_manifest: Manifest) -> ProtectedPushPlan {
         ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -294,6 +317,61 @@ mod tests {
             matches!(err, AuthServerError::CasConflict { .. }),
             "expected CasConflict, got {err:?}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_mirror_commit_publishes_plan_receipt_at_manifest_cas() -> Result<()> {
+        let (store, router) = context();
+        let base = Manifest::default_for_repo("refs/heads/main");
+        manifest_store::create_manifest(&store, &router, &base)
+            .await
+            .map_err(AuthServerError::from)?;
+        let (_, base_etag) = manifest_store::read_manifest(&store, &router)
+            .await
+            .map_err(AuthServerError::from)?;
+        let mut candidate = base;
+        candidate.generation += 1;
+        candidate
+            .refs
+            .insert("refs/heads/main".to_owned(), oid('2'));
+        candidate.seal_git_validation();
+        let plan_id = "a".repeat(64);
+        let mut plan = plan_with_candidate(candidate.clone());
+        plan.schema_version = 2;
+        plan.mirror_plan_id = Some(plan_id.clone());
+        let materialized = MaterializedSourcePush {
+            ref_updates: plan.ref_updates.clone(),
+            packs: Vec::new(),
+            peeled_refs: std::collections::BTreeMap::new(),
+            git_visibility: super::super::MaterializedGitVisibility::Exact(
+                std::collections::BTreeMap::new(),
+            ),
+        };
+
+        commit_receive_manifest(
+            &store,
+            &router,
+            ReceiveManifestCommit {
+                repo_prefix: "org/repo",
+                active_active: None,
+                plan: &plan,
+                materialized: &materialized,
+                manifest: &candidate,
+                base_etag: Some(&base_etag),
+                visibility_proof_published: false,
+            },
+        )
+        .await?;
+        let receipt = crab_metadata::plan_receipt::resolve_plan_receipt(&store, &router, &plan_id)
+            .await
+            .map_err(AuthServerError::from)?
+            .expect("managed commit must publish its receipt");
+
+        assert!(matches!(
+            receipt.commit,
+            crab_metadata::plan_receipt::MirrorPlanCommit::Manifest { generation: 1, .. }
+        ));
         Ok(())
     }
 }

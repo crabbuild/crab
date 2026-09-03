@@ -214,6 +214,22 @@ impl FileIndexLookupSession {
         })
     }
 
+    /// Open acceleration against the caller's captured repository snapshot.
+    ///
+    /// The caller binds the snapshot to this layout and owns freshness and GC
+    /// protection. Unscoped SlateDB readers may write checkpoints and must be
+    /// closed; scoped stores retain the write-free canonical shard lookup.
+    pub async fn open_from_snapshot(
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        snapshot: &RepositorySnapshot,
+    ) -> Result<Self> {
+        let mut session = Self::from_snapshot(router, snapshot)?;
+        if session.storage.storage_scope().is_none() {
+            session.open_acceleration().await?;
+        }
+        Ok(session)
+    }
+
     /// Open a read-only lookup session for `repo_prefix`.
     ///
     /// A never-written `file_index_db` opens as an empty session: every lookup
@@ -245,36 +261,39 @@ impl FileIndexLookupSession {
             }) => None,
             Err(error) => return Err(error),
         };
-        let reader = if use_acceleration {
-            let path = file_index_path(repo_prefix);
-            match slatedb::DbReader::builder(
-                ObjectPath::from(path.as_str()),
-                Arc::clone(storage.inner()),
-            )
-            .build()
-            .await
-            {
-                Ok(reader) => Some(Arc::new(reader)),
-                Err(source) if is_manifest_missing(&source) => None,
-                Err(source) => {
-                    return Err(MetadataError::SlateDbOpen {
-                        db: DB_LABEL.to_owned(),
-                        path,
-                        source,
-                    });
-                }
-            }
-        } else {
-            None
-        };
-
-        Ok(Self {
-            reader,
+        let mut session = Self {
+            reader: None,
             anchor,
             storage,
             router,
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
-        })
+        };
+        if use_acceleration {
+            session.open_acceleration().await?;
+        }
+        Ok(session)
+    }
+
+    async fn open_acceleration(&mut self) -> Result<()> {
+        let path = file_index_path(self.router.repo_prefix());
+        self.reader = match slatedb::DbReader::builder(
+            ObjectPath::from(path.as_str()),
+            Arc::clone(self.storage.inner()),
+        )
+        .build()
+        .await
+        {
+            Ok(reader) => Some(Arc::new(reader)),
+            Err(source) if is_manifest_missing(&source) => None,
+            Err(source) => {
+                return Err(MetadataError::SlateDbOpen {
+                    db: DB_LABEL.to_owned(),
+                    path,
+                    source,
+                });
+            }
+        };
+        Ok(())
     }
 
     /// Look up one file hash in the open session.

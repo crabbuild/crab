@@ -2089,6 +2089,7 @@ impl Cmd {
             | Self::Clone { json, jsonl, .. }
             | Self::Download { json, jsonl, .. }
             | Self::Hydrate { json, jsonl, .. }
+            | Self::Pull { json, jsonl, .. }
             | Self::Dehydrate { json, jsonl, .. }
             | Self::Fetch { json, jsonl, .. }
             | Self::Gc { json, jsonl, .. }
@@ -6587,6 +6588,20 @@ mod tests {
                     assert_eq!(paths, vec!["file.txt"]);
                 }
                 _ => unreachable!("get should parse as download"),
+            }
+        });
+    }
+
+    #[test]
+    fn pull_machine_errors_keep_the_selected_mode_and_schema() {
+        parse_cli_on_large_stack(|| {
+            for (flag, mode) in [("--json", OutputMode::Json), ("--jsonl", OutputMode::Jsonl)] {
+                let cli = Cli::try_parse_from(["crab", "pull", flag]).unwrap();
+                let command = cli.cmd.as_ref().unwrap();
+                assert_eq!(
+                    (command.output_mode(), command.schema_name()),
+                    (mode, "pull")
+                );
             }
         });
     }

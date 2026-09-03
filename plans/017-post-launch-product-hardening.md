@@ -859,6 +859,87 @@ outcomes and their protected dependencies under the existing recovery owner;
 never compensate by deleting data. Dependencies: protected publication
 lifetime; receipt compatibility decision.
 
+Implement this packet at the ref-journal commit point, not in mirror's Git
+subprocess wrapper. The wrapper cannot distinguish its own successful mutation
+from a concurrent writer that published the same OIDs, and a local receipt can
+disappear with the caller. Use this sequence after the compatibility decision:
+
+1. `mirror --apply-plan` passes the validated 64-hex plan identity through one
+   internal child-process field. It is not user configuration. The remote
+   helper admits it only for mirror apply and threads it through the existing
+   push configuration to the direct or managed commit authority.
+2. The authority create-writes an immutable intent keyed by plan and attempt
+   immediately before its existing commit boundary. Direct mode does this
+   after every expected-old journal head is prepared and binds the transaction
+   identity plus dependency digest. Managed finalize does this after verifying
+   the current manifest CAS token and binds the exact base and candidate
+   manifest generations and canonical body digests. Both forms transitively
+   bind the canonical ref edits and repository/storage identity through the
+   plan. They contain no URL credentials, provider tokens or local paths.
+   Multiple attempts are bounded and ordered; an uncommitted attempt does not
+   prevent a later safe retry.
+3. The existing active marker remains direct mode's atomic ref visibility
+   boundary. A direct transaction is attributable only when its exact identity
+   is reachable from current journal heads or retained ancestry after
+   compaction. Managed mode retains its existing manifest CAS boundary: the
+   candidate is attributable only when its exact body is current or present in
+   validated immutable manifest history together with its bound base. Ref
+   equality, candidate-body existence and intent existence alone are not commit
+   proof. GC retains the journal, manifest-history and plan objects.
+4. The authority or a later read-back create-writes the plan's terminal receipt
+   after proving that transaction committed. The receipt binds the committed
+   transaction and dependency proof. Replaying the same plan returns this
+   historical commit result without another mutation. The output separately
+   reports the newly inspected current drift; it must not reuse the receipt's
+   commit-time `equal` state as present convergence. A conflicting receipt,
+   target mismatch, unknown version, missing history or more than the attempt
+   limit fails closed as corrupt/unverifiable; it never falls back to equality.
+5. If the child response is lost, mirror reads the receipt and unresolved
+   intents while it still owns the cache. A committed intent is promoted to the
+   same terminal result; a definitely uncommitted intent permits a new
+   expected-old attempt; indeterminate provider/history reads return an
+   uncertain result and preserve dependencies for recovery. Cancellation never
+   turns an unknown commit into a retry or compensating delete.
+
+**Compatibility decision.** Keep the canonical-v1 descriptor, transaction and
+manifest JSON unchanged. Store versioned intent and terminal objects under a
+new repo-local `refs/journal/plans/v1/` namespace. Direct protected pushes keep
+push-plan schema v1; a mirror-plan identity uses push-plan schema v2, which new
+receive helpers accept and tagged helpers reject before canonical mutation.
+Tagged v1.0.1 reads only the
+existing head, transaction, active-marker and frontier keys; its compactor
+removes the exact active-marker key after promotion and retains immutable
+transaction bodies. Existing repo and bucket GC enumerate known pack,
+partitioned file-index, shard and xorb candidates rather than deleting unknown
+repo-local objects. The additive keys are therefore ignored and retained by
+the shipped client, while a new client can trace an intent's transaction
+through current heads and preserved parent transactions after compaction.
+Do not add fields to the version-1 transaction or marker: both use strict
+unknown-field rejection.
+
+Before shipping, add the namespace to explicit backup/restore inventory and
+managed-service read/finalize authorization, and add upgrade/downgrade tests
+that run tagged v1.0.1 compaction between intent, commit and terminal read-back.
+Direct credentials already address the repository namespace, but managed
+clients must never receive canonical mutable write permission; the service
+commit owner writes intents and receipts. GC gains retention assertions, not
+an unknown-key delete fallback. If any provider or future maintenance owner
+cannot preserve the namespace, layout admission must refuse receipt-enabled
+repositories rather than silently degrading to ref equality.
+
+Acceptance is one deterministic fault table: kill before intent, after intent,
+after one/all head prepares, immediately after active-marker creation, after
+head promotion, during compaction, after compaction and after terminal-receipt
+write. For each point restart the caller and reapply the same plan. Assert the
+old batch or the exact new batch, never partial refs; at most one committed
+transaction; no duplicate dependency publication; the same terminal result
+after commit; safe retry only before commit; and an explicit uncertain result
+when history cannot be proved. Add different-plan/same-OID, unrelated-writer,
+target-copy, receipt-corruption, attempt-exhaustion, cancellation, lost-lease,
+GC-overlap and managed-finalize siblings. Real S3, GCS and Azure rows must use
+their selected conditional-write/version contracts; RustFS is local direct-mode
+evidence only.
+
 **Bounded execution and support qualification — Git and release owners.**
 Context: Crab pointer scanning has explicit object/lookup/allocation limits;
 Crab and LFS now share streamed blob verification and supervised subprocesses.
@@ -2791,14 +2872,14 @@ configured service, not just a mock interpretation of that contract.
 fix. Three new hermetic tests cover delayed rollback after a successor on
 both new/existing heads, ordinary restoration of an existing head, and an
 actual multi-ref prepare conflict with no marker/partial publication. They
-also verify a subsequent commit retains a coherent parent chain. An explicit
-opt-in S3 test passes on RustFS `crabbuild` with the same successor scenarios;
-its small isolated namespace is retained as
+also verify a subsequent commit retains a coherent parent chain. A one-time
+explicit RustFS qualification passed on `crabbuild` with the same successor
+scenarios; its small isolated namespace is retained as
 `qualification/ref-journal-rollback-91961-1788425898401725000`. The test uses
-standard AWS endpoint/bucket/credential environment, introduces no product
-configuration, and is ignored unless explicitly requested. CI now selects the
-hermetic journal tests for Linux, Windows and macOS; live-provider tests are
-not silently counted as part of that default run.
+standard AWS endpoint/bucket/credential inputs and introduces no product
+configuration. The live harness is kept outside the shared metadata crate;
+CI selects the hermetic journal tests for Linux, Windows and macOS and does
+not silently count live-provider proof as part of that default run.
 
 Both `storage`-only and `remote-index` feature selections pass the fourteen
 hermetic tests; the minimal no-default-features build also passes. Three
@@ -3261,6 +3342,521 @@ Protocol CI 33747451500 is separate and was still in progress at this source
 checkpoint. Prior run 33745743645 for `2411cb3` was cancelled after its unit
 job passed, not a complete CI pass.
 
+### Ordinary LFS upload history and selected-remote scope: 2026-09-03 UTC
+
+**Context and failure proof.** Ordinary `crab lfs push` still inspected only
+tip trees after bulk upload was fixed. This behavior also exists in tagged
+`v1.0.1` and the locally available `origin/main`. The replacement/deletion
+regression returned an empty inventory before this change. Optimized
+`60cc9e2` returned successful standalone upload of two current versions while
+omitting older reachable payloads. The unchanged ordinary-upload driver
+failed its first independent historical object read after 18 commands, before
+another publisher could fill the omission. Retain
+`phase2-lfs-normal-before-60cc9e2-20260903/report.json`; zero acceptance checks
+completed. This is a correctness defect, not a performance result.
+
+**Design and ownership.** `cmd::lfs::push` chooses ordinary or bulk policy;
+`lfs::discovery` owns both traversals through its existing bounded, verified
+history scanner. Ordinary roots default to `HEAD`; an explicit named remote
+excludes only its local remote-tracking history. Direct URLs and the project
+default have no named tracking set: do not guess `origin`. Bulk upload retains
+its local-branch/tag default and no remote exclusion; bulk fetch retains
+all-ref/promisor access. Each explicit root resolves independently before
+frozen IDs enter owned stdin. Both uploads remain local-only and fail closed
+on missing/corrupt selected objects or conflicting pointer sizes. Delete the
+ordinary tip-tree path; add no parser, configuration, format or dependency.
+The two production modules grow by nine net lines to carry direction/remote
+policy through the existing owner.
+
+**Phased acceptance.**
+
+1. Prove introduced-history selection with unchanged before/after assertions:
+   replaced/deleted versions without old-tip refs, omitted/explicit roots,
+   selected versus unrelated remote-tracking refs, and unrelated local branch
+   exclusion. Preserve bulk scope. Invalid refs/options/ranges/newlines,
+   pre-cancellation, SHA-1/SHA-256 corruption, conflicting sizes and real
+   blobless-source non-hydration must still fail closed. Run push, fetch,
+   discovery, recent, prune, publication, mirror and process-owner siblings.
+2. Build one optimized candidate. Run unchanged `qualify_normal_push_lfs.py`
+   against a fresh dedicated RustFS prefix with four 65 MiB versions over two
+   commits/two paths. Independently GET and verify SHA-256/size of all four
+   objects immediately after ordinary push, before any Git/Git LFS publisher.
+   Preserve the original ref, clone, fetch, checkout and fsck checks. Add a
+   separate selected-remote CLI probe; do not infer its wiring from unit tests.
+3. Rerun bulk-upload, bulk-fetch and native Git/mirror qualification on that
+   same binary; retain report and binary/driver hashes. Require exact-commit
+   CI and the original provider/OS matrix separately. Measure scan CPU, memory,
+   remote requests and tail latency on isolated small/large introduced ranges
+   before claiming performance parity. Concurrent-host functional runs do not
+   close these gates.
+
+**Local source and functional checkpoint.** All 168 selected tests pass:
+push 17, discovery 29, fetch 20, recent 15, prune 16, publication 4, mirror 65
+and process owner 2. Formatting, diff checks, production-library
+correctness/suspicious Clippy and optimized build pass. Other lint categories
+are not claimed clean. Candidate SHA-256 is
+`be2e08945b7f116786c847bf68346da385af4802d2cd5aeaaf5437c6a56b50af`;
+base commit remains `625ff0c`, with the pull and LFS work still uncommitted.
+The nine touched production-file hashes and driver hashes are recorded in
+`phase2-candidate-be2e089-source-attestation.json` under the qualification root.
+
+Six dedicated RustFS runs pass 259 commands / 79 checks:
+
+| Run ID (`report.json`) | Commands / checks | Acceptance covered |
+| --- | --- | --- |
+| `phase2-lfs-normal-be2e089-20260903` | 35 / 8 | Ordinary upload, all four historical 65 MiB payloads independently read before another publisher |
+| `phase2-lfs-selected-direct-be2e089-20260903` | 44 / 12 | Selected-remote exclusion, unrelated-remote isolation, known-history no-op, direct-URL recovery |
+| `phase2-lfs-selected-default-be2e089-20260903` | 44 / 12 | Same selected-remote controls, project-default whole-history recovery |
+| `phase2-lfs-selected-bulk-be2e089-20260903` | 44 / 12 | Same selected-remote controls, `--all` recovery despite tracking refs |
+| `phase2-lfs-bulk_push-be2e089-20260903` | 35 / 8 | Unchanged standalone bulk-upload regression and independent historical bytes |
+| `phase2-lfs-all_history-be2e089-20260903` | 57 / 27 | All-ref/full and explicit-ref/partial fetch, dry-run nonmutation, both commit versions, strict Git/LFS fsck |
+
+The ordinary driver's SHA-256 matches its retained failing baseline:
+`3d15dee9672e2d3d799e54fdc4a219110b496ae038a6b4105a0ef26de5536bac`.
+Selected-remote probes deliberately install synthetic local tracking refs
+without prior remote media, making exclusion and recovery independently
+observable. Their initial namespace is empty; only introduced payloads appear
+after ordinary upload. No-op inventory retains exact keys/ETags/sizes. Each
+recovery mode fills older media, independently hash/size-verified, followed by
+the original ref/clone/fetch/checkout/fsck checks. Driver SHA-256:
+`1d46c3adedff6ac98077b72678c9e97a8a62f7b73840fcf1df0093d79ec64b85`.
+This is not proof that synthetic tracking refs represent actual publication.
+
+The first native Git/mirror run remains failed after 434 commands / 119
+recorded checks (118 passed):
+`phase2-protocol-mirror-be2e089-20260903/artifacts/report.json`. The launch
+incorrectly supplied `GIT_CONFIG_GLOBAL=/dev/null`, suppressing the isolated
+XDG `uploadpack.packObjectsHook` used to trigger cancellation. Neither hook
+marker existed; mirror completed ordinary inspection before a signal was
+sent. Read-only `git config --show-origin --get uploadpack.packObjectsHook`
+on the exact fixture returned missing with that variable and the expected
+hook path with it unset, matching [Git's configuration contract](https://git-scm.com/docs/git-config#Documentation/git-config.txt-GITCONFIGGLOBAL).
+This is a retained launch/fixture failure, not evidence that a signalled child
+survived cancellation. Failure-report SHA-256:
+`96fc963ab97b00820dcb59674fd508e15b0c0ad087d404c55c7deb406bae784c`.
+No production source, fixture assertion or gate was changed. A fresh namespace
+with only that conflicting launch override removed passes 464 commands / 133
+checks: `phase2-protocol-mirror-be2e089-xdg-20260903/artifacts/report.json`.
+Real-child cancellation/cache release, native ref lifecycle, full/shallow/
+partial reads, security refusals, mirror hooks and plan/apply/reapply pass.
+The optional prior-release rollback executable was omitted. The seven completed
+suites total 723 commands / 212 checks; the failed launch is retained separately,
+not included in the pass count. Candidate binary and all nine production-source
+hashes remain unchanged. The retained pull transport-assertion casing failure
+still requires approval; these LFS results do not make the pull suite green.
+No clean-commit CI, provider matrix, controlled-performance or full Phase 2
+completion claim follows from this concurrent-host checkpoint.
+
+**Contract boundary.** [Git LFS 3.8's push manual](https://github.com/git-lfs/git-lfs/blob/v3.8.0/docs/man/git-lfs-push.adoc)
+and [range scanner](https://github.com/git-lfs/git-lfs/blob/v3.8.0/git/rev_list_scanner.go)
+define selected-remote exclusions. Its [CLI](https://github.com/git-lfs/git-lfs/blob/v3.8.0/commands/command_push.go)
+requires explicit refs for non-stdin ordinary push; Crab's omitted-`HEAD` and
+direct-URL extensions are retained from tagged `v1.0.1`, not claimed as exact
+Git LFS CLI parity. Crab does not adopt `--ignore-missing`: selected graph
+failures must not produce partial upload success. Object-ID/stdin admission,
+remote-resolution cancellation, alias-lock coverage, configured non-bulk
+filters, selected-remote recent scope and prune safety remain separate work.
+The guide names the exact history scopes. The stdin-admission checkpoint below
+also aligns generated CLI `--all` help and verifies the rendered release help.
+
+### Whole-request LFS stdin admission: 2026-09-03 UTC
+
+**Context and reproduced failure.** Push and fetch collected stdin lines
+without bounds. Push read input before rejecting conflicting flags; object-ID
+normalization silently discarded malformed trailing values and accepted a
+second remote operand. Empty object-ID stdin could lose its selection mode.
+The unchanged release-binary probe against `be2e089` records 9 commands / 10
+checks, with 8 failures: malformed requests returned success, empty input was
+rejected, or conflicting flags waited for a producer-held-open pipe. The fetch
+flag-conflict control passed. Retained report:
+`phase2-lfs-admission-before-be2e089-python39-20260903/report.json`, SHA-256
+`96516689662e34798ec0f22fc37672afc0c59f9aafab3ccfb77c110cd1d6eb5e`.
+The preceding Python 3.9 driver launch lacked `hashlib.file_digest` and ran no
+commands; it is not a product failure. The corrected driver uses a bounded
+hash loop and is unchanged between the retained baseline and candidate.
+
+**Design and ownership.** `cmd/lfs/input.rs` is one private push/fetch admission
+owner, replacing both unbounded readers. It retains exact UTF-8 operand bytes,
+accepts LF/CRLF and a final unterminated line, ignores empty lines, and rejects
+control bytes. Encoded input is capped at 64 MiB, each encoded line at 1 MiB;
+an independent 64 MiB logical budget charges string descriptors and operand
+bytes. Reads consume at most the remaining encoded allowance plus one byte
+needed to detect overflow. No partial inventory escapes on a read, encoding or
+budget failure. Allocation overhead means these are not exact RSS limits.
+
+Push's pure argument resolver rejects mode conflicts and ambiguous remotes
+before input, validates every object ID, and keeps object-ID mode even when
+its stdin selection is empty. Empty ordinary stdin selects nothing; explicit
+`--all` retains whole local branch/tag history. Fetch uses the same framing
+owner and preserves empty JSON/prune behavior, with broader selection only
+when explicitly requested. No new dependency, config option or storage format.
+The shared helper pays for its added code by removing two unbounded readers
+and owning one input/error/budget contract. Pre-push's existing bounded
+four-field ref-update grammar is distinct and remains under its Git owner;
+mirror does not acquire a second reader for that same stream.
+
+**Phased acceptance.**
+
+1. **Admission before work — implemented, locally verified.** Context: a bad
+   request must not become a partial or different upload. Exit: mixed CLI/stdin
+   operands and incompatible modes reject with stdin held open; malformed final
+   OIDs, invalid UTF-8/control bytes, read failures and exhausted bounds reject
+   the entire list. Empty streams never default an object-ID request to HEAD.
+2. **Preserved user workflow — implemented, RustFS verified.** Context: strict
+   parsing must not break valid scripted publication. Exit: ref stdin, uppercase
+   object-ID stdin and empty `--all` stdin independently publish four 65 MiB
+   historical payloads before any other publisher. Independent GET/hash/size
+   proof and exact LFS inventory pass; empty/rejected requests leave no payloads.
+   Cold-clone ref and all-history stdin fetches recover all four exact objects;
+   empty JSON fetch and invalid input leave an empty local media cache. Retain
+   ordinary Git/LFS push, clone, fetch, checkout, fsck and ref checks afterward.
+3. **Interruptible input lifecycle — open.** Context: bounded synchronous input
+   is not cancellable while a producer stalls inside a read. Exit: idle pipe,
+   partial line, EOF, read error and cancellation/second-signal races terminate
+   every owned reader before returning on all supported OSes, with no detached
+   thread or false success. Preserve transfer-agent and pre-push grammar owners;
+   qualify their distinct input lifecycles rather than aliasing parsers.
+4. **Release closure — open.** Context: local functional results do not certify
+   the full Phase 2 contract. Exit: exact-commit CI, supported Git/OS/providers,
+   managed/direct paths, complete large-history and controlled resource gates.
+   Object-ID dry-run currently validates syntax but not cache availability;
+   remote-resolution/transfer cancellation and output-write errors remain open.
+
+**Current evidence.** Candidate SHA-256
+`dbcdf17b6db132a106082fe101d5f2527f30e61124fc8b004f617222639001dc`,
+base `625ff0c`, dirty/uncommitted. All 187 command-LFS, 29 shared discovery
+and 65 mirror tests pass (281 total). Production correctness/suspicious Clippy, formatting, diff checks,
+optimized build and rendered `lfs push --help` pass; 496 other Crab warnings
+are not a clean lint result. The unchanged admission driver passes all 9
+commands / 10 checks at `phase2-lfs-admission-dbcdf17-20260903/report.json`.
+Its held-open conflict probes exit in 10–12 ms on this host, not a latency SLO.
+Three fresh RustFS suites each pass 53 commands / 41 checks (159 / 123 total):
+`phase2-lfs-stdin-{refs,object-ids,all}-dbcdf17-20260903/report.json`.
+Admission driver SHA-256:
+`df2419db2fe727ed61266c743b984d6c75c741ec8fae56070484dcc8ef84b56c`;
+stdin RustFS driver SHA-256:
+`3e04e9e34dcb401f3940b2fecf5246d0ed0509a7373cbf80e74b9670b6dabbf3`.
+Native Git/mirror also passes 464 commands / 133 checks:
+`phase2-protocol-mirror-dbcdf17-20260903/artifacts/report.json`. Its XDG hook
+configuration is not suppressed by `GIT_CONFIG_GLOBAL`; real-child cancellation,
+complete hook batches, plan/apply/reapply, native ref lifecycle and partial/
+shallow/security gates retain the original assertions. Optional rollback binary
+omitted. The four RustFS suites total 623 commands / 256 checks; separate
+admission proof is 9 / 10. Binary and twelve focused production-source hashes
+remain unchanged; `phase2-candidate-dbcdf17-source-attestation.json` binds them.
+No clean-commit CI, controlled-performance or full provider-matrix claim.
+The pull casing assertion remains unchanged and failing pending approval.
+
+**Dependency contract.** [Git LFS 3.8 push](https://github.com/git-lfs/git-lfs/blob/v3.8.0/commands/command_push.go)
+and [fetch](https://github.com/git-lfs/git-lfs/blob/v3.8.0/commands/command_fetch.go)
+separate stdin from positional selections and allow empty stdin; explicit
+all-history selection remains distinct. Crab retains its tagged optional
+remote/default-HEAD extensions. Whole-request bounds and stricter malformed-ID
+rejection are explicit local admission policy, not a claim of complete upstream
+CLI parity. No production diagnostic or test expectation was changed to erase
+the unrelated pending pull failure.
+
+### Caller-owned LFS remote setup: 2026-09-03 UTC
+
+**Context.** The canonical LFS resolver created a fresh cancellation token,
+discarding the command's cancellation domain. Named-remote lookups and fetch's
+remote-existence probe used unsupervised Git processes. A retained optimized
+`dbcdf17` probe stalled `git remote get-url`: push, object-ID push, fetch, pull
+and pre-push each ignored the first SIGINT and exceeded the three-second
+deadline. The driver killed only its owned process group. Report:
+`phase2-lfs-remote-cancel-before-dbcdf17-20260903/report.json`.
+
+**Implementation.** One private `resolve_lfs_remote_context` accepts the
+operation, repository root and caller token. Existing command owners pass
+their token through remote selection, client acquisition and readiness setup.
+Conversion uses its explicit target root. Remote-verified pruning checks
+cancellation before and after verification, but does not yet interrupt the
+verification await itself. One bounded, owned Git lookup serves remote URL
+resolution, pre-push URL validation and fetch's remote/ref discriminator.
+Cancellation and I/O failures propagate instead of becoming a missing remote.
+Tagged `v1.0.1` public no-token signatures remain thin entry points to the same
+resolver; there is no second routing implementation or new configuration.
+
+The async setup boundary may be cancelled because it acquires read clients,
+grants and readiness information, not ref-publication ownership. Do not apply
+the same drop-on-cancel rule to mutating transfers without abort/acknowledgment
+proof. Local dependency inspection found checks between managed HTTP requests
+and before provider resolution, not guaranteed interruption of pending awaits.
+The shared Git runner owns process-group/job teardown and joins output workers.
+
+**Phases and acceptance.**
+
+1. **Remote lookup ownership — implemented and qualified locally.** First
+   SIGINT during each of the five lookup entry points returns cancellation,
+   stops the Git child before returning, and never enters transfer discovery.
+   Precancellation beats repository access and remote/ref reinterpretation.
+2. **Pending network setup — implemented; qualification incomplete.** A
+   stage-specific fixture must serve a valid canonical layout, stall readiness
+   or grant acquisition, and verify cancellation with no transfer or mutation.
+   The first HTTP probe reached layout validation rather than its intended
+   manifest request. All three commands returned cancellation in 1 ms, but its
+   exact-stage checks failed. Retain
+   `phase2-lfs-readiness-cancel-43fd963-20260903/report.json` as **failed**;
+   it is not replica-readiness or managed-grant acceptance. No assertions were
+   changed to relabel it. Repair the fixture's stage setup while preserving
+   the original report and intended readiness acceptance.
+3. **Whole-operation ownership — open.** Carry the caller domain into owners
+   still lacking it: transfer-agent sessions, locks, migration, standalone
+   filter/smudge and hooks. Prove idle input, identity lookups, storage transfer,
+   multipart abort acknowledgment and output failure without detached workers.
+   `resolve_crab_read_layout` and conversion/prune transfer awaits remain
+   explicit siblings; this patch does not certify them.
+4. **Release closure — open.** Exact-commit CI, OS/provider/managed matrix and
+   controlled resource measurements remain required. Never describe local
+   timing as a latency SLO or reuse a predecessor binary's proof as current.
+
+**Evidence.** Optimized candidate SHA-256
+`43fd96348b9e39aa0cc16fd64a546e6ad89d3e6d6be160f16b33359cc96f2bab`,
+base `625ff0c`, dirty/uncommitted. The unchanged stalled-Git driver passes
+5 commands / 6 checks in
+`phase2-lfs-remote-cancel-current-20260903/report.json`: all children stop
+before return, cancellation takes 6–15 ms, and binary identity is unchanged.
+Command-LFS tests pass 190/190; discovery 29/29; mirror 65/65. The prune
+selector passes 16 tests, including eight command-option tests already counted
+in command-LFS. Production correctness/suspicious Clippy passes with 495 other
+Crab warnings; this is not a globally clean lint result. Three fresh RustFS
+stdin suites each pass 53 commands / 41 checks using four 65 MiB payloads,
+independent remote GET/hash/size checks and cold fetches:
+`phase2-lfs-stdin-{refs,object-ids,all}-43fd963-20260903/report.json`.
+The same binary also passes native Git/mirror RustFS qualification, 464
+commands / 133 checks, at
+`phase2-protocol-mirror-43fd963-20260903/artifacts/report.json`, SHA-256
+`68cd6d62ff00b84905afdb82562b9e0c730b0e6ca3703b9b820fd2d0ad287a06`.
+The four successful RustFS suites total 623 commands / 256 checks. The XDG
+Git hook remains active; optional rollback binary is omitted. Neither the
+failed readiness fixture nor Kubernetes replay is counted in these passes.
+No storage format, dependency or lockfile changes. Added production surface
+owns the missing cancellation boundary and replaces duplicate Git lookup
+construction; it does not add fallback policy. The pending pull assertion
+and broader clone/recovery fixture failures remain unchanged.
+
+### Kubernetes push 919: journal-only payload visibility gap
+
+**Terminal evidence, not a running replay.**
+`phase2-kubernetes-published-full-625ff0c-20260903/artifacts/report.json`
+is **failed**: initial import and 918 incremental pushes succeeded; push 919
+failed in 7,491 ms with a missing-staged-pointer error. The pinned executable
+SHA-256 is
+`424d0df7a99920d1396421b86c62cf89c6a3395aee2afc6a0854496727a5a94e`.
+The terminal report SHA-256 is
+`8930a6edfdeec7ac1be9090d64e07649ad8441132b154327c590d58b6a0f2782`.
+The final 1,000-push, clone/hydrate and performance gates did not run to
+completion. The original Kubernetes checkout remains unchanged.
+
+**Observed boundary.** Normal add had published both recovered historical
+recipes. Push 918 introduced the 581,598,168-byte Docker.dmg pointer; staging
+then retired that recipe. Push 919 added only `crab.toml`, so incremental
+discovery found no pointers. The live staging entry for the other prepared
+payload triggered a full walk of 140,658 commits. The discovered old pointer
+was rejected because its retired recipe was not found through remote lookup.
+Its wire hash starts `17c73fe6`; the error's `bbb7450f` prefix is the same
+32 bytes formatted through Xet's four-word little-endian Merkle hash contract,
+not a third payload identity. `crab-types::pointer` serializes raw bytes;
+`xet-core-structures` 1.6.0 `DataHash::hex` formats little-endian words.
+
+**Read-only origin audit.**
+`phase2-kubernetes-journal-audit-625ff0c-20260903/report.json` passes four
+checks using only repository-prefix LIST/GET. Compacted manifest generation
+is 6. The current main head names push 918's active transaction
+`1b88c516f3bd685ff0316abd024f5b447f9f8a8e779e7f585c1ff3f65db1079d`,
+which contains shard
+`66dedb49f9d95bebea8c24de03ae66cd0be018db2c2e393baa4cbcab677026ae`.
+The ref lock is explicitly released. All 8,461 repository object keys, sizes
+and ETags and the failed report are unchanged. This does not independently
+prove every global xorb's bytes or a completed GC exclusion interval.
+
+**Source evidence map.** `cmd::push` enters native discovery, then the shared
+`PushPipeline`. `read_base_manifest` obtains a `RepositorySnapshot` but keeps
+only `materialized_manifest`: current refs, old compacted pack/shard roots.
+`lookup_origin_file_index_batch` searches that old shard root, not
+`snapshot.journal.shards`. `commit_ref_journal` correctly makes uploaded
+shards visible through its active transaction before staging retirement.
+The mismatch also exists in the inspected `origin/main`; it is not introduced
+by the LFS setup changes. The snapshot-backed `FileIndexLookupSession` and
+post-fetch shard synchronization already consume journal shards. Existing
+push tests cover compacted-manifest recovery and stale/corrupt/cache-only
+rejection, but do not prove this sequential post-retirement journal case.
+
+**Executable repair plan; not implemented by this checkpoint.**
+
+1. **Pin complete push-base ownership.** Preserve one captured base containing
+   the compacted manifest, CAS token and committed journal inventory/digest.
+   Derive ref decisions and payload proof from that same capture. Exit:
+   journal-only shard lookup succeeds with retired staging, before compaction;
+   uncommitted/cache-only/corrupt/missing payloads still reject. Do not create
+   synthetic persisted roots or accept a freshly read unrelated snapshot as
+   proof for an older plan. Reuse canonical snapshot lookup where it meets
+   origin/GC/cache contracts instead of adding another recovery search path.
+2. **Revalidate every shared consumer.** Cover under-lock refresh, CAS retry,
+   remote-only records, candidate index/receipt construction, same-repository
+   deduplication and manifest publication. Exit: journal changes at an unchanged
+   manifest ETag invalidate stale plans; compaction and concurrent sibling refs
+   retain all committed packs/shards; ref rejection cannot publish sibling
+   dependencies. Prove native CLI, remote helper and mirror callers; preserve
+   protected/active-active service ownership and existing corruption tests.
+3. **Focused real-store regression, then full replay.** In a fresh namespace,
+   perform add/commit/push, confirm retirement, commit an ordinary file, push
+   again before maintenance compacts the journal, then cold clone/hydrate and
+   compare original bytes. Include an unrelated staged payload to exercise the
+   observed full-walk branch. Exit: exact refs, byte identity, released locks,
+   no restaging requirement, then all 1,000 original-history pushes and final
+   cold-client gates. Preserve the failed namespace; no repair/retry has run.
+4. **Scale and release qualification.** Measure journal inventory reads and
+   bounded memory/requests; examine the zero-pointer full-walk trigger separately
+   after durability is fixed. A staged unrelated file does not itself prove a
+   stale remote frontier. Exit: controlled before/after large-history results,
+   broad exact-commit CI and required provider/OS gates. Passing a short repro
+   or forcing compaction before the second push is not completion.
+
+### Journal-aware push repair: local implementation checkpoint
+
+The working tree now retains the complete `RepositorySnapshot` in
+`crab/src/git/push.rs`. Ref decisions, remote-only file lookup, same-repository
+shard lookup and incremental pack inventory derive from that capture.
+Candidate indexes union all committed journal packs/shards with newly uploaded
+dependencies; membership sets avoid repeated pairwise inventory comparisons.
+Under-lock and publication-time refresh compare complete snapshots, not only
+the compacted manifest ETag. The private dependency plan binds the snapshot
+digest and invalidates receipts when that capture changes. This is not a new
+persisted receipt format or continuous publication fencing.
+
+`crates/crab-metadata/src/file_index_lookup.rs` owns the captured-snapshot
+acceleration opener. Push's duplicate compacted-only search was removed.
+Scoped lookup remains write-free; unscoped SlateDB readers close after lookup,
+including errors. SlateDB 0.15.0's managed reader creates checkpoints and its
+`close` shuts down the reader task. Acceleration hits still require exact
+captured shard membership, then push independently verifies the origin shard,
+recipe and xorbs. Existing cache-only and corrupt-origin rejections remain.
+
+**Proof so far.** The new retired-staging/journal-only regression failed with
+`PointerMissingStaging` before the source change and passes afterward. Twelve
+metadata lookup tests pass with only `file-index-reader` enabled, including
+captured lookup after a newer manifest and scoped no-write access. A focused
+push selection passes 22 tests and fails one newly added fixture: its sole
+committed sibling ref leaves HEAD pointing to absent `main`, so canonical
+journal validation correctly rejects the fixture before the intended refresh
+assertion. The existing under-lock refresh, ref-lease, candidate inventory,
+non-atomic dependency replan and missing/corrupt/cache-only tests pass.
+The failing fixture has not been weakened or relabeled.
+The minimal no-default-features metadata check also passes; existing unused
+type warnings remain. Formatting and whitespace checks pass.
+
+**Real-store gate still open.**
+`phase2-journal-reuse-baseline-43fd963-20260903/artifacts/report.json` is failed,
+not product qualification. Its new harness checks the wrong journal prefix,
+`ref-journal/active`; the storage contract and recorded object listing use
+`refs/journal/active`. The run stops before its second payload-reuse push.
+Keep that failed report. Correcting these newly authored fixtures and the
+previous Git diagnostic casing assertion requires user approval under the
+repository's test-edit restriction. Then run a fresh baseline/candidate pair,
+confirm staging retirement without intervening compaction, and cold-clone and
+hydrate with byte identity. Do not replace the Kubernetes failure with these
+unit results or count this fixture failure as a reproduced product failure.
+
+The external release binary remains `43fd963`; no new optimized candidate or
+1,000-history replay has started at this checkpoint. PR #148 remains draft at
+`625ff0c`; these source changes are not pushed. Native remote-helper/mirror
+caller proof, full replay, controlled performance and required provider/OS CI
+remain open. Cross-repository committed chunk receipt acceleration still uses
+compacted source anchors; its journal fast path needs separate proof, while
+full origin verification remains the correctness path. Protected push keeps
+service-owned base state; active-active still requires its own qualification.
+
+### Snapshot refresh without redundant immutable repacking
+
+The existing `cas_retry_reuses_dependencies_when_only_unrelated_ref_advanced`
+test exposed an implementation regression: the first journal repair rebuilt
+all dependencies whenever any snapshot field changed. The unchanged test
+observed one dependency replan instead of zero. This was fixed in production,
+not by changing its assertion.
+
+`snapshot_retains_dependencies` now permits reuse only when the validated
+layout is unchanged and every prior committed shard and complete pack metadata
+entry remains in the refreshed inventory. Requested-ref conflicts still force
+the existing subset replan. With retained dependencies, push verifies current
+pack origin, rechecks remote-only file recipes/bytes, registers the candidate
+shard union, refreshes local-placement origin proof, and rebuilds the receipt
+against the new snapshot. A removed shard/pack, changed pack metadata or layout
+does not qualify for reuse. Same ref OIDs or the same manifest ETag alone are
+not sufficient. This preserves the existing immutable-upload reuse contract
+without reusing a stale snapshot-bound receipt.
+
+Twenty-two focused current-source tests pass, including the unchanged
+unrelated-ref reuse regression, conflicting-ref subset publication, active
+marker acknowledgement, compaction/locator handoff, journal-only staging
+lookup and corruption/cache-only rejection. A new table-driven policy test
+covers identical/additive/ref-only/compacted inventories and removed or
+changed dependency identities. Sixty-five mirror tests and fourteen
+protected/active-active tests pass; one DynamoDB-local test remains explicitly
+ignored and is not cloud-provider proof. The separate new under-lock fixture
+still fails for its invalid HEAD and remains unchanged pending approval.
+
+The protocol workflow now schedules these push regressions and the shared
+file-index lookup tests. YAML parsing, formatting and whitespace checks pass.
+This is workflow wiring, not evidence of a completed CI run. The optimized
+candidate is rebuilt for unchanged native-Git/mirror RustFS qualification;
+its terminal result must be recorded separately before claiming that gate.
+
+### Journal candidate RustFS result and fresh Kubernetes replay
+
+Optimized binary SHA-256
+`771e8bee09211480f7d46b628546547f4ec57f3087af877c9c0276d0fcd0578a`
+passes the unchanged native Git/mirror RustFS harness: **464 commands / 133
+checks**, no failed checks, macOS / Apple Git 2.50.1 / direct mode. Report:
+`phase2-protocol-mirror-journal-771e8be-20260903/artifacts/report.json`, SHA-256
+`e65c192ad6d3370b33e6482aa557e74b5694e51548fd72c892c4571c64e621c0`.
+The executable and changed journal source hashes match before/after the run.
+No rollback binary was supplied; this is not a production-provider, cross-OS
+or controlled performance result. The metadata lookup suite also passes all
+twelve tests again with only `file-index-reader` enabled.
+The product Clippy correctness/suspicious gate exits successfully; 490 other
+product warnings remain, so this is not a warnings-free lint claim. Capability
+matrix verification and workflow YAML parsing also pass.
+
+The full original Kubernetes qualification is running separately as
+`phase2-kubernetes-journal-771e8be-20260903`, with a run-owned pinned copy of
+the same executable and a fresh isolated remote prefix. It requests all
+1,000 original first-parent pushes and the existing final clone/correctness
+gates. Preflight confirms source HEAD
+`4675851bd198493d2fcd371cf493594ab1933f23`, replay base
+`338e80805f4034fafb9c7344b151b719f9171fc5`, and a clean source checkout.
+Both original recovered payloads are published through normal add, the owned
+index is restored, and preparation checks pass before replay. No old failure
+namespace is repaired or retried. The task-specific driver explicitly marks
+this functional qualification invalid for performance comparison.
+
+The small dedicated journal-reuse fixture remains blocked on its path
+correction; the larger unchanged real-history workload proceeds after the
+focused unit and native/mirror gates. This does not relabel the failed fixture
+or remove its acceptance requirement. Neither a running replay nor successful
+preparation is a large-repository pass. Retain its terminal result and run the
+unchanged full report verifier before closing any original-history gate.
+The source/binary/report attestation is
+`phase2-candidate-journal-771e8be-source-attestation.json`; its running-replay
+field is a checkpoint, not final evidence. No source changes have been pushed.
+
+### Host merge enforcement audit: 2026-09-03 16:54 UTC
+
+Read-only GitHub queries for `crabbuild/crab` / `main` return an empty effective
+rules list and HTTP 404 `Branch not protected` from the legacy protection
+endpoint. Evidence: `phase2-host-merge-gate-audit-20260903T1654.json` in the
+external qualification root. No repository settings were changed, and no
+candidate merge was attempted. The existing RustFS mirror-CI failure check
+proves command behavior, not host enforcement.
+
+The Phase 2 host gate remains open: authorize/configure the candidate-bound
+required check and branch protection, then prove a missing-data candidate is
+blocked while a valid candidate can satisfy it. Preserve exact candidate OIDs,
+check conclusions and mergeability evidence. Enabling branch protection is a
+repository policy change requiring explicit approval; do not infer permission
+from this implementation or PR request. This audit covers only the named branch,
+not every collaboration host or managed deployment.
+
 ### Original Kubernetes replay remains incomplete: 2026-09-03 UTC
 
 The pinned `56d336a` frozen-preparation replay reached push 918 and failed
@@ -3461,6 +4057,408 @@ do not conflate this with clone's no-index-change contract. Original source and
 history remain untouched. Exact `8456eeb` CI is run 33751971094; predecessor
 33749651295 was superseded/cancelled, not a full pass. No controlled-performance
 or complete 1,000-push gate is closed by these functional results.
+
+### Pull Git-phase ownership and diagnostic parity
+
+**Context and reproduced behavior.** On optimized `625ff0c`, a real local-Git
+merge conflict leaves `file.txt` unmerged, but both text and `--json` modes
+return exit 5 / `CRAB-E0070` instead of `CRAB-E0130`. Text mode loses the Git
+diagnostic; JSON mode retains the fetch message but emits plain stderr instead
+of a JSON terminal result. The retained neutral-path baseline is
+`phase2-pull-classification-neutral-625ff0c-20260903/artifacts/report.json`:
+73 commands, 22 checks, two failed classification checks. Both merge
+and rebase no-op cases with a deliberately stale `ORIG_HEAD` pass on this Git
+version; do not describe stale-path selection as a reproduced product failure.
+An earlier attempt stopped on an overlong driver log filename before invoking
+Crab pull; that failed report is not product-regression evidence. The intervening
+`phase2-pull-classification-baseline-625ff0c-20260903` run incorrectly appeared
+to pass JSON classification because its remote directory contained `conflict`.
+The current substring classifier matched that unrelated fetch diagnostic.
+Neutral transport names remove this accidental positive; retain both reports.
+
+**Baseline owner and evidence map.** `crab/src/main.rs` dispatches into
+`crab/src/cmd/pull.rs::run_pull`. At `625ff0c`,
+`execute_git_pull` blocks in `Command::output`, captures stdout, and inherits
+stderr only in text mode. Classification reads only stderr, ignoring the
+actual merge-conflict messages captured on stdout. Text mode has no captured
+stderr; machine mode can misclassify unrelated diagnostic path text.
+`diff_since` separately ignores snapshot/diff failures and consults
+`ORIG_HEAD`; candidate selection uses process-relative paths and turns literal
+paths into hydrate patterns. The shared cloud hydration owner is now wired,
+but does not repair these Git-phase contracts. `crab/src/git/process.rs` owns
+cancellation, bounded output, process groups/jobs and joined pipe workers for
+mirror and LFS callers. Reuse that owner; do not add another child-cleanup
+implementation. Its existing callers are the required sibling regression set.
+
+**Design.** Resolve the worktree root once. Run the blocking Git phase in
+`spawn_blocking` with the caller's cancellation token. Extend
+the shared process owner's stderr consumption only as necessary to support
+bounded capture plus live terminal progress; retain its default behavior for
+mirror/LFS. Capture checked before/after commit snapshots. A proven unborn
+HEAD permits initial-tree enumeration; command failure is not an unborn HEAD.
+Equal snapshots produce no changed paths. Otherwise enumerate the exact pair;
+do not substitute an older `ORIG_HEAD` or silently ignore enumeration failure.
+Determine conflicts from the unmerged index, not localized progress phrases.
+Hydration receives root-relative literal paths without lossy decoding or glob
+expansion. Retain provider failures and cancellation, and report Git integration
+separately when it succeeded before hydration failed. One terminal outcome
+must use the selected text/JSON/JSONL boundary; subprocess stdout must not leak
+into the machine stream.
+
+**Phases and acceptance.**
+
+1. Preserve the baseline above. Add real-Git failing tests for text/JSON
+   conflict parity, failed transport diagnostics, explicit-root/subdirectory
+   execution, malformed enumeration and literal metacharacter filenames.
+   Keep merge/rebase no-op cases as positive controls. Test an unborn branch
+   separately from corrupt/missing commit objects; no fallback-based success.
+2. Integrate the existing process owner. Require bounded stdout/stderr,
+   visible text progress, typed cancellation, no acknowledgement on failure,
+   and reaped children/descendants with joined readers. Mirror and LFS process
+   tests must retain their previous behavior on Linux, macOS and Windows.
+3. Replace snapshot/path admission and terminal output together. Verify exact
+   changed-path sets for fast-forward, merge, rebase, rename, deletion and
+   initial pull. Exercise default pathspec and non-default selector features;
+   unrepresentable paths must fail explicitly, never hydrate a different file.
+   No-hydrate controls only Crab's post-pull phase: native Git filters can
+   still materialize files during checkout. Documentation must reflect that.
+4. Rerun the unchanged baseline against an exact optimized candidate, then
+   deferred-hydration RustFS with cold caches, independently hashed payloads,
+   strict Git fsck and unchanged candidate identity. Inject cancellation during
+   Git and hydration, transport failure, malformed output and output-sink
+   failure. Publish fresh CI results; unit or local-Git proof alone is not
+   provider, lifecycle or full compatibility qualification.
+
+**Dependency contracts.** Git documents NUL-delimited path output and the
+unmerged `U` selection in [`git diff`](https://git-scm.com/docs/git-diff).
+[`git rev-parse`](https://git-scm.com/docs/git-rev-parse) describes `ORIG_HEAD`
+as state recorded by several history-changing commands, not a transaction
+receipt for this Crab invocation. Preserve the supported Git-version floor
+when choosing snapshot and existence probes. The shared process implementation
+and both selector dependencies must be read and tested before extending their
+contracts. [`git show-ref`](https://git-scm.com/docs/git-show-ref) documents
+exact `--verify --quiet` lookup; use that supported probe rather than newer
+existence options. `diff --cached --diff-filter=U -z` inspects the unmerged
+index directly without depending on worktree contents or localized messages.
+
+**Local implementation checkpoint, not complete acceptance.** The Git phase
+now lives in `crab/src/cmd/pull/git.rs`. It uses the shared subprocess owner
+with bounded stderr capture/terminal tee, checked commit snapshots, proven
+unborn admission and strict NUL path inventory. An operation-local child
+cancellation token also signals the blocking worker if its async caller is
+dropped; normal awaited cancellation joins the process/pipe workers. Dropping
+an async task is not itself proof that those workers have already joined.
+`run_pull` resolves the explicit worktree root for candidate inspection and
+propagates inspection failures. `Cmd::output_mode` now includes pull, allowing
+its failures to use the existing JSON/JSONL error boundary. This does not yet
+provide a unified pull success/hydration outcome.
+
+The old command/snapshot/conflict helpers are removed, not retained as another
+path. Existing mirror/LFS callers retain their default stderr reader. Local
+sibling tests pass: 12 mirror process, two platform cleanup, 29 discovery and
+15 recent-history tests. The pull suite still has a known new-test assertion
+failure: its transport expectation uses lower-case `could`, while native Git
+returns `Could`. Production preserves the original diagnostic; no lowercasing
+or validation bypass was added to make the assertion pass. The CLI mode/schema
+test passes. The current pull selection is **23 passed, one failed**; the
+stalled-hook fixture entry is a subprocess helper, not an independent product
+acceptance scenario. Production-library correctness/suspicious Clippy, formatting,
+diff checks and workflow YAML parsing pass; other warning categories are not
+claimed clean. The bounded subprocess extension and stricter admission add
+roughly 95 production lines after deleting the old Git-phase helpers; new
+tests are separate. This added code owns checked failure and cancellation
+behavior rather than a second command or reconstruction path.
+
+The optimized **uncommitted** candidate built successfully, SHA-256
+`e80061ec30d10683e6ea751b7ad24e987f4d5ad778093d00cbe1cf1fe71018cf`.
+Three separate probes pass with that identity unchanged:
+
+- `phase2-pull-classification-local-625ff0c-dirty-20260903`: 73 commands,
+  22 checks. Driver SHA-256 matches the retained failed baseline; both former
+  conflict-classification failures pass, with the no-op controls unchanged.
+- `phase2-pull-machine-local-625ff0c-dirty-20260903`: 85 commands, 39 checks.
+  JSON and JSONL each emit one exact typed conflict/transport error, correct
+  exit codes and original Git diagnostic casing. Subdirectory execution and
+  inherited wrong-repository Git environment variables target the intended
+  client. The report also records hashes of the dirty production source files.
+- `phase2-hydration-callers-local-625ff0c-dirty-20260903`: 44 commands,
+  24 checks. Cold profile-driven clone and deferred post-pull hydration
+  reconstruct independently hashed 4 MiB originals; exact refs and strict
+  Git fsck pass. Native smudge is deliberately disabled in the deferred case
+  to exercise Crab's post-pull owner.
+
+All reports are under their run's `artifacts/report.json`. These functional
+developer-host results do not supersede the failing test or certify a clean
+commit, full lifecycle, native-platform CI or performance baseline. The
+concurrent 1,000-push replay still uses its separate unchanged `625ff0c` binary
+copy; rebuilding the candidate did not replace that run's executable.
+
+At this Git-phase checkpoint, literal candidate paths still enter hydrate's
+pattern selector; the following packet addresses that boundary. Do not mark
+literal metacharacter selection, missing-pointer admission, descriptor-race
+protection, output-sink cancellation or the combined hydration/reporting
+lifecycle complete. The local Git-phase change is bounded follow-up work, not
+closure of this design's four phases or the original Phase 2 gates.
+
+### Literal Git hydration inventory and cache-key identity
+
+**Context and reproduction.** The optimized Git-phase-only candidate
+`e80061ec30d10683e6ea751b7ad24e987f4d5ad778093d00cbe1cf1fe71018cf`
+still expanded the post-pull inventory. In a fresh RustFS repository, only
+`data[1].bin` changed; its sibling `data1.bin` remained at the original commit's
+pointer. Pull succeeded and reconstructed the changed file correctly, but also
+hydrated the unselected sibling. The retained failure is
+`phase2-pull-literal-baseline-e80061e-20260903/artifacts/report.json`:
+29 commands, 23 checks, failed `unselected-decoy-remains-pointer`. This is
+over-selection, not a failure to reconstruct the selected original. The prior
+12-command attempt used an unsupported `crab add --all` invocation and stopped
+before pull; it is a driver failure, not product evidence.
+
+**Design and owner boundaries.** Keep Git selection typed as exact absolute
+paths paired with parsed pointer identities. The pointer reader returns its
+parsed identity while retaining the existing boolean query for its other
+callers; reads remain stack-bounded and handle short/interrupted reads through
+EOF. Pull passes the typed inventory to `hydrate_selected`, not `HydrateArgs`
+patterns. `configured_hydrator` remains the sole provider/restore/local-staging
+composition. `run_selected_hydration` owns the existing progress and reporting;
+`hydrate/execute.rs` owns shared recovery, verified CoW, reconstruction,
+verified cache publication and index refresh. Ordinary hydrate's CLI selection
+and clone/profile callers feed the same execution/reporting path. No alternate
+reconstructor, provider resolver, configuration flag or storage layout is added.
+
+**Size review.** Across the local Git-phase and literal-inventory changes,
+production sections grow by approximately 114 lines including comments and
+whitespace, with tests counted separately. The new owners replace the old
+pull subprocess/pattern wrapper and move shared hydration execution rather
+than copying it. The additional surface carries checked snapshots, bounded
+Git diagnostics, explicit-root selection and one typed hydration entry point;
+there is still one provider composition and one reconstruction/reporting path.
+
+Execution errors are captured before joining reporters, so an early recovery
+or CoW error cannot bypass the normal reporter cleanup. This does not prove
+cleanup after abrupt task/process death or blocked output sinks. Pull's text
+completion uses the actual verified hydrated count, not candidate count.
+The shared reporter also rejects a declared byte total that cannot fit `u64`,
+before creating progress tasks or starting reconstruction. Its new regression
+panicked on the former unchecked sum and returns `InvalidData` after the fix.
+Pull's duplicate byte summation and formatter are removed; byte accounting
+stays with the shared hydration owner. This is a numeric admission check, not
+the still-required total-memory/inventory budget.
+
+**Shipped reporting contract.** `git show v1.0.1:crab/src/cmd/pull.rs` and its
+called hydrate implementation establish the released `hydrate` /
+`hydrate.event` result stream during post-pull hydration. This packet reuses
+that reporter rather than silently changing the command's emitted schema.
+The proposed single pull-level success/partial-failure envelope still needs
+an explicit published transition contract and full caller proof; retaining
+the released stream is not completion of that broader design.
+
+**Cache identity.** A second regression reproduced conversion of a literal
+Unix `data\1.bin` cache key to `data/1.bin`. The failing test observed the
+wrong row before the production fix. Shared publication now retains literal
+Unix backslashes, normalizes separators only on Windows, and declines an
+advisory cache entry when its path is outside the root or is not representable
+as UTF-8. It does not write a lossy alias. Rust's
+[`Path` contract](https://doc.rust-lang.org/std/path/struct.Path.html#method.to_str)
+distinguishes checked Unicode conversion from replacement-character decoding
+and documents platform-specific separators. No existing cache is deleted or
+migrated; advisory candidates still require byte/stat verification.
+
+**Phases and acceptance.**
+
+1. Retain the failing RustFS probe and cache-key regression. The former must
+   pass unchanged with an optimized candidate: only the intended file is
+   materialized, the sibling remains byte-identical to its pointer, HEAD and
+   strict Git fsck pass, and candidate/driver identities are recorded.
+2. Require exact inventory and cache-key tests, precancellation, reporter
+   cleanup, and the existing ordinary-hydrate/recovery/CoW/index-proof cases.
+   Check the boolean pointer-reader siblings, particularly dehydrate and
+   batch hydration. Keep every prior failure visible; no assertion bypasses.
+3. Exercise both path-matching feature configurations plus native Windows,
+   macOS and Linux CI. Re-run profile clone and deferred post-pull hydration
+   against cold RustFS caches, independently checking payload bytes. The
+   workflow now selects the complete hydration test module and pointer tests.
+4. Continue the original gates: missing-file/index admission, metadata and
+   ancestor/descriptor races, output-sink lifecycle, strict manifest literal
+   handling, bounded total inventory, full provider matrix and controlled
+   performance. Typed pull selection alone does not close those sibling gaps.
+
+**Source checkpoint.** Local implementation compiles. All 83 hydration tests
+pass after the cache-key fix, including the unchanged regression that failed
+before it. All five new selected-hydration tests also pass without
+`gix-pathmatch` (features `simd-accel,tier,watch,nfs,gix-transport`). The shared
+pointer-reader selection passes ten tests, dehydrate 42, and batch policy six.
+Production-library correctness/suspicious Clippy, formatting, diff checks and
+workflow YAML parsing pass; unrelated warning categories are not claimed clean.
+The optimized build passes. Fresh local candidate SHA-256 is
+`60cc9e27c36e44a256feedd8eed77ac47ba0f153b18661370949d35087da4683`;
+the base commit remains `625ff0c` with uncommitted source changes, not a new
+published commit or clean release artifact.
+
+The unchanged literal-path driver now passes 29 commands / 23 checks in
+`phase2-pull-literal-60cc9e2-serial-20260903/artifacts/report.json`: exact
+changed payload bytes, unchanged sibling pointer, expected HEAD, strict Git
+fsck and unchanged binary. Its SHA-256
+`80b51d6631f949902ebcee222e32f9688ddee06ad2f8d6bf367ad5e6cf750252`
+matches the retained baseline. Three sibling runs on the same candidate pass:
+
+| Report run ID (`artifacts/report.json`) | Commands / checks | Proof |
+| --- | --- | --- |
+| `phase2-hydration-callers-60cc9e2-local-20260903` | 44 / 24 | Cold clone profile and deferred post-pull hydration; independent 4 MiB payload hashes, refs and strict fsck |
+| `phase2-pull-classification-60cc9e2-local-20260903` | 73 / 22 | Neutral-path real conflicts plus no-op merge/rebase controls |
+| `phase2-pull-machine-60cc9e2-local-20260903` | 85 / 39 | JSON/JSONL errors, original Git diagnostic, no false HEAD advance, explicit nested-root isolation |
+
+These four completed runs total 231 commands / 108 checks. A separate first
+attempt, `phase2-pull-literal-60cc9e2-local-20260903`, remains **failed** after
+16 commands / 15 completed checks: initial push hit SlateDB writer fencing
+before clone or pull. It was run concurrently with the sibling probes. Its
+failure is not removed by the serial pass and is not evidence of a literal
+selection regression; shared metadata ownership needs separate qualification.
+The same candidate also passes full native Git/mirror RustFS qualification:
+464 commands / 133 checks, report
+`phase2-protocol-mirror-60cc9e2-local-20260903/artifacts/report.json`.
+Native ref lifecycle, full/shallow/partial reads, security rejection, mirror
+hook composition, plan/apply/reapply and approved deletion checks pass.
+Candidate binary and the seven touched production-source file hashes are
+unchanged after these runs; the local source attestation is
+`phase2-candidate-60cc9e2-source-attestation.json` under the qualification root.
+The optional prior-release rollback binary was omitted. The five completed
+suites total 695 commands / 241 checks; the separate failed run is excluded
+from that pass count, not erased.
+The separate 1,000-push replay retains its earlier pinned `625ff0c` executable
+and cannot certify this newer source. These are functional checks on a
+concurrent development host, not controlled performance or native/provider
+matrix proof. The known pull transport-assertion casing mismatch remains
+pending approval and is not made green by these results. No original Phase 2
+gate is closed by this checkpoint.
+
+### Concurrent bucket-shared metadata writers: qualification follow-up
+
+**Context.** The retained 16-command initial-push failure above reports
+`CRAB-E0503` for `chunk_index_db`, with SlateDB's `Fenced` close reason and zero
+reported pushed refs. It occurred while independent repositories in the same
+RustFS bucket were being qualified concurrently. Distinct repository prefixes
+and local cache roots do not imply distinct global chunk-index manifests.
+The same literal driver passes in a later run with the three sibling probes
+finished; this isolates literal hydration behavior, not concurrent-writer
+correctness. The long Kubernetes replay was still active. No exact competing
+writer identity or deterministic interleaving has yet been established.
+
+**Independent failed-run readback.** A separate read-only AWS LIST/GET audit
+passes six commands / nine checks in
+`phase2-failed-push-readback-60cc9e2-20260903/artifacts/report.json`. The exact
+failed repository has a generation-zero empty ref manifest and no ref-journal
+objects. Its ref lock and all admission slots are explicit released records;
+its repository GC fence has no active writer or sweep. Uploaded pack and file
+index objects remain retained. The complete 24-object repository inventory
+(key, ETag, size) and original failure-report hash are unchanged before/after.
+No Crab advertisement, repair, retry, publication or deletion was invoked.
+This proves the observed failed push did not expose refs and left these
+repository leases released; it does not reproduce the competing writer,
+prove bucket-global fencing or resolve the concurrency defect. Original
+failure remains failed, with SHA-256
+`1f83283fa7f2e3ed7537c28e503dd06f43c088b158844e8b7bdd284dc689ce8f`.
+Audit driver SHA-256:
+`62ec0502248d6e739950533a61e2da3c87af2afb54dfaa86f413bea56386c7c9`.
+
+**Known ownership contracts.** `build_push_metadb_guard_with_object_store` in
+`crab/src/git/push.rs` derives the shared chunk-index path from the global
+storage domain. `promote_metadb_to_candidate_writer` deliberately delays
+writer creation until candidate publication work, but a short writer lifetime
+is not mutual exclusion. The metadata `Db::open_with_cache` path opens a
+SlateDB writer; its pinned 0.15.0
+[`CloseReason::Fenced` contract](https://docs.rs/slatedb/0.15.0/slatedb/enum.CloseReason.html#variant.Fenced)
+makes that instance unusable. Per-ref leases are repository-scoped, while
+`PushAdmissionTicket::acquire_fences` uses the GC fence's shared writer mode;
+neither fact is proof of exclusive ownership of one global metadata writer.
+These boundaries also exist on the currently available `origin/main`; a
+deterministic before/after test is still required before attributing the
+observed failure to this branch or declaring it pre-existing behavior.
+
+**Phased plan and acceptance.**
+
+1. Reproduce with two barrier-controlled push candidates for different
+   repositories sharing one isolated global metadata domain. Record exact
+   manifest path, writer epochs, refs, dependency receipts and terminal errors;
+   run pinned base and candidate. Acceptance: overlap is proven, the failing
+   interleaving is deterministic, and both failed/successful ref outcomes are
+   independently read back. Do not interrupt the existing long replay or use
+   bucket-wide GC for this test.
+2. Establish one owner for global writer admission, database close and lease
+   release. Evaluate a short canonical-store-scoped writer lease against an
+   immutable-index publication design; do not serialize the entire upload.
+   Acceptance: two disjoint pushes cannot fence each other's accepted writer;
+   cancellation/timeout/fencing drain the database before ownership handoff;
+   uncertain ref publication is read back, never blindly retried or called
+   successful. New persistent coordination keys or layouts require the
+   explicit writer-format/upgrade decision already tracked by this plan.
+3. Cover all writers and callers, including native helper, CLI, mirror,
+   protected push and metadata maintenance. Acceptance: no alternate writer
+   bypasses the owner; read-only hydration still does not fence writers;
+   process death and successor takeover preserve acknowledged data. Validate
+   bounded admission and tail latency at 1/2/8 simultaneous repositories on
+   the declared provider matrix. Preserve an isolated single-writer baseline
+   and distinguish queueing from upload and metadata-commit time.
+
+Status: observed failure plus an executable investigation/design packet;
+no concurrent-metadata fix or full scalability claim in this checkpoint.
+
+### Historical first-read admission: retained failure and separate recovery proof
+
+**Context.** Exact `625ff0c` passed three focused RustFS suites: hydration
+callers (44 commands / 24 checks), native Git/mirror (464 / 133), and bulk LFS
+(57 / 27). Binary SHA-256 is
+`424d0df7a99920d1396421b86c62cf89c6a3395aee2afc6a0854496727a5a94e`.
+Those passes do not cover the historical first-read failure below.
+
+Exact `625ff0c` protocol CI subsequently completed successfully in all nine
+jobs: [run 33753308414](https://github.com/crabbuild/crab/actions/runs/33753308414).
+This includes Windows/macOS contracts, Git 2.30/2.40/2.45/current clients and
+the released-shape RustFS lifecycle. It is not proof for the newer local pull
+changes, production-provider coverage or controlled performance.
+
+`phase2-historical-clone-reconfiguration-625ff0c-20260903/artifacts/report.json`
+failed after 37 commands / 24 completed checks. All four pushes succeeded;
+the subsequent `git ls-remote` failed after 401,985 ms. Its stderr records
+journal compaction followed by locator publication ending in a coordination
+renewal deadline error. No clone/payload acceptance gate completed in that run.
+Do not relabel it as passing after a retry or call it a hydration failure.
+
+**Observed recovery, not root-cause proof.** A separate diagnostic retry
+(`phase2-historical-admission-retry-625ff0c-20260903/artifacts/report.json`)
+passed 14 commands / 9 checks and advertised the exact expected ref in 219 ms.
+The locator lock was already a released tombstone before retry and unchanged
+afterward. Original failure report, candidate hash and source checkout remained
+unchanged. This establishes recoverable advertisement on retained state, not
+why renewal missed its deadline, absence of earlier lease expiry, cold-read
+reliability or controlled performance.
+
+**Phases and acceptance.** First instrument and reproduce the original
+first-admission sequence in a new isolated namespace, retaining request,
+renewal, locator-work and close timings. Distinguish provider latency, host
+contention and long non-yielding work before choosing a fix; increasing TTL
+alone is not acceptance. Audit `upload_pack_wire` admission into locator repair,
+`push::while_renewing_internal_lock_impl`, locator publication and writer close.
+The non-cancelling wrapper currently retains a renewal error while allowing
+the operation to finish, and writer close can publish a checkpoint. Prove
+mutation/publication behavior under renewal loss with a successor, preserving
+mandatory SlateDB close and holder-checked lock release. Cancellation is not
+by itself continuous fencing. Keep the existing writer/format and strictly
+read-only admission decisions explicit; do not silently extend their contract.
+
+**Post-repair client proof.**
+`phase2-historical-cold-clients-625ff0c-20260903/artifacts/report.json` passes
+46 commands / 42 checks: separate empty-cache lazy/ordinary-hydrate, eager and
+selective clients reconstruct the original 581,598,168-byte version; a fourth
+lazy client preserves committed project policy before explicit relocation and
+ordinary hydration of the original 581,598,166-byte version. Independent
+SHA-256 checks, exact commits, strict Git fsck, unchanged clone index and final
+source/binary identity checks pass. The original failed report is unchanged.
+This is post-repair client proof, not a new first-admission pass.
+
+Then require fresh first-admission fault/success proof,
+the full 1,000-push replay, provider/OS matrix and controlled baseline before
+closing the corresponding original gates. No gate is closed by this note.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

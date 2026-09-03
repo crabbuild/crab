@@ -1707,6 +1707,10 @@ fn native_push_config_for_helper(
     }
     native_config.mirror_git_only =
         std::env::var_os(crate::git::push_native::MIRROR_GIT_ONLY_ENV).is_some();
+    if native_config.mirror_git_only {
+        native_config.push.mirror_plan_id =
+            std::env::var(crate::git::push_native::MIRROR_PLAN_ID_ENV).ok();
+    }
 
     native_config
 }

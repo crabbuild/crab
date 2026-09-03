@@ -81,6 +81,53 @@ pub async fn commit_ref_journal_transaction(
     .map_err(CrabError::from)
 }
 
+pub async fn commit_ref_journal_transaction_for_plan(
+    store: &Store,
+    router: &StoreLayout,
+    transaction: &RefJournalTransaction,
+    expected_heads: &[RefJournalHeadSnapshot],
+    plan_id: &str,
+) -> Result<RefJournalCommitResult> {
+    let router = storage_layout(store, router);
+    crab_metadata::ref_journal::commit_ref_transaction_for_plan(
+        store.as_storage(),
+        &router,
+        transaction,
+        expected_heads,
+        plan_id,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
+pub async fn resolve_mirror_plan_receipt(
+    store: &Store,
+    router: &StoreLayout,
+    plan_id: &str,
+) -> Result<Option<crab_metadata::plan_receipt::MirrorPlanReceipt>> {
+    let router = storage_layout(store, router);
+    crab_metadata::plan_receipt::resolve_plan_receipt(store.as_storage(), &router, plan_id)
+        .await
+        .map_err(CrabError::from)
+}
+
+pub async fn read_mirror_plan_manifest(
+    store: &Store,
+    router: &StoreLayout,
+    generation: u64,
+    digest: &str,
+) -> Result<Option<Manifest>> {
+    let router = storage_layout(store, router);
+    crab_metadata::plan_receipt::read_manifest_version(
+        store.as_storage(),
+        &router,
+        generation,
+        digest,
+    )
+    .await
+    .map_err(CrabError::from)
+}
+
 /// Return whether a committed ref transaction still has an active marker.
 pub async fn ref_journal_transaction_is_active(
     store: &Store,

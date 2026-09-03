@@ -10,9 +10,14 @@ on:
       - "Cargo.lock"
       - "crab/Cargo.toml"
       - "crab/src/git/**"
+      - "crab/src/engine/pointer.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/hydrate/**"
       - "crab/src/cmd/lfs/**"
       - "crab/src/cmd/mirror.rs"
       - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/pull.rs"
+      - "crab/src/cmd/pull/**"
       - "crab/src/cmd/cache.rs"
       - "crab/src/main.rs"
       - "crates/crab-cache/**"
@@ -56,9 +61,14 @@ on:
       - "Cargo.lock"
       - "crab/Cargo.toml"
       - "crab/src/git/**"
+      - "crab/src/engine/pointer.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/cmd/hydrate/**"
       - "crab/src/cmd/lfs/**"
       - "crab/src/cmd/mirror.rs"
       - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/pull.rs"
+      - "crab/src/cmd/pull/**"
       - "crab/src/cmd/cache.rs"
       - "crab/src/main.rs"
       - "crates/crab-cache/**"
@@ -151,10 +161,24 @@ jobs:
           cargo test -p crab --lib cmd::lfs::fetch::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::lfs::clone::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --features gix-transport
-          cargo test -p crab --lib cmd::hydrate::tests::hydration_owner --locked --features gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests --locked --features gix-transport
+          cargo test -p crab --lib engine::pointer::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::pull:: --locked --features gix-transport
+          cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --features gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
+          cargo test -p crab --lib --locked --features gix-transport -- \
+            git::push::tests::lookup_staging \
+            git::push::tests::under_lock_refresh \
+            git::push::tests::candidate_indexes_retain_uncompacted_journal_dependencies \
+            git::push::tests::candidate_metadata_anchor \
+            git::push::tests::snapshot_dependency_retention \
+            git::push::tests::cas_retry_reuses_dependencies \
+            git::push::tests::non_atomic_cas_retry \
+            git::push::tests::shared_xorb_non_atomic_replan \
+            git::push::tests::ref_lease
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
+          cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
           cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
@@ -252,7 +276,10 @@ jobs:
           cargo test -p crab --lib cmd::lfs::fetch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::clone::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
-          cargo test -p crab --lib cmd::hydrate::tests::hydration_owner --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib engine::pointer::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::pull:: --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run protocol and transcript contracts
         run: >-

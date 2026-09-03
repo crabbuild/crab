@@ -187,7 +187,7 @@ pub fn run_prune_with_cancel(
     }
 
     if options.verify_remote {
-        let (verified, skipped) = verify_remote_candidates(&candidates)?;
+        let (verified, skipped) = verify_remote_candidates(&candidates, cancel)?;
         if skipped > 0 {
             println!("crab lfs prune: kept {skipped} object(s) missing remotely");
             if options.when_unverified == WhenUnverified::Halt {
@@ -407,12 +407,21 @@ fn collect_local_objects(lfs_objects_dir: &Path) -> Result<Vec<LocalObject>> {
 
 fn verify_remote_candidates<'a>(
     candidates: &[&'a LocalObject],
+    cancel: &CancellationToken,
 ) -> Result<(Vec<&'a LocalObject>, u64)> {
-    let ctx = crate::cmd::lfs::store_setup::resolve_lfs_remote_for_operation_sync("prune")?;
+    let ctx = crate::cmd::lfs::block_on_runtime(
+        crate::cmd::lfs::store_setup::resolve_lfs_remote_context(
+            "prune",
+            None,
+            Path::new("."),
+            cancel,
+        ),
+    )?;
     let mut verified = Vec::new();
     let mut skipped = 0u64;
 
     for candidate in candidates {
+        check_cancelled(cancel)?;
         let oid = parse_hex32(&candidate.oid_hex)?;
         let valid = crate::cmd::lfs::block_on_runtime(async {
             match ctx.store.verify(&oid).await {
@@ -421,6 +430,7 @@ fn verify_remote_candidates<'a>(
                 Err(error) => Err(CrabError::from(error)),
             }
         })?;
+        check_cancelled(cancel)?;
         if valid {
             verified.push(*candidate);
         } else {

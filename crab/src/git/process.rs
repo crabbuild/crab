@@ -3,7 +3,7 @@
 use crate::core::error::{CrabError, Result, check_cancelled};
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use std::io::{self, Read as _};
-use std::process::{ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,10 +36,22 @@ pub(crate) struct Output<T> {
 }
 
 pub(crate) fn run<T: Send>(
+    command: Command,
+    cancel: &CancellationToken,
+    write_stdin: Option<impl FnOnce(ChildStdin) -> Result<()> + Send>,
+    read_stdout: impl FnOnce(ChildStdout) -> Result<T> + Send,
+) -> Result<Output<T>> {
+    run_with_stderr(command, cancel, write_stdin, read_stdout, |stderr| {
+        Ok(capture_output(stderr, MAX_CAPTURE_BYTES)?)
+    })
+}
+
+pub(crate) fn run_with_stderr<T: Send>(
     mut command: Command,
     cancel: &CancellationToken,
     write_stdin: Option<impl FnOnce(ChildStdin) -> Result<()> + Send>,
     read_stdout: impl FnOnce(ChildStdout) -> Result<T> + Send,
+    read_stderr: impl FnOnce(ChildStderr) -> Result<Vec<u8>> + Send,
 ) -> Result<Output<T>> {
     check_cancelled(cancel)?;
     command
@@ -62,7 +74,14 @@ pub(crate) fn run<T: Send>(
     // Stop the owned process tree before joining workers on any error. A
     // blocked pipe must not outlive the caller's repository/cache ownership.
     thread::scope(|scope| {
-        let result = communicate(scope, &mut child, write_stdin, read_stdout, cancel);
+        let result = communicate(
+            scope,
+            &mut child,
+            write_stdin,
+            read_stdout,
+            read_stderr,
+            cancel,
+        );
         if result.is_err() {
             child.stop()?;
             if cancel.is_cancelled() {
@@ -84,6 +103,7 @@ fn communicate<'scope, T: Send + 'scope>(
     child: &mut OwnedChild,
     write_stdin: Option<impl FnOnce(ChildStdin) -> Result<()> + Send + 'scope>,
     read_stdout: impl FnOnce(ChildStdout) -> Result<T> + Send + 'scope,
+    read_stderr: impl FnOnce(ChildStderr) -> Result<Vec<u8>> + Send + 'scope,
     cancel: &CancellationToken,
 ) -> Result<Output<T>> {
     let (sender, receiver) = mpsc::channel();
@@ -98,10 +118,7 @@ fn communicate<'scope, T: Send + 'scope>(
     {
         let sender = sender.clone();
         thread::Builder::new().spawn_scoped(scope, move || {
-            let result = capture_output(stderr, MAX_CAPTURE_BYTES)
-                .map(PipeResult::Stderr)
-                .map_err(CrabError::from);
-            let _ = sender.send(result);
+            let _ = sender.send(read_stderr(stderr).map(PipeResult::Stderr));
         })?;
     }
     let mut pending = 2;

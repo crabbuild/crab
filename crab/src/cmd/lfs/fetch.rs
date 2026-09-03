@@ -4,9 +4,8 @@
 //! via the shared [`super::store_setup`] module.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
@@ -15,7 +14,7 @@ use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use super::store_setup::resolve_lfs_remote_for_operation_with_remote_sync;
+use super::store_setup::{git_remote_url_output, resolve_lfs_remote_context};
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsFetchOptions {
@@ -47,9 +46,18 @@ pub struct LfsPullOptions {
 pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
     validate_fetch_options(&options)?;
-    let (remote, refs) = remote_and_refs_from_options(&options)?;
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", remote.as_deref())?;
-    let entries = collect_lfs_pointers(Path::new("."), options.all, options.recent, &refs, cancel)?;
+    let (remote, refs) = remote_and_refs_from_options(&options, cancel)?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "pull",
+        remote.as_deref(),
+        Path::new("."),
+        cancel,
+    ))?;
+    let entries = if options.stdin && refs.is_empty() && !options.all && !options.recent {
+        Vec::new()
+    } else {
+        collect_lfs_pointers(Path::new("."), options.all, options.recent, &refs, cancel)?
+    };
     check_cancelled(cancel)?;
 
     if entries.is_empty() {
@@ -180,46 +188,28 @@ fn validate_fetch_options(options: &LfsFetchOptions) -> Result<()> {
 
 fn remote_and_refs_from_options(
     options: &LfsFetchOptions,
+    cancel: &CancellationToken,
 ) -> Result<(Option<String>, Vec<String>)> {
-    let refs = refs_from_options(options)?;
     if options.stdin {
+        let refs = super::input::read_stdin_lines(cancel)?;
         return Ok((options.remote.clone(), refs));
     }
+    let refs = options.refs.clone();
 
     let Some(candidate) = options.remote.as_ref() else {
         return Ok((None, refs));
     };
 
-    if git_remote_exists(candidate) || !refs.is_empty() {
+    if git_remote_exists(candidate, cancel)? || !refs.is_empty() {
         return Ok((Some(candidate.clone()), refs));
     }
 
     Ok((None, vec![candidate.clone()]))
 }
 
-fn git_remote_exists(name: &str) -> bool {
-    Command::new("git")
-        .args(["remote", "get-url", name])
-        .output()
-        .ok()
-        .is_some_and(|output| output.status.success())
-}
-
-fn refs_from_options(options: &LfsFetchOptions) -> Result<Vec<String>> {
-    if !options.stdin {
-        return Ok(options.refs.clone());
-    }
-
-    let stdin = std::io::stdin();
-    stdin
-        .lock()
-        .lines()
-        .map(|line| {
-            line.map(|line| line.trim().to_owned())
-                .map_err(CrabError::Io)
-        })
-        .filter(|line| !matches!(line, Ok(value) if value.is_empty()))
-        .collect()
+fn git_remote_exists(name: &str, cancel: &CancellationToken) -> Result<bool> {
+    let output = git_remote_url_output(Path::new("."), name, false, cancel)?;
+    Ok(output.status.success())
 }
 
 #[derive(Debug, Clone)]
@@ -372,7 +362,12 @@ fn run_fetch_prune(dry_run: bool, cancel: &CancellationToken) -> Result<()> {
 /// tree with the actual file content.
 pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Result<()> {
     check_cancelled(cancel)?;
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", options.remote.as_deref())?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "pull",
+        options.remote.as_deref(),
+        Path::new("."),
+        cancel,
+    ))?;
     let entries = collect_lfs_pointers(Path::new("."), false, false, &[], cancel)?;
     check_cancelled(cancel)?;
 

@@ -302,6 +302,30 @@ pub async fn select_manifest_history(
     Ok(selected)
 }
 
+/// Read one exact historical manifest without enumerating its generation.
+pub async fn read_manifest_history_exact(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    generation: u64,
+    digest: &str,
+) -> Result<Option<ManifestHistoryEntry>> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(MetadataError::Internal(
+            "historical manifest digest must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    let path = router.manifest_history_path(generation, digest);
+    match store.head(&path).await {
+        Ok(_) => read_history_entry(store, router, &path).await.map(Some),
+        Err(StorageError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn archive_manifest(
     store: &Store,
     router: &StoreLayout<Store>,

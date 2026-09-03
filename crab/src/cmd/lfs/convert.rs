@@ -26,7 +26,7 @@ use crab_git::lfs_pointer::LfsPointer;
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_types::pointer::Pointer;
 
-use super::store_setup::resolve_lfs_remote_for_operation_sync;
+use super::store_setup::resolve_lfs_remote_context;
 
 const CONVERT_MANIFEST: &str = "crab-lfs-convert-state.json";
 const CONVERT_LOCK: &str = "crab-lfs-convert.lock";
@@ -256,7 +256,7 @@ fn convert_lfs_to_crab(
         let SourcePointer::Lfs(pointer) = &candidate.source else {
             continue;
         };
-        let content = resolve_lfs_content(repo_root, &candidate.path, pointer)?;
+        let content = resolve_lfs_content(repo_root, &candidate.path, pointer, cancel)?;
         write_worktree_file(repo_root, &candidate.path, &content)?;
     }
     check_cancelled(cancel)?;
@@ -280,7 +280,7 @@ fn convert_crab_to_lfs(
     candidates: &[ConvertCandidate],
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let ctx = resolve_lfs_remote_for_operation_sync("push")?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context("push", None, repo_root, cancel))?;
 
     for candidate in candidates {
         check_cancelled(cancel)?;
@@ -351,7 +351,13 @@ fn collect_candidates(
     Ok(candidates)
 }
 
-fn resolve_lfs_content(repo_root: &Path, rel_path: &str, pointer: &LfsPointer) -> Result<Vec<u8>> {
+fn resolve_lfs_content(
+    repo_root: &Path,
+    rel_path: &str,
+    pointer: &LfsPointer,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>> {
+    check_cancelled(cancel)?;
     let full_path = repo_root.join(rel_path);
     if full_path.is_file() {
         let content = std::fs::read(&full_path).map_err(CrabError::Io)?;
@@ -370,7 +376,9 @@ fn resolve_lfs_content(repo_root: &Path, rel_path: &str, pointer: &LfsPointer) -
         Err(error) => return Err(error),
     }
 
-    let ctx = resolve_lfs_remote_for_operation_sync("download")?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "download", None, repo_root, cancel,
+    ))?;
     let content = super::block_on_runtime(async {
         ctx.store
             .verify(&pointer.oid)

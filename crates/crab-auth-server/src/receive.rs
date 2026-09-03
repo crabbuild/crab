@@ -101,6 +101,8 @@ pub struct ActiveActiveReceiveConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProtectedPushPlan {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_plan_id: Option<String>,
     pub repo_prefix: String,
     pub push_id: String,
     pub upload_prefix: String,
@@ -324,8 +326,15 @@ pub fn validate_push_plan_shape(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    if plan.schema_version != 1 {
-        return Err(invalid("unsupported push-plan schema_version"));
+    match (plan.schema_version, plan.mirror_plan_id.as_deref()) {
+        (1, None) => {}
+        (2, Some(plan_id)) => validate_hash_component(plan_id, "mirror plan id")?,
+        (1, Some(_)) | (2, None) => {
+            return Err(invalid(
+                "push-plan schema_version does not match its mirror plan identity",
+            ));
+        }
+        _ => return Err(invalid("unsupported push-plan schema_version")),
     }
     if plan.repo_prefix != repo_prefix {
         return Err(invalid("push-plan repo_prefix does not match repo_url"));
@@ -2735,6 +2744,7 @@ mod tests {
     fn push_plan() -> ProtectedPushPlan {
         ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -3013,6 +3023,28 @@ mod tests {
             err.to_string().contains("too many ref updates"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn push_plan_shape_accepts_version_two_with_a_mirror_plan_identity() {
+        let mut plan = push_plan();
+        plan.schema_version = 2;
+        plan.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(
+            validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_ok()
+        );
+    }
+
+    #[test]
+    fn push_plan_shape_rejects_mirror_identity_in_version_one() {
+        let mut plan = push_plan();
+        plan.mirror_plan_id = Some("a".repeat(64));
+
+        let error = validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("schema_version"));
     }
 
     #[test]
@@ -3509,6 +3541,7 @@ mod tests {
 
         let plan = ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -3533,6 +3566,7 @@ mod tests {
     async fn commit_service_metadata_publishes_file_and_chunk_indexes() -> Result<()> {
         let store = store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &router).await?;
         let (file_hash, shard_hash, shard_bytes, xorb_hash, xorb_bytes, expected_chunks) =
             test_file_shard_reference()?;
         let shard_entry = ShardSegmentEntry {
@@ -3578,6 +3612,7 @@ mod tests {
         candidate.seal_git_validation();
         let plan = ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),

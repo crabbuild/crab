@@ -15,6 +15,7 @@ pub mod fetch;
 pub mod filter_process;
 pub mod fsck;
 pub mod hooks;
+mod input;
 pub mod install;
 pub mod locks;
 pub mod logs;
@@ -225,12 +226,12 @@ pub enum LfsCmd {
     },
     /// Upload LFS objects to the remote store.
     Push {
-        /// Git remote name. Crab reads this Git remote URL when provided.
+        /// Git remote name or Crab remote URL; omitted uses the configured default.
         remote: Option<String>,
-        /// Refs or additional object IDs to push.
+        /// Refs or object IDs; ordinary push without refs or --stdin defaults to HEAD.
         #[arg(value_name = "REF_OR_OID")]
         args: Vec<String>,
-        /// Upload all locally-known LFS objects.
+        /// Upload complete selected history; omitted refs select local branches and tags.
         #[arg(long, short = 'a')]
         all: bool,
         /// Upload a specific LFS object by OID.

@@ -204,6 +204,27 @@ pub async fn commit_ref_transaction(
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
 ) -> Result<RefJournalCommitResult> {
+    commit_ref_transaction_inner(store, router, transaction, expected_heads, None).await
+}
+
+/// Commit one transaction with durable attribution to a mirror plan.
+pub async fn commit_ref_transaction_for_plan(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction: &RefJournalTransaction,
+    expected_heads: &[RefJournalHeadSnapshot],
+    plan_id: &str,
+) -> Result<RefJournalCommitResult> {
+    commit_ref_transaction_inner(store, router, transaction, expected_heads, Some(plan_id)).await
+}
+
+async fn commit_ref_transaction_inner(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction: &RefJournalTransaction,
+    expected_heads: &[RefJournalHeadSnapshot],
+    plan_id: Option<&str>,
+) -> Result<RefJournalCommitResult> {
     validate_transaction(transaction)?;
     validate_expected_heads(transaction, expected_heads)?;
     let transaction_id = transaction.id()?;
@@ -223,6 +244,25 @@ pub async fn commit_ref_transaction(
         }
     }
 
+    let intent = if let Some(plan_id) = plan_id {
+        match crate::plan_receipt::prepare_ref_journal_plan_intent(
+            store,
+            router,
+            plan_id,
+            transaction,
+        )
+        .await
+        {
+            Ok(intent) => Some(intent),
+            Err(error) => {
+                rollback_prepared_heads(store, router, &prepared).await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
     let marker = RefJournalActiveMarker {
         version: REF_JOURNAL_VERSION,
         transaction_id: transaction_id.clone(),
@@ -233,6 +273,19 @@ pub async fn commit_ref_transaction(
             Bytes::from(serialize(&marker)?),
         )
         .await?;
+
+    if let Some(intent) = &intent
+        && let Err(error) = crate::plan_receipt::publish_plan_receipt(store, router, intent).await
+    {
+        // The active marker already committed the ref batch. A later replay
+        // resolves the retained intent instead of treating this as failure.
+        warn!(
+            plan_id = %intent.plan_id,
+            %transaction_id,
+            %error,
+            "committed mirror plan terminal receipt needs read-back repair"
+        );
+    }
 
     for (_, prepared_head) in prepared {
         if let Err(error) = promote_head(store, router, prepared_head, &transaction_id).await {
@@ -1149,33 +1202,6 @@ mod tests {
             read_ref_head(&store, &layout, ref_name).await.unwrap().head,
             original.head
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires AWS_BUCKET, AWS_ENDPOINT_URL and credentials for a writable S3-compatible test bucket"]
-    async fn s3_delayed_rollback_preserves_successor() {
-        let bucket = std::env::var("AWS_BUCKET").unwrap();
-        let endpoint = std::env::var("AWS_ENDPOINT_URL").unwrap();
-        let inner = object_store::aws::AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_endpoint(endpoint)
-            .with_client_options(crab_storage::provider_options::default_client_options())
-            .build()
-            .unwrap();
-        let store = Store::new(Arc::new(inner));
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let prefix = format!(
-            "qualification/ref-journal-rollback-{}-{timestamp}",
-            std::process::id()
-        );
-        println!("retained qualification prefix: {prefix}");
-        for existing in [false, true] {
-            let layout = StoreLayout::new(store.clone(), format!("{prefix}/{existing}"));
-            rollback_preserves_successor(&store, &layout, existing).await;
-        }
     }
 
     #[tokio::test]

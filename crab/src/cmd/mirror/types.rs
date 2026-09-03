@@ -255,8 +255,16 @@ pub struct MirrorApplySummary {
     pub actions_applied: u64,
     /// Whether the exact plan outcome was already present.
     pub already_applied: bool,
+    /// Ref-journal transaction that durably attributes a mutating plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<String>,
+    /// Canonical manifest digest that durably attributes a managed plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_digest: Option<String>,
     /// Verified destination relationship after apply.
     pub final_state: MirrorDriftState,
+    /// Fresh inspection kept separate from the historical terminal result.
+    pub current: Box<MirrorCheckSummary>,
 }
 
 /// Typed terminal outcome of mirror integrity or reconciliation execution.

@@ -1,4 +1,19 @@
 use super::*;
+use std::process::Command;
+
+#[test]
+fn cancelled_remote_selection_does_not_fall_back_to_a_ref() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let options = LfsFetchOptions {
+        remote: Some("origin".to_owned()),
+        ..LfsFetchOptions::default()
+    };
+    assert!(matches!(
+        remote_and_refs_from_options(&options, &cancel),
+        Err(CrabError::Cancelled)
+    ));
+}
 
 mod all;
 
@@ -336,7 +351,7 @@ fn remote_operand_becomes_ref_when_not_configured_and_alone() {
         ..LfsFetchOptions::default()
     };
 
-    let (remote, refs) = remote_and_refs_from_options(&options).unwrap();
+    let (remote, refs) = remote_and_refs_from_options(&options, &CancellationToken::new()).unwrap();
 
     assert_eq!(remote, None);
     assert_eq!(refs, vec!["feature"]);

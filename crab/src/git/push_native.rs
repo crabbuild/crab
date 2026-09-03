@@ -32,6 +32,7 @@ use crate::storage::store::Store;
 use crab_staging::StagingAreaReadOnly;
 
 pub(crate) const MIRROR_GIT_ONLY_ENV: &str = "CRAB_INTERNAL_MIRROR_GIT_ONLY";
+pub(crate) const MIRROR_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
 
 /// Configuration for the native push pipeline.
 #[derive(Debug, Clone)]
@@ -196,6 +197,7 @@ pub async fn run_native_push(
     specs: &[PushSpec],
     inputs: NativePushInputs<'_>,
 ) -> Result<PushResult> {
+    validate_mirror_plan_context(config)?;
     if specs.is_empty() {
         debug!("native push: empty spec list, nothing to do");
         return Ok(PushResult::empty());
@@ -585,6 +587,38 @@ pub async fn run_native_push(
     }
 
     Ok(result)
+}
+
+fn validate_mirror_plan_context(config: &NativePushConfig) -> Result<()> {
+    if let Some(plan_id) = config.push.mirror_plan_id.as_deref() {
+        if !config.mirror_git_only {
+            return Err(CrabError::Protocol(
+                "mirror plan identity is only valid for mirror reconciliation".to_owned(),
+            ));
+        }
+        if config.push.active_active_replication.is_some()
+            || config
+                .push
+                .protected_push
+                .as_ref()
+                .and_then(|session| session.active_active_writer.as_ref())
+                .is_some()
+        {
+            return Err(CrabError::Protocol(
+                "mirror plan receipts are not supported by active-active finalize".to_owned(),
+            ));
+        }
+        if plan_id.len() != 64
+            || !plan_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(CrabError::Protocol(
+                "mirror plan identity must be 64 lowercase hexadecimal characters".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[expect(
@@ -1143,6 +1177,32 @@ fn update_push_state_on_success(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_plan_context_accepts_a_valid_direct_plan() {
+        let mut config = NativePushConfig::new(PushConfig::default());
+        config.mirror_git_only = true;
+        config.push.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(validate_mirror_plan_context(&config).is_ok());
+    }
+
+    #[test]
+    fn mirror_plan_context_rejects_identity_outside_mirror_mode() {
+        let mut non_mirror = NativePushConfig::new(PushConfig::default());
+        non_mirror.push.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(validate_mirror_plan_context(&non_mirror).is_err());
+    }
+
+    #[test]
+    fn mirror_plan_context_rejects_noncanonical_identity() {
+        let mut uppercase = NativePushConfig::new(PushConfig::default());
+        uppercase.mirror_git_only = true;
+        uppercase.push.mirror_plan_id = Some("A".repeat(64));
+
+        assert!(validate_mirror_plan_context(&uppercase).is_err());
+    }
 
     #[derive(Debug)]
     struct ManifestReadFailingStore {

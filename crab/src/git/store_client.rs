@@ -800,6 +800,12 @@ mod tests {
     }
 
     async fn seed_file_index(client: &StoreClient, entries: &[(MerkleHash, MerkleHash)]) {
+        crab_metadata::layout_descriptor::ensure_canonical_layout(
+            client.store.origin(),
+            &client.router,
+        )
+        .await
+        .expect("initialize canonical layout");
         let shard_hashes = entries
             .iter()
             .map(|(_, shard_hash)| shard_hash.hex())

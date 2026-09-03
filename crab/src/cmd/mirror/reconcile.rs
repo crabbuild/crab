@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     CRAB_REMOTE, CommandRunner, MirrorArgs, MirrorExecution, check_cancelled, git_command,
-    git_command_from_vec, load_local_refs, load_remote_refs, preflight, prepare_cache,
-    resolve_cache_dir, resolve_source, run_required,
+    git_command_from_vec, load_local_refs, preflight, prepare_cache, resolve_cache_dir,
+    resolve_source, run_required,
 };
 use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
@@ -56,9 +56,10 @@ pub(super) async fn run_integrity_command(
         // Apply owns the cache through the final destination read, not just
         // inspection. A second source refresh must not change its Git objects.
         let cache = cache?;
-        return apply_plan(args, plan_path, &cache, cancel, options, runner, &store?)
-            .await
-            .map(MirrorCommandOutcome::Apply);
+        let mode = options.mode;
+        let summary = apply_plan(args, plan_path, &cache, cancel, options, runner, &store?).await?;
+        render_apply(&summary, mode);
+        return Ok(MirrorCommandOutcome::Apply(summary));
     }
 
     let check = match cache {
@@ -744,6 +745,24 @@ async fn apply_plan(
             "reconciliation storage target changed or is unavailable; create a new plan".to_owned(),
         ));
     }
+    let parsed = CrabUrl::parse(&args.destination)?;
+    let router = StoreLayout::new(store.clone(), parsed.repo_path);
+    if !plan.actions.is_empty()
+        && let Some(commit) = resolve_plan_commit(store, &router, &plan).await?
+    {
+        return Ok(MirrorApplySummary {
+            plan_id: plan.plan_id,
+            source,
+            destination: args.destination.clone(),
+            actions_planned: plan.actions.len() as u64,
+            actions_applied: 0,
+            already_applied: true,
+            transaction_id: commit.transaction_id,
+            manifest_digest: commit.manifest_digest,
+            final_state: before.state,
+            current: Box::new(before),
+        });
+    }
     if before.pointers.state != MirrorPointerState::Verified {
         return Err(CrabError::Protocol(
             "reconciliation refused because pointer data is not fully verified".to_owned(),
@@ -752,6 +771,12 @@ async fn apply_plan(
     let current_source = ref_map(&before.refs, true);
     let current_crab = ref_map(&before.refs, false);
     if current_source == plan.source_refs && current_crab == current_source {
+        if !plan.actions.is_empty() {
+            return Err(CrabError::Protocol(
+                "Crab refs match the plan but no plan-bound receipt exists; another writer cannot satisfy this reconciliation plan"
+                    .to_owned(),
+            ));
+        }
         if plan.actions.is_empty() && before.destination_snapshot != plan.destination_snapshot {
             return Err(CrabError::Protocol(
                 "reconciliation metadata snapshot changed; create a new plan".to_owned(),
@@ -769,7 +794,10 @@ async fn apply_plan(
             actions_planned: plan.actions.len() as u64,
             actions_applied: 0,
             already_applied: true,
+            transaction_id: None,
+            manifest_digest: None,
             final_state: MirrorDriftState::Equal,
+            current: Box::new(before),
         });
     }
     if current_source != plan.source_refs || current_crab != plan.crab_refs {
@@ -815,17 +843,43 @@ async fn apply_plan(
     }
     if !plan.actions.is_empty() {
         let command = git_command_from_vec(push_args, Some(cache_dir), &options, true)
-            .env(crate::git::push_native::MIRROR_GIT_ONLY_ENV, "1".into());
-        run_required(runner, command, options.mode)?;
+            .env(crate::git::push_native::MIRROR_GIT_ONLY_ENV, "1".into())
+            .env(
+                crate::git::push_native::MIRROR_PLAN_ID_ENV,
+                plan.plan_id.clone().into(),
+            );
+        let push_result = run_required(runner, command, options.mode);
+        if let Err(push_error) = push_result {
+            match resolve_plan_commit(store, &router, &plan).await? {
+                Some(commit) => {
+                    let current = inspect(args, cache, cancel, &options, runner, store).await?;
+                    return Ok(MirrorApplySummary {
+                        plan_id: plan.plan_id,
+                        source,
+                        destination: args.destination.clone(),
+                        actions_planned: plan.actions.len() as u64,
+                        actions_applied: plan.actions.len() as u64,
+                        already_applied: false,
+                        transaction_id: commit.transaction_id,
+                        manifest_digest: commit.manifest_digest,
+                        final_state: current.state,
+                        current: Box::new(current),
+                    });
+                }
+                None => return Err(push_error),
+            }
+        }
     }
     check_cancelled(cancel)?;
-    let final_refs = load_remote_refs(cache_dir, &options, runner)?;
-    if final_refs != plan.source_refs {
-        return Err(CrabError::Protocol(
-            "reconciliation push completed but Crab refs do not exactly match the source"
+    let commit = resolve_plan_commit(store, &router, &plan)
+        .await?
+        .ok_or_else(|| {
+        CrabError::Protocol(
+            "reconciliation push returned without a durable plan receipt; commit outcome is uncertain"
                 .to_owned(),
-        ));
-    }
+        )
+    })?;
+    let current = inspect(args, cache, cancel, &options, runner, store).await?;
     let summary = MirrorApplySummary {
         plan_id: plan.plan_id,
         source,
@@ -833,15 +887,137 @@ async fn apply_plan(
         actions_planned: plan.actions.len() as u64,
         actions_applied: plan.actions.len() as u64,
         already_applied: false,
-        final_state: MirrorDriftState::Equal,
+        transaction_id: commit.transaction_id,
+        manifest_digest: commit.manifest_digest,
+        final_state: current.state,
+        current: Box::new(current),
     };
-    if options.mode == OutputMode::Text {
-        eprintln!(
-            "mirror: applied {} action(s); Crab refs now match source",
-            summary.actions_applied
-        );
-    }
     Ok(summary)
+}
+
+#[derive(Debug)]
+struct ResolvedPlanCommit {
+    transaction_id: Option<String>,
+    manifest_digest: Option<String>,
+}
+
+async fn resolve_plan_commit(
+    store: &Store,
+    router: &StoreLayout,
+    plan: &MirrorReconciliationPlan,
+) -> Result<Option<ResolvedPlanCommit>> {
+    let Some(receipt) =
+        crate::metadata::manifest::resolve_mirror_plan_receipt(store, router, &plan.plan_id)
+            .await?
+    else {
+        return Ok(None);
+    };
+    match receipt.commit {
+        crab_metadata::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id, .. } => {
+            let transaction = crate::metadata::manifest::read_ref_journal_transaction(
+                store,
+                router,
+                &transaction_id,
+            )
+            .await?;
+            let expected = plan
+                .actions
+                .iter()
+                .map(|action| {
+                    let next = match action.kind {
+                        MirrorPlanActionKind::UpdateCrabRef => action.expected_source_oid.clone(),
+                        MirrorPlanActionKind::DeleteCrabRef => None,
+                    };
+                    (
+                        action.ref_name.clone(),
+                        (action.expected_crab_oid.clone(), next),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let actual = transaction
+                .edits
+                .iter()
+                .map(|edit| {
+                    (
+                        edit.ref_name.clone(),
+                        (edit.old_oid.clone(), edit.new_oid.clone()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            if expected.len() != plan.actions.len()
+                || actual.len() != transaction.edits.len()
+                || actual != expected
+            {
+                return Err(CrabError::Protocol(
+                    "mirror plan receipt transaction does not match the reviewed ref edits"
+                        .to_owned(),
+                ));
+            }
+            Ok(Some(ResolvedPlanCommit {
+                transaction_id: Some(transaction_id),
+                manifest_digest: None,
+            }))
+        }
+        crab_metadata::plan_receipt::MirrorPlanCommit::Manifest {
+            base_generation,
+            base_digest,
+            generation,
+            digest,
+        } => {
+            let base = crate::metadata::manifest::read_mirror_plan_manifest(
+                store,
+                router,
+                base_generation,
+                &base_digest,
+            )
+            .await?
+            .ok_or_else(|| {
+                CrabError::Protocol(
+                    "managed mirror plan receipt base manifest is unavailable".to_owned(),
+                )
+            })?;
+            let committed = crate::metadata::manifest::read_mirror_plan_manifest(
+                store, router, generation, &digest,
+            )
+            .await?
+            .ok_or_else(|| {
+                CrabError::Protocol(
+                    "managed mirror plan receipt manifest is unavailable".to_owned(),
+                )
+            })?;
+            if base.refs != plan.crab_refs || committed.refs != plan.source_refs {
+                return Err(CrabError::Protocol(
+                    "managed mirror plan receipt does not match the reviewed ref snapshots"
+                        .to_owned(),
+                ));
+            }
+            Ok(Some(ResolvedPlanCommit {
+                transaction_id: None,
+                manifest_digest: Some(digest),
+            }))
+        }
+    }
+}
+
+fn render_apply(summary: &MirrorApplySummary, mode: OutputMode) {
+    if mode != OutputMode::Text {
+        return;
+    }
+    let outcome = if summary.already_applied {
+        "was already committed"
+    } else {
+        "committed"
+    };
+    let commit = summary
+        .transaction_id
+        .as_deref()
+        .or(summary.manifest_digest.as_deref())
+        .unwrap_or("none");
+    eprintln!(
+        "mirror: plan {} {outcome}; submitted {} of {} action(s); commit {commit}; current state {}",
+        summary.plan_id, summary.actions_applied, summary.actions_planned, summary.final_state
+    );
+    render_check(&summary.current, mode);
 }
 
 fn render_check(check: &MirrorCheckSummary, mode: OutputMode) {

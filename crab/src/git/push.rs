@@ -47,10 +47,10 @@ use crate::git::pack;
 use crate::git::progress::NativePushProgress;
 use crate::git::remote_helper::PushSpec;
 use crate::metadata::manifest::{
-    BulkData, Manifest, PackManifestEntry, append_pack_index, append_shard_index,
-    create_manifest_with_etag, read_bulk_pack_list, read_bulk_shard_list, read_manifest,
-    read_pack_index, read_shard_index, upload_segmented_bulk, validate_manifest_payload,
-    write_manifest_cas,
+    BulkData, Manifest, PackManifestEntry, RepositorySnapshot, append_pack_index,
+    append_shard_index, create_manifest_with_etag, read_bulk_pack_list, read_bulk_shard_list,
+    read_manifest, read_pack_index, read_shard_index, upload_segmented_bulk,
+    validate_manifest_payload, write_manifest_cas,
 };
 use crate::replication::{ActiveActivePushPlan, ReplicationConfig};
 use crate::storage::StoreLayout;
@@ -292,12 +292,6 @@ struct VerifiedGlobalChunkRefs {
     stale_hits: usize,
     lookup_unavailable: bool,
     skipped_after_unavailable: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RemoteFileCandidate {
-    shard_hash: MerkleHash,
-    indexed_record: Option<crab_metadata::value_codec::CommittedFileRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -2357,6 +2351,31 @@ fn ref_base_conflicts(
         .collect()
 }
 
+fn snapshot_retains_dependencies(base: &RepositorySnapshot, current: &RepositorySnapshot) -> bool {
+    if base.layout != current.layout {
+        return false;
+    }
+    // Ref movement alone does not invalidate immutable packs. Reuse requires
+    // every old exclusion and recipe source to remain in the committed inventory;
+    // payload origin and the new receipt are still revalidated by the caller.
+    let packs = current
+        .journal
+        .packs
+        .iter()
+        .map(|pack| (&pack.pack_id, pack))
+        .collect::<HashMap<_, _>>();
+    let shards = current.journal.shards.iter().collect::<HashSet<_>>();
+    base.journal.packs.iter().all(|pack| {
+        packs
+            .get(&pack.pack_id)
+            .is_some_and(|current| *current == pack)
+    }) && base
+        .journal
+        .shards
+        .iter()
+        .all(|shard| shards.contains(shard))
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "active-active plan assembly crosses manifest, bulk, routing, and coordinator boundaries"
@@ -3016,6 +3035,8 @@ pub struct PushConfig {
     /// Explicit git directory for callers that publish a repository
     /// other than the process current directory.
     pub git_dir: Option<PathBuf>,
+    /// Validated internal mirror-plan identity for durable commit attribution.
+    pub mirror_plan_id: Option<String>,
     pub protected_push: Option<ProtectedPushSession>,
 }
 
@@ -3047,6 +3068,8 @@ pub enum ProtectedPushBackend {
 #[derive(Serialize)]
 struct ProtectedPushPlan {
     schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mirror_plan_id: Option<String>,
     repo_prefix: String,
     push_id: String,
     upload_prefix: String,
@@ -3099,6 +3122,7 @@ impl Default for PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            mirror_plan_id: None,
             protected_push: None,
         }
     }
@@ -3151,6 +3175,7 @@ impl PushConfig {
             active_active_coordinator: None,
             perf_phase_sink: None,
             git_dir: None,
+            mirror_plan_id: None,
             protected_push: None,
         }
     }
@@ -4146,9 +4171,8 @@ pub struct PushPipeline {
     /// reconstruction terms from an empty staging list would mis-fire
     /// the tertiary `IncompleteShardReconstruction` sentinel.
     remote_only_pointers: tokio::sync::Mutex<std::collections::HashSet<MerkleHash>>,
-    /// Generation-pinned records backing remote-only pointer dependencies.
-    remote_file_records:
-        tokio::sync::Mutex<HashMap<MerkleHash, crab_metadata::value_codec::CommittedFileRecord>>,
+    /// Verified recipe hashes backing snapshot-pinned remote-only dependencies.
+    remote_file_recipe_hashes: tokio::sync::Mutex<HashMap<MerkleHash, [u8; 32]>>,
     /// ChunkIndex populated by this push's verified MetaDb hits.
     /// Used by step 4 for A/B/C classification and warmed after success.
     chunk_index: tokio::sync::Mutex<ChunkIndex>,
@@ -4212,11 +4236,9 @@ pub struct PushPipeline {
     /// falls back to treating every staging-miss as unpushable and
     /// candidate index publication skips the commit-and-warm entirely.
     metadb: tokio::sync::Mutex<Option<crate::metadata::MetaDbGuard>>,
-    /// Base manifest read at the start of the push (before step 1).
-    /// Used by `build_manifest` to compute the new manifest from the
-    /// current state. `None` only when the store is unavailable in a test or
-    /// protected push delegates source-manifest ownership to the service.
-    base_manifest: tokio::sync::Mutex<Option<Manifest>>,
+    // Ref decisions and payload proof must use the same captured journal.
+    // Projecting refs alone loses shards whose staging was already retired.
+    base_snapshot: tokio::sync::Mutex<Option<Arc<RepositorySnapshot>>>,
     /// Base split commit graph loaded on demand as the fast-forward
     /// fallback when `git merge-base --is-ancestor` can't answer
     /// (shallow / sparse client missing the old tip locally). `None`
@@ -4455,6 +4477,7 @@ struct PushDependencyPlan {
     attempt_id: String,
     base_manifest_generation: u64,
     base_manifest_etag: Option<String>,
+    base_snapshot_digest: Option<String>,
     ref_edits: Vec<PlannedRefEdit>,
     git_object_count: u64,
     git_object_set_digest: [u8; 32],
@@ -4508,6 +4531,10 @@ impl PushDependencyPlan {
                 .unwrap_or_default()
                 .as_bytes(),
         );
+        if let Some(digest) = &self.base_snapshot_digest {
+            field(&mut hasher, b"repository-snapshot");
+            field(&mut hasher, digest.as_bytes());
+        }
         for edit in &self.ref_edits {
             field(&mut hasher, edit.src.as_bytes());
             field(&mut hasher, edit.dst.as_bytes());
@@ -7376,7 +7403,7 @@ impl PushPipeline {
             file_shard_index: tokio::sync::Mutex::new(HashMap::new()),
             pending_file_index_plan: tokio::sync::Mutex::new(Vec::new()),
             remote_only_pointers: tokio::sync::Mutex::new(std::collections::HashSet::new()),
-            remote_file_records: tokio::sync::Mutex::new(HashMap::new()),
+            remote_file_recipe_hashes: tokio::sync::Mutex::new(HashMap::new()),
             chunk_index: tokio::sync::Mutex::new(ChunkIndex::with_ceiling(chunk_index_ceiling)),
             uploaded_packs: tokio::sync::Mutex::new(Vec::new()),
             git_object_candidates: tokio::sync::Mutex::new(Vec::new()),
@@ -7393,7 +7420,7 @@ impl PushPipeline {
             staging_push_marked: tokio::sync::Mutex::new(false),
             prepopulated: tokio::sync::Mutex::new(None),
             metadb: tokio::sync::Mutex::new(None),
-            base_manifest: tokio::sync::Mutex::new(None),
+            base_snapshot: tokio::sync::Mutex::new(None),
             base_commit_graph: tokio::sync::Mutex::new(None),
             base_commit_graph_loaded: tokio::sync::Mutex::new(false),
             manifest_etag: tokio::sync::Mutex::new(None),
@@ -7710,14 +7737,13 @@ impl PushPipeline {
 
         match crate::metadata::manifest::read_repository_snapshot(store, &self.router).await {
             Ok(snapshot) => {
-                let manifest = snapshot.materialized_manifest();
                 debug!(
-                    generation = manifest.generation,
-                    refs = manifest.refs.len(),
+                    generation = snapshot.manifest.generation,
+                    refs = snapshot.journal.refs.len(),
                     "read base manifest"
                 );
-                *self.base_manifest.lock().await = Some(manifest);
-                *self.manifest_etag.lock().await = Some(snapshot.manifest_etag);
+                *self.manifest_etag.lock().await = Some(snapshot.manifest_etag.clone());
+                *self.base_snapshot.lock().await = Some(Arc::new(snapshot));
             }
             Err(CrabError::NotFound { path }) if path == self.router.manifest_path().as_ref() => {
                 return Err(CrabError::CorruptObject {
@@ -7729,6 +7755,14 @@ impl PushPipeline {
         }
 
         Ok(())
+    }
+
+    async fn base_manifest(&self) -> Option<Manifest> {
+        self.base_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.materialized_manifest())
     }
 
     async fn load_base_split_commit_graph(
@@ -7751,7 +7785,7 @@ impl PushPipeline {
             *self.base_commit_graph_loaded.lock().await = true;
             return Ok(None);
         };
-        let base = self.base_manifest.lock().await.clone();
+        let base = self.base_manifest().await;
         let Some((base, hash)) = base
             .as_ref()
             .and_then(|base| base.commit_graph_hash.as_ref().map(|hash| (base, hash)))
@@ -7810,7 +7844,7 @@ impl PushPipeline {
     /// relies on this to skip the `receive.denyCurrentBranch` check
     /// when there is nothing to match against.
     pub async fn remote_head(&self) -> Option<String> {
-        let base = self.base_manifest.lock().await;
+        let base = self.base_manifest().await;
         base.as_ref().and_then(|m| {
             if m.head.is_empty() {
                 None
@@ -7854,7 +7888,7 @@ impl PushPipeline {
         &self,
         sha_map: &HashMap<String, String>,
     ) -> Result<HashMap<String, RefUpdateDecision>> {
-        let base = self.base_manifest.lock().await;
+        let base = self.base_manifest().await;
         let base_refs: HashMap<String, String> = base
             .as_ref()
             .map(|m| m.refs.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -8085,7 +8119,10 @@ impl PushPipeline {
         // Direct repositories always start from init's generation-0 manifest.
         // Protected push builds a delta candidate whose source state is owned
         // and validated by the service.
-        let base = self.base_manifest.lock().await;
+        let base_snapshot = self.base_snapshot.lock().await.clone();
+        let base = base_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.materialized_manifest());
         let mut new_manifest = if let Some(manifest) = base.as_ref() {
             manifest.clone()
         } else if self.config.protected_push.is_some() {
@@ -8231,11 +8268,22 @@ impl PushPipeline {
             };
 
         let mut new_shard_hashes = Vec::new();
+        let mut known_shards = shard_hashes.iter().cloned().collect::<HashSet<_>>();
+        // The candidate must retain all committed journal dependencies, even
+        // though its append-only indexes start from the compacted generation.
+        if let Some(snapshot) = &base_snapshot {
+            for hash in &snapshot.journal.shards {
+                if known_shards.insert(hash.clone()) {
+                    shard_hashes.push(hash.clone());
+                    new_shard_hashes.push(hash.clone());
+                }
+            }
+        }
         {
             let uploaded_shards = self.uploaded_shard_hashes.lock().await;
             for hash in uploaded_shards.iter() {
                 let hex = hash.hex();
-                if !shard_hashes.contains(&hex) {
+                if known_shards.insert(hex.clone()) {
                     shard_hashes.push(hex.clone());
                     new_shard_hashes.push(hex);
                 }
@@ -8243,14 +8291,23 @@ impl PushPipeline {
         }
 
         let mut new_packs = Vec::new();
+        let mut known_packs = packs
+            .iter()
+            .map(|pack| pack.pack_id.clone())
+            .collect::<HashSet<_>>();
+        if let Some(snapshot) = &base_snapshot {
+            for pack in &snapshot.journal.packs {
+                if known_packs.insert(pack.pack_id.clone()) {
+                    packs.push(pack.clone());
+                    new_packs.push(pack.clone());
+                }
+            }
+        }
         {
             let uploaded_packs = self.uploaded_packs.lock().await;
             for uploaded in uploaded_packs.iter() {
                 let pack = &uploaded.entry;
-                if !packs
-                    .iter()
-                    .any(|existing| existing.pack_id == pack.pack_id)
-                {
+                if known_packs.insert(pack.pack_id.clone()) {
                     packs.push(pack.clone());
                     new_packs.push(pack.clone());
                 }
@@ -8411,7 +8468,7 @@ impl PushPipeline {
         recipe_specs.dedup_by_key(|(hash, _)| *hash);
         let mut recipe_hasher = blake3::Hasher::new();
         recipe_hasher.update(b"crab push file recipes v1\0");
-        let remote_records = self.remote_file_records.lock().await.clone();
+        let remote_records = self.remote_file_recipe_hashes.lock().await.clone();
         let mut planned_file_dependencies = Vec::with_capacity(recipe_specs.len());
         for (file_hash, size) in recipe_specs {
             recipe_hasher.update(&<[u8; 32]>::from(file_hash));
@@ -8419,11 +8476,11 @@ impl PushPipeline {
             let (recipe_hash, committed_remote) = if remote_only.contains(&file_hash) {
                 let record = remote_records.get(&file_hash).ok_or_else(|| {
                     CrabError::Internal(format!(
-                        "remote-only file {} lost its generation-pinned record",
+                        "remote-only file {} lost its captured recipe proof",
                         file_hash.hex()
                     ))
                 })?;
-                (record.recipe_hash, true)
+                (*record, true)
             } else {
                 (self.staged_recipe_hash(&file_hash).await?, false)
             };
@@ -8561,8 +8618,7 @@ impl PushPipeline {
         }
 
         let base_generation = self
-            .base_manifest
-            .lock()
+            .base_manifest()
             .await
             .as_ref()
             .map_or(0, |base| base.generation);
@@ -8651,10 +8707,18 @@ impl PushPipeline {
             || self.staging_push_id.clone(),
             |session| session.push_id.clone(),
         );
+        let base_snapshot_digest = self
+            .base_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.digest())
+            .transpose()?;
         let mut plan = PushDependencyPlan {
             attempt_id: receipt_attempt_id.clone(),
             base_manifest_generation: base_generation,
             base_manifest_etag: base_etag.clone(),
+            base_snapshot_digest,
             ref_edits: planned_ref_edits,
             git_object_count: git_object_proof.count,
             git_object_set_digest: git_object_proof.digest,
@@ -8703,8 +8767,7 @@ impl PushPipeline {
             .clone()
             .ok_or_else(|| CrabError::Internal("push dependency receipt is missing".to_owned()))?;
         let base_generation = self
-            .base_manifest
-            .lock()
+            .base_manifest()
             .await
             .as_ref()
             .map_or(0, |base| base.generation);
@@ -8719,6 +8782,13 @@ impl PushPipeline {
             .clone()
             .ok_or_else(|| CrabError::Internal("push dependency plan is missing".to_owned()))?;
         let protected = self.config.protected_push.is_some();
+        let base_snapshot_digest = self
+            .base_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.digest())
+            .transpose()?;
         let origin_proof_ids = plan
             .origin_receipts
             .iter()
@@ -8727,6 +8797,7 @@ impl PushPipeline {
         if plan.attempt_id != receipt.attempt_id
             || plan.base_manifest_generation != base_generation
             || plan.base_manifest_etag != base_etag
+            || plan.base_snapshot_digest != base_snapshot_digest
             || plan.plan_digest != receipt.plan_digest
             || plan.recompute_digest() != plan.plan_digest
             || plan.candidate_pack_index_hash != receipt.candidate_pack_index_hash
@@ -8814,7 +8885,7 @@ impl PushPipeline {
             return Ok(None);
         };
 
-        let base_manifest = self.base_manifest.lock().await.clone();
+        let base_manifest = self.base_manifest().await;
         let uploaded_shards = self.uploaded_shard_hashes.lock().await.clone();
         let uploaded_packs = self
             .uploaded_packs
@@ -9081,8 +9152,13 @@ impl PushPipeline {
         // independent immutable objects. Publish both before the manifest
         // CAS so the manifest remains the only visibility boundary.
         tokio::try_join!(
-            upload_segmented_bulk(store, &self.router, bulk),
-            publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router),
+            Box::pin(upload_segmented_bulk(store, &self.router, bulk)),
+            Box::pin(publish_git_visibility_index_from_git_dir(
+                &git_dir,
+                manifest,
+                store,
+                &self.router,
+            )),
         )?;
         let new_etag =
             write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
@@ -9128,7 +9204,10 @@ impl PushPipeline {
             .as_ref()
             .ok_or_else(|| CrabError::Internal("commit_ref_journal requires a store".to_owned()))?;
         self.validate_push_commit_receipt(&manifest).await?;
-        let base = self.base_manifest.lock().await.clone();
+        let base_snapshot = self.base_snapshot.lock().await.clone();
+        let base = base_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.materialized_manifest());
         let current_snapshot =
             crate::metadata::manifest::read_repository_snapshot(store, &self.router)
                 .await
@@ -9192,15 +9271,37 @@ impl PushPipeline {
             };
             decisions.insert(conflict.dst, RefUpdateDecision::Reject(reason));
         }
-        if had_conflicts {
-            self.replan_base_bound_dependencies_after_cas_conflict()
-                .await?;
+        let snapshot_changed = base_snapshot.as_deref() != Some(&current_snapshot);
+        if had_conflicts || snapshot_changed {
+            // A sibling journal commit or compaction can change dependency
+            // ownership without changing any requested ref. Rebind every
+            // surviving dependency before deriving its candidate receipt.
+            *self.manifest_etag.lock().await = Some(current_snapshot.manifest_etag.clone());
+            *self.base_snapshot.lock().await = Some(Arc::new(current_snapshot.clone()));
+            *self.base_commit_graph.lock().await = None;
+            *self.base_commit_graph_loaded.lock().await = false;
+            *self.planned_ref_decisions.lock().await = Some(decisions.clone());
+            let retain_dependencies = !had_conflicts
+                && base_snapshot
+                    .as_ref()
+                    .is_some_and(|base| snapshot_retains_dependencies(base, &current_snapshot));
+            if retain_dependencies {
+                self.verify_committed_pack_inventory(&current_snapshot.journal.packs)
+                    .await?;
+                self.revalidate_remote_only_files_after_base_change()
+                    .await?;
+            } else {
+                self.replan_base_bound_dependencies_after_cas_conflict()
+                    .await?;
+            }
             (manifest, _) = self
                 .apply_decisions_with_sha_map(&decisions, false, sha_map)
                 .await?;
             self.publish_candidate_metadb(&manifest).await?;
+            self.validate_push_commit_receipt(&manifest).await?;
         }
         if !had_conflicts
+            && !snapshot_changed
             && self
                 .try_publish_initial_manifest(&manifest, &bulk, &current_snapshot, admission_commit)
                 .await?
@@ -9322,13 +9423,27 @@ impl PushPipeline {
         let transaction = crate::metadata::manifest::RefJournalTransaction::new(
             parents, edits, head, packs, shards,
         )?;
-        let committed = crate::metadata::manifest::commit_ref_journal_transaction(
-            store,
-            &self.router,
-            &transaction,
-            &expected_heads,
-        )
-        .await?;
+        let committed = match self.config.mirror_plan_id.as_deref() {
+            Some(plan_id) => {
+                crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
+                    store,
+                    &self.router,
+                    &transaction,
+                    &expected_heads,
+                    plan_id,
+                )
+                .await?
+            }
+            None => {
+                crate::metadata::manifest::commit_ref_journal_transaction(
+                    store,
+                    &self.router,
+                    &transaction,
+                    &expected_heads,
+                )
+                .await?
+            }
+        };
         info!(
             transaction_id = %committed.transaction_id,
             refs_count = committed.edited_refs,
@@ -9495,7 +9610,7 @@ impl PushPipeline {
         })
         .await
         .map_err(|error| CrabError::Internal(format!("commit graph collection join: {error}")))??;
-        let base_manifest = self.base_manifest.lock().await.clone();
+        let base_manifest = self.base_manifest().await;
         let storage_router = crab_storage::StoreLayout::new(
             store.as_storage().clone(),
             self.router.repo_prefix().to_owned(),
@@ -9594,8 +9709,7 @@ impl PushPipeline {
         upload_segmented_bulk(store, &self.router, &bulk).await?;
 
         let base_generation = self
-            .base_manifest
-            .lock()
+            .base_manifest()
             .await
             .as_ref()
             .map(|base| base.generation);
@@ -9615,7 +9729,12 @@ impl PushPipeline {
                 })?;
 
         let plan = ProtectedPushPlan {
-            schema_version: 1,
+            schema_version: if self.config.mirror_plan_id.is_some() {
+                2
+            } else {
+                1
+            },
+            mirror_plan_id: self.config.mirror_plan_id.clone(),
             repo_prefix: self.router.repo_prefix().to_owned(),
             push_id: session.push_id.clone(),
             upload_prefix: session.upload_prefix.clone(),
@@ -9923,7 +10042,7 @@ impl PushPipeline {
         self.chunk_cache.lock().await.clear();
         self.add_push_plans.lock().await.clear();
         self.remote_only_pointers.lock().await.clear();
-        self.remote_file_records.lock().await.clear();
+        self.remote_file_recipe_hashes.lock().await.clear();
         *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates::default();
         self.verified_committed_chunk_receipts.lock().await.clear();
 
@@ -13264,7 +13383,7 @@ impl PushPipeline {
         let refs = self.planned_git_ref_updates().await?;
         let tip_shas = refs.iter().map(|update| update.new_sha.clone()).collect();
         let excluded_tips = {
-            let base = self.base_manifest.lock().await;
+            let base = self.base_manifest().await;
             manifest_connectivity_frontier(base.as_ref(), &self.objects_dir()?)
         };
         let bytes =
@@ -13294,7 +13413,7 @@ impl PushPipeline {
 
         let tip_shas = refs.iter().map(|update| update.new_sha.clone()).collect();
         let excluded_tips = {
-            let base = self.base_manifest.lock().await;
+            let base = self.base_manifest().await;
             manifest_connectivity_frontier(base.as_ref(), &self.objects_dir()?)
         };
         *self.connectivity_frontier_tips.lock().await = excluded_tips.clone();
@@ -13695,13 +13814,13 @@ impl PushPipeline {
         let store = self.store.as_ref().ok_or_else(|| {
             CrabError::Internal("no store available for Git locator lookup".to_owned())
         })?;
-        let Some(base) = self.base_manifest.lock().await.clone() else {
+        let Some(snapshot) = self.base_snapshot.lock().await.clone() else {
             return Ok(Some(RemotePackBasis::ExactObjects(HashSet::new())));
         };
-        if base.pack_index_hash.is_empty() {
+        if snapshot.journal.packs.is_empty() {
             return Ok(Some(RemotePackBasis::ExactObjects(HashSet::new())));
         }
-        let packs = read_bulk_pack_list(store, &self.router, &base.pack_index_hash).await?;
+        let packs = snapshot.journal.packs.clone();
         self.verify_committed_pack_inventory(&packs).await?;
         // A complete, locally resolvable ref-tip frontier is cheaper than
         // opening the locator and remains a safe superset boundary for Git's
@@ -13873,19 +13992,13 @@ impl PushPipeline {
     }
 
     async fn compute_remote_pack_basis(&self) -> Result<RemotePackBasis> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            CrabError::Internal("no store available for remote pack exclusion computation".into())
-        })?;
-
-        // Read the pack entries from the base manifest's segmented index.
-        let base = self.base_manifest.lock().await;
-        let packs = match base.as_ref() {
-            Some(manifest) if !manifest.pack_index_hash.is_empty() => {
-                read_bulk_pack_list(store, &self.router, &manifest.pack_index_hash).await?
-            }
-            _ => Vec::new(),
-        };
-        drop(base);
+        let packs = self
+            .base_snapshot
+            .lock()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.journal.packs.clone())
+            .unwrap_or_default();
 
         if packs.is_empty() {
             debug!("remote pack list is empty, no pack exclusions to apply");
@@ -14003,18 +14116,21 @@ impl PushPipeline {
         let store = self.store.as_ref().ok_or_else(|| {
             CrabError::Internal("under-lock base refresh requires a store".to_owned())
         })?;
-        let (current, current_etag) = match read_manifest(store, &self.router).await {
-            Ok((manifest, etag)) => (Some(manifest), Some(etag)),
-            Err(CrabError::NotFound { .. }) => (None, None),
-            Err(error) => return Err(error),
+        let current =
+            crate::metadata::manifest::read_repository_snapshot(store, &self.router).await?;
+        let prior_etag = {
+            let prior = self.base_snapshot.lock().await;
+            // Journal commits do not change the compacted manifest's ETag.
+            // Compare the complete capture before retaining any derived plan.
+            if prior.as_deref() == Some(&current) {
+                return Ok(prior_decisions.clone());
+            }
+            prior
+                .as_ref()
+                .map(|snapshot| snapshot.manifest_etag.clone())
         };
-        let prior_etag = self.manifest_etag.lock().await.clone();
-        if current_etag == prior_etag {
-            return Ok(prior_decisions.clone());
-        }
-
-        *self.base_manifest.lock().await = current;
-        *self.manifest_etag.lock().await = current_etag;
+        *self.manifest_etag.lock().await = Some(current.manifest_etag.clone());
+        *self.base_snapshot.lock().await = Some(Arc::new(current));
         *self.base_commit_graph.lock().await = None;
         *self.base_commit_graph_loaded.lock().await = false;
 
@@ -14493,18 +14609,9 @@ impl PushPipeline {
         verified_origins
     }
 
-    /// Step 2 helper: split `missing_locally` into
-    /// (unpushable, remote_only) by probing the installed
-    /// `file_index_db` and confirming its shard object when available.
-    ///
-    /// Extracted into a dedicated `async fn` so the outer
-    /// `lookup_staging` future stays small. Keeping the
-    /// `MetaDbGuard` read inside this helper also hides the
-    /// `tokio::sync::Mutex` access from the outer future's state
-    /// machine, which matters for `Send` inference in the remote-
-    /// helper spawn site — the top-level `execute` state is
-    /// sensitive to higher-ranked lifetime inference and adding
-    /// new `.await` points inline has tripped it before.
+    // A staging miss is acceptable only with a recipe in the captured journal
+    // and complete origin proof. Keep lookup and proof together so acceleration
+    // or a cached shard alone cannot admit an unpublished payload.
     async fn probe_missing_pointers_against_file_index(
         &self,
         missing_locally: Vec<(MerkleHash, u64)>,
@@ -14523,12 +14630,10 @@ impl PushPipeline {
                 .lookup_origin_file_index_batch(store, &file_hashes)
                 .await?;
             let mut candidates = Vec::new();
-            let mut candidate_records = HashMap::new();
 
             for ((file_hash, size), hit) in missing_locally.into_iter().zip(hits.into_iter()) {
-                if let Some(candidate) = hit {
-                    candidates.push((file_hash, size, candidate.shard_hash));
-                    candidate_records.insert(file_hash, candidate.indexed_record);
+                if let Some(shard_hash) = hit {
+                    candidates.push((file_hash, size, shard_hash));
                 } else {
                     unpushable.push((file_hash, size));
                 }
@@ -14542,34 +14647,10 @@ impl PushPipeline {
                 match proof {
                     RemoteFileIndexProof::ContainsFile { recipe_hash } => {
                         remote_only.insert(file_hash);
-                        if let Some(Some(indexed)) = candidate_records.remove(&file_hash)
-                            && indexed.recipe_hash != recipe_hash
-                        {
-                            warn!(
-                                file_hash = %file_hash.hex(),
-                                "step 2: committed file-index recipe hash was stale; using manifest-scoped recipe and scheduling repair"
-                            );
-                        }
-                        let base = self.base_manifest.lock().await.clone().ok_or_else(|| {
-                            CrabError::Internal(
-                                "remote file proof lost its base manifest".to_owned(),
-                            )
-                        })?;
-                        let shard_index_hash = MerkleHash::from_hex(&base.shard_index_hash)
-                            .map_err(|error| {
-                                CrabError::Internal(format!(
-                                    "base shard-index hash invalid after proof: {error}"
-                                ))
-                            })?;
-                        self.remote_file_records.lock().await.insert(
-                            file_hash,
-                            crab_metadata::value_codec::CommittedFileRecord {
-                                recipe_hash,
-                                shard_hash,
-                                committed_generation: base.generation,
-                                shard_index_hash,
-                            },
-                        );
+                        self.remote_file_recipe_hashes
+                            .lock()
+                            .await
+                            .insert(file_hash, recipe_hash);
                     }
                     RemoteFileIndexProof::VerifiedXorbs => {
                         return Err(CrabError::Internal(
@@ -14642,7 +14723,6 @@ impl PushPipeline {
         Ok(())
     }
 
-    #[cfg(test)]
     async fn revalidate_remote_only_files_after_base_change(&self) -> Result<()> {
         let expected = self.remote_only_pointers.lock().await.clone();
         if expected.is_empty() {
@@ -14660,7 +14740,7 @@ impl PushPipeline {
                 })
                 .collect::<Vec<_>>()
         };
-        self.remote_file_records.lock().await.clear();
+        self.remote_file_recipe_hashes.lock().await.clear();
         let mut unpushable = Vec::new();
         let mut revalidated = HashSet::new();
         self.probe_missing_pointers_against_file_index(missing, &mut unpushable, &mut revalidated)
@@ -14698,9 +14778,9 @@ impl PushPipeline {
         #[cfg(test)]
         self.cas_dependency_replans
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // The surviving non-atomic ref set is a strict subset of the initial
-        // plan. Rewalk and rebuild all ref-scoped large-file state so shards,
-        // receipts, acceleration writes, and cleanup describe that exact set.
+        // Ref rejection can shrink the plan; sibling journal commits can change
+        // its base without changing its refs. Rebuild dependency state against
+        // the refreshed capture before creating any replacement receipt.
         self.enumerate_pointers().await?;
         self.lookup_staging().await?;
         self.classify_chunks().await?;
@@ -14739,171 +14819,29 @@ impl PushPipeline {
         &self,
         store: &Store,
         file_hashes: &[MerkleHash],
-    ) -> Result<Vec<Option<RemoteFileCandidate>>> {
-        if file_hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let Some(base_manifest) = self.base_manifest.lock().await.clone() else {
+    ) -> Result<Vec<Option<MerkleHash>>> {
+        let Some(snapshot) = self.base_snapshot.lock().await.clone() else {
             return Ok(vec![None; file_hashes.len()]);
         };
-        if base_manifest.shard_index_hash.is_empty() {
+        if file_hashes.is_empty() || snapshot.journal.shards.is_empty() {
             return Ok(vec![None; file_hashes.len()]);
         }
-        let base_shard_index_hash =
-            MerkleHash::from_hex(&base_manifest.shard_index_hash).map_err(|error| {
-                CrabError::Internal(format!("base manifest shard-index hash invalid: {error}"))
-            })?;
-        let committed_shards =
-            read_bulk_shard_list(store, &self.router, &base_manifest.shard_index_hash)
-                .await?
-                .into_iter()
-                .map(|hash| {
-                    MerkleHash::from_hex(&hash).map_err(|error| {
-                        CrabError::Internal(format!(
-                            "base shard index contains invalid hash: {error}"
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-        let committed_shard_set = committed_shards.iter().copied().collect::<HashSet<_>>();
-
-        // Remote-only pointer acceptance is a durability proof. Metadata
-        // reads use the origin store, while immutable shard bodies may use a
-        // hash-verified cache response only after origin HEAD confirms the key.
-        let guard = build_push_metadb_guard_with_object_store(
-            store,
-            self.caching_store
-                .as_ref()
-                .map(crab_cache_store::CachingStore::object_store),
-            &self.router,
-            self.metrics.clone(),
-            &self.config.metadb,
-            true,
+        let router = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
         );
-        let file_store = match guard.file_index().await {
-            Ok(store) => Some(store),
-            Err(e) if e.is_metadb_read_only_uninitialized() => None,
-            Err(e) => {
-                if let Err(close_err) = guard.close().await {
-                    warn!(
-                        error = %close_err,
-                        "step 2: origin file-index proof close failed after open error"
-                    );
-                }
-                return Err(e);
-            }
-        };
-
-        let indexed_result = match file_store {
-            Some(file_store) => file_store
-                .get_committed_batch_at(file_hashes, base_manifest.generation)
-                .await
-                .map(|records| {
-                    records
-                        .into_iter()
-                        .map(|record| {
-                            record.and_then(|record| {
-                                (record.committed_generation > 0
-                                    && record.committed_generation <= base_manifest.generation
-                                    && committed_shard_set.contains(&record.shard_hash)
-                                    && (record.committed_generation < base_manifest.generation
-                                        || record.shard_index_hash == base_shard_index_hash))
-                                    .then_some(record)
-                            })
-                        })
-                        .collect()
-                }),
-            None => Ok(vec![None; file_hashes.len()]),
-        };
-        let close_result = guard.close().await;
-        let indexed = indexed_result?;
-        close_result?;
-
-        let missing = file_hashes
-            .iter()
-            .zip(&indexed)
-            .filter_map(|(file_hash, record)| record.is_none().then_some(*file_hash))
-            .collect::<HashSet<_>>();
-        let recovered = if missing.is_empty() {
-            HashMap::new()
-        } else {
-            use futures_util::StreamExt;
-            let shard_search_concurrency = 16usize.min(committed_shards.len()).max(1);
-            let pipeline = self;
-            let batches =
-                futures_util::stream::iter(committed_shards.into_iter().map(|shard_hash| {
-                    let store = store.clone();
-                    let router = self.router.clone();
-                    let missing = missing.clone();
-                    async move {
-                        let path = router.shard_path(&shard_hash);
-                        let body = pipeline
-                            .read_remote_shard_for_proof(&store, &path, shard_hash)
-                            .await?;
-                        let actual = compute_data_hash(&body);
-                        if actual != shard_hash {
-                            return Err(CrabError::CorruptObject {
-                                path: path.to_string(),
-                                reason: format!(
-                                    "manifest-scoped shard hash mismatch: expected {}, got {}",
-                                    shard_hash.hex(),
-                                    actual.hex()
-                                ),
-                            });
-                        }
-                        let recipes = crab_xet::shard_parse::extract_file_recipes_for_hashes(
-                            &body, &missing,
-                        )?;
-                        Ok::<_, CrabError>(
-                            recipes
-                                .into_iter()
-                                .map(|recipe| (recipe.file_hash, shard_hash))
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                }))
-                .buffer_unordered(shard_search_concurrency)
-                .collect::<Vec<Result<Vec<(MerkleHash, MerkleHash)>>>>()
-                .await;
-            let mut recovered = HashMap::new();
-            for batch in batches {
-                for (file_hash, shard_hash) in batch? {
-                    recovered.entry(file_hash).or_insert(shard_hash);
-                }
-            }
-            if !recovered.is_empty() {
-                warn!(
-                    recovered_files = recovered.len(),
-                    generation = base_manifest.generation,
-                    "step 2: file-index miss recovered from committed manifest shards; run metadb rebuild"
-                );
-            }
-            recovered
-        };
-
-        Ok(file_hashes
-            .iter()
-            .zip(indexed)
-            .map(|(file_hash, record)| {
-                record.map_or_else(
-                    || {
-                        recovered
-                            .get(file_hash)
-                            .copied()
-                            .map(|shard_hash| RemoteFileCandidate {
-                                shard_hash,
-                                indexed_record: None,
-                            })
-                    },
-                    |record| {
-                        Some(RemoteFileCandidate {
-                            shard_hash: record.shard_hash,
-                            indexed_record: Some(record),
-                        })
-                    },
-                )
-            })
-            .collect())
+        // Acceleration is admitted against this captured journal, not another
+        // snapshot or the compacted root. Immutable origin proof still follows.
+        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open_from_snapshot(
+            router, &snapshot,
+        )
+        .await?;
+        let result = session.lookup_batch(file_hashes).await;
+        let closed = session.close().await;
+        let hits = result?;
+        closed?;
+        Ok(hits)
     }
 
     async fn verify_remote_file_index_candidates(
@@ -15070,18 +15008,13 @@ impl PushPipeline {
         if chunk_hashes.len() <= GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE {
             return Ok(HashMap::new());
         }
-        let Some(manifest) = self.base_manifest.lock().await.clone() else {
+        let Some(snapshot) = self.base_snapshot.lock().await.clone() else {
             return Ok(HashMap::new());
         };
-        if manifest.shard_index_hash.is_empty() {
+        if snapshot.journal.shards.is_empty() {
             return Ok(HashMap::new());
         }
-        let shard_hashes = read_bulk_shard_list(
-            self.router.store(),
-            &self.router,
-            &manifest.shard_index_hash,
-        )
-        .await?;
+        let shard_hashes = snapshot.journal.shards.clone();
         if shard_hashes.len() > BASE_SHARD_LOOKUP_LIMIT {
             debug!(
                 shards = shard_hashes.len(),
@@ -15112,7 +15045,7 @@ impl PushPipeline {
             .sync(
                 &mut index,
                 &crab_metadata::manifests::ShardList {
-                    generation: manifest.generation,
+                    generation: snapshot.manifest.generation,
                     entries: shard_hashes,
                 },
             )
@@ -16667,8 +16600,7 @@ impl PushPipeline {
             // proportional to newly introduced history instead of re-reading
             // every ordinary blob in the repository on every push.
             let remote_tips = self
-                .base_manifest
-                .lock()
+                .base_manifest()
                 .await
                 .as_ref()
                 .map(|manifest| manifest.refs.values().cloned().collect())
@@ -16736,7 +16668,7 @@ impl PushPipeline {
             && self.config.active_active_replication.is_none()
             && let Some((sha_map, decisions)) = preflight.as_ref()
         {
-            let base = self.base_manifest.lock().await;
+            let base = self.base_manifest().await;
             let is_noop =
                 ref_edits_are_manifest_noop(&self.specs, base.as_ref(), decisions, sha_map);
             drop(base);
@@ -23436,6 +23368,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn snapshot_dependency_retention_requires_all_prior_pack_and_shard_identities() {
+        let (store, router) = test_store_router("snapshot-dependency-retention");
+        ensure_test_layout(&store, &router).await;
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .unwrap();
+        let mut base = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .unwrap();
+        base.journal.packs = vec![pack_manifest_entry_with_tips(Vec::new())];
+        base.journal.shards = vec!["b".repeat(64)];
+        for (case, expected) in [
+            ("identical", true),
+            ("additive", true),
+            ("refs-only", true),
+            ("compacted", true),
+            ("removed-pack", false),
+            ("removed-shard", false),
+            ("changed-pack-metadata", false),
+            ("changed-layout", false),
+        ] {
+            let mut current = base.clone();
+            match case {
+                "identical" => {}
+                "additive" => {
+                    let mut pack = current.journal.packs[0].clone();
+                    pack.pack_id = "c".repeat(64);
+                    pack.content_hash = pack.pack_id.clone();
+                    current.journal.packs.push(pack);
+                    current.journal.shards.push("d".repeat(64));
+                }
+                "refs-only" => {
+                    current
+                        .journal
+                        .refs
+                        .insert("refs/heads/main".to_owned(), "a".repeat(40));
+                }
+                "compacted" => {
+                    current.manifest.generation += 1;
+                }
+                "removed-pack" => current.journal.packs.clear(),
+                "removed-shard" => current.journal.shards.clear(),
+                "changed-pack-metadata" => current.journal.packs[0].object_count += 1,
+                "changed-layout" => current.layout.digest = "changed".to_owned(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                snapshot_retains_dependencies(&base, &current),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn push_returns_after_active_marker_while_owner_is_busy() {
         let _guard = GitDirGuard::new();
@@ -24644,8 +24632,7 @@ mod tests {
         ));
         assert_eq!(
             pipeline
-                .base_manifest
-                .lock()
+                .base_manifest()
                 .await
                 .as_ref()
                 .map(|manifest| manifest.generation),
@@ -24655,6 +24642,90 @@ mod tests {
         assert!(pipeline.chunk_placement.lock().await.is_empty());
         assert!(pipeline.uploaded_packs.lock().await.is_empty());
         pipeline.stop_heartbeat_and_release_lock().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn under_lock_refresh_observes_journal_changes_with_unchanged_manifest_etag() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("under-lock-journal-refresh");
+        ensure_test_layout(&store, &router).await;
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let etag = pipeline.manifest_etag.lock().await.clone();
+        let sha_map = pipeline.resolve_src_ref_map().unwrap();
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .unwrap();
+        let (candidate, _) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .unwrap();
+        pipeline
+            .validate_push_commit_receipt(&candidate)
+            .await
+            .unwrap();
+
+        let sibling = "refs/heads/sibling";
+        let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, sibling)
+            .await
+            .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([(sibling.to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: sibling.to_owned(),
+                old_oid: None,
+                new_oid: Some(crate::test::git_repo::TEST_GIT_REPO.commit_sha.clone()),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+        pipeline.acquire_push_lock().await.unwrap();
+        let refreshed = pipeline
+            .refresh_base_bound_plan_after_lock(&sha_map, &decisions)
+            .await;
+        pipeline.stop_heartbeat_and_release_lock().await;
+        pipeline.close_metadb().await;
+        let refreshed = refreshed.unwrap();
+        let snapshot = pipeline.base_snapshot.lock().await.clone().unwrap();
+        let old_receipt = pipeline.validate_push_commit_receipt(&candidate).await;
+        assert!(
+            matches!(
+                refreshed.get("refs/heads/main"),
+                Some(RefUpdateDecision::Proceed { .. })
+            ) && Some(snapshot.manifest_etag.clone()) == etag
+                && snapshot.journal.refs.contains_key(sibling)
+                && old_receipt.is_err(),
+            "same-ETag journal updates must refresh the base and invalidate old receipts"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -24798,7 +24869,12 @@ mod tests {
             let mut base = Manifest::default_for_repo(name);
             base.refs.insert(name.to_owned(), second.clone());
             base.seal_git_validation();
-            *pipeline.base_manifest.lock().await = Some(base);
+            let store = pipeline.store.as_ref().unwrap();
+            ensure_test_layout(store, &pipeline.router).await;
+            create_manifest_with_etag(store, &pipeline.router, &base)
+                .await
+                .unwrap();
+            pipeline.read_base_manifest().await.unwrap();
             let decisions = pipeline
                 .evaluate_decisions_with_sha_map(&HashMap::from([(first.clone(), first.clone())]))
                 .await
@@ -32836,6 +32912,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn candidate_indexes_retain_uncompacted_journal_dependencies() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("candidate-journal-inventory");
+        ensure_test_layout(&store, &router).await;
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .unwrap();
+        let pack = pack_manifest_entry_with_tips(Vec::new());
+        let shard = MerkleHash::from([72_u64, 0, 0, 0]).hex();
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some(crate::test::git_repo::TEST_GIT_REPO.commit_sha.clone()),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            vec![pack.clone()],
+            vec![shard.clone()],
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&HashMap::new(), false, &HashMap::new())
+            .await
+            .unwrap();
+        upload_segmented_bulk(&store, &router, &bulk).await.unwrap();
+        pipeline
+            .validate_push_commit_receipt(&candidate)
+            .await
+            .unwrap();
+        let packs = read_bulk_pack_list(&store, &router, &candidate.pack_index_hash)
+            .await
+            .unwrap();
+        let shards = read_bulk_shard_list(&store, &router, &candidate.shard_index_hash)
+            .await
+            .unwrap();
+        assert_eq!((packs, shards), (vec![pack], vec![shard]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn metadb_commit_requires_guard_when_store_is_present() {
         let repo_prefix = "repo-metadb-missing-guard";
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
@@ -34491,13 +34636,116 @@ mod tests {
         );
         let mut compacted = Manifest::default_for_repo("refs/heads/main");
         compacted.generation = 2;
-        *pipeline.base_manifest.lock().await = Some(compacted);
+        compacted.seal_git_validation();
+        let store = pipeline.store.as_ref().unwrap();
+        let (_, etag) = read_manifest(store, &pipeline.router).await.unwrap();
+        write_manifest_cas(store, &pipeline.router, &compacted, &etag)
+            .await
+            .unwrap();
+        pipeline.read_base_manifest().await.unwrap();
         let error = pipeline
             .revalidate_remote_only_files_after_base_change()
             .await
             .expect_err("a CAS retry must reject proof removed from the refreshed manifest");
         assert!(matches!(error, CrabError::PointerMissingStaging { .. }));
         pipeline.close_metadb().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lookup_staging_accepts_committed_journal_shard_before_compaction() {
+        let (store, router) = test_store_router("journal-only-pointer");
+        let file_hash = MerkleHash::from([71u64, 0, 0, 0]);
+        let (shard, shard_hash, xorb, xorb_hash) = test_shard_with_file(file_hash, 71);
+        store
+            .put(&router.shard_path(&shard_hash), shard)
+            .await
+            .unwrap();
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb)
+            .await
+            .unwrap();
+        ensure_test_layout(&store, &router).await;
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .unwrap();
+        let head =
+            crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            vec![shard_hash.hex()],
+        )
+        .unwrap();
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let staging = crab_staging::StagingArea::open(directory.path().to_path_buf())
+            .await
+            .unwrap();
+        staging.close().await.unwrap();
+        let reader = Arc::new(
+            StagingAreaReadOnly::open(directory.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let guard = build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            false,
+        );
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store),
+            None,
+            Some(reader),
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.install_metadb(guard);
+        pipeline.read_base_manifest().await.unwrap();
+        pipeline
+            .pointers
+            .lock()
+            .await
+            .push(super::super::walk::PointerBlob {
+                oid: [1; 20],
+                file_hash: file_hash.into(),
+                size: test_remote_only_file_size(71),
+            });
+        let lookup = pipeline.lookup_staging().await;
+        pipeline.close_metadb().await;
+        lookup.expect("committed journal payload must not require restaging or compaction");
+        assert!(
+            pipeline
+                .remote_only_pointers
+                .lock()
+                .await
+                .contains(&file_hash)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -36273,7 +36521,7 @@ mod tests {
         assert!(
             matches!(error, CrabError::CorruptObject { ref reason, .. } if reason.contains("crab init"))
         );
-        assert!(pipeline.base_manifest.lock().await.is_none());
+        assert!(pipeline.base_manifest().await.is_none());
     }
 
     #[tokio::test]

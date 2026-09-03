@@ -29,6 +29,21 @@ local staging. Local unpublished staging remains available when no remote is
 configured. Automatic clone profile failures remain warnings; retry with
 `crab hydrate --profile always` after addressing the reported cause.
 
+`crab pull` completes Git integration before selecting post-pull hydration.
+It resolves the worktree root even when invoked from a subdirectory, compares
+checked pre/post-pull commits, and stops on Git or path-inventory failure.
+Conflicts come from the unmerged index, not progress-message text. Cancelling
+the Git phase stops its owned process tree before normal cancellation returns;
+Git may already have changed HEAD, so inspect `git status` before retrying.
+`--no-hydrate` skips Crab's later hydration phase; it does not disable Git
+smudge filters during checkout. Selected Git filenames and parsed pointers go
+directly to the shared hydration pipeline, without interpreting filenames as
+patterns. An unchanged sibling matching a changed filename's glob syntax is
+not selected. Post-pull hydration retains the `hydrate` / `hydrate.event`
+reporting used by the released CLI. Whole-command progress/result composition,
+missing-pointer admission and descriptor-race qualification remain open in
+Plan 017.
+
 ## Arguments
 
 | Argument | Required | Description |

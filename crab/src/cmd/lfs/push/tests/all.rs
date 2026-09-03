@@ -58,10 +58,97 @@ fn bulk_push_includes_replaced_and_deleted_versions_without_old_tip_refs() {
     git(root, &["rm", "asset.bin"]);
     commit(root);
     for refs in [vec![], vec!["main".to_owned()]] {
-        let pointers = collect_push_pointers(root, true, &refs, &CancellationToken::new()).unwrap();
+        let pointers = collect_push_pointers(
+            root,
+            HistoryOperation::PushAll,
+            &refs,
+            &CancellationToken::new(),
+        )
+        .unwrap();
         assert_eq!(
             pointers.into_iter().map(|p| p.oid).collect::<HashSet<_>>(),
             HashSet::from([old.oid, new.oid])
+        );
+    }
+}
+
+#[test]
+fn ordinary_push_includes_replaced_and_deleted_versions_without_old_tip_refs() {
+    let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    let old = pointer(b"old payload");
+    fs::write(root.join("asset.bin"), old.serialize()).unwrap();
+    commit(root);
+    let new = pointer(b"new payload");
+    fs::write(root.join("asset.bin"), new.serialize()).unwrap();
+    commit(root);
+    git(root, &["rm", "asset.bin"]);
+    commit(root);
+    for refs in [vec![], vec!["main".to_owned()]] {
+        let pointers = collect_push_pointers(
+            root,
+            HistoryOperation::Push { remote: None },
+            &refs,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            pointers.into_iter().map(|p| p.oid).collect::<HashSet<_>>(),
+            HashSet::from([old.oid, new.oid])
+        );
+    }
+}
+
+#[test]
+fn ordinary_push_excludes_only_the_selected_remote_and_defaults_to_head() {
+    let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    let old = pointer(b"published payload");
+    fs::write(root.join("asset.bin"), old.serialize()).unwrap();
+    commit(root);
+    git(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let new = pointer(b"introduced payload");
+    fs::write(root.join("asset.bin"), new.serialize()).unwrap();
+    commit(root);
+    git(root, &["rm", "asset.bin"]);
+    commit(root);
+    git(root, &["update-ref", "refs/remotes/other/main", "HEAD"]);
+    git(root, &["checkout", "-qb", "side"]);
+    let side = pointer(b"other branch payload");
+    fs::write(root.join("side.bin"), side.serialize()).unwrap();
+    commit(root);
+    git(root, &["checkout", "-q", "main"]);
+    for (operation, expected) in [
+        (
+            HistoryOperation::Push {
+                remote: Some("origin"),
+            },
+            HashSet::from([new.oid]),
+        ),
+        (
+            HistoryOperation::Push {
+                remote: Some("other"),
+            },
+            HashSet::new(),
+        ),
+        (
+            HistoryOperation::Push { remote: None },
+            HashSet::from([old.oid, new.oid]),
+        ),
+        (
+            HistoryOperation::PushAll,
+            HashSet::from([old.oid, new.oid, side.oid]),
+        ),
+    ] {
+        let pointers =
+            collect_push_pointers(root, operation, &[], &CancellationToken::new()).unwrap();
+        assert_eq!(
+            pointers.into_iter().map(|p| p.oid).collect::<HashSet<_>>(),
+            expected
         );
     }
 }
@@ -103,7 +190,13 @@ fn bulk_push_defaults_to_local_branches_and_tags_not_remote_or_detached_history(
             HashSet::from([main.oid, detached.oid]),
         ),
     ] {
-        let pointers = collect_push_pointers(root, true, &refs, &CancellationToken::new()).unwrap();
+        let pointers = collect_push_pointers(
+            root,
+            HistoryOperation::PushAll,
+            &refs,
+            &CancellationToken::new(),
+        )
+        .unwrap();
         assert_eq!(
             pointers.into_iter().map(|p| p.oid).collect::<HashSet<_>>(),
             expected
@@ -112,7 +205,7 @@ fn bulk_push_defaults_to_local_branches_and_tags_not_remote_or_detached_history(
 }
 
 #[test]
-fn bulk_push_never_hydrates_promised_pointer_blobs() {
+fn push_scans_never_hydrate_promised_pointer_blobs() {
     let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
@@ -141,48 +234,64 @@ fn bulk_push_never_hydrates_promised_pointer_blobs() {
         before.lines().filter(|line| line.starts_with('?')).count(),
         2
     );
-    for refs in [vec![], vec!["main".to_owned()]] {
-        assert!(collect_push_pointers(&reader, true, &refs, &CancellationToken::new()).is_err());
-        assert_eq!(git(&reader, &missing_args), before);
+    for operation in [
+        HistoryOperation::PushAll,
+        HistoryOperation::Push { remote: None },
+    ] {
+        for refs in [vec![], vec!["main".to_owned()]] {
+            assert!(
+                collect_push_pointers(&reader, operation, &refs, &CancellationToken::new())
+                    .is_err()
+            );
+            assert_eq!(git(&reader, &missing_args), before);
+        }
     }
 }
 
 #[test]
-fn bulk_push_rejects_invalid_operands_and_honors_precancellation() {
+fn push_scans_reject_invalid_operands_and_honor_precancellation() {
     let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     git(root, &["init", "-q", "-b", "main"]);
     let cancel = CancellationToken::new();
     assert!(
-        collect_push_pointers(root, true, &[], &cancel)
+        collect_push_pointers(root, HistoryOperation::PushAll, &[], &cancel)
             .unwrap()
             .is_empty()
     );
     fs::write(root.join("asset.bin"), pointer(b"payload").serialize()).unwrap();
     commit(root);
-    for invalid in ["missing-ref", "--all", "^HEAD", "HEAD..HEAD", "HEAD\n--all"] {
-        assert!(
-            collect_push_pointers(
-                root,
-                true,
-                &["HEAD".to_owned(), invalid.to_owned()],
-                &cancel
-            )
-            .is_err()
-        );
+    for operation in [
+        HistoryOperation::PushAll,
+        HistoryOperation::Push { remote: None },
+    ] {
+        for invalid in ["missing-ref", "--all", "^HEAD", "HEAD..HEAD", "HEAD\n--all"] {
+            assert!(
+                collect_push_pointers(
+                    root,
+                    operation,
+                    &["HEAD".to_owned(), invalid.to_owned()],
+                    &cancel
+                )
+                .is_err()
+            );
+        }
     }
     cancel.cancel();
-    for all in [false, true] {
+    for operation in [
+        HistoryOperation::Push { remote: None },
+        HistoryOperation::PushAll,
+    ] {
         assert!(matches!(
-            collect_push_pointers(Path::new("absent"), all, &[], &cancel),
+            collect_push_pointers(Path::new("absent"), operation, &[], &cancel),
             Err(CrabError::Cancelled)
         ));
     }
 }
 
 #[test]
-fn bulk_push_rejects_conflicting_sizes_and_corrupt_historical_blobs() {
+fn push_scans_reject_conflicting_sizes_and_corrupt_historical_blobs() {
     let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
     for format in ["sha1", "sha256"] {
         let dir = tempfile::tempdir().unwrap();
@@ -207,17 +316,27 @@ fn bulk_push_rejects_conflicting_sizes_and_corrupt_historical_blobs() {
         fs::write(root.join("ordinary.bin"), vec![0x80; 65536]).unwrap();
         commit(root);
         let cancel = CancellationToken::new();
-        assert!(matches!(
-            collect_push_pointers(root, true, &[], &cancel),
-            Err(CrabError::LfsObjectCorrupt { .. })
-        ));
+        for operation in [
+            HistoryOperation::PushAll,
+            HistoryOperation::Push { remote: None },
+        ] {
+            assert!(matches!(
+                collect_push_pointers(root, operation, &[], &cancel),
+                Err(CrabError::LfsObjectCorrupt { .. })
+            ));
+        }
         let large_blob = git(root, &["rev-parse", "HEAD:ordinary.bin"]);
         let object = |id: &str| root.join(".git/objects").join(&id[..2]).join(&id[2..]);
         let replacement = fs::read(object(&large_blob)).unwrap();
         fs::remove_file(object(&old_blob)).unwrap();
         fs::write(object(&old_blob), replacement).unwrap();
-        assert!(
-            matches!(collect_push_pointers(root, true, &[], &cancel), Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData && error.to_string().contains("checksum differs"))
-        );
+        for operation in [
+            HistoryOperation::PushAll,
+            HistoryOperation::Push { remote: None },
+        ] {
+            assert!(
+                matches!(collect_push_pointers(root, operation, &[], &cancel), Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData && error.to_string().contains("checksum differs"))
+            );
+        }
     }
 }
