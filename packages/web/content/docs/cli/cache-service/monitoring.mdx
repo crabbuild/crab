@@ -22,6 +22,24 @@ The cache service exposes health endpoints, Prometheus metrics, and structured l
 
 Use liveness for restarts. Use readiness for load-balancer rotation.
 
+### Client failure suppression
+
+An enabled cache client shares availability state with its clones. A transport
+failure or HTTP 429, 502, or 503 defers new service requests for 30 seconds;
+reads can still use local cache and authoritative origin. After that interval,
+one logical request probes recovery. A streamed probe owns that admission until its
+body completes; dropping or cancelling it schedules another probe rather than
+leaving the client stuck. The existing request timeout remains 30 seconds,
+including connection and body transfer.
+
+Not every error disables the service. A missing object, caller/auth error,
+batch-local HTTP 500, origin-failure HTTP 504, or write-admission HTTP 507 can
+coexist with readable cached objects. Their normal error handling remains in
+place. This state is per configured client, not a machine-wide ban: new
+commands may construct new clients, and already-admitted requests can finish.
+These limits are not a whole-command latency guarantee. Health-gated client
+construction may also omit an unhealthy service for that operation.
+
 ## Prometheus
 
 Scrape:

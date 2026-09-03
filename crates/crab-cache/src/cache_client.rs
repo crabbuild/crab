@@ -5,15 +5,19 @@
 
 use std::ops::Range;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderName};
 
 use crate::error::{CacheError, Result};
+mod availability;
+use availability::{Availability, RequestPermit};
 #[cfg(feature = "local-cache")]
 mod completed_body;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub use crate::service::{
     CacheObjectHead, CacheObjectRange, CacheServiceAuth, CacheServiceCapabilities,
     CacheServiceLimits, CacheServiceMode, DedupQueryResult, KnownChunk,
@@ -31,6 +35,7 @@ pub struct CacheObjectStream {
     response: reqwest::Response,
     content_length: Option<u64>,
     url: String,
+    permit: RequestPermit,
 }
 
 impl CacheObjectStream {
@@ -58,10 +63,11 @@ impl CacheObjectStream {
 
         let expected = self.content_length;
         let url = self.url;
+        let permit = self.permit;
         let stream = self.response.bytes_stream().boxed();
         futures_util::stream::unfold(
-            (stream, expected, 0_u64, url, false),
-            |(mut stream, expected, received, url, done)| async move {
+            (stream, expected, 0_u64, url, false, permit),
+            |(mut stream, expected, received, url, done, mut permit)| async move {
                 if done {
                     return None;
                 }
@@ -77,7 +83,7 @@ impl CacheObjectStream {
                                             "cache service response length overflow: {url}"
                                         ),
                                     }),
-                                    (stream, expected, received, url, true),
+                                    (stream, expected, received, url, true, permit),
                                 ));
                             }
                         };
@@ -88,15 +94,15 @@ impl CacheObjectStream {
                                         "cache service response exceeded Content-Length: {url}"
                                     ),
                                 }),
-                                (stream, expected, received, url, true),
+                                (stream, expected, received, url, true, permit),
                             ));
                         }
-                        Some((Ok(chunk), (stream, expected, next, url, false)))
+                        Some((Ok(chunk), (stream, expected, next, url, false, permit)))
                     }
-                    Some(Err(error)) => Some((
-                        Err(map_reqwest_error(&url, error)),
-                        (stream, expected, received, url, true),
-                    )),
+                    Some(Err(error)) => {
+                        let error = body_error(&url, error, &mut permit);
+                        Some((Err(error), (stream, expected, received, url, true, permit)))
+                    }
                     None => {
                         if let Some(expected) = expected
                             && expected != received
@@ -107,9 +113,10 @@ impl CacheObjectStream {
                                         "cache service response ended at {received} bytes, expected {expected}: {url}"
                                     ),
                                 }),
-                                (stream, Some(expected), received, url, true),
+                                (stream, Some(expected), received, url, true, permit),
                             ));
                         }
+                        permit.succeeded();
                         None
                     }
                 }
@@ -124,6 +131,7 @@ pub struct CacheClient {
     client: Client,
     base_url: String,
     auth_header: Option<(HeaderName, String)>,
+    availability: Arc<Availability>,
 }
 
 impl CacheClient {
@@ -133,6 +141,8 @@ impl CacheClient {
     /// is provided, the PEM file is added as a trusted root; when
     /// `client_cert` and `client_key` are provided, they are sent as the
     /// native mTLS client identity.
+    /// Clones share failure suppression: transport and HTTP 429/502/503 failures
+    /// defer further requests for 30 seconds, then admit one recovery probe.
     pub fn new(
         base_url: &str,
         auth: &CacheServiceAuth,
@@ -140,12 +150,8 @@ impl CacheClient {
         client_cert: Option<&Path>,
         client_key: Option<&Path>,
     ) -> Result<Self> {
-        let client = build_cache_service_http_client(
-            Duration::from_secs(30),
-            ca_cert,
-            client_cert,
-            client_key,
-        )?;
+        let client =
+            build_cache_service_http_client(REQUEST_TIMEOUT, ca_cert, client_cert, client_key)?;
 
         let auth_header = match auth {
             CacheServiceAuth::None | CacheServiceAuth::Mtls => None,
@@ -159,6 +165,7 @@ impl CacheClient {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth_header,
+            availability: Arc::default(),
         })
     }
 
@@ -170,30 +177,65 @@ impl CacheClient {
         }
     }
 
+    async fn send(
+        &self,
+        url: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::Response, RequestPermit)> {
+        let mut permit = self.availability.begin(Instant::now())?;
+        let response = self.apply_auth(req).send().await.map_err(|error| {
+            if !error.is_builder() {
+                permit.failed();
+            }
+            map_reqwest_error(url, error)
+        })?;
+        let status = response.status();
+        if matches!(
+            status,
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+                | reqwest::StatusCode::BAD_GATEWAY
+                | reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ) {
+            permit.failed();
+        } else if !status.is_success() {
+            // 500 may be batch-local; 504 is this service's origin failure;
+            // 507 is write admission. None disproves other cached reads or
+            // advisory batches. Existing status validators retain the error.
+            permit.succeeded();
+        }
+        Ok((response, permit))
+    }
+
     /// Quick health check: GET `{base_url}/v1/health` with a short timeout.
     ///
     /// Returns `true` if the service responds with 2xx within 2 seconds.
     pub async fn is_healthy(&self) -> bool {
         let url = format!("{}/v1/health", self.base_url);
         let req = self.client.get(&url).timeout(Duration::from_secs(2));
-        let result = self.apply_auth(req).send().await;
-        matches!(result, Ok(resp) if resp.status().is_success())
+        match self.send(&url, req).await {
+            Ok((resp, mut permit)) if resp.status().is_success() => {
+                permit.succeeded();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Fetch service capabilities after authentication succeeds.
     pub async fn capabilities(&self) -> Result<CacheServiceCapabilities> {
         let url = format!("{}/v1/capabilities", self.base_url);
         let req = self.client.get(&url);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, mut permit) = self.send(&url, req).await?;
 
         check_status(&url, &resp)?;
-        resp.json::<CacheServiceCapabilities>()
+        let result = resp
+            .json::<CacheServiceCapabilities>()
             .await
-            .map_err(|e| map_reqwest_error(&url, e))
+            .map_err(|error| json_error(&url, error, &mut permit));
+        if result.is_ok() {
+            permit.succeeded();
+        }
+        result
     }
 
     /// GET an immutable object from the cache service.
@@ -202,14 +244,15 @@ impl CacheClient {
     pub async fn get(&self, path: &str) -> Result<Bytes> {
         let url = format!("{}/v1/{}", self.base_url, path);
         let req = self.client.get(&url);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, mut permit) = self.send(&url, req).await?;
 
         check_get_status(&url, &resp)?;
-        resp.bytes().await.map_err(|e| map_reqwest_error(&url, e))
+        let data = resp
+            .bytes()
+            .await
+            .map_err(|error| body_error(&url, error, &mut permit))?;
+        permit.succeeded();
+        Ok(data)
     }
 
     /// GET an immutable object without collecting its response body.
@@ -220,11 +263,7 @@ impl CacheClient {
     pub async fn get_stream(&self, path: &str) -> Result<Option<CacheObjectStream>> {
         let url = format!("{}/v1/{}", self.base_url, path);
         let req = self.client.get(&url);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, permit) = self.send(&url, req).await?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -235,6 +274,7 @@ impl CacheClient {
             response: resp,
             content_length,
             url,
+            permit,
         }))
     }
 
@@ -255,11 +295,7 @@ impl CacheClient {
         let url = format!("{}/v1/{}", self.base_url, path);
         let _ = tokio::fs::remove_file(dest).await;
         let req = self.client.get(&url);
-        let mut resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (mut resp, mut permit) = self.send(&url, req).await?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -283,7 +319,7 @@ impl CacheClient {
             while let Some(chunk) = resp
                 .chunk()
                 .await
-                .map_err(|e| map_reqwest_error(&url, e))?
+                .map_err(|error| body_error(&url, error, &mut permit))?
             {
                 let next = written
                     .checked_add(chunk.len() as u64)
@@ -309,6 +345,7 @@ impl CacheClient {
                     reason: "cache service response length does not match Content-Length".to_owned(),
                 });
             }
+            permit.succeeded();
             Ok(Some(written))
         }
         .await;
@@ -329,11 +366,7 @@ impl CacheClient {
     pub async fn get_bounded(&self, path: &str, max_bytes: u64) -> Result<Bytes> {
         let url = format!("{}/v1/{}", self.base_url, path);
         let req = self.client.get(&url);
-        let mut resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (mut resp, mut permit) = self.send(&url, req).await?;
 
         check_get_status(&url, &resp)?;
         if let Some(size) = resp.content_length()
@@ -348,7 +381,11 @@ impl CacheClient {
         }
 
         let mut body = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| map_reqwest_error(&url, e))? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|error| body_error(&url, error, &mut permit))?
+        {
             let next_len =
                 body.len()
                     .checked_add(chunk.len())
@@ -366,6 +403,7 @@ impl CacheClient {
             }
             body.extend_from_slice(&chunk);
         }
+        permit.succeeded();
         Ok(Bytes::from(body))
     }
 
@@ -373,15 +411,12 @@ impl CacheClient {
     pub async fn head(&self, path: &str) -> Result<CacheObjectHead> {
         let url = format!("{}/v1/{}", self.base_url, path);
         let req = self.client.head(&url);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, mut permit) = self.send(&url, req).await?;
 
         check_head_status(&url, &resp)?;
         let size = response_content_length(&url, &resp)?;
         let cache_status = response_cache_status(&resp);
+        permit.succeeded();
         Ok(CacheObjectHead { size, cache_status })
     }
 
@@ -423,11 +458,7 @@ impl CacheClient {
             .client
             .get(&url)
             .header(reqwest::header::RANGE, &range_value);
-        let mut resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (mut resp, mut permit) = self.send(&url, req).await?;
 
         let returned = check_range_status(&url, &resp, &range_value, range.start, last_byte)?;
         let cache_status = response_cache_status(&resp);
@@ -444,7 +475,11 @@ impl CacheClient {
         }
 
         let mut body = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| map_reqwest_error(&url, e))? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|error| body_error(&url, error, &mut permit))?
+        {
             let next_len =
                 body.len()
                     .checked_add(chunk.len())
@@ -463,6 +498,7 @@ impl CacheClient {
             body.extend_from_slice(&chunk);
         }
         check_range_body_len(&url, &range_value, expected_len, body.len())?;
+        permit.succeeded();
         Ok(CacheObjectRange {
             data: Bytes::from(body),
             range: returned.range,
@@ -477,13 +513,10 @@ impl CacheClient {
     pub async fn put(&self, path: &str, data: Bytes) -> Result<()> {
         let url = format!("{}/v1/{}", self.base_url, path);
         let req = self.client.put(&url).body(data);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, mut permit) = self.send(&url, req).await?;
 
         check_status(&url, &resp)?;
+        permit.succeeded();
         Ok(())
     }
 
@@ -503,16 +536,17 @@ impl CacheClient {
         };
 
         let req = self.client.post(&url).json(&body);
-        let resp = self
-            .apply_auth(req)
-            .send()
-            .await
-            .map_err(|e| map_reqwest_error(&url, e))?;
+        let (resp, mut permit) = self.send(&url, req).await?;
 
         check_status(&url, &resp)?;
-        resp.json::<DedupQueryResult>()
+        let result = resp
+            .json::<DedupQueryResult>()
             .await
-            .map_err(|e| map_reqwest_error(&url, e))
+            .map_err(|error| json_error(&url, error, &mut permit));
+        if result.is_ok() {
+            permit.succeeded();
+        }
+        result
     }
 }
 
@@ -588,6 +622,20 @@ fn load_client_identity(
             key_path: key_path.display().to_string(),
             source,
         })
+}
+
+fn body_error(url: &str, error: reqwest::Error, permit: &mut RequestPermit) -> CacheError {
+    // These callers consume raw bytes, so decode errors are transport/body
+    // failures, not a JSON or object-schema rejection.
+    permit.failed();
+    map_reqwest_error(url, error)
+}
+
+fn json_error(url: &str, error: reqwest::Error, permit: &mut RequestPermit) -> CacheError {
+    if error.is_timeout() || error.is_connect() || error.is_body() || error.is_request() {
+        permit.failed();
+    }
+    map_reqwest_error(url, error)
 }
 
 /// Map a reqwest error to a cache-service error with context.
