@@ -48,6 +48,77 @@ fn read_only_stats_does_not_create_missing_root() {
     assert!(!root.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn read_only_stats_preserves_quiet_and_uncheckpointed_catalogs() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    fn snapshot(root: &Path) -> impl PartialEq + std::fmt::Debug + use<> {
+        let mut paths = vec![root.to_owned()];
+        paths.extend(
+            std::fs::read_dir(root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path()),
+        );
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                let bytes = if metadata.is_file() {
+                    std::fs::read(&path).unwrap()
+                } else {
+                    Vec::new()
+                };
+                (
+                    path,
+                    metadata.ino(),
+                    metadata.mode(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>()
+    }
+
+    for retained_wal in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let connection = open_catalog(&root).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO cache_entries VALUES ('entry', 'temporary', 'key', 17, 0, 0)",
+            )
+            .unwrap();
+        if retained_wal {
+            connection
+                .set_db_config(
+                    rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                    true,
+                )
+                .unwrap();
+        }
+        drop(connection);
+        assert_eq!(
+            root.join(format!("{CATALOG_FILE}-wal")).exists(),
+            retained_wal
+        );
+        let before = snapshot(&root);
+
+        let stats = CacheCatalog::read_only_stats(&root).unwrap();
+
+        assert_eq!(
+            (stats.entries, stats.total_bytes, stats.temporary_bytes),
+            (1, 17, 17)
+        );
+        assert!(
+            snapshot(&root) == before,
+            "catalog changed; retained WAL: {retained_wal}"
+        );
+    }
+}
+
 #[test]
 fn read_only_stats_does_not_report_an_unbound_catalog_as_empty() {
     let tmp = tempfile::tempdir().unwrap();

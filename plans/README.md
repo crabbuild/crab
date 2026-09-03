@@ -397,7 +397,11 @@ The next Phase 5 slice makes both stats entry points read-only: missing roots
 stay missing, the product root is pinned before range inspection, chunk bytes
 are counted, and range/object-group failures leave the other report visible
 while returning nonzero. Full disk accounting, individual-family errors,
-versioned JSON, non-mutating catalog inspection, and doctor health remain open.
+versioned JSON, and doctor health remain open. The catalog library now uses an
+exclusively locked, write-denying SQLite inspection boundary; quiet/retained WAL,
+busy state, native writer exclusion, and post-crash inspection have native macOS
+tests. Shared health wiring, inspection resource bounds, and other native OS
+qualification remain open; this does not complete Phase 5.
 
 ### Release gates
 

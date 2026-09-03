@@ -23,6 +23,119 @@ fn count(connection: &Connection) -> u64 {
 }
 
 #[test]
+fn inspection_reports_a_busy_wal_without_changing_recovery_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let writer = open(&root);
+    writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE entries(value); INSERT INTO entries VALUES(1); BEGIN IMMEDIATE; INSERT INTO entries VALUES(2)").unwrap();
+    let snapshot = || {
+        let mut paths = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, modified, bytes)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshot();
+    let reader = open_database(
+        &root,
+        &root.join(DATABASE),
+        DatabaseMode::ReadOnly,
+        Duration::from_millis(25),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let error = reader
+        .query_row("SELECT COUNT(*) FROM entries", [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap_err();
+    assert_eq!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy)
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(reader);
+    assert!(
+        snapshot() == before,
+        "busy inspection changed recovery files"
+    );
+    writer.execute_batch("COMMIT").unwrap();
+    drop(writer);
+    let reader = open_database(
+        &root,
+        &root.join(DATABASE),
+        DatabaseMode::ReadOnly,
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(count(&reader), 2);
+}
+
+#[test]
+fn inspection_excludes_native_writers_and_releases_locks_on_close() {
+    const ROOT: &str = "CRAB_TEST_INSPECTION_ROOT";
+    const BUSY: &str = "CRAB_TEST_INSPECTION_BUSY";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let connection = Connection::open(PathBuf::from(root).join(DATABASE)).unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let result = connection.execute_batch("INSERT INTO entries VALUES(2)");
+        if std::env::var_os(BUSY).is_some() {
+            assert_eq!(
+                result.unwrap_err().sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+        } else {
+            result.unwrap();
+        }
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let writer = open(&root);
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE entries(value); INSERT INTO entries VALUES(1)",
+        )
+        .unwrap();
+    drop(writer);
+    let reader = open_database(
+        &root,
+        &root.join(DATABASE),
+        DatabaseMode::ReadOnly,
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(count(&reader), 1);
+    let child = |busy| {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "private_fs::platform::database::lifetime_tests::inspection_excludes_native_writers_and_releases_locks_on_close"]).env_clear().env(ROOT, &root);
+        if busy {
+            command.env(BUSY, "1");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    child(true);
+    assert_eq!(count(&reader), 1);
+    drop(reader);
+    child(false);
+    assert_eq!(count(&open(&root)), 2);
+}
+
+#[test]
 fn root_replacement_cannot_redirect_wal_commit_checkpoint_or_close() {
     for outcome in ["COMMIT", "ROLLBACK"] {
         let tmp = tempfile::tempdir().unwrap();
@@ -350,6 +463,45 @@ fn killed_writer_recovers_only_committed_rows_in_both_journal_modes() {
         assert!(ready, "{journal}: child failed before dirty-page spill");
         child.kill().unwrap();
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        let snapshot = || {
+            let mut paths = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths
+                .into_iter()
+                .map(|path| {
+                    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, modified, bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        let inspector = open_database(
+            &root,
+            &root.join(DATABASE),
+            DatabaseMode::ReadOnly,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let result = inspector.query_row("SELECT COUNT(*) FROM entries", [], |row| {
+            row.get::<_, u64>(0)
+        });
+        if journal == "DELETE" {
+            assert_eq!(
+                result.unwrap_err().sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ReadOnly)
+            );
+        } else {
+            assert_eq!(result.unwrap(), 1);
+        }
+        drop(inspector);
+        assert!(
+            snapshot() == before,
+            "{journal}: inspection changed crash recovery state"
+        );
         let recovered = open(&root);
         assert_eq!(count(&recovered), 1, "{journal}");
         assert_eq!(

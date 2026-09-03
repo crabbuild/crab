@@ -46,12 +46,16 @@ unsafe extern "C" fn read(
         // SAFETY: SQLite supplies length writable bytes for this read.
         let output =
             unsafe { std::slice::from_raw_parts_mut(output.cast::<u8>(), length as usize) };
+        let Some(file) = state.file.as_ref() else {
+            output.fill(0);
+            if !file_context(state).exclusive.get() {
+                return Err(ffi::SQLITE_BUSY);
+            }
+            return Err(ffi::SQLITE_IOERR_SHORT_READ);
+        };
         let mut read = 0;
         while read < output.len() {
-            match state
-                .file
-                .read_at(&mut output[read..], offset as u64 + read as u64)
-            {
+            match file.read_at(&mut output[read..], offset as u64 + read as u64) {
                 Ok(0) => {
                     // SQLite requires every unread byte to be zero even on
                     // SQLITE_IOERR_SHORT_READ; pages may be newly allocated.
@@ -85,6 +89,8 @@ unsafe extern "C" fn write(
         let input = unsafe { std::slice::from_raw_parts(input.cast::<u8>(), length as usize) };
         state
             .file
+            .as_ref()
+            .ok_or(ffi::SQLITE_READONLY)?
             .write_all_at(input, offset as u64)
             .map_err(io_code)
     })
@@ -97,7 +103,12 @@ unsafe extern "C" fn truncate(raw: *mut ffi::sqlite3_file, size: i64) -> c_int {
             return Err(ffi::SQLITE_READONLY);
         }
         let size = u64::try_from(size).map_err(|_| ffi::SQLITE_IOERR_TRUNCATE)?;
-        state.file.set_len(size).map_err(io_code)
+        state
+            .file
+            .as_ref()
+            .ok_or(ffi::SQLITE_READONLY)?
+            .set_len(size)
+            .map_err(io_code)
     })
 }
 
@@ -106,23 +117,24 @@ unsafe extern "C" fn sync(raw: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
         if state.read_only {
             return Ok(());
         }
+        let file = state.file.as_ref().ok_or(ffi::SQLITE_READONLY)?;
         #[cfg(target_os = "macos")]
         {
             let full_sync = flags & 0x0f == ffi::SQLITE_SYNC_FULL && {
                 // SAFETY: F_FULLFSYNC operates on this live owned descriptor.
                 // Pinned SQLite also uses fsync when this is unsupported.
-                unsafe { libc::fcntl(state.file.as_raw_fd(), libc::F_FULLFSYNC) == 0 }
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) == 0 }
             };
             if !full_sync {
-                state.file.sync_all().map_err(|_| ffi::SQLITE_IOERR_FSYNC)?;
+                file.sync_all().map_err(|_| ffi::SQLITE_IOERR_FSYNC)?;
             }
         }
         #[cfg(target_os = "linux")]
         {
             let result = if flags & ffi::SQLITE_SYNC_DATAONLY != 0 {
-                state.file.sync_data()
+                file.sync_data()
             } else {
-                state.file.sync_all()
+                file.sync_all()
             };
             result.map_err(|_| ffi::SQLITE_IOERR_FSYNC)?;
         }
@@ -140,8 +152,13 @@ unsafe extern "C" fn sync(raw: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
 
 unsafe extern "C" fn size(raw: *mut ffi::sqlite3_file, output: *mut i64) -> c_int {
     with_file(raw, |state| {
-        let size = i64::try_from(state.file.metadata().map_err(io_code)?.len())
-            .map_err(|_| ffi::SQLITE_IOERR_FSTAT)?;
+        file_context(state).validate_generation()?;
+        let size = match &state.file {
+            Some(file) => i64::try_from(file.metadata().map_err(io_code)?.len())
+                .map_err(|_| ffi::SQLITE_IOERR_FSTAT)?,
+            None if file_context(state).exclusive.get() => 0,
+            None => return Err(ffi::SQLITE_BUSY),
+        };
         // SAFETY: SQLite provides a valid i64 output pointer.
         unsafe {
             *output = size;
@@ -153,17 +170,35 @@ unsafe extern "C" fn size(raw: *mut ffi::sqlite3_file, output: *mut i64) -> c_in
 unsafe extern "C" fn lock(raw: *mut ffi::sqlite3_file, level: c_int) -> c_int {
     with_file(raw, |state| {
         file_context(state).validate_generation()?;
-        state.locks.acquire(&state.file, level)
+        state
+            .locks
+            .acquire(state.file.as_ref().ok_or(ffi::SQLITE_IOERR_LOCK)?, level)?;
+        file_context(state).main_lock_changed(&state.name, state.locks.level);
+        Ok(())
     })
 }
 
 unsafe extern "C" fn unlock(raw: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    with_file(raw, |state| state.locks.release(&state.file, level))
+    with_file(raw, |state| {
+        // An unlock may partially succeed before an OS error. Stop asserting
+        // exclusive ownership before releasing any byte-range lock.
+        file_context(state).main_lock_changed(&state.name, ffi::SQLITE_LOCK_NONE);
+        state
+            .locks
+            .release(state.file.as_ref().ok_or(ffi::SQLITE_IOERR_UNLOCK)?, level)?;
+        file_context(state).main_lock_changed(&state.name, state.locks.level);
+        Ok(())
+    })
 }
 
 unsafe extern "C" fn reserved(raw: *mut ffi::sqlite3_file, output: *mut c_int) -> c_int {
     with_file(raw, |state| {
-        let reserved = state.locks.reserved(&state.file)?;
+        let reserved = state.locks.reserved(
+            state
+                .file
+                .as_ref()
+                .ok_or(ffi::SQLITE_IOERR_CHECKRESERVEDLOCK)?,
+        )?;
         // SAFETY: SQLite provides a valid integer output pointer.
         unsafe {
             *output = c_int::from(reserved);
@@ -186,7 +221,12 @@ unsafe extern "C" fn control(
                 }
             }
             ffi::SQLITE_FCNTL_HAS_MOVED => {
-                let metadata = state.file.metadata().map_err(io_code)?;
+                let metadata = state
+                    .file
+                    .as_ref()
+                    .ok_or(ffi::SQLITE_NOTFOUND)?
+                    .metadata()
+                    .map_err(io_code)?;
                 let moved = match file_context(state).directory.stat_component(&state.name) {
                     Ok(stat) => {
                         #[cfg(target_os = "macos")]

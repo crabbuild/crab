@@ -396,7 +396,7 @@ Qualification limits and next actions:
 | 2. Cache failure isolation | IN PROGRESS; acceptance open | Source-specific xorb/body/metadata repair and bounded fallback pass; actual reconstruction retains origin/restore/writer failures; remaining family faults and broader diagnostic/provider qualification outstanding |
 | 3. Unified budget/lifecycle | IN PROGRESS; acceptance open | Incoming-space admission, root-bound reservation/publication/registration, and payload-lease handoff have focused proof; full accounting, crash recovery, and bounded owner cleanup remain outstanding |
 | 4. Private tenancy | IN PROGRESS; acceptance open | Unix private payload/maintenance paths plus descriptor-bound catalog/xorb-index SQLite connections. Catalog inventory/deletion, reservation release, and fill publication now use the same retained root; non-mutating health, main-file replacement, other index owners, ACLs, and native OS qualification remain open. |
-| 5. Operability/state cleanup | IN PROGRESS; acceptance open | Object/range helpers inspect private payloads without repair; shared health, CLI stats/doctor, scoped hints, and state removal outstanding |
+| 5. Operability/state cleanup | IN PROGRESS; acceptance open | Both stats commands inspect private payloads without repair; catalog inspection denies writes and preserves quiet/retained WAL state in native macOS tests. Complete health/JSON/accounting, doctor/verify wiring, scoped hints, state removal, and resource/platform proof remain outstanding |
 | 6. Concurrency/startup | IN PROGRESS; acceptance open | Retained xorb results own/charge buffers and keys; four whole-file consumers stream; shared outputs reject size violations and close owned resources on cancellation. Configured output/decode admission, cross-process fills, startup, and resource qualification remain open |
 | 7. Qualification/release docs | IN PROGRESS; acceptance open | Maintained cache-service isolation and report-contract hardening; installed RustFS checkpoints retained. Large-file prototype integration, remaining lifecycle/resource/provider/native proof, and broad release gates remain open. |
 
@@ -1900,10 +1900,11 @@ Current contracts and limits:
   aggregate deadline.
 - `CANTOPEN` is retained for failed opens: pinned SQLite's `hasHotJournal`
   uses it to recover a disappeared-journal race under an exclusive lock.
-- SQLite read-only **main** connections retain their existing native writable
+- At this historical checkpoint, SQLite read-only **main** connections retained native writable
   WAL/SHM bookkeeping semantics. Enforcing read-only side files here broke
-  seven catalog inspection tests; non-mutating health needs its own complete
-  design and proof. This checkpoint does not claim it is implemented.
+  seven catalog inspection tests. The later non-mutating catalog inspection
+  checkpoint replaces that behavior with exclusive, write-denying inspection;
+  full health-model integration and qualification remain open.
 - Unnamed SQLite temporaries are private, immediately unlinked, and descriptor-
   owned. Their live physical bytes still need explicit Phase 3 accounting;
   directory totals alone cannot count unlinked open files.
@@ -3153,6 +3154,113 @@ inspection, full accounting, and doctor/verify health remain open. Doctor still
 uses its separate recursive size estimate and does not establish cache health.
 No claim of bounded wall-clock scans, Windows support, or integrity verification.
 
+### Non-mutating catalog inspection checkpoint, 2026-09-03
+
+**Context and ownership.** At `acd6fc1`, `CacheCatalog::read_only_stats` opens
+the main database read-only, but SQLite can still create or update WAL/SHM
+files. A new filesystem-snapshot regression failed on an idle catalog before
+the fix. The four independent queries also had no explicit read transaction.
+The shared private database owner is the fix boundary: catalog stats is the
+production API consumer of `DatabaseMode::ReadOnly`; its current callers are
+tests/diagnostics, not the CLI stats or doctor implementation. Writable catalog
+and remote-proof index callers retain their existing WAL/NORMAL policy.
+
+**Design and dependency contract.** Pinned rusqlite 0.34.0 / libsqlite3-sys
+0.32.0 provide the mechanism without a dependency patch or alternate database
+parser. In bundled `sqlite3.c`, `pagerOpenWal` acquires the main EXCLUSIVE lock
+before choosing a heap WAL index for exclusive pager mode. `lockBtree` still
+opens a WAL for a WAL-mode header even when the WAL file is absent;
+`sqlite3WalOpen` requests READWRITE/CREATE and then honors the VFS's returned
+READONLY flag. `sqlite3PagerClose` can checkpoint unless the connection's
+`SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE` option is set.
+
+The existing `ReadOnly` owner now configures exclusive pager locking and
+disables checkpoint-on-close; there is no second inspection implementation.
+The private VFS opens existing side files read-only and rejects all writes,
+truncation, deletion, temporary-file creation, and SHM initialization. A missing
+WAL becomes an empty read-only handle only after an actual EXCLUSIVE main lock
+and a descriptor-relative `NotFound`. Existing WALs are always consumed by
+SQLite. An empty handle cannot be read after exclusive ownership is lost.
+All catalog totals now use one read transaction. Connection close still
+precedes release of the retained generation and VFS registration.
+
+**Explicit tradeoff.** The main OS descriptor needs `O_RDWR` for OFD exclusive
+byte locking; it is not an OS-read-only descriptor. The SQLite connection and
+every data/namespace mutation callback are read-only. Filesystems without that
+permission report unavailable; no chmod or lock bypass is attempted. The
+no-write guarantee is enforced at the SQLite/VFS boundary; an OS-read-only
+descriptor requirement is not satisfied. Keep that distinction explicit in
+review before accepting the Phase 5 inspection contract. Busy
+catalogs can report unavailable even when a concurrent ordinary WAL reader
+could have read them. This is preferable to mutating SHM or labelling a live
+database immutable. Retaining writer WALs forever or changing writer journal
+mode merely for diagnostics would broaden the product's persistence policy.
+
+**Current proof.** Native macOS: 246 cache-library tests pass with local-cache,
+xet-chunk-cache, and remote-client enabled; strict all-target Clippy passes for
+that combination and for local-cache alone. The new quiet/retained-WAL
+regression passes after initially failing on the prior implementation. Its
+snapshots compare entries, bytes, inode, mode, and mtime, excluding access time.
+Additional tests prove bounded busy failure without recovery-file changes,
+native SQLite writer exclusion and release on close, SQL plus direct VFS write
+denial, and absence proof before creating an empty virtual WAL. The existing
+killed-writer test now also checks inspection before recovery: hot rollback
+journals return READONLY, WAL reads retain only committed rows, and recovery
+files remain byte/mtime-identical. Its existing recovery assertions remain.
+
+**Installed regression proof.** Isolated Make install, external per-worktree
+target, CLI `acd6fc1-catalog-inspection-dirty`, built 2026-09-03 13:35:23 UTC:
+SHA-256 `b6e92ab9740a7f34f5d88683e5b2d1f6d9f1f0a7ca0f5a0b542d8692219e116b`.
+Diff against `acd6fc1` of `catalog.rs` and the five changed runtime database
+modules (`database.rs`, `file.rs`, `generation.rs`, `shm.rs`, `vfs.rs`):
+SHA-256 `14ae067169128866a4901a60cf97c414cef5352bebd3207f02b4a0a349596ae1`.
+Retained run group `cache-f410.E7nt8I/catalog-inspection.Ah0Z5p`, run
+`inspection-smoke-v1`, fresh bucket `crabbuild-catalog-inspection-ah0z5p-v1`:
+**1,192 checks / 89 commands pass** using the committed maintained harness
+snapshot above and the previous availability server. Add/commit/push/dedup,
+clone/hydrate, restart, and same-push service recovery pass; each healthy hydrate
+stage retains 15 service hits, zero service fetches/payload-origin GETs, and
+19 metadata/control GETs. Original hydrated SHA-256:
+`a239291f1fc724cf7a1e6f44c574ff5fc279ac1d99d6801909b5e1d4e33ff069`.
+Packaged audit and installed Rust release verification (275 checks plus
+summary) pass. This exercises unchanged writable catalog/index consumers; it
+does not claim the new inspection API is wired into the CLI. Minimal and
+xet-chunk-cache-only builds, the inspection regression with only that feature,
+format/whitespace, and docs content audit also pass. No shared-bucket cleanup.
+
+**Broader CI is not green.** At preceding head `acd6fc1`, cache-service smoke,
+protocol unit/transcript tests, documentation, and binary contracts pass.
+[Workspace tests](https://github.com/crabbuild/crab/actions/runs/33759661867/job/100662710517)
+fail while linking `generate_schemas`, `v1_contract_inventory`, and the Crab
+library test: linker signal 7 / bus error, not a reported assertion failure.
+[Architecture guardrails](https://github.com/crabbuild/crab/actions/runs/33759661901/job/100662539157)
+report dev-edge, cache test-scope, dependency-budget, and feature-inventory
+drift. Protected inventory/API decisions remain pending; nothing is suppressed
+or updated to silence them. This slice does not change dependencies or budgets.
+
+**Next executable slices / acceptance.**
+
+1. Shared health model: compose catalog snapshot and pinned per-family scans;
+   report absent, busy, corrupt/schema-invalid, unsafe, and orphaned-recovery
+   state distinctly. Missing main with surviving recovery files must not be
+   reported as an empty healthy catalog. Every other family remains visible.
+2. CLI/doctor wiring: one versioned JSON and human report; missing roots stay
+   missing; no initialization, repair, or independent recursive-size policy.
+   Golden command tests must prove one broken family cannot hide healthy ones.
+3. Inspection qualification: native Linux and macOS read-only/full-filesystem,
+   root/side-file replacement, cancellation, contention, and large WAL cases;
+   establish aggregate time/memory bounds before claiming interactive health.
+   Heap WAL-index memory is not bounded by this checkpoint's busy timeout.
+4. Complete Phase 5: allocation reconciliation, per-family verify/schema and
+   reference checks, scoped transactional hints, and removal of unused local
+   placements while preserving the remote-proof contract.
+
+No Phase 5 acceptance, complete health report, Windows support, live concurrent
+WAL-reader availability guarantee, or full resource bound is claimed. Runtime
+growth owns the absent-WAL and write-denial/locking invariants in the existing
+VFS; it adds no fallback parser, compatibility alias, public configuration,
+serialized format, or dependency change.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
@@ -3242,7 +3350,10 @@ contract. Do not ship a warning-only shared cache containing private bytes.
 
 Current stats and verify commands see only part of the root. Stats now uses
 read-only filesystem scans, with range/object-group errors isolated, but lacks
-full-family accounting, per-object-family errors, and JSON. Local xorb-placement rows are written but unused,
+full-family accounting, per-object-family errors, and JSON. The catalog's
+write-denying inspection boundary has native macOS tests, but is not wired into
+the shared health model or qualified for aggregate resource bounds and other
+native platforms. Local xorb-placement rows are written but unused,
 while the live remote proof index shares their database. Shard hints use a
 global JSON read-modify-write that loses updates across processes.
 

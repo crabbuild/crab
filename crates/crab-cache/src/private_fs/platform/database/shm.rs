@@ -36,10 +36,14 @@ impl Drop for Mapping {
 impl SharedMemory {
     pub(super) fn open(context: &Context) -> Result<Self, i32> {
         let name = context.side_name(b"-shm")?;
-        // Match native SQLite's side-file contract even for a read-only main
-        // connection. A non-mutating health view requires a separate policy;
-        // READONLY on the main database alone does not establish that promise.
-        let file = context.open(&name, true, false, false)?;
+        // Inspection must use SQLite's exclusively locked heap WAL index;
+        // reject unexpected shared-memory initialization without touching disk.
+        if context.read_only {
+            return Err(ffi::SQLITE_READONLY);
+        }
+        let file = context
+            .open(&name, true, false, false)?
+            .ok_or(ffi::SQLITE_CANTOPEN)?;
         // Match SQLite's dead-man-switch protocol: only the first owner may
         // reset abandoned shared memory. An exclusive initializer means BUSY,
         // not permission to proceed with possibly uninitialized contents.

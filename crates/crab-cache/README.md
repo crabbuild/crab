@@ -126,11 +126,26 @@ catalog timeouts and WAL/NORMAL writer policy are unchanged.
 This is a main-inode replacement checkpoint, not complete database-generation
 qualification. Side-file-only replacement, identity reuse after all descriptors
 close, resource/crash qualification of retained owners, remaining index callers,
-non-mutating WAL inspection, complete temporary-byte accounting, bounded
-cancellation, and other native-platform qualification remain open. Read-only
-main connections may still update WAL/SHM bookkeeping. Native SQLite does not
+complete temporary-byte accounting, bounded cancellation, and other
+native-platform qualification remain open. Native SQLite does not
 participate in Crab's generation lease; cross-process transaction locking is
 qualified, but arbitrary external replacement or repair is not authorized.
+
+Read-only catalog inspection now uses a read-only SQLite connection with
+exclusive pager locking, SQLite's heap WAL index, and checkpoint-on-close
+disabled. Existing WAL bytes are read, not bypassed; an absent WAL is represented
+as empty only while the actual main-file EXCLUSIVE lock proves its absence.
+The VFS rejects writes, truncation, deletion, temporary creation, and SHM
+initialization. Catalog totals share one read transaction. Busy catalogs report
+an error, and hot rollback journals require recovery by a writer, not inspection.
+
+The main OS descriptor uses `O_RDWR` because OFD exclusive byte locks require
+write permission; SQL and VFS data writes remain disabled. A filesystem that
+cannot grant that descriptor reports unavailable rather than weakening locking.
+Native macOS tests cover quiet and retained WAL state, contention, direct VFS
+write denial, native writer exclusion, and inspection after writer death. This
+is a library boundary, not full health-model/CLI integration, native Linux proof,
+or a bound on heap WAL-index size and total inspection time.
 
 Admission includes the incoming file and other active reservations when making
 space, even below the current-usage high watermark. The final capacity check

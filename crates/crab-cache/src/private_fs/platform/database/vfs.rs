@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int};
 use std::fs::File;
 use std::os::unix::ffi::OsStrExt as _;
@@ -13,6 +14,7 @@ use super::super::{Directory, validate_metadata};
 use super::generation::Generation;
 use super::locking::DatabaseLock;
 use super::shm::SharedMemory;
+use crate::private_fs::DatabaseMode;
 use crate::{CacheError, Result};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -24,6 +26,8 @@ pub(super) struct Context {
     native: *mut ffi::sqlite3_vfs,
     busy_timeout: Duration,
     generation: Arc<Generation>,
+    pub(super) read_only: bool,
+    pub(super) exclusive: Cell<bool>,
 }
 
 impl Context {
@@ -63,7 +67,7 @@ impl Context {
         create: bool,
         exclusive: bool,
         read_only: bool,
-    ) -> std::result::Result<File, i32> {
+    ) -> std::result::Result<Option<File>, i32> {
         // Serialize namespace changes with other Crab openers/removers. macOS
         // openat(O_CREAT) can report ENOENT when the leaf is concurrently
         // unlinked even though the pinned parent still exists.
@@ -72,7 +76,7 @@ impl Context {
         if name == self.name.as_c_str() {
             // SQLite must use the inode bound under the initialization lock.
             // Reopening the pathname here could select another generation.
-            return self.generation.main.try_clone().map_err(io_code);
+            return self.generation.main.try_clone().map(Some).map_err(io_code);
         }
         let path = self.directory.path.join(OsStr::from_bytes(name.to_bytes()));
         validate_metadata(
@@ -81,6 +85,7 @@ impl Context {
             true,
         )
         .map_err(cache_code)?;
+        let read_only = read_only || self.read_only;
         let flags = if read_only {
             libc::O_RDONLY
         } else {
@@ -93,18 +98,29 @@ impl Context {
                 0
             }
             | if exclusive { libc::O_EXCL } else { 0 };
-        let file = self
-            .directory
-            .open_component(name, flags, &path)
-            .map_err(|error| {
+        let file = match self.directory.open_component(name, flags, &path) {
+            Ok(file) => file,
+            Err(CacheError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.read_only
+                    && self.exclusive.get()
+                    && name == self.side_name(b"-wal")?.as_c_str() =>
+            {
+                // A quiet WAL-mode main still makes SQLite request a WAL.
+                // Its proven absence under EXCLUSIVE is an empty read-only
+                // handle, never permission to create or ignore an existing WAL.
+                return Ok(None);
+            }
+            Err(error) => {
                 // SQLite retries a disappeared hot journal under EXCLUSIVE
                 // only for CANTOPEN. A generic IOERR makes that normal unlink
                 // race fatal; match the native VFS's open-error contract.
                 tracing::debug!(%error, "private SQLite open failed");
-                ffi::SQLITE_CANTOPEN
-            })?;
+                return Err(ffi::SQLITE_CANTOPEN);
+            }
+        };
         validate_metadata(&file.metadata().map_err(io_code)?, &path, false).map_err(cache_code)?;
-        Ok(file)
+        Ok(Some(file))
     }
 
     pub(super) fn side_name(&self, suffix: &[u8]) -> std::result::Result<CString, i32> {
@@ -117,7 +133,16 @@ impl Context {
         self.generation.validate(&self.directory, &self.name)
     }
 
+    pub(super) fn main_lock_changed(&self, name: &CStr, level: i32) {
+        if name == self.name.as_c_str() {
+            self.exclusive.set(level == ffi::SQLITE_LOCK_EXCLUSIVE);
+        }
+    }
+
     pub(super) fn unlink(&self, name: &CString) -> std::result::Result<(), i32> {
+        if self.read_only {
+            return Err(ffi::SQLITE_READONLY);
+        }
         // Never wait for SQLite while holding this short namespace lock.
         // Bounded waiting uses the owning caller's existing busy policy.
         let _mutation = self.mutation()?;
@@ -153,6 +178,7 @@ impl Registration {
         name: CString,
         generation: Arc<Generation>,
         busy_timeout: Duration,
+        mode: DatabaseMode,
     ) -> Result<Self> {
         // SAFETY: SQLite initializes and serializes its built-in VFS registry.
         let native = unsafe { ffi::sqlite3_vfs_find(c"unix".as_ptr()) };
@@ -171,6 +197,8 @@ impl Registration {
             native,
             busy_timeout,
             generation,
+            read_only: mode == DatabaseMode::ReadOnly,
+            exclusive: Cell::new(false),
         });
         let mut vfs = Box::new(ffi::sqlite3_vfs {
             iVersion: 2,
@@ -231,7 +259,8 @@ pub(super) struct SqlFile {
 }
 
 pub(super) struct FileState {
-    pub(super) file: File,
+    // None is exclusively a missing WAL proven under the main EXCLUSIVE lock.
+    pub(super) file: Option<File>,
     pub(super) context: *const Context,
     pub(super) name: CString,
     pub(super) locks: DatabaseLock,
@@ -315,8 +344,11 @@ unsafe extern "C" fn open(
             // SAFETY: SQLite supplies a NUL-terminated filename for named opens.
             context.component(unsafe { CStr::from_ptr(name) })?
         };
-        let create = flags & ffi::SQLITE_OPEN_CREATE != 0;
-        let read_only = flags & ffi::SQLITE_OPEN_READONLY != 0;
+        if temporary && context.read_only {
+            return Err(ffi::SQLITE_READONLY);
+        }
+        let create = flags & ffi::SQLITE_OPEN_CREATE != 0 && !context.read_only;
+        let read_only = flags & ffi::SQLITE_OPEN_READONLY != 0 || context.read_only;
         let file = context.open(
             &name,
             create,
@@ -351,7 +383,12 @@ unsafe extern "C" fn open(
                 },
             );
             if !out_flags.is_null() {
-                *out_flags = flags;
+                *out_flags = if context.read_only {
+                    (flags & !(ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE))
+                        | ffi::SQLITE_OPEN_READONLY
+                } else {
+                    flags
+                };
             }
         }
         Ok(())
@@ -370,7 +407,10 @@ pub(super) unsafe extern "C" fn close(raw: *mut ffi::sqlite3_file) -> c_int {
         // A generation lease can retain the main description after xClose.
         // Release its OFD byte locks explicitly, including partial acquisitions;
         // closing this cloned fd alone no longer releases them.
-        let result = super::locking::lock(&state.file, super::locking::UNLOCK, 0, 0);
+        let result = state.file.as_ref().map_or(Ok(()), |file| {
+            super::locking::lock(file, super::locking::UNLOCK, 0, 0)
+        });
+        file_context(&state).main_lock_changed(&state.name, ffi::SQLITE_LOCK_NONE);
         drop(state);
         result
     })
@@ -498,6 +538,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspection_rejects_writes_and_requires_exclusion_for_an_absent_wal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let path = root.join("entry");
+        let writer =
+            super::super::open_database(&root, &path, DatabaseMode::Create, Duration::ZERO)
+                .unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE entries(value); INSERT INTO entries VALUES(1)").unwrap();
+        drop(writer);
+        let reader =
+            super::super::open_database(&root, &path, DatabaseMode::ReadOnly, Duration::ZERO)
+                .unwrap();
+        let context = &reader.registration._context;
+        assert!(context.open(c"entry-wal", true, false, false).is_err());
+        assert_eq!(
+            reader
+                .query_row("SELECT value FROM entries", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            context
+                .open(c"entry-wal", true, false, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(context.open(c"entry-journal", true, false, false).is_err());
+        assert_eq!(
+            context.unlink(&c"entry".to_owned()),
+            Err(ffi::SQLITE_READONLY)
+        );
+        assert!(matches!(
+            SharedMemory::open(context),
+            Err(ffi::SQLITE_READONLY)
+        ));
+        for sql in ["INSERT INTO entries VALUES(2)", "PRAGMA user_version=7"] {
+            assert_eq!(
+                reader.execute_batch(sql).unwrap_err().sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ReadOnly)
+            );
+        }
+
+        let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
+        // SAFETY: FILE_POINTER returns this live connection's main sqlite3_file;
+        // it stays owned by reader throughout the synchronous callback probes.
+        assert_eq!(
+            unsafe {
+                ffi::sqlite3_file_control(
+                    reader.handle(),
+                    c"main".as_ptr(),
+                    ffi::SQLITE_FCNTL_FILE_POINTER,
+                    ptr::from_mut(&mut file).cast(),
+                )
+            },
+            ffi::SQLITE_OK
+        );
+        assert!(!file.is_null());
+        // SAFETY: SQLite returned its valid file and method table; both input
+        // buffers have the lengths required by these callbacks.
+        unsafe {
+            let methods = &*(*file).pMethods;
+            assert_eq!(
+                methods.xWrite.unwrap()(file, b"x".as_ptr().cast(), 1, 0),
+                ffi::SQLITE_READONLY
+            );
+            assert_eq!(methods.xTruncate.unwrap()(file, 0), ffi::SQLITE_READONLY);
+        }
+        drop(reader);
+        assert!(!root.join("entry-wal").exists());
+        assert!(!root.join("entry-shm").exists());
+    }
+
+    #[test]
     fn close_releases_sqlite_locks_even_when_generation_retains_the_main_description() {
         use super::super::locking::{PENDING, UNLOCK, WRITE_LOCK, conflicting_lock, lock};
         let tmp = tempfile::tempdir().unwrap();
@@ -511,7 +624,10 @@ mod tests {
         )
         .unwrap();
         let context = &connection.registration._context;
-        let file = context.open(c"entry", false, false, false).unwrap();
+        let file = context
+            .open(c"entry", false, false, false)
+            .unwrap()
+            .unwrap();
         let probe = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -520,7 +636,7 @@ mod tests {
         lock(&file, WRITE_LOCK, PENDING, 1).unwrap();
         assert_eq!(conflicting_lock(&probe, PENDING, 1).unwrap(), WRITE_LOCK);
         let state = Box::new(FileState {
-            file,
+            file: Some(file),
             context: ptr::from_ref(context.as_ref()),
             name: c"entry".to_owned(),
             locks: DatabaseLock::default(),

@@ -22,8 +22,12 @@ unavailable storage and failed admission remain best-effort. Catalog/xorb-index
 SQLite connections also retain a descriptor-bound private owner through close.
 Catalog maintenance and reserved publication now retain one root through
 registration and owner release; payload leases protect the publication handoff.
-Main-file replacement, other index owners, non-mutating inspection, complete
-accounting, and separate-process/provider qualification remain open.
+Main-file replacement, other index owners, complete accounting, and
+separate-process/provider qualification remain open. Catalog inspection now
+uses a read-only SQLite connection and write-denying private VFS, with an
+exclusively locked heap WAL index and checkpoint-on-close disabled. Busy or
+recovery-required databases report errors; the CLI/doctor health-model wiring
+and inspection resource/native-platform qualification are not complete.
 
 ## Authority boundary
 

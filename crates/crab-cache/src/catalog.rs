@@ -289,11 +289,11 @@ impl CacheCatalog {
 
     /// Read an existing catalog without initializing a missing root or database.
     ///
-    /// SQLite opens the database read-only, but its WAL bookkeeping may still
-    /// create or update side files; this is not yet a non-mutating health probe.
+    /// Inspection never writes database or recovery files. A busy or unsafe
+    /// catalog returns an error instead of repairing state or bypassing its WAL.
     pub fn read_only_stats(root: &Path) -> Result<CacheCatalogStats> {
         let path = root.join(CATALOG_FILE);
-        let connection = match open_database(
+        let mut connection = match open_database(
             root,
             &path,
             DatabaseMode::ReadOnly,
@@ -305,6 +305,11 @@ impl CacheCatalog {
             }
             Err(error) => return Err(error),
         };
+        // All totals describe one snapshot, including reservations and the
+        // maintenance marker. Independent autocommit reads can mix generations.
+        let connection = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            .map_err(|source| index_error(&path, source))?;
         let (entries, total_bytes) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM cache_entries",

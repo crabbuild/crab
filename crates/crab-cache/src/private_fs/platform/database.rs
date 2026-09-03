@@ -206,7 +206,7 @@ fn open_with_generation(
         ));
     }
     drop(_mutation);
-    let registration = vfs::Registration::new(directory, name, generation, busy_timeout)?;
+    let registration = vfs::Registration::new(directory, name, generation, busy_timeout, mode)?;
     let flags = if mode == DatabaseMode::ReadOnly {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     } else {
@@ -227,6 +227,24 @@ fn open_with_generation(
             path: path.display().to_string(),
             source,
         })?;
+    if mode == DatabaseMode::ReadOnly {
+        // SQLite's exclusive pager uses a heap WAL index under the real main
+        // file lock. Disable close-time checkpointing as well as SQL writes;
+        // inspecting recovery state must never repair or remove it.
+        connection
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .and_then(|_| {
+                connection
+                    .execute_batch("PRAGMA locking_mode = EXCLUSIVE; PRAGMA temp_store = MEMORY;")
+            })
+            .map_err(|source| CacheError::Index {
+                path: path.display().to_string(),
+                source,
+            })?;
+    }
     Ok(Database {
         connection: std::mem::ManuallyDrop::new(connection),
         registration: std::mem::ManuallyDrop::new(registration),

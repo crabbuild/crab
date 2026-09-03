@@ -67,7 +67,10 @@ impl Generation {
             })?;
         let metadata = owner.metadata()?;
         validate_metadata(&metadata, &owner_path, false)?;
-        let main = directory.open_component(name, flags, &path)?;
+        // OFD exclusive byte locks require a writable OS description. The
+        // read-only SQLite connection and VFS deny data/namespace writes;
+        // this capability exists only to exclude writers during inspection.
+        let main = directory.open_component(name, libc::O_RDWR, &path)?;
         let main_metadata = main.metadata()?;
         validate_metadata(&main_metadata, &path, false)?;
         let mut expected = [0; 24];
