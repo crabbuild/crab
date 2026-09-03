@@ -4,7 +4,7 @@
 //! unreachable remotes from the exit code and stderr, then conditionally
 //! hydrates newly-fetched pointer blobs that match the hydration filter.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
@@ -152,7 +152,7 @@ pub async fn run_pull(args: &PullArgs, cancel: &CancellationToken) -> Result<()>
                 );
             }
 
-            hydrate_pointers(&pointers, args.mode, &config, cancel).await?;
+            hydrate_pointers(&repo_root, &pointers, args.mode, &config, cancel).await?;
 
             let total_elapsed = start.elapsed();
             if !args.mode.is_machine() {
@@ -464,6 +464,7 @@ fn find_hydration_candidates(
 ///
 /// Delegates to `crab hydrate` with the specific file paths.
 async fn hydrate_pointers(
+    root: &Path,
     pointers: &[PathBuf],
     mode: OutputMode,
     config: &Config,
@@ -491,7 +492,14 @@ async fn hydrate_pointers(
         recover_from: None,
     };
 
-    crate::cmd::hydrate::run_hydrate(&hydrate_args, config, cancel).await
+    crate::cmd::hydrate::run_hydrate(
+        root,
+        &hydrate_args,
+        config,
+        &crate::cmd::hydrate_restore::RestoreFlags::default(),
+        cancel,
+    )
+    .await
 }
 
 /// Format a byte count compactly for progress messages.

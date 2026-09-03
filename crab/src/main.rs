@@ -33,6 +33,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use tokio::io::{BufReader, Stdin, Stdout};
 use tokio_util::sync::CancellationToken;
 
+use crab::cmd::hydrate::resolve_hydrate_remote_url;
 use crab::core::config::Config;
 use crab::core::context::AppContext;
 use crab::core::error::{CrabError, Result};
@@ -3351,8 +3352,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                     mode: crab::core::output::OutputMode::Text,
                                 };
                                 let _ = crab::cmd::hydrate::run_hydrate(
+                                    &cwd,
                                     &hydrate_args,
                                     &rt_config,
+                                    &crab::cmd::hydrate_restore::RestoreFlags::default(),
                                     &cancel,
                                 )
                                 .await;
@@ -4250,71 +4253,14 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             };
             let config = Config::resolve_local()?;
 
-            // Try to create a cloud-backed hydrator from crab.toml.
-            // Falls back to the SmudgeSession hydrator only when the remote is
-            // absent. Configured remotes fail closed so forced replica policies
-            // cannot silently hydrate from another source.
-            if let Some(parsed) = resolve_hydrate_remote_url(&config)? {
-                let selection =
-                    crab::replication::select_read_store(&config, &parsed, "hydrate", &cancel)
-                        .await?;
-                if let crab::replication::ReadSource::Replica { name } = &selection.source {
-                    tracing::debug!(replica = %name, "selected read replica for hydrate");
-                }
-                let router = selection.router;
-                let caching_store =
-                    crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-                // Bulk hydrate is a one-pass stream already backed by the full-xorb cache.
-                // A bounded decoded-range cache only adds writes and eviction churn here.
-                let mut hydrator = crab::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-                    caching_store,
-                    router,
-                    &config,
-                )?;
-                let restore_flags = crab::cmd::hydrate_restore::RestoreFlags {
-                    restore,
-                    no_restore,
-                    restore_tier: restore_tier.clone(),
-                    restore_duration_days,
-                };
-                let requested_restore =
-                    restore_flags.resolve_auto_restore(config.hydrate.auto_restore);
-                if restore && !config.tier.enabled {
-                    return Err(crab::core::error::CrabError::Configuration {
-                        key: "tier.enabled is false; cannot restore archived xorbs".into(),
-                        origin: "hydrate --restore".into(),
-                    });
-                }
-                if requested_restore && config.tier.enabled {
-                    let mut options = crab::tier::runtime::restore_options_from_config(&config)?;
-                    if let Some(tier) = &restore_flags.restore_tier {
-                        options.tier = crab::tier::runtime::parse_restore_tier(tier)?;
-                    }
-                    if let Some(days) = restore_flags.restore_duration_days {
-                        options.duration = std::time::Duration::from_secs(u64::from(days) * 86_400);
-                    }
-                    let backend =
-                        crab::tier::runtime::build_restore_backend(&config, &parsed).await?;
-                    let orchestrator = std::sync::Arc::new(
-                        crab::tier::restore::RestoreOrchestrator::with_options(
-                            backend,
-                            config.tier.restore_max_concurrency,
-                            std::time::Duration::from_secs(config.tier.restore_timeout_secs),
-                            options,
-                        ),
-                    );
-                    hydrator = hydrator.with_restore(Some(orchestrator), true);
-                } else {
-                    hydrator = hydrator.with_restore(None, false);
-                }
-                let cwd = std::env::current_dir()?;
-                crab::cmd::hydrate::run_hydrate_in(&cwd, &args, &config, &hydrator, &cancel)
-                    .await?;
-                return Ok(ExitCode::SUCCESS);
-            }
-
-            // Fallback to default hydrator.
-            crab::cmd::hydrate::run_hydrate(&args, &config, &cancel).await?;
+            let restore_flags = crab::cmd::hydrate_restore::RestoreFlags {
+                restore,
+                no_restore,
+                restore_tier,
+                restore_duration_days,
+            };
+            let cwd = std::env::current_dir()?;
+            crab::cmd::hydrate::run_hydrate(&cwd, &args, &config, &restore_flags, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Diff {
@@ -6072,19 +6018,6 @@ fn format_bytes_size(bytes: u64) -> String {
     } else {
         format!("{scaled:.1} {unit}", unit = UNITS[idx])
     }
-}
-
-fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crab::git::url::CrabUrl>> {
-    let Some(url) = config.remote_url.as_deref() else {
-        return Ok(None);
-    };
-    if url.trim().is_empty() {
-        return Err(CrabError::Configuration {
-            key: "remote.url".into(),
-            origin: "crab.toml contains an empty [remote].url".into(),
-        });
-    }
-    crab::git::url::CrabUrl::parse(url).map(Some)
 }
 
 /// Implementation of `crab cache stats`. Reports both cache families:

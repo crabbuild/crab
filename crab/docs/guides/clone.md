@@ -65,6 +65,12 @@ policy. Ordinary Git URLs and local Git paths still delegate to Git without
 creating Crab configuration. This initialization is specific to `crab clone`;
 an existing unconfigured checkout needs `crab configure <REMOTE>`.
 
+When a committed project file names a different primary than the clone URL,
+that primary still controls payload hydration. To deliberately relocate the
+project, clone lazily, run `crab configure <REMOTE> --no-auto-track` in the new
+checkout, review its staged project configuration, then hydrate. Clone does
+not silently rewrite committed storage policy.
+
 ## Examples
 
 ### Basic lazy clone (default)

@@ -2,10 +2,9 @@
 //!
 //! Walks the working tree, identifies crab-tracked pointer files
 //! matching the resolved pattern set, and batch-hydrates them via the
-//! [`Hydrator`] trait. The default [`SmudgeSessionHydrator`] delegates
-//! to [`SmudgeSession`](crate::git::smudge::SmudgeSession) for real
-//! content reconstruction. A [`StubHydrator`] that writes pointer bytes
-//! back unchanged is available for tests.
+//! [`Hydrator`] trait. Configured repositories use [`ShardHydrator`];
+//! unconfigured repositories retain local staging reconstruction through
+//! [`SmudgeSessionHydrator`]. A [`StubHydrator`] is available for tests.
 //!
 //! All writes go through a tempfile-then-rename pattern for crash
 //! safety: a SIGINT mid-write leaves only a tempfile that the OS
@@ -3221,33 +3220,84 @@ pub fn run_clear_speculation() -> Result<()> {
     Ok(())
 }
 
-/// Run the hydrate command.
+/// Run hydration at an explicit root using its resolved storage and restore policy.
 ///
-/// Resolves effective patterns, walks the working tree, parses pointer
-/// files, and batch-hydrates them via [`SmudgeSessionHydrator`] which
-/// delegates to the full smudge pipeline for content reconstruction.
-///
-/// # Errors
-///
-/// Returns [`CrabError::InvalidPattern`] on bad globs,
-/// [`CrabError::Io`] on filesystem failures, or
-/// [`CrabError::Cancelled`] if the token fires mid-walk.
+/// Configured remotes fail closed; only an absent remote selects local staging.
+/// Returns selection, reconstruction, filesystem and cancellation errors.
 pub async fn run_hydrate(
+    root: &Path,
     args: &HydrateArgs,
     config: &Config,
+    restore_flags: &crate::cmd::hydrate_restore::RestoreFlags,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let cwd = std::env::current_dir()?;
+    error::check_cancelled(cancel)?;
+    if let Some(parsed) = resolve_hydrate_remote_url(config)? {
+        let selection =
+            crate::replication::select_read_store(config, &parsed, "hydrate", cancel).await?;
+        if let crate::replication::ReadSource::Replica { name } = &selection.source {
+            debug!(replica = %name, "selected read replica for hydrate");
+        }
+        let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
+        // Bulk hydrate already streams through the full-xorb cache. A decoded
+        // range cache here would add writes and eviction churn to one-pass reads.
+        let mut hydrator =
+            ShardHydrator::with_config_from_cli_layout(caching_store, selection.router, config)?;
+        let requested_restore = restore_flags.resolve_auto_restore(config.hydrate.auto_restore);
+        if restore_flags.restore && !config.tier.enabled {
+            return Err(error::CrabError::Configuration {
+                key: "tier.enabled is false; cannot restore archived xorbs".into(),
+                origin: "hydrate --restore".into(),
+            });
+        }
+        if requested_restore && config.tier.enabled {
+            let mut options = crate::tier::runtime::restore_options_from_config(config)?;
+            if let Some(tier) = &restore_flags.restore_tier {
+                options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
+            }
+            if let Some(days) = restore_flags.restore_duration_days {
+                options.duration = Duration::from_secs(u64::from(days) * 86_400);
+            }
+            let backend = crate::tier::runtime::build_restore_backend(config, &parsed).await?;
+            let orchestrator = Arc::new(crate::tier::restore::RestoreOrchestrator::with_options(
+                backend,
+                config.tier.restore_max_concurrency,
+                Duration::from_secs(config.tier.restore_timeout_secs),
+                options,
+            ));
+            hydrator = hydrator.with_restore(Some(orchestrator), true);
+        } else {
+            hydrator = hydrator.with_restore(None, false);
+        }
+        error::check_cancelled(cancel)?;
+        return run_hydrate_in(root, args, config, &hydrator, cancel).await;
+    }
+
+    // Local unpublished staging remains readable without a configured remote.
+    // Never enter this path after a configured provider or replica fails.
     let ctx = AppContext::new(config.clone(), cancel.clone());
     let hydrator = SmudgeSessionHydrator::new(ctx);
-    run_hydrate_in(&cwd, args, config, &hydrator, cancel).await
+    run_hydrate_in(root, args, config, &hydrator, cancel).await
 }
 
-/// Run the hydrate command with a shared chunk cache.
+/// Parse the configured hydration remote, distinguishing absence from invalid policy.
+pub fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crate::git::url::CrabUrl>> {
+    let Some(url) = config.remote_url.as_deref() else {
+        return Ok(None);
+    };
+    if url.trim().is_empty() {
+        return Err(error::CrabError::Configuration {
+            key: "remote.url".into(),
+            origin: "crab.toml contains an empty [remote].url".into(),
+        });
+    }
+    crate::git::url::CrabUrl::parse(url).map(Some)
+}
+
+/// Run local smudge-session hydration with a shared chunk cache.
 ///
-/// Same as [`run_hydrate`] but passes the cache to the smudge pipeline
-/// so fetched chunks are cached for reuse by FUSE and subsequent hydrate
-/// operations.
+/// This low-level entry point does not compose remote readers; CLI callers use
+/// [`run_hydrate`] so configured storage policy is honored.
 pub async fn run_hydrate_with_cache(
     args: &HydrateArgs,
     config: &Config,
@@ -5459,6 +5509,83 @@ mod tests {
             ignore_sparse: false,
             recover_from: None,
         }
+    }
+
+    #[tokio::test]
+    async fn hydration_owner_cancellation_precedes_root_and_remote_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent");
+        let mut config = Config::default();
+        config.remote_url = Some("invalid-remote".to_owned());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = run_hydrate(
+            &root,
+            &default_args(),
+            &config,
+            &crate::cmd::hydrate_restore::RestoreFlags::default(),
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(error::CrabError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn hydration_owner_rejects_invalid_remote_before_local_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        for remote in ["", " ", "not-a-crab-url"] {
+            let mut config = Config::default();
+            config.remote_url = Some(remote.to_owned());
+            let result = run_hydrate(
+                &dir.path().join("absent"),
+                &default_args(),
+                &config,
+                &crate::cmd::hydrate_restore::RestoreFlags::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(error::CrabError::Configuration { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn hydration_owner_uses_explicit_root_for_unpublished_staging() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let content = command_path_content();
+        let (chunks, file_hash) = chunk_and_hash(&content);
+        let pointer = Pointer {
+            file_hash,
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let staging = stage_command_path_file(root, file_hash, &chunks, pointer.size).await;
+        drop(staging);
+        let path = root.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=crab -text\n").unwrap();
+        run_git(root, &["add", "model.bin", ".gitattributes"]);
+        let args = HydrateArgs {
+            all: true,
+            ..default_args()
+        };
+
+        run_hydrate(
+            root,
+            &args,
+            &Config::default(),
+            &crate::cmd::hydrate_restore::RestoreFlags::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), content);
     }
 
     #[derive(Default)]

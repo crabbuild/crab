@@ -463,23 +463,14 @@ async fn run_post_checkout_hydrate(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let config = crate::core::config::Config::resolve_for_repo(target_dir)?;
-    let remote = config
-        .remote_url
-        .as_deref()
-        .ok_or_else(|| CrabError::Configuration {
-            key: "remote.url".to_owned(),
-            origin: "crab.toml does not declare [remote].url".to_owned(),
-        })?;
-    let parsed = crate::git::url::CrabUrl::parse(remote)?;
-    let selection =
-        crate::replication::select_read_store(&config, parsed, "hydrate", cancel).await?;
-    let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-    let hydrator = crate::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        selection.router,
+    crate::cmd::hydrate::run_hydrate(
+        target_dir,
+        args,
         &config,
-    )?;
-    crate::cmd::hydrate::run_hydrate_in(target_dir, args, &config, &hydrator, cancel).await
+        &crate::cmd::hydrate_restore::RestoreFlags::default(),
+        cancel,
+    )
+    .await
 }
 
 async fn run_post_clone_shard_sync_with_selector<F, Fut>(
@@ -896,7 +887,13 @@ async fn auto_hydrate_always_profile(
     mode: OutputMode,
     cancel: &CancellationToken,
 ) {
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+    let config = match crate::core::config::Config::resolve_for_repo(repo_root) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load clone configuration, skipping auto-hydrate");
+            return;
+        }
+    };
 
     if !config.hydrate.auto_prefetch {
         tracing::debug!("auto_prefetch disabled, skipping always-profile hydration");
@@ -951,7 +948,15 @@ async fn auto_hydrate_always_profile(
         recover_from: None,
     };
 
-    if let Err(e) = crate::cmd::hydrate::run_hydrate(&hydrate_args, &config, cancel).await {
+    if let Err(e) = crate::cmd::hydrate::run_hydrate(
+        repo_root,
+        &hydrate_args,
+        &config,
+        &crate::cmd::hydrate_restore::RestoreFlags::default(),
+        cancel,
+    )
+    .await
+    {
         tracing::warn!(
             error = %e,
             "auto-hydrate of always profile failed; clone succeeded, run \

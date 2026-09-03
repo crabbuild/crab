@@ -3382,6 +3382,86 @@ Protocol CI 33749651295 was still running at this checkpoint; predecessor
 33747451500 was superseded with eight jobs passed and Windows cancelled.
 Neither narrow local proof nor a cancelled workflow closes the full matrix.
 
+### Share cloud hydration composition across callers: 2026-09-03 UTC
+
+**Context.** The optimized `8456eeb` RustFS caller probe reproduces two
+failures: an `always` profile clone succeeds but leaves its selected payload
+as a pointer; deferred post-pull hydration advances to the correct Git commit,
+then exits 9 with a 121-byte pointer instead of the original 4 MiB payload.
+Retain `phase2-hydration-callers-before-8456eeb-isolated-20260903/artifacts/report.json`.
+Earlier probe attempts failed in the driver at CLI argument admission or Git
+filter configuration, before post-pull hydration. They remain failed reports,
+not additional product regressions. The corrected probe disables only the
+run-owned Git process filter and uses identity clean/smudge commands, preserving
+the tracked pointer bytes so it tests the post-pull owner independently of
+filter-process. Git's [filter contract](https://git-scm.com/docs/gitattributes#_filter)
+distinguishes process filtering from single-file clean/smudge drivers.
+
+**Design and owner.** Move the existing CLI cloud composition into
+`cmd::hydrate::run_hydrate`: explicit root, resolved configuration, existing
+restore flags and caller cancellation. Select the existing managed/replica-aware
+store, build one `ShardHydrator`, and delegate to `run_hydrate_in`. Preserve the
+bulk full-xorb cache policy and restore overrides. Only an absent remote uses
+local unpublished staging; malformed remote or returned selection errors must
+not fall through to it. Clone eager/selective/profile, pull and init auto-patterns
+call this owner. Profile configuration comes from its target root; a configuration
+error skips optional hydration with a warning, not silently default policy.
+The filter-process parser shares the moved remote parser; its incremental read,
+decoded cache, prefetch and failure behavior remain unchanged. No new environment
+setting, dependency, storage format, reader implementation or automatic remote
+rewrite. The existing uncalled low-level local chunk-cache API is not promoted
+as a cloud reader or removed as unrelated cleanup.
+
+**Phased execution and acceptance.**
+
+1. Reproduce both caller failures with the old optimized binary, separate
+   empty clone caches, exact source refs and independent SHA-256 payload checks.
+   Preserve failed reports and driver corrections. This gate is complete above.
+2. Consolidate composition; prove cancellation before root/provider access,
+   invalid configured remote rejection, and byte-identical unpublished staging
+   reconstruction at an explicit root. Preserve existing clone/config, restore,
+   hydration and pull selection tests. No fixture or expected-failure weakening.
+3. Build an exact optimized candidate, rerun the same RustFS caller probe, and
+   require both original payload hashes plus strict Git fsck. Verify ordinary
+   explicit hydrate and eager/selective clone as siblings. Candidate live proof
+   is required; unit wiring alone does not close this phase.
+4. Rerun native Git/mirror and LFS RustFS regressions, retain binary identity,
+   and require fresh native Linux/macOS/Windows workflow results. The new owner
+   tests are included in each existing protocol workflow platform selection.
+5. Separately qualify managed grants, forced-replica failure semantics, archive
+   restore and cancellation during provider construction. The existing store
+   resolver already handles managed identity; do not introduce a second resolver.
+   Init's warning/auto-pattern policy, pull subprocess ownership/path admission,
+   profile cancellation/output semantics and filter-process failure policy still
+   need their broader lifecycle gates. This patch does not certify them.
+
+**Source checkpoint.** All 94 selected tests pass: 78 hydration (including three
+new owner tests), five restore, three clone profile-skip, four pull-policy and
+four binary remote-parser cases. Production-library correctness/suspicious
+Clippy, formatting, diff checks and workflow-YAML parsing pass. Other existing
+lint warning categories are not claimed clean. The refactor removes about as
+many production lines as it adds; the new owner replaces duplicated composition
+rather than introducing another reader. Optimized build, fresh caller live
+proof and exact-candidate CI remain required at this source checkpoint.
+
+**Prior clone packet evidence.** Optimized `8456eeb` passed native Git/mirror
+RustFS (464 commands, 133 checks) and bulk LFS (57 commands, 27 checks), with
+SHA-256 `994fef73dac80c222dc6d426915d06f8f8c19d647f9557b8ea60c1ff0104c3b6`.
+The historical clone-mode probe passed three ordinary pushes, the first payload
+push, cold lazy/explicit and eager clones, strict Git fsck, unchanged Git index,
+and original 581,598,168-byte payload identity. Its final status is **failed**
+(50 commands, 37 checks): it incorrectly assumed the second revision also
+lacked project configuration. That revision commits `crab://crab/k8s` as its
+primary. Do not overwrite it merely because the clone transport differs.
+Retain `phase2-historical-clone-modes-8456eeb-20260903/artifacts/report.json`.
+Continue second-version proof with lazy clone, verify committed policy unchanged,
+then explicitly configure the disposable checkout to the isolated RustFS remote
+before hydration. Configuration intentionally stages its project changes;
+do not conflate this with clone's no-index-change contract. Original source and
+history remain untouched. Exact `8456eeb` CI is run 33751971094; predecessor
+33749651295 was superseded/cancelled, not a full pass. No controlled-performance
+or complete 1,000-push gate is closed by these functional results.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

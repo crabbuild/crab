@@ -151,6 +151,7 @@ jobs:
           cargo test -p crab --lib cmd::lfs::fetch::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::lfs::clone::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --features gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests::hydration_owner --locked --features gix-transport
           cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
@@ -251,6 +252,7 @@ jobs:
           cargo test -p crab --lib cmd::lfs::fetch::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::clone::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::clone::tests::clone_project_remote --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::hydrate::tests::hydration_owner --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run protocol and transcript contracts
         run: >-

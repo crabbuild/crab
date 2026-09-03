@@ -19,6 +19,16 @@ Hydration is selective: you can hydrate specific files by glob pattern, or use
 `--all` to hydrate everything. Files already replaced with full content are not
 selected again.
 
+Explicit hydration, post-clone eager/selective hydration, clone's `always`
+prefetch profile, post-pull hydration and init's configured auto-patterns use
+the same cloud-reader composition. Clone profiles resolve configuration and
+files from the cloned repository, not the parent directory. Restore defaults
+come from that repository's resolved configuration; explicit hydrate flags
+override them. A configured remote error is returned rather than switching to
+local staging. Local unpublished staging remains available when no remote is
+configured. Automatic clone profile failures remain warnings; retry with
+`crab hydrate --profile always` after addressing the reported cause.
+
 ## Arguments
 
 | Argument | Required | Description |
