@@ -1384,6 +1384,7 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
 pub fn error_code(err: &CrabError) -> &'static str {
     match err {
         CrabError::Read(error) => error.code(),
+        CrabError::HydrationFailed { source, .. } => error_code(source),
         CrabError::NetworkTransient(_) => "CRAB-E0001",
         CrabError::Throttled { .. } => "CRAB-E0002",
         CrabError::CasConflict { .. } => "CRAB-E0010",

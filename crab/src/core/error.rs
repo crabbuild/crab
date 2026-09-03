@@ -18,6 +18,13 @@ pub enum CrabError {
     #[error("{0}")]
     Read(#[source] ReadFailure),
 
+    #[error("hydrate failed for {failed} file(s): {source}")]
+    HydrationFailed {
+        failed: u64,
+        #[source]
+        source: std::sync::Arc<CrabError>,
+    },
+
     // Transient — retry-worthy.
     #[error("network transient error [CRAB-E0001]: {0}")]
     NetworkTransient(#[source] object_store::Error),
@@ -2142,6 +2149,7 @@ impl CrabError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Read(error) => error.exit_code(),
+            Self::HydrationFailed { source, .. } => source.exit_code(),
             Self::NonFastForward { .. } => 2,
 
             Self::CasConflict { .. }
@@ -2344,6 +2352,7 @@ impl CrabError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Read(error) => error.code(),
+            Self::HydrationFailed { source, .. } => source.code(),
             Self::NetworkTransient(_) => "CRAB-E0001",
             Self::Throttled { .. } => "CRAB-E0002",
             Self::CasConflict { .. } => "CRAB-E0010",
@@ -2519,6 +2528,7 @@ impl CrabError {
     pub fn category(&self) -> ErrorCategory {
         match self {
             Self::Read(error) => error.category(),
+            Self::HydrationFailed { source, .. } => source.category(),
             Self::ManagedRepository { diagnostic } => match diagnostic {
                 crab_auth_store::ManagedRepositoryDiagnostic::ServiceUnavailable { .. } => {
                     ErrorCategory::Transient
@@ -2743,6 +2753,7 @@ impl CrabError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Read(error) => error.is_retryable(),
+            Self::HydrationFailed { source, .. } => source.is_retryable(),
             Self::ManagedRepository { diagnostic } => matches!(
                 diagnostic,
                 crab_auth_store::ManagedRepositoryDiagnostic::ServiceUnavailable { .. }
@@ -2911,6 +2922,10 @@ impl CrabError {
     pub fn details_json(&self) -> serde_json::Value {
         match self {
             Self::Read(error) => error.details_json(),
+            Self::HydrationFailed { failed, source } => serde_json::json!({
+                "failed_files": failed,
+                "cause": source.details_json(),
+            }),
             Self::NetworkTransient(err) | Self::Storage(err) => {
                 serde_json::json!({ "source": err.to_string() })
             }
@@ -3698,6 +3713,7 @@ impl CrabError {
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             Self::Read(error) => error.hint(),
+            Self::HydrationFailed { source, .. } => source.hint(),
             Self::NotFound { .. } => Some(
                 "Check the requested path and remote. For a new repository, run `crab configure <REMOTE>`; otherwise run `crab doctor`.",
             ),
@@ -3727,6 +3743,7 @@ impl CrabError {
     pub fn docs_anchor(&self) -> Option<&'static str> {
         match self {
             Self::Read(error) => error.docs_anchor(),
+            Self::HydrationFailed { source, .. } => source.docs_anchor(),
             Self::NotFound { .. } => Some("cli/diagnostics/error-codes"),
             Self::Forbidden { .. }
             | Self::NoCredentials
@@ -3762,6 +3779,49 @@ pub fn check_cancelled(cancel: &tokio_util::sync::CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydration_failure_preserves_cause_diagnostics() {
+        use std::error::Error;
+
+        for source in [
+            CrabError::Forbidden {
+                path: "xorbs/private".into(),
+            },
+            CrabError::Throttled {
+                retry_after: Some(Duration::from_secs(3)),
+            },
+            CrabError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        ] {
+            let source = std::sync::Arc::new(source);
+            let failure = CrabError::HydrationFailed {
+                failed: 2,
+                source: source.clone(),
+            };
+            assert_eq!(failure.code(), source.code());
+            assert_eq!(
+                crate::core::error_catalog::error_code(&failure),
+                source.code()
+            );
+            assert_eq!(failure.exit_code(), source.exit_code());
+            assert_eq!(failure.category(), source.category());
+            assert_eq!(failure.is_retryable(), source.is_retryable());
+            assert_eq!(failure.hint(), source.hint());
+            assert_eq!(failure.docs_anchor(), source.docs_anchor());
+            assert_eq!(
+                failure.details_json(),
+                serde_json::json!({
+                    "failed_files": 2, "cause": source.details_json(),
+                })
+            );
+            let cause = failure
+                .source()
+                .unwrap()
+                .downcast_ref::<std::sync::Arc<CrabError>>()
+                .unwrap();
+            assert!(std::sync::Arc::ptr_eq(cause, &source));
+        }
+    }
 
     #[test]
     fn availability_preserves_product_diagnostics() {

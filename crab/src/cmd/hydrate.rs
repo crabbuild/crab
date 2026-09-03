@@ -25,6 +25,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, warn};
 
 use crate::core::config::Config;
@@ -192,6 +193,35 @@ pub struct HydrateSummary {
     pub bytes_cow_cloned: u64,
     /// Exact post-publication stats for content verified during this run.
     pub(crate) verified_paths: Vec<crate::cache::add_validation::VerifiedPath>,
+    // Retain one typed cause, not an unbounded list of per-file errors. Arc
+    // preserves the published Clone contract without cloning error sources.
+    first_failure: Option<Arc<error::CrabError>>,
+}
+
+impl HydrateSummary {
+    fn record_failure(&mut self, source: error::CrabError) {
+        self.failed += 1;
+        if self.first_failure.is_none() {
+            self.first_failure = Some(Arc::new(source));
+        }
+    }
+
+    fn failure(&self) -> Option<error::CrabError> {
+        if self.failed == 0 {
+            return None;
+        }
+        // Public Hydrator implementations may return count-only summaries.
+        // Report missing provenance explicitly; never invent a remote cause.
+        let source = self.first_failure.clone().unwrap_or_else(|| {
+            Arc::new(error::CrabError::Internal(
+                "hydrator reported failed files without a cause".to_owned(),
+            ))
+        });
+        Some(error::CrabError::HydrationFailed {
+            failed: self.failed,
+            source,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,7 +565,7 @@ impl Hydrator for SmudgeSessionHydrator {
                     }
                     Err(e) => {
                         debug!(path = %path.display(), err = %e, "smudge failed");
-                        summary.failed += 1;
+                        summary.record_failure(e);
                         if let Some(p) = progress {
                             p.files_done.fetch_add(1, Relaxed);
                             p.send_file_result(HydrateFileResult {
@@ -1018,10 +1048,7 @@ impl HydrationRuntime {
                 progress.bytes_done.fetch_add(ptr.size, Relaxed);
                 progress.send_file_result(result.clone());
             }
-            return Ok(HydrateOneResult {
-                result,
-                verified_path: None,
-            });
+            return Ok(HydrateOneResult::Skipped(ptr.size));
         }
 
         let result = self
@@ -1055,34 +1082,37 @@ impl HydrationRuntime {
             },
         };
 
-        let (outcome, write) = match result {
-            Ok(write) => (HydrateFileOutcome::Hydrated, Some(write)),
+        let result = match result {
+            Ok(write) => HydrateOneResult::Hydrated(verified_path(path, ptr, write)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), err = %e, "reconstruction failed");
-                (HydrateFileOutcome::Failed, None)
+                HydrateOneResult::Failed(e)
             }
         };
-        let bytes = write.map_or(0, |write| write.bytes);
-        let result = HydrateFileResult {
-            path: path.to_owned(),
-            outcome,
-            duration: file_start.elapsed(),
-            bytes,
-        };
         if let Some(progress) = progress {
+            let (outcome, bytes) = match &result {
+                HydrateOneResult::Hydrated(verified) => {
+                    (HydrateFileOutcome::Hydrated, verified.size)
+                }
+                HydrateOneResult::Skipped(bytes) => (HydrateFileOutcome::Skipped, *bytes),
+                HydrateOneResult::Failed(_) => (HydrateFileOutcome::Failed, 0),
+            };
             progress.files_done.fetch_add(1, Relaxed);
-            progress.send_file_result(result.clone());
+            progress.send_file_result(HydrateFileResult {
+                path: path.to_owned(),
+                outcome,
+                duration: file_start.elapsed(),
+                bytes,
+            });
         }
-        Ok(HydrateOneResult {
-            result,
-            verified_path: write.map(|write| verified_path(path, ptr, write)),
-        })
+        Ok(result)
     }
 }
 
-struct HydrateOneResult {
-    result: HydrateFileResult,
-    verified_path: Option<crate::cache::add_validation::VerifiedPath>,
+enum HydrateOneResult {
+    Hydrated(crate::cache::add_validation::VerifiedPath),
+    Skipped(u64),
+    Failed(error::CrabError),
 }
 
 impl Hydrator for HydrationRuntime {
@@ -1105,22 +1135,17 @@ impl Hydrator for HydrationRuntime {
                 // Refill the bounded set as each file completes. Fixed-size waves
                 // leave download slots idle behind one large straggler.
                 while let Some(result) = results.next().await {
-                    let result = result?;
-                    match result.result.outcome {
-                        HydrateFileOutcome::Hydrated => {
+                    match result? {
+                        HydrateOneResult::Hydrated(verified) => {
                             summary.hydrated += 1;
-                            summary.bytes_written += result.result.bytes;
-                            if let Some(verified) = result.verified_path {
-                                summary.verified_paths.push(verified);
-                            }
+                            summary.bytes_written += verified.size;
+                            summary.verified_paths.push(verified);
                         }
-                        HydrateFileOutcome::Skipped => {
+                        HydrateOneResult::Skipped(bytes) => {
                             summary.skipped += 1;
-                            summary.bytes_skipped += result.result.bytes;
+                            summary.bytes_skipped += bytes;
                         }
-                        HydrateFileOutcome::Failed => {
-                            summary.failed += 1;
-                        }
+                        HydrateOneResult::Failed(source) => summary.record_failure(source),
                     }
                     if let Some((path, ptr)) = remaining.next() {
                         results.push(self.hydrate_one(
@@ -1269,7 +1294,7 @@ impl Hydrator for StubHydrator {
                     }
                     Err(e) => {
                         debug!(path = %path.display(), err = %e, "failed to hydrate file");
-                        summary.failed += 1;
+                        summary.record_failure(e);
                         if let Some(p) = progress {
                             p.files_done.fetch_add(1, Relaxed);
                             p.send_file_result(HydrateFileResult {
@@ -2334,10 +2359,10 @@ async fn run_selected_hydration(
     })?;
     let total_files = to_hydrate.len() as u64;
 
-    // In JSONL manifest mode, set up a per-file result channel so the
-    // hydrator streams one JSONL row per file as it completes.
+    // All JSONL modes consume actual completion results; failed pointers
+    // cannot distinguish failed attempts from skipped files after the fact.
     let is_manifest_jsonl = manifest && mode == Some(OutputMode::Jsonl);
-    let (file_result_tx, file_result_rx) = if is_manifest_jsonl {
+    let (file_result_tx, file_result_rx) = if mode == Some(OutputMode::Jsonl) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<HydrateFileResult>();
         (Some(tx), Some(rx))
     } else {
@@ -2366,30 +2391,20 @@ async fn run_selected_hydration(
     let jsonl_emitter_handle =
         if let (Some(mut rx), Some(stream)) = (file_result_rx, jsonl_stream.clone()) {
             let root_buf = root.to_path_buf();
-            Some(tokio::spawn(async move {
+            Some(AbortOnDropHandle::new(tokio::spawn(async move {
                 while let Some(file_result) = rx.recv().await {
-                    let rel = file_result
-                        .path
-                        .strip_prefix(&root_buf)
-                        .unwrap_or(&file_result.path);
-                    let row = ManifestHydrateFileRow {
-                        path: rel.to_string_lossy().into_owned(),
-                        strategy: "shard_batch".to_owned(),
-                        duration_ms: file_result.duration.as_millis() as u64,
-                        bytes: file_result.bytes,
-                    };
                     if let Ok(mut s) = stream.lock() {
-                        s.emit_file_done(&row);
+                        emit_hydrate_file_result(&mut s, &root_buf, file_result, is_manifest_jsonl);
                     }
                 }
-            }))
+            })))
         } else {
             None
         };
 
     // Spawn a live progress ticker when stderr is a TTY (text mode only).
     let ticker = if mode == Some(OutputMode::Text) {
-        progress.start_ticker(cancel)
+        progress.start_ticker(cancel).map(AbortOnDropHandle::new)
     } else {
         None
     };
@@ -2419,11 +2434,6 @@ async fn run_selected_hydration(
     // hydrate_batch returns, no more sends will happen.
     drop(progress);
 
-    // Wait for the JSONL emitter to finish draining.
-    if let Some(handle) = jsonl_emitter_handle {
-        let _ = handle.await;
-    }
-
     // Stop the ticker before printing the final summary.
     if let Some(handle) = ticker {
         handle.abort();
@@ -2431,6 +2441,10 @@ async fn run_selected_hydration(
         eprint!("\r\x1b[2K");
     }
 
+    // Drain completed file outcomes before emitting the terminal result.
+    if let Some(handle) = jsonl_emitter_handle {
+        let _ = handle.await;
+    }
     let summary = result?;
     let elapsed = start.elapsed();
 
@@ -2440,27 +2454,59 @@ async fn run_selected_hydration(
         mark_pending_worktree_hydration_applied(root, &pending.policy)?;
     }
 
-    // In non-manifest JSONL mode, emit retroactive file_done events.
-    // Manifest JSONL mode already streamed per-file rows above.
-    if !is_manifest_jsonl && let Some(stream) = &jsonl_stream {
-        for (path, ptr) in &selected_to_hydrate {
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            let is_pointer = is_working_tree_pointer(path).unwrap_or(false);
-            let (status, bytes) = if is_pointer {
-                ("skipped", ptr.size)
-            } else {
-                ("ok", ptr.size)
-            };
-            if let Ok(mut s) = stream.lock() {
-                s.emit_file_done(FileDonePayload {
-                    path: rel.to_string_lossy().into_owned(),
-                    bytes,
-                    duration_ms: elapsed.as_millis() as u64,
-                    status: status.to_owned(),
-                });
+    // Publish only descriptor-safe proofs captured by successful atomic
+    // writes. Sibling worktrees use this cache to locate CoW candidates;
+    // they still hash each candidate before publication. Best-effort: an
+    // unavailable cache only disables that local optimization.
+    if summary.hydrated > 0 {
+        let pointers = selected_to_hydrate
+            .iter()
+            .map(|(path, pointer)| (path.as_path(), pointer))
+            .collect::<HashMap<_, _>>();
+        let updates = summary
+            .verified_paths
+            .iter()
+            .filter_map(|verified| {
+                let pointer = pointers.get(verified.path.as_path())?;
+                if pointer.file_hash != verified.file_hash || pointer.size != verified.size {
+                    return None;
+                }
+                let rel = verified.path.strip_prefix(root).unwrap_or(&verified.path);
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                crate::cache::hydrated_pointer::entry_for_verified_stat(
+                    verified.index_stat,
+                    &pointer.serialize(),
+                )
+                .map(|entry| (rel_str, entry))
+            })
+            .collect::<Vec<_>>();
+        if !updates.is_empty() {
+            match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
+                Ok(cache_path) => {
+                    if let Err(e) =
+                        crate::cache::HydratedPointerCache::update_on_disk(&cache_path, updates)
+                    {
+                        debug!(
+                            path = %cache_path.display(),
+                            error = %e,
+                            "failed to persist hydrated-pointer cache (non-fatal)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        root = %root.display(),
+                        error = %e,
+                        "hydrated-pointer cache unavailable for hydrate"
+                    );
+                }
             }
         }
+        refresh_hydrated_index_entries(root, &summary.verified_paths);
+    }
 
+    // Per-file events were drained above; finish ordinary progress counters.
+    if !is_manifest_jsonl && let Some(stream) = &jsonl_stream {
         // Emit a final progress event.
         if let Ok(mut s) = stream.lock() {
             let rate = if elapsed.as_secs_f64() > 0.0 {
@@ -2481,6 +2527,13 @@ async fn run_selected_hydration(
     }
 
     let payload = HydrateSummaryPayload::from_summary(&summary, elapsed);
+
+    // main owns the terminal error envelope for partially failed batches.
+    if mode.is_some_and(|mode| mode.is_machine())
+        && let Some(error) = summary.failure()
+    {
+        return Err(error);
+    }
 
     match mode {
         Some(OutputMode::Text) => {
@@ -2558,14 +2611,53 @@ async fn run_selected_hydration(
         None => {}
     }
 
-    if summary.failed > 0 {
-        return Err(error::CrabError::Internal(format!(
-            "hydrate failed for {} file(s)",
-            summary.failed
-        )));
+    if let Some(error) = summary.failure() {
+        return Err(error);
     }
 
     Ok(summary)
+}
+
+fn emit_hydrate_file_result<W: Write>(
+    stream: &mut JsonlStream<W>,
+    root: &Path,
+    result: HydrateFileResult,
+    manifest: bool,
+) {
+    let path = result.path.strip_prefix(root).unwrap_or(&result.path);
+    let path = path.to_string_lossy().into_owned();
+    let duration_ms = result.duration.as_millis() as u64;
+    let status = match result.outcome {
+        HydrateFileOutcome::Hydrated => "ok",
+        HydrateFileOutcome::Skipped => "skipped",
+        HydrateFileOutcome::Failed => "failed",
+    };
+    if manifest {
+        // Preserve the tagged public manifest row's Rust shape and strategy
+        // field, adding the ordinary file_done status to its wire payload.
+        #[derive(Serialize)]
+        struct Completion {
+            #[serde(flatten)]
+            row: ManifestHydrateFileRow,
+            status: &'static str,
+        }
+        stream.emit_file_done(Completion {
+            row: ManifestHydrateFileRow {
+                path,
+                strategy: "shard_batch".to_owned(),
+                duration_ms,
+                bytes: result.bytes,
+            },
+            status,
+        });
+    } else {
+        stream.emit_file_done(FileDonePayload {
+            path,
+            bytes: result.bytes,
+            duration_ms,
+            status: status.to_owned(),
+        });
+    }
 }
 
 fn refresh_hydrated_index_entries(
@@ -5815,6 +5907,45 @@ mod tests {
         assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
         assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 1);
 
+        // The CLI batch must retain the same diagnostic after collecting a
+        // failed file alongside a verified skip, not infer success from disk.
+        let skipped = output.path().join("already-hydrated.bin");
+        std::fs::write(&skipped, &original).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = Arc::new(HydrateProgress::with_file_result_tx(
+            2,
+            pointer.size * 2,
+            tx,
+        ));
+        let items = [
+            (destination.clone(), pointer.clone()),
+            (skipped.clone(), pointer.clone()),
+        ];
+        let summary = hydrator
+            .hydrate_batch(&items, &CancellationToken::new(), Some(&progress))
+            .await
+            .unwrap();
+        drop(progress);
+        let mut completions = Vec::new();
+        while let Some(result) = rx.recv().await {
+            completions.push((result.path, result.outcome, result.bytes));
+        }
+        completions.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            completions,
+            vec![
+                (skipped.clone(), HydrateFileOutcome::Skipped, pointer.size),
+                (destination.clone(), HydrateFileOutcome::Failed, 0),
+            ]
+        );
+        assert_eq!(
+            (summary.hydrated, summary.skipped, summary.failed),
+            (0, 1, 1)
+        );
+        assert_eq!(summary.failure().unwrap().code(), "CRAB-E0043");
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        std::fs::remove_file(skipped).unwrap();
+
         hydrator.canonical = canonical;
         let prefix = crab_storage::global_content_prefix(hydrator.router.global_prefix(), "xorbs");
         let xorbs = hydrator.store.origin().list_prefix(&prefix).await.unwrap();
@@ -6541,6 +6672,64 @@ mod tests {
         assert_eq!(json["strategy"], "shard_batch");
         assert_eq!(json["duration_ms"], 42);
         assert_eq!(json["bytes"], 8192);
+    }
+
+    #[test]
+    fn file_done_reports_actual_outcomes_in_both_jsonl_modes() {
+        let root = Path::new("worktree");
+        for manifest in [false, true] {
+            for (outcome, status, bytes) in [
+                (HydrateFileOutcome::Hydrated, "ok", 4096),
+                (HydrateFileOutcome::Skipped, "skipped", 4096),
+                (HydrateFileOutcome::Failed, "failed", 0),
+            ] {
+                let mut output = Vec::new();
+                {
+                    let mut stream = JsonlStream::new("hydrate.event", "1.0", &mut output);
+                    emit_hydrate_file_result(
+                        &mut stream,
+                        root,
+                        HydrateFileResult {
+                            path: root.join("model.bin"),
+                            outcome,
+                            duration: Duration::from_millis(17),
+                            bytes,
+                        },
+                        manifest,
+                    );
+                }
+                let event: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                let mut expected = serde_json::json!({
+                    "path": "model.bin",
+                    "status": status,
+                    "bytes": bytes,
+                    "duration_ms": 17,
+                });
+                if manifest {
+                    expected["strategy"] = "shard_batch".into();
+                }
+                assert_eq!(event["data"], expected, "manifest={manifest}, {status}");
+            }
+        }
+    }
+
+    #[test]
+    fn summary_clone_retains_first_failure_and_total_count() {
+        let mut summary = HydrateSummary::default();
+        summary.record_failure(error::CrabError::Forbidden {
+            path: "xorbs/denied".into(),
+        });
+        summary.record_failure(error::CrabError::Internal("later failure".into()));
+        let cloned = summary.clone();
+        drop(summary);
+        let failure = cloned.failure().unwrap();
+        assert_eq!(
+            (failure.code(), failure.details_json()),
+            (
+                "CRAB-E0031",
+                serde_json::json!({"failed_files": 2, "cause": {"path": "xorbs/denied"}})
+            )
+        );
     }
 
     #[test]

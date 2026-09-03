@@ -172,6 +172,67 @@ for the reproduction, owner contract, dependencies, and acceptance criteria.
 The database gate still blocks release claims for the affected surface, not
 independent implementation or qualification work.
 
+### Hydration completion reporting checkpoint, 2026-09-03
+
+The installed bloom-repair artifact reproduced a second user-visible failure:
+denied xorb GETs left pointers intact and exited nonzero, but ordinary JSONL
+reported those files as skipped with their full logical sizes. The command
+then emitted a success result before `main` emitted its terminal error.
+`hydrate-outcomes-baseline/report.json` retains the failed regression attempt.
+
+The working fix streams actual `HydrateFileResult` outcomes in both JSONL
+modes, with per-file duration and zero materialized bytes on failure. A bounded
+single typed cause survives batch collection, alongside the total failure
+count. Machine-mode failures return before emitting a success result; `main`
+owns the terminal error envelope. Recovery and CoW phase errors also drain
+completed events, and reporting tasks abort when their owning future is
+dropped. This does not bound the existing per-file event queue.
+
+The `HydrateSummary` Clone contract and four-field `ManifestHydrateFileRow`
+Rust shape from tag `v1.1.0` remain intact. Manifest wire rows gain `status`
+through a private serialization wrapper. `thiserror` 2.0.18 exposes the retained
+`Arc<CrabError>` as the typed source; a pointer-identity regression proves the
+cause is shared, not recreated from its display string. The existing
+`tokio-util` 0.7.18 abort-on-drop handle owns the reporting tasks; no dependency
+or error-code catalog entry was added.
+
+Error, error-catalog, and retry modules pass 79 tests, including the new typed
+cause and retry regressions; both error-code integration tests also pass
+without golden-file updates. Hydration module: 74/75
+pass, including ordinary/manifest outcome serialization, first-cause retention,
+and a real reconstruction batch combining an auth-expired failure with a
+verified skip. The failing test is
+`concurrent_cow_clone_publication_never_exposes_partial_content`: after one
+publisher renames its verified inode, a competing publisher can replace the
+destination before the first compares its descriptor stat to the path. The
+CoW function is byte-identical to `5ac3c8c`; this run is not a green module
+result, and the failure must not be hidden by changing its expectations.
+
+Installed proof passes 29 checks across eight commands in
+`hydrate-outcomes-fixed/report.json`: ordinary JSONL, manifest JSONL, and JSON
+each fail under real xorb GET denial with exactly one terminal error. Failed
+rows have zero bytes; all failed pointers remain unchanged. Local recovery
+publishes one correct success row while three other files fail. Restoring
+origin verifies all four 128 MiB files independently and leaves Git clean.
+Artifact SHA-256:
+`99cb01ab969de525185abc34d06710c5fb93b4b9e84b0a5f323c22e4ca484899`;
+build label `5ac3c8c-hydrate-outcomes-dirty`. Source-only patch SHA-256 against
+`5ac3c8c`:
+`7664f6b3a9b8dbfa8cc1dbbd55df7bafe3b1bf7ee6ff8afed72e9e0376832605`.
+Both release feature shapes were built and installed through `make install`
+into an isolated prefix. Strict CLI library Clippy still stops on the eight
+recorded VFS/coordinator diagnostics. No baseline/inventory or suppression
+was changed. Actual denial still reports `CRAB-E0099`/exit 9: the source and
+failure count now survive, but nested storage classification remains open.
+
+Remaining execution slices; Phase 2 and release acceptance remain open:
+
+| Slice | Context and owning boundary | Acceptance criteria |
+|---|---|---|
+| Nested storage diagnostics | `core/error/read_failure.rs` recognizes product, origin-integrity, and I/O causes but not every nested `crab_storage::StorageError`. Retaining the source alone does not produce the correct public diagnostic. | Actual denied origin GETs preserve the storage-specific code/category/exit/retry policy through Xet, batch collection, and JSON/JSONL; table tests compare nested and direct conversion without string matching or cloning opaque SDK errors. |
+| Concurrent publication proof | CoW and ordinary atomic hydration both compare their published descriptor with the current pathname. A successful competing publication can invalidate that equality. | Define the publication/proof ownership rule once; unchanged concurrent CoW test passes repeatedly, ordinary atomic writes share it, and changed content/pointers never receive a false clean Git stat or add-validation token. Do not weaken source verification or accept foreign inode stats. |
+| Installed outcome qualification | Pure serialization tests cannot prove stream termination or mixed-phase output through the actual binary. | Fresh installed CLI: ordinary JSONL, manifest JSONL, and JSON each produce one terminal error under real RustFS denial; failed rows report zero bytes and unchanged pointers; mixed local recovery retains its success row; restored origin yields independently verified bytes and clean Git state. |
+
 ### Delivery ledger
 
 | Phase | Status | Retained proof |

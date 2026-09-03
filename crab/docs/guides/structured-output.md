@@ -161,6 +161,22 @@ The `schema` field uses the `.event` suffix (e.g. `"hydrate.event"`,
 The final event is always `type: "result"`. Its `data` field matches what
 `--json` would emit for the same operation.
 
+### Hydration completions and failures
+
+`crab hydrate --jsonl` reports completed attempts as they finish, in completion
+order. `status` is `ok` for materialized content, `skipped` for content already
+verified on disk, or `failed` for a failed attempt. Failed rows have `bytes: 0`;
+`duration_ms` measures that file's attempt, not the whole batch. Manifest mode
+includes the same status and retains its `strategy` field.
+
+A partially failed hydration emits one terminal `result` with `error` and no
+`data`; it does not emit a success summary first. `--json` likewise emits only
+the error envelope. `error.details.failed_files` counts failed files and
+`error.details.cause` contains the first collected cause's details. Its error
+code, retryability, and source chain come from that cause. Successful files
+remain materialized, and completed JSONL rows remain available before the
+terminal error. Resolve the cause and rerun hydration for the remaining files.
+
 ### Example: `crab add --jsonl`
 
 ```
