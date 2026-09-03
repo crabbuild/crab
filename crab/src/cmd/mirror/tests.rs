@@ -305,6 +305,24 @@ fn missing_cache_initializes_then_mirrors_lfs_and_git_refs()
     )?;
 
     assert!(summary.created_cache);
+    let init = runner
+        .commands
+        .iter()
+        .find(|command| command.args.first().is_some_and(|arg| arg == "init"))
+        .unwrap();
+    assert_command(
+        init,
+        "git",
+        &["init", "--bare", "--object-format=sha1", "--", "."],
+    );
+    assert_eq!(init.current_dir.as_deref(), Some(cache.as_path()));
+    assert!(runner.commands.iter().any(|command| command.args
+        == [
+            "config",
+            "--replace-all",
+            "remote.origin.url",
+            args.source.as_str()
+        ]));
     let commands = destination_commands(&runner);
     assert_eq!(commands.len(), 7);
     assert_command(commands[0], "git", &["remote", "get-url", CRAB_REMOTE]);

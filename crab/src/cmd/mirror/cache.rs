@@ -22,12 +22,14 @@ pub(super) fn prepare_cache(
         // Git clone requires an empty target and would conflict with retained
         // lock inodes. Init plus one mirror fetch handles every new cache,
         // including marker-only skeletons, without deleting coordination files.
-        let target = path.to_string_lossy();
+        // The owner retains its physical path. Git for Windows cannot use
+        // canonical verbatim paths as init operands; enter the owned directory.
+        std::fs::create_dir_all(path)?;
         run_required(
             runner,
             git_command(
-                ["init", "--bare", "--object-format=sha1", "--", &target],
-                path.parent(),
+                ["init", "--bare", "--object-format=sha1", "--", "."],
+                Some(path),
                 options,
                 true,
             ),
@@ -37,11 +39,24 @@ pub(super) fn prepare_cache(
         validate_bare_cache(path, options, runner)?;
     }
 
+    // Keep filesystem identity for hook inspection and plans; encode local
+    // paths only at Git's transport boundary (including Windows verbatim paths).
+    let source = if Path::new(&args.source).is_absolute() {
+        url::Url::from_file_path(&args.source)
+            .map_err(|()| CrabError::Configuration {
+                key: "mirror source path cannot be represented as a Git file URL".to_owned(),
+                origin: args.source.clone(),
+            })?
+            .to_string()
+    } else {
+        args.source.clone()
+    };
+
     // Replace all three owned settings on every refresh. An interrupted first
     // initialization must resume through the same path, not leave an origin
     // missing its mirror refspec or retain stale extra source URLs.
     for (key, value) in [
-        ("remote.origin.url", args.source.as_str()),
+        ("remote.origin.url", source.as_str()),
         ("remote.origin.fetch", "+refs/*:refs/*"),
         ("remote.origin.mirror", "true"),
     ] {

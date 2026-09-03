@@ -2624,6 +2624,37 @@ Version-specific transport behavior and Windows execution still require the
 exact-candidate CI matrix; dependency-source proof is not an E2E substitute.
 Retain the broader remaining acceptance work above.
 
+### Git-safe mirror cache paths: 2026-09-03 UTC
+
+**Context.** Windows CI at `d89a152` compiles after the subprocess API fix,
+but eight mirror tests fail. The first failure is `git init` rejecting the
+cache owner's canonical verbatim path as an operand. Reconciliation then
+correctly refuses unavailable source/target proof; those refusals must not be
+relaxed. See [Windows job 100566636538](https://github.com/crabbuild/crab/actions/runs/33729717072/job/100566636538).
+
+**Design.** Keep `CacheUseGuard`'s physical path and lock identity unchanged.
+Create the owned cache directory, then initialize `.` from inside it instead
+of serializing the physical path into Git arguments. This uses the same
+initialization path for missing, empty and retained-marker directories.
+At the adjacent source transport boundary, encode absolute local paths as
+file URLs; retain the original filesystem path for hook checks, cache keys
+and reconciliation plan identity. Remote URLs remain unchanged. The existing
+`url` dependency supports disk/verbatim-disk and UNC/verbatim-UNC prefixes;
+no path-prefix stripping, dependency, platform fallback or alternate cache
+owner is introduced. Git documents both local forms as supported
+[fetch transports](https://git-scm.com/docs/git-fetch#_git_urls).
+
+**Acceptance and proof.** Existing tests retain lock identity across cleanup
+and rebuild, reject unrelated nonempty directories, resume interrupted init,
+mirror empty/detached/changed/shallow sources, and enforce plan target binding.
+A new real-Git fixture uses canonical source/cache paths with spaces, `#`
+and `%`; it verifies configured transport, exact mirrored refs, hook inspection
+and strict Git fsck. The command test verifies in-directory init and unchanged
+remote URL. All 109 final focused mirror/LFS tests and correctness/suspicious
+Clippy pass on macOS; other warning categories are not claimed clean.
+Require the next exact-commit Windows/macOS CI run before declaring the
+cross-platform failure resolved. No broad Phase 2 acceptance gate is closed.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

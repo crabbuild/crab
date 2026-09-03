@@ -119,6 +119,37 @@ fn detached_head_is_fetched_without_publishing_an_extra_ref() {
 }
 
 #[test]
+fn canonical_local_source_uses_a_file_transport_without_losing_path_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source # % name");
+    source(&source_path);
+    let source_path = source_path.canonicalize().unwrap();
+    let cancel = CancellationToken::new();
+    let owner = CacheUseGuard::acquire(&temp.path().join("cache # %.git"), &cancel).unwrap();
+    let mut args = base_args(owner.path().to_owned());
+    args.source = source_path.to_str().unwrap().to_owned();
+    prepare_cache(
+        &args,
+        &owner,
+        &cancel,
+        &test_options(),
+        &mut SystemCommandRunner::default(),
+    )
+    .unwrap();
+    let configured = git(owner.path(), &["config", "--get", "remote.origin.url"]);
+    assert_eq!(
+        configured,
+        url::Url::from_file_path(&source_path).unwrap().as_str()
+    );
+    assert_eq!(refs(owner.path()), refs(&source_path));
+    assert_eq!(
+        super::super::hook::mirror_hook_status(Path::new(&args.source)).state,
+        super::super::types::MirrorHookState::Missing
+    );
+    git(owner.path(), &["fsck", "--strict", "--full"]);
+}
+
+#[test]
 fn unrelated_nonempty_directory_is_not_initialized_or_overwritten() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("cache.git");
