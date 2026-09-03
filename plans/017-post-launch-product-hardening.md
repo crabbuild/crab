@@ -5375,7 +5375,25 @@ dry-run verified that release paths were excluded, `cargo clean -p crab
 --profile dev` against this worktree's target removed 367.1 GiB of regenerable
 artifacts. The selected release binary, retained reports, source checkouts and
 other target directories were preserved. Both focused suites passed afterward.
-Release and large-repository qualification remain pending below.
+Release `358499f` builds successfully, binary SHA-256
+`f5a1d5e2ed6881faeca143db100a5ce373a7aa30015225b369b8428b1febec7c`.
+The independent real-CLI probe report
+`filter-output-cli-358499f.8OIJE3/report.json` verifies both entry points in a
+new local Git fixture: each begins the 4 MiB response, then exits with code 5
+when its output reader closes (30 ms native / 26 ms LFS). This proves the real
+process failure boundary, not RustFS availability or a Git-version matrix.
+
+The three initial release qualification reports remain failed:
+`phase2-response-output-358499f-20260903`,
+`phase2-protocol-mirror-output-358499f-20260903`, and
+`phase2-k8s-lifecycle-output-358499f-20260903` (each under
+`artifacts/report.json`). All stop during service preflight: RustFS port 9000
+refuses connections. Docker reports a stopped engine; starting it does not
+recover it, and the normal desktop restart times out on hung desktop/backend
+processes. A force-quit/reopen requires user approval. No containers, images,
+volumes or retained qualification reports have been deleted or reset.
+The RustFS and Kubernetes acceptance rows above remain unchecked and must be
+rerun under new run IDs once the existing service is healthy.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
