@@ -2244,6 +2244,41 @@ catalog cannot block valid origin, cannot admit bytes while its old generation
 is retained, and can cache again after the old owner releases. These results
 do not replace fresh installed qualification or the remaining lifecycle gates.
 
+**Installed retained-generation repeat, 2026-09-03.** Production source
+`d3ced851f131f3303276504c362ed104a3a5b6c2`; isolated `make install` completed both
+release feature shapes and the cache server. Version `crab 1.0.1 (d3ced85)`,
+built at `2026-09-03 09:26:17 UTC`; binary SHA-256
+`b70be8f8a84c0fe9564b835f3596a5c1080cd5481fbf0b1f8c0cec059b6aa7e9`.
+The unchanged local RustFS service and existing `crabbuild` bucket were used;
+no global installation, service reset, or remote deletion was performed.
+
+All three reports, relative to workspace-volume run `cache-f410.E7nt8I`, record
+that exact binary fingerprint: **207 passing checks / 111 commands**, no
+timeouts. Six intentionally denied commands exit 7; all other commands exit 0.
+
+| Installed workload | Evidence |
+|---|---|
+| Fresh add/commit/push/lazy-clone/fetch/hydrate/fault/maintenance | **63 checks / 53 commands**, `generation-lease.sxx9zN/report.json`. Fresh remote prefix `cache-qualification/cache-f410.E7nt8I/generation-lease.sxx9zN`; binary in that run's `bin/crab`. Initial push adds four xorbs/135,730,210 bytes; exact duplicate adds zero; one-MiB edit adds one/1,082,467 bytes. Earlier CAS objects remain unchanged. Independent hashes, committed pointers, final Git state, and fsck pass. |
+| Cold and warm traffic | Fresh cold hydrate: 16 xorb GETs/875,217,530 bytes and seven shard GETs. Cold fetch: 19 xorb GETs/943,822,689 bytes and seven shard GETs. Warm hydrate and separate fetch→hydrate both make **zero xorb and shard GETs**, with xorb denial enforced. Ordinary hydration retains decoded ranges, not whole-xorb entries. Cold transfer amplification remains unresolved; different fresh fixture seeds do not constitute a controlled performance comparison. |
+| Fault and maintenance repeat | Corrupted ranges recover from origin; incomplete catalog ownership with retained recovery bytes bypasses caching without changing main/owner/WAL sentinels. Unsafe-root targets survive. Scoped clean and one-MiB prune preserve unrelated state and existing checkout settings; oversized hydration remains byte-identical without retaining over-budget ranges. Same fresh report. |
+| Concurrent publication | **111 checks / 50 commands**, `publication-lease-d3ced85/report.json`. Ten rounds of two linked-worktree hydrators pass byte identity and zero warm xorb attempts under denial. Sibling worktree, unchanged add/index, and final Git state pass. |
+| Error outcomes | **33 checks / 8 commands**, `hydrate-outcomes-lease-d3ced85/report.json`. JSON, ordinary/manifest JSONL, partial local recovery, unchanged failed pointers, restored-origin hashes, and clean Git state pass. Denials retain `CRAB-E0031`, permanent/non-retryable classification, and exit 7. |
+
+The fresh prototype now takes the full source revision explicitly and checks
+the installed version before creating the workload. Its SHA-256 is
+`bc9fd4676cc20c16a9e950cc919ed3241805d4963a5bd403bf89198156d09696`;
+shared base harness SHA-256
+`0a81de08ed10b052ec9d99ff85ab0d972d7e11035055fa819ed478488cd443a6`.
+Earlier failed reports remain retained. These are external prototypes, not
+completed maintained Phase 7 tooling. Exact-source CLI cache clean/maintenance
+also passes **6** focused tests and filter-process passes **41**.
+
+This repeat closes the installed functional regression check for this source,
+not the remaining lifecycle/resource/platform gates. It does not establish
+descriptor caps, contention bounds, crash durability, independent side-file
+identity, native mounted reads, or cloud-provider parity. Required CI is still
+not green; the PR remains draft.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
