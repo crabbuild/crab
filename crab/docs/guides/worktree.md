@@ -168,6 +168,12 @@ so the paths and branches do not need to match. Crab accepts a clone only after
 checking its size and full BLAKE3 hash against the pointer, then preserves the
 destination mode and publishes it with an atomic rename.
 
+Concurrent hydrators may publish the same destination. Each keeps a proof for
+its own verified file descriptor; a later rename does not turn the earlier
+publication into a failure. Git index updates and validation-cache reuse still
+require that proof to match the current path and indexed pointer. A content
+edit detected on the published inode is an error, not a new verification proof.
+
 CoW cloning is automatic on supported macOS and Linux filesystems. It has no
 flag or separate hydration mode. Unsupported filesystems, cross-filesystem
 worktrees, stale or corrupt cache entries, source mutation, and clone failures

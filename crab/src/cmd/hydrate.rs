@@ -1327,7 +1327,8 @@ fn is_already_hydrated(path: &Path, ptr: &Pointer, cancel: &CancellationToken) -
     if !matches!(is_working_tree_pointer(path), Ok(false)) {
         return Ok(false);
     }
-    Ok(hash_file_blake3_cancellable(path, cancel)? == ptr.file_hash)
+    let mut file = std::fs::File::open(path)?;
+    Ok(hash_file_blake3_cancellable(&mut file, cancel)? == ptr.file_hash)
 }
 
 /// Write `content` to `dest` atomically via a sibling tempfile and rename.
@@ -1367,9 +1368,8 @@ fn persist_verified_temp(
     tmp.flush()?;
     preserve_destination_permissions(dest, tmp.as_file())?;
     crate::git::worktree::age_filter_output_mtime(tmp.as_file());
-    let file = tmp.persist(dest).map_err(|e| e.error)?;
-    let verified_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(&file)
-        .ok_or_else(|| error::CrabError::Internal("stat published hydration file".to_owned()))?;
+    let verified_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(tmp.as_file())
+        .ok_or_else(|| error::CrabError::Internal("stat verified hydration tempfile".to_owned()))?;
     if verified_stat.len != bytes {
         return Err(error::CrabError::Internal(format!(
             "verified hydration size mismatch for {}: expected {bytes}, got {}",
@@ -1377,16 +1377,29 @@ fn persist_verified_temp(
             verified_stat.len
         )));
     }
-    if crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(dest) != Some(verified_stat)
-    {
-        return Err(error::CrabError::Internal(format!(
-            "hydrated file changed during atomic publication: {}",
-            dest.display()
-        )));
+    let file = tmp.persist(dest).map_err(|e| e.error)?;
+    published_write(&file, verified_stat)
+}
+
+fn published_write(
+    file: &std::fs::File,
+    verified: crate::cmd::stream_stage::VerifiedIndexStat,
+) -> Result<VerifiedWrite> {
+    let published = crate::cmd::stream_stage::VerifiedIndexStat::from_file(file)
+        .ok_or_else(|| error::CrabError::Internal("stat published hydration file".to_owned()))?;
+    // Rename can change ctime, but not the verified payload's other stat fields.
+    // A competing rename may replace the pathname; never adopt its inode/stat.
+    // Git/cache consumers revalidate this descriptor proof against their path.
+    let mut comparable = published;
+    comparable.stat.ctime = verified.stat.ctime;
+    if comparable != verified {
+        return Err(error::CrabError::Internal(
+            "verified hydration file changed during publication".to_owned(),
+        ));
     }
     Ok(VerifiedWrite {
-        bytes,
-        index_stat: verified_stat,
+        bytes: verified.len,
+        index_stat: published,
     })
 }
 
@@ -1803,10 +1816,12 @@ fn sibling_cow_candidates(root: &Path) -> CowCandidateIndex {
     index
 }
 
-fn hash_file_blake3_cancellable(path: &Path, cancel: &CancellationToken) -> Result<[u8; 32]> {
+fn hash_file_blake3_cancellable(
+    file: &mut std::fs::File,
+    cancel: &CancellationToken,
+) -> Result<[u8; 32]> {
     use std::io::Read;
 
-    let mut file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
@@ -1830,8 +1845,8 @@ fn remove_file_if_present(path: &Path) {
 }
 
 /// Clone and verify one candidate without exposing unverified bytes at `dest`.
-/// Any filesystem clone failure is an advisory miss so normal hydration remains
-/// the canonical fallback. Cancellation is the only error propagated directly.
+/// Preparation failures are advisory misses; cancellation and failures after
+/// publication propagate because the destination may already have changed.
 fn try_cow_clone_candidate(
     source: &Path,
     dest: &Path,
@@ -1862,17 +1877,28 @@ fn try_cow_clone_candidate(
         return Ok(None);
     }
 
-    let verified = (|| -> Result<bool> {
+    let verified = (|| -> Result<Option<std::fs::File>> {
         error::check_cancelled(cancel)?;
-        let metadata = std::fs::symlink_metadata(&temporary)?;
-        if !metadata.file_type().is_file() || metadata.len() != pointer.size {
-            return Ok(false);
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        Ok(hash_file_blake3_cancellable(&temporary, cancel)? == pointer.file_hash)
+        let mut file = options.open(&temporary)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.len() != pointer.size {
+            return Ok(None);
+        }
+        if hash_file_blake3_cancellable(&mut file, cancel)? != pointer.file_hash {
+            return Ok(None);
+        }
+        Ok(Some(file))
     })();
-    match verified {
-        Ok(true) => {}
-        Ok(false) => {
+    let temporary_file = match verified {
+        Ok(Some(file)) => file,
+        Ok(None) => {
             remove_file_if_present(&temporary);
             debug!(source = %source.display(), path = %dest.display(), "CoW clone verification mismatch; falling back to hydration");
             return Ok(None);
@@ -1886,10 +1912,9 @@ fn try_cow_clone_candidate(
             debug!(source = %source.display(), path = %dest.display(), error = %error, "CoW clone verification failed; falling back to hydration");
             return Ok(None);
         }
-    }
+    };
 
-    let prepare = (|| -> Result<std::fs::File> {
-        let temporary_file = std::fs::OpenOptions::new().write(true).open(&temporary)?;
+    let prepare = (|| -> Result<crate::cmd::stream_stage::VerifiedIndexStat> {
         preserve_destination_permissions(dest, &temporary_file)?;
         crate::git::worktree::age_filter_output_mtime(&temporary_file);
         let pre_publish_stat =
@@ -1902,10 +1927,10 @@ fn try_cow_clone_candidate(
                 dest.display()
             )));
         }
-        Ok(temporary_file)
+        Ok(pre_publish_stat)
     })();
-    let temporary_file = match prepare {
-        Ok(temporary_file) => temporary_file,
+    let verified_stat = match prepare {
+        Ok(verified_stat) => verified_stat,
         Err(error::CrabError::Cancelled) => {
             remove_file_if_present(&temporary);
             return Err(error::CrabError::Cancelled);
@@ -1925,20 +1950,7 @@ fn try_cow_clone_candidate(
         debug!(source = %source.display(), path = %dest.display(), error = %error, "CoW clone publication failed; falling back to hydration");
         return Ok(None);
     }
-    let index_stat = crate::cmd::stream_stage::VerifiedIndexStat::from_file(&temporary_file)
-        .ok_or_else(|| {
-            error::CrabError::Internal("stat published CoW hydration file".to_owned())
-        })?;
-    if crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(dest) != Some(index_stat) {
-        return Err(error::CrabError::Internal(format!(
-            "CoW hydrated file changed during publication: {}",
-            dest.display()
-        )));
-    }
-    Ok(Some(VerifiedWrite {
-        bytes: pointer.size,
-        index_stat,
-    }))
+    published_write(&temporary_file, verified_stat).map(Some)
 }
 
 #[derive(Debug, Default)]
@@ -4149,6 +4161,47 @@ mod tests {
         assert_eq!(rows, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn replaced_publication_cannot_seed_git_or_validation_caches() {
+        let _git_env = ScopedGitDir::acquire();
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let content = b"verified";
+        let pointer = pointer_for_content(content);
+        let path = root.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        run_git(root, &["add", "model.bin"]);
+        let mut temporary = tempfile::NamedTempFile::new_in(root).unwrap();
+        temporary.write_all(content).unwrap();
+        crate::git::worktree::age_filter_output_mtime(temporary.as_file());
+        let verified =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(temporary.as_file()).unwrap();
+        let published = temporary.persist(&path).unwrap();
+        let mut replacement = tempfile::NamedTempFile::new_in(root).unwrap();
+        replacement.write_all(b"modified").unwrap();
+        replacement.persist(&path).unwrap();
+        let write = published_write(&published, verified).unwrap();
+        let proof = verified_path(&path, &pointer, write);
+
+        refresh_hydrated_index_entries(root, std::slice::from_ref(&proof));
+
+        assert_eq!(
+            git_stdout(root, &["diff-files", "--name-only"]).trim(),
+            "model.bin"
+        );
+        assert_eq!(
+            crate::cache::add_validation::record_verified_paths(root, &[proof]).unwrap(),
+            0
+        );
+        if let Some(entry) = crate::cache::hydrated_pointer::entry_for_verified_stat(
+            write.index_stat,
+            &pointer.serialize(),
+        ) {
+            assert!(!crate::cache::hydrated_pointer::matches_stat(&path, &entry));
+        }
+    }
+
     fn run_git_without_crab_filter(cwd: &Path, args: &[&str]) {
         let mut git_args = vec![
             "-c",
@@ -5432,6 +5485,84 @@ mod tests {
         let content = b"new content";
         atomic_write(&dest, content).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), content);
+    }
+
+    #[test]
+    fn invalid_verified_length_does_not_replace_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let pointer = sample_pointer(4).serialize();
+        std::fs::write(&dest, &pointer).unwrap();
+        let mut temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"bad").unwrap();
+
+        assert!(persist_verified_temp(temporary, &dest, 4).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), pointer);
+    }
+
+    #[test]
+    fn publication_proof_remains_bound_to_replaced_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let mut temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"verified").unwrap();
+        crate::git::worktree::age_filter_output_mtime(temporary.as_file());
+        let verified =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(temporary.as_file()).unwrap();
+        let published = temporary.persist(&dest).unwrap();
+        let mut replacement = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        replacement.write_all(b"replaced").unwrap();
+        replacement.persist(&dest).unwrap();
+
+        let proof = published_write(&published, verified).unwrap();
+
+        assert_eq!(proof.index_stat.stat.ino, verified.stat.ino);
+        assert_ne!(
+            Some(proof.index_stat),
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&dest)
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"replaced");
+    }
+
+    #[test]
+    fn publication_proof_rejects_same_inode_content_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let mut temporary = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        temporary.write_all(b"verified").unwrap();
+        crate::git::worktree::age_filter_output_mtime(temporary.as_file());
+        let verified =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(temporary.as_file()).unwrap();
+        let published = temporary.persist(&dest).unwrap();
+        std::fs::write(&dest, b"modified").unwrap();
+
+        assert!(published_write(&published, verified).is_err());
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_publish_complete_content_and_owned_proofs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        std::fs::write(&dest, sample_pointer(65536).serialize()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let workers = [0xAA, 0xBB].map(|byte| {
+            let barrier = barrier.clone();
+            let dest = dest.clone();
+            std::thread::spawn(move || {
+                let content = vec![byte; 65536];
+                barrier.wait();
+                atomic_write_with_progress(&dest, &content, None).unwrap()
+            })
+        });
+        barrier.wait();
+        let proofs = workers.map(|worker| worker.join().unwrap());
+        let content = std::fs::read(&dest).unwrap();
+        let current =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&dest).unwrap();
+
+        assert!(content == vec![0xAA; 65536] || content == vec![0xBB; 65536]);
+        assert!(proofs.contains(&current));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]

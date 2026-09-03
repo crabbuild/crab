@@ -233,6 +233,72 @@ Remaining execution slices; Phase 2 and release acceptance remain open:
 | Concurrent publication proof | CoW and ordinary atomic hydration both compare their published descriptor with the current pathname. A successful competing publication can invalidate that equality. | Define the publication/proof ownership rule once; unchanged concurrent CoW test passes repeatedly, ordinary atomic writes share it, and changed content/pointers never receive a false clean Git stat or add-validation token. Do not weaken source verification or accept foreign inode stats. |
 | Installed outcome qualification | Pure serialization tests cannot prove stream termination or mixed-phase output through the actual binary. | Fresh installed CLI: ordinary JSONL, manifest JSONL, and JSON each produce one terminal error under real RustFS denial; failed rows report zero bytes and unchanged pointers; mixed local recovery retains its success row; restored origin yields independently verified bytes and clean Git state. |
 
+### Published-inode proof repair, 2026-09-03
+
+The CoW failure above also exists on current `origin/main`. CoW and ordinary
+atomic hydration compared a retained published descriptor to a pathname that
+another successful publisher could already have replaced. A failed equality
+then misreported the earlier completed publication as an internal failure.
+
+Both producers now finish through `published_write`. The producer captures
+verified metadata before rename; the shared finish step checks the same open
+descriptor afterward, permitting the ctime change caused by rename but rejecting
+changes to the verified payload's other stat fields. It never adopts metadata
+from a replacement pathname. Ordinary hydration also rejects a length mismatch
+before replacing the destination. CoW hashes and publishes through the same
+retained file handle, opened without following a leaf symlink on Unix.
+
+This is a completed-publication proof, not a claim that the destination can
+never change afterward. `refresh_verified_index_stats` checks current path
+identity and the indexed pointer before writing the captured stat;
+`record_verified_paths` independently checks current path, index stat, pointer,
+and mode-bound token. Sibling-worktree hints still check the captured stat and
+hash the candidate before accepting it. No consumer may refresh a stale proof
+using a replacement file's metadata.
+
+Source/dependency map:
+
+| Surface | Caller and owner | Contract and proof |
+|---|---|---|
+| Ordinary publication | Remote atomic hydration, smudge, staging recovery, and `--recover-from` → `persist_verified_temp` → `published_write` | `tempfile` 3.27.0 atomically replaces the destination and returns the original file handle; its Unix implementation uses rename. Length errors occur before that replacement. |
+| CoW publication | `run_cow_phase` → `try_cow_clone_candidate` → `published_write` | The verified handle survives hashing, permission/mtime preparation, and rename. Pre-publication clone failures remain advisory; cancellation and post-publication verification failures still propagate. |
+| Proof consumers | `refresh_hydrated_index_entries`, add-validation recording, sibling candidate lookup | Gix 0.51.0 descriptor stats include inode/device, size, ownership, and timestamps; consumers compare exact captured fields rather than borrowing current path stats. Replaced content and pointers do not seed clean-index or validation proofs. |
+
+Focused macOS proof: all 80 hydration tests pass. The unchanged CoW concurrency
+regression and the new ordinary atomic-write concurrency regression both pass
+100 consecutive invocations. Deterministic tests cover a replaced published
+inode, a same-inode content edit, invalid length without destination mutation,
+and rejection of a stale publication by Git/add-validation/sibling-hint
+consumers. The 21 adjacent CoW, Git worktree, add-validation, and hydrated-pointer
+tests also pass. No expectation or baseline was weakened. This does not establish
+native Linux/Windows behavior, crash durability, or snapshot isolation against
+arbitrary external filesystem/timestamp manipulation.
+
+Installed release qualification reuses the existing RustFS instance and isolated
+repository prefix, with a fresh reader/cache. `publication-workload/report.json`
+retains **111 passing checks / 50 commands**: cold/warm reads, separate-process
+fetch-to-hydrate reuse, corrupted-range repair, scoped clean, denied origin reads,
+and ten rounds of two concurrent CLI hydrators in one linked worktree. All 20
+hydrators succeed with four CoW clones each; all ten rounds make zero xorb body
+attempts while the gateway denies them. Independent content hashes, unchanged
+sibling content, unchanged indexed pointers after add, and final clean Git state
+pass. The same artifact passes the **29 checks / 8 commands** outcome workload
+again, retained in `hydrate-outcomes-publication/report.json`. Reports and the
+external prototype harnesses live under the qualification root recorded above;
+they are not yet maintained Phase 7 tooling.
+
+Artifact identity: `publication/bin/crab`, build label
+`a725621-publication-dirty`, built 2026-09-03 07:42:50 UTC through isolated
+`make install`. Binary SHA-256:
+`b837071f485a19c07a53b6c9a4531cd2a950498b03f30cc9cbdd0b83a45714cf`.
+Source-only patch SHA-256 against `a725621`:
+`4758e4b414dec230acd0c3d39937eed154be5ad5283ebda4a82e9c8f15107d91`.
+Both installed release feature shapes and format/diff checks pass. Strict CLI
+no-dependency library Clippy still reports 478 findings; the three in hydration
+are unchanged outside the publication edits. This is not a green lint gate.
+Nested storage classification and the remaining Plan 017 acceptance gates stay
+open.
+
 ### Delivery ledger
 
 | Phase | Status | Retained proof |
