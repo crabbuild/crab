@@ -68,8 +68,13 @@ impl PayloadRemoval {
                 Ok(transaction) => Some(transaction),
                 Err(error)
                     if matches!(&error, CacheError::Index { source, .. }
-                    if matches!(source.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase))) =>
+                    if source.sqlite_error().is_some_and(|error|
+                        matches!(error.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                        || error.extended_code == rusqlite::ffi::SQLITE_ERROR)) =>
                 {
+                    // These fixed statements also fail with SQLITE_ERROR when
+                    // disposable tables/columns are missing. Generation and
+                    // I/O errors are different codes and must stop deletion.
                     unavailable(&self.path, &error);
                     None
                 }

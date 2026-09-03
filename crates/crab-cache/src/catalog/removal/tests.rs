@@ -237,25 +237,35 @@ async fn root_replacement_keeps_deletion_and_accounting_in_original_tree() {
 
 #[tokio::test]
 async fn missing_or_corrupt_catalog_does_not_require_repair_for_payload_cleanup() {
-    for missing in [false, true] {
+    for state in ["missing", "corrupt", "schema"] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
         let path = seeded(&root).await;
         let database = root.join(CATALOG_FILE);
-        if missing {
-            std::fs::remove_file(&database).unwrap();
-        } else {
-            std::fs::write(&database, b"invalid SQLite").unwrap();
+        match state {
+            "missing" => std::fs::remove_file(&database).unwrap(),
+            "corrupt" => std::fs::write(&database, b"invalid SQLite").unwrap(),
+            _ => {
+                let pinned = PinnedRoot::open(&root).unwrap();
+                let connection = pinned
+                    .open_database(
+                        Path::new(CATALOG_FILE),
+                        DatabaseMode::ReadWrite,
+                        std::time::Duration::ZERO,
+                    )
+                    .unwrap();
+                connection
+                    .execute_batch("DROP TABLE cache_entries")
+                    .unwrap();
+            }
         }
+        let before = std::fs::read(&database).ok();
         let report = crate::clean_cache(&root, false, &CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(report.files_removed, 1);
         assert!(!path.exists());
-        assert_eq!(
-            std::fs::read(database).ok(),
-            (!missing).then(|| b"invalid SQLite".to_vec())
-        );
+        assert_eq!(std::fs::read(database).ok(), before);
     }
 }
 
