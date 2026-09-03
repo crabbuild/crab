@@ -463,14 +463,7 @@ async fn run_post_checkout_hydrate(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let config = crate::core::config::Config::resolve_for_repo(target_dir)?;
-    crate::cmd::hydrate::run_hydrate(
-        target_dir,
-        args,
-        &config,
-        &crate::cmd::hydrate_restore::RestoreFlags::default(),
-        cancel,
-    )
-    .await
+    crate::cmd::hydrate::hydrate_worktree(target_dir, args, &config, cancel).await
 }
 
 async fn run_post_clone_shard_sync_with_selector<F, Fut>(
@@ -702,7 +695,12 @@ fn checkout_head(target: &Path, remote_url: &str) -> Result<()> {
         .status()?;
 
     if !checkout_status.success() {
-        tracing::warn!("git checkout after clone returned non-zero, continuing");
+        // A fetched object database is not a completed clone when a required
+        // filter leaves checkout incomplete. Stop before hydration or success.
+        return Err(CrabError::Protocol(format!(
+            "git checkout exited with status {}",
+            checkout_status.code().unwrap_or(-1),
+        )));
     }
 
     Ok(())
@@ -948,14 +946,8 @@ async fn auto_hydrate_always_profile(
         recover_from: None,
     };
 
-    if let Err(e) = crate::cmd::hydrate::run_hydrate(
-        repo_root,
-        &hydrate_args,
-        &config,
-        &crate::cmd::hydrate_restore::RestoreFlags::default(),
-        cancel,
-    )
-    .await
+    if let Err(e) =
+        crate::cmd::hydrate::hydrate_worktree(repo_root, &hydrate_args, &config, cancel).await
     {
         tracing::warn!(
             error = %e,
@@ -1391,6 +1383,32 @@ mod tests {
     fn repo_name_rejects_empty() {
         let err = repo_name_from_url("crab://bucket/");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn checkout_failure_is_not_a_successful_clone() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_in(root, &["init"]);
+        git_in(root, &["config", "user.email", "test@example.invalid"]);
+        git_in(root, &["config", "user.name", "Test User"]);
+        std::fs::write(root.join("asset.bin"), "committed content\n").unwrap();
+        git_in(root, &["add", "asset.bin"]);
+        git_in(root, &["commit", "-m", "checkout fixture"]);
+        git_in(root, &["clone", "--no-checkout", ".", "checkout"]);
+        let clone = root.join("checkout");
+        std::fs::write(
+            clone.join(".git/info/attributes"),
+            "asset.bin filter=refuse\n",
+        )
+        .unwrap();
+        git_in(&clone, &["config", "filter.refuse.smudge", "false"]);
+        git_in(&clone, &["config", "filter.refuse.required", "true"]);
+
+        let result = checkout_head(&clone, "crab://bucket/repo");
+
+        assert!(matches!(result, Err(CrabError::Protocol(_))));
     }
 
     #[test]

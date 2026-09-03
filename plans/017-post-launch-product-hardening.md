@@ -5114,6 +5114,69 @@ Earlier Kubernetes qualification is for `802dec8`, not a claim about an
 unbuilt candidate. The known v1.0.1 hook upgrade path remains; unrecognized
 older/custom hook bodies still require explicit manual composition.
 
+### Cold LFS checkout and clone result ownership: 2026-09-03 UTC
+
+**Reproduction.** A real Git `clone --no-checkout` fixture installs a required
+smudge command that exits unsuccessfully. `checkout_head` previously returned
+success despite Git's failure; `checkout_failure_is_not_a_successful_clone`
+fails before the change and passes afterward. The first attempted fixture
+only removed an already tracked file, which Git correctly preserved as a local
+deletion; that attempt is not evidence of checkout-error propagation.
+
+The release baseline `ace8d98`, bound to its clean checkout by
+`phase2-cold-lfs-before-ace8d98-20260903/artifacts/report.json`, reproduces
+the full CLI problem: eager `crab clone` encounters missing LFS configuration,
+waits for the filter's 60-second idle timeout, then exits zero and emits a
+clone success envelope. It also writes the nested hydrate command's human
+no-op summary before JSON, causing the strict JSON parser to reject stdout.
+The report remains failed, not retroactively relabeled as a successful run.
+
+**Phase A — preserve the selected read context and fail closed.** The shared
+lazy LFS loader now uses the canonical Config resolver's selected URL when
+calling the existing operation-scoped LFS resolver. Both `crab filter-process`
+and `crab lfs filter-process` use that loader; standalone explicit remote
+resolution is unchanged. A present project file still overrides the existing
+temporary clone URL. No new environment variable, storage format or fallback
+uploader is introduced. `checkout_head` returns a protocol error on Git failure,
+so post-checkout hydration and the CLI success envelope are unreachable.
+
+**Phase B — one command result owner.** Clone's ordinary, selected and
+automatic-profile hydration calls use the same hydration selection/execution
+pipeline without nested reporting. The hydrate command retains its existing
+text/JSON/JSONL reporting. Internal reporting is optional; the public hydration
+entry points retain their signatures and behavior. The additional production
+surface pays for a real ownership boundary: clone emits its own terminal
+result instead of mixing hydrate output into that result.
+
+**Acceptance and executable proof.** Run
+`crab/scripts/e2e/run_lfs_cold_clone_rustfs_smoke.py` with the same binary,
+matching source root, isolated run root and local RustFS arguments as the
+admission driver. It puts LFS paths before and after `crab.toml` in checkout
+order, includes a Crab-native payload, and requires eager, lazy and selected
+hydration to preserve exact bytes and Git integrity. Every successful
+`clone --json` must parse as one clone envelope. Denying only the run-owned
+LFS reads must fail a cold clone with an error envelope and no success data.
+Nothing is deleted or repaired to inject the failure.
+
+The focused hydrate/LFS/checkout regression run passes 94 tests. A wider clone
+run has 45 passes and one existing failure in
+`clone_shard_sync_uses_selected_replica_store`: its in-memory fixture lacks
+the canonical layout descriptor. The same fixture body is present on current
+`origin/main`; it remains unchanged pending the separate fixture decision.
+Release qualification is pending until recorded below.
+
+**Still open.** The filter error recovery path attempts to drain after the
+request's content flush was already consumed. This explains the observed idle
+wait and needs one request-framing owner across clean, smudge and delayed
+commands, with real interactive-pipe regression proof. Do not lower the idle
+timeout or special-case the diagnostic. Git requires the final request flush
+before a response and permits an error response without restarting the filter
+([Git filter protocol](https://git-scm.com/docs/gitattributes#_long_running_filter_process)).
+Cold plain-Git checkout setup, committed/configured remote precedence during
+checkout, cancellation, corrupt-content cases, all provider/OS rows and
+controlled performance remain broader gates; this change is not Phase 2
+completion.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression

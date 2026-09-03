@@ -3237,6 +3237,18 @@ pub async fn run_hydrate(
     run_hydrate_in(root, args, config, hydrator.as_ref(), cancel).await
 }
 
+/// Hydrate as a step whose caller owns progress and the terminal result.
+pub(crate) async fn hydrate_worktree(
+    root: &Path,
+    args: &HydrateArgs,
+    config: &Config,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let flags = crate::cmd::hydrate_restore::RestoreFlags::default();
+    let hydrator = configured_hydrator(config, &flags, cancel).await?;
+    run_hydrate_in_with_reporting(root, args, config, hydrator.as_ref(), None, cancel).await
+}
+
 async fn configured_hydrator(
     config: &Config,
     restore_flags: &crate::cmd::hydrate_restore::RestoreFlags,
@@ -3313,7 +3325,7 @@ pub(crate) async fn hydrate_selected(
         selected,
         hydrator.as_ref(),
         HydrateReporting {
-            mode,
+            mode: Some(mode),
             manifest: false,
             recover_from: None,
             pending_hydration: None,
@@ -3367,6 +3379,17 @@ pub async fn run_hydrate_in(
     hydrator: &dyn Hydrator,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    run_hydrate_in_with_reporting(root, args, config, hydrator, Some(args.mode), cancel).await
+}
+
+async fn run_hydrate_in_with_reporting(
+    root: &Path,
+    args: &HydrateArgs,
+    config: &Config,
+    hydrator: &dyn Hydrator,
+    mode: Option<OutputMode>,
+    cancel: &CancellationToken,
+) -> Result<()> {
     let pending_hydration = pending_worktree_hydration(root, args)?;
     let args = pending_hydration
         .as_ref()
@@ -3387,7 +3410,7 @@ pub async fn run_hydrate_in(
     };
 
     let Some(filter) = filter else {
-        if !args.mode.is_machine() {
+        if mode == Some(OutputMode::Text) {
             print_help();
         }
         return Ok(());
@@ -3399,7 +3422,8 @@ pub async fn run_hydrate_in(
     // discovered since the last clone are picked up automatically.
     // Best-effort: failures here must not block hydrate. Idempotent —
     // only appends missing rules, existing ones are left alone.
-    refresh_pointer_attributes(root, args.mode);
+    let attribute_mode = mode.unwrap_or(OutputMode::Json);
+    refresh_pointer_attributes(root, attribute_mode);
 
     let mut to_hydrate: Vec<(PathBuf, Pointer)> = Vec::new();
     let manifest_filter;
@@ -3439,7 +3463,7 @@ pub async fn run_hydrate_in(
         to_hydrate,
         hydrator,
         HydrateReporting {
-            mode: args.mode,
+            mode,
             manifest: manifest_entries.is_some(),
             recover_from: args.recover_from.as_deref(),
             pending_hydration: pending_hydration.as_ref(),
@@ -3451,7 +3475,7 @@ pub async fn run_hydrate_in(
 }
 
 struct HydrateReporting<'a> {
-    mode: OutputMode,
+    mode: Option<OutputMode>,
     manifest: bool,
     recover_from: Option<&'a Path>,
     pending_hydration: Option<&'a PendingWorktreeHydration>,
@@ -3474,7 +3498,9 @@ async fn run_selected_hydration(
         if let Some(pending) = pending_hydration.as_ref() {
             mark_pending_worktree_hydration_applied(root, &pending.policy)?;
         }
-        emit_empty_hydrate_summary(mode);
+        if let Some(mode) = mode {
+            emit_empty_hydrate_summary(mode);
+        }
         return Ok(HydrateSummary::default());
     }
 
@@ -3493,7 +3519,7 @@ async fn run_selected_hydration(
 
     // In JSONL manifest mode, set up a per-file result channel so the
     // hydrator streams one JSONL row per file as it completes.
-    let is_manifest_jsonl = manifest && mode == OutputMode::Jsonl;
+    let is_manifest_jsonl = manifest && mode == Some(OutputMode::Jsonl);
     let (file_result_tx, file_result_rx) = if is_manifest_jsonl {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<HydrateFileResult>();
         (Some(tx), Some(rx))
@@ -3509,7 +3535,7 @@ async fn run_selected_hydration(
 
     // Build the optional JSONL stream for streaming mode.
     let jsonl_stream: Option<Arc<std::sync::Mutex<JsonlStream<Stdout>>>> = match mode {
-        OutputMode::Jsonl => Some(Arc::new(std::sync::Mutex::new(JsonlStream::new(
+        Some(OutputMode::Jsonl) => Some(Arc::new(std::sync::Mutex::new(JsonlStream::new(
             "hydrate.event",
             "1.0",
             std::io::stdout(),
@@ -3545,7 +3571,7 @@ async fn run_selected_hydration(
         };
 
     // Spawn a live progress ticker when stderr is a TTY (text mode only).
-    let ticker = if mode == OutputMode::Text {
+    let ticker = if mode == Some(OutputMode::Text) {
         progress.start_ticker(cancel)
     } else {
         None
@@ -3555,7 +3581,7 @@ async fn run_selected_hydration(
     let selected_to_hydrate = to_hydrate;
 
     if let Some(recover_path) = recover_from
-        && !mode.is_machine()
+        && mode == Some(OutputMode::Text)
     {
         eprintln!("Recovering from local source: {}", recover_path.display());
     }
@@ -3640,7 +3666,7 @@ async fn run_selected_hydration(
     let payload = HydrateSummaryPayload::from_summary(&summary, elapsed);
 
     match mode {
-        OutputMode::Text => {
+        Some(OutputMode::Text) => {
             let mut parts = Vec::new();
             parts.push(format!(
                 "Hydrated {} file(s) ({})",
@@ -3687,10 +3713,10 @@ async fn run_selected_hydration(
                 );
             }
         }
-        OutputMode::Json => {
+        Some(OutputMode::Json) => {
             emit_json("hydrate", "1.0", &payload);
         }
-        OutputMode::Jsonl => {
+        Some(OutputMode::Jsonl) => {
             if let Some(stream) = &jsonl_stream {
                 if is_manifest_jsonl {
                     // Manifest mode: emit the typed summary record.
@@ -3712,6 +3738,7 @@ async fn run_selected_hydration(
                 }
             }
         }
+        None => {}
     }
 
     if summary.failed > 0 {
@@ -5696,7 +5723,7 @@ mod tests {
                 vec![(dir.path().join("data.bin"), sample_pointer(4096))],
                 &RecordingHydrator::default(),
                 HydrateReporting {
-                    mode: OutputMode::Jsonl,
+                    mode: Some(OutputMode::Jsonl),
                     manifest: true,
                     recover_from: Some(dir.path()),
                     pending_hydration: None,
@@ -5722,7 +5749,7 @@ mod tests {
             ],
             &hydrator,
             HydrateReporting {
-                mode: OutputMode::Json,
+                mode: Some(OutputMode::Json),
                 manifest: false,
                 recover_from: None,
                 pending_hydration: None,

@@ -82,6 +82,18 @@ crab clone crab://team-bucket/ml/models
 An authority other than `crab.build` remains direct unless an exact managed
 service profile binds it.
 
+## Checkout and failures
+
+Crab installs its filters before the first checkout. Eager Git LFS reads can
+use the selected clone URL before `crab.toml` reaches the working tree; an
+existing project configuration keeps its normal precedence. Lazy clones leave
+LFS pointers for later `crab lfs pull` or explicit smudge.
+
+A failed Git checkout fails the clone command. Downloaded Git objects and any
+partially checked-out files remain available for diagnosis; they are not
+reported as a completed clone. `--json` emits one clone result or error
+envelope, without a separate hydration summary mixed into stdout.
+
 ## Related
 
 - [Managed Service Quickstart](/docs/cli/managed-service)

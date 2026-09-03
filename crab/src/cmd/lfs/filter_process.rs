@@ -9,12 +9,21 @@ use std::os::fd::AsRawFd;
 use crate::core::context::AppContext;
 use crate::core::error::Result;
 
-use super::store_setup::resolve_lfs_remote_for_operation_sync;
+use super::store_setup::resolve_lfs_remote_for_operation_with_remote_sync;
 
 /// Build the lazy direct-storage resolver used by the LFS filter process.
 pub fn lazy_lfs_store_loader() -> crate::git::filter_process::LfsStoreLoader {
     Arc::new(|| {
-        resolve_lfs_remote_for_operation_sync("smudge")
+        // First checkout may smudge LFS before crab.toml exists. Use the
+        // canonical config's clone-time URL, while a present project file
+        // retains its normal precedence over that temporary selection.
+        crate::core::config::Config::resolve_local()
+            .and_then(|config| {
+                resolve_lfs_remote_for_operation_with_remote_sync(
+                    "smudge",
+                    config.remote_url.as_deref(),
+                )
+            })
             .map(|remote_ctx| remote_ctx.store)
             .map_err(|error| {
                 tracing::debug!(
