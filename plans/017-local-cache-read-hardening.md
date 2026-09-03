@@ -1506,9 +1506,40 @@ private-filesystem run passed 39/40: the existing native/OFD interoperability
 test returned `DatabaseBusy` at its native `BEGIN IMMEDIATE` after dropping a
 raw reservation descriptor. Its isolated rerun and the unchanged 40-test
 parallel repeat passed. This test's raw/native locking path does not call the
-changed payload
-reader, but intermittent lock behavior is not considered resolved or waived.
-Installed requalification is pending. Remaining work includes object/xorb and
+changed payload reader, but intermittent lock behavior is not considered
+resolved or waived. Strict all-target Clippy passes for all features, local-only,
+and range-only; minimal-feature compilation and workspace formatting pass.
+
+**Installed proof.** A stable-source Make install at
+`e5f8af4b4a64d57b995de651805646bc1da292e7` produced CLI SHA-256
+`af0ac5e7fde480b7163e80fc5ff5efdc74b2b5fcd35504f9b2ac46b0b76d0160`.
+The unchanged qualification harnesses and RustFS image recorded above pass:
+
+- `generation-e5f8af4.KEjX5w/report.json`: 63 checks / 53 commands / 1,563
+  gateway requests. Real large-file add/commit/push/lazy-clone, independent
+  byte identity, corruption recovery, unsafe/unbound-cache bypass, clean/prune,
+  fsck, and clean Git state pass. Initial duplicate/delta fixtures create
+  135,437,106 xorb bytes; adding another exact duplicate creates no xorb; a
+  one-MiB edit creates 1,070,681 bytes. Cold hydrate/fetch use 16/18 xorb GETs;
+  both warm stages use zero with body GETs denied. Cold denial fails with
+  pointers intact; restored origin recovers. This is the fresh remote
+  `crab://crabbuild/cache-qualification/cache-f410.E7nt8I/generation-e5f8af4.KEjX5w`.
+- `prune-accounting-e5f8af4.aKpwmy/report.json`: eight checks / seven commands.
+  Seven decoded ranges / 235,953,625 bytes removed; the four remaining catalog
+  entries / 421,777 bytes exactly match the remaining payload families.
+  Complete linked inventory is 462,761 logical / 479,232 allocated bytes.
+- `generation-e5f8af4.KEjX5w/catalog-diagnostics-a6doskxr/report.json`: 33 checks /
+  12 commands. Both stats spellings and doctor retain independent counts and
+  filesystem identity/bytes while reporting the injected catalog faults.
+  Restored SQL values restore baseline totals; the unrelated sentinel warning
+  remains intact.
+
+Existing service data and new remote xorbs are retained; no bucket cleanup ran.
+The committed CLI/read/cache source is qualified, not the cache-server artifact
+built alongside unrelated dirty evidence edits. Runtime fault recovery and
+deterministic delayed-cleanup tests are separate evidence: the installed script
+does not inject the publication interleaving. Cold-read amplification and
+controlled performance/resource comparisons remain open. Remaining work includes object/xorb and
 manifest sibling readers, LRU touch identity, complete cancellation/resource
 qualification, catalog generation changes during a read, and external in-place
 mutations; this slice does not establish full Phase 2 acceptance.
