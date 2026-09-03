@@ -1260,11 +1260,19 @@ When configured, a background task renews the lock at regular intervals:
 ```
 Heartbeat interval: clamped to [10s, TTL - 10s]
 
-Every interval:
-  1. GET lock → verify holder matches
+Every interval (through the shared PushLock renewal owner):
+  1. GET lock → verify holder matches and claim is not released
   2. PUT lock with new expires_at (CAS via etag)
-  3. If holder mismatch → lock stolen → cancel push
+  3. Lost/released claim or exhausted bounded retries → cancel push
 ```
+
+The released tombstone retains the old holder for diagnostics, not renewal
+authority. Both cached-version renewal and heartbeat renewal reject it without
+rewriting it. Heartbeats use the same retry count/deadline as `PushLock::renew`
+instead of maintaining a second retry/serialization implementation. Stopping
+a heartbeat joins the current bounded attempt before releasing the lock.
+This revocation rule does not itself fence a later multi-object ref commit
+against lease expiry; that publication boundary needs separate proof.
 
 ### CAS (Compare-and-Swap) for Manifests
 

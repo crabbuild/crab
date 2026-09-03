@@ -26,6 +26,8 @@ on:
       - "crab/src/cmd/gc/**"
       - "crab/src/replication/**"
       - "crab/src/metadata/**"
+      - "crab/src/coordination/**"
+      - "crates/crab-coordination/**"
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
@@ -70,6 +72,8 @@ on:
       - "crab/src/cmd/gc/**"
       - "crab/src/replication/**"
       - "crab/src/metadata/**"
+      - "crab/src/coordination/**"
+      - "crates/crab-coordination/**"
       - "crab/src/storage/**"
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
@@ -151,6 +155,9 @@ jobs:
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
+          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo check -p crab-coordination --locked --no-default-features
+          cargo test -p crab --lib coordination::heartbeat::tests --locked --features gix-transport
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
             --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
@@ -210,6 +217,11 @@ jobs:
 
       - name: Run ref-journal rollback contracts
         run: cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
+
+      - name: Run lease renewal contracts
+        run: |
+          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo test -p crab --lib coordination::heartbeat::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
 
       - name: Run hook composition and frozen-ref discovery contracts
         run: |

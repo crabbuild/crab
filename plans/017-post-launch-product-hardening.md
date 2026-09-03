@@ -2881,6 +2881,67 @@ length, or asynchronous transfer-output error propagation. The session still
 creates its own coordinator cancellation token. Those original lifecycle
 gates remain open; passing this regression cannot close them.
 
+### Released-claim renewal ownership: 2026-09-03 UTC
+
+**Context and reproduced failure.** Holder-checked release leaves a tombstone
+with the original holder and zero expiry. Shared cached renewal reread that
+tombstone after its stale CAS failed, checked only holder identity, and could
+revive the claim. The independently implemented product heartbeat had the
+same defect. Each regression failed before its respective fix; fixing the
+shared owner alone did not fix the heartbeat.
+
+**Design.** `crates/crab-coordination/src/push_lock.rs` now rejects released
+payloads during renewal. A narrow `PushLock::renew_if_holder` entry point
+lets `crab/src/coordination/heartbeat.rs` use that existing bounded renewal
+owner without a cached version. The duplicate heartbeat serialization, retry
+classification and retry loop are removed. Normal cached renewal retains its
+single conditional PUT. No persistent shape, key, dependency or configuration
+changes. The dependency boundary remains `object_store 0.14.1` conditional
+updates with the complete ETag/version; a successful release invalidates the
+former cached token, and a racing release invalidates the heartbeat's token.
+
+**Acceptance.** After explicit release, both renewal entry points fail and
+leave the tombstone bytes and version unchanged. The heartbeat cancels its
+operation after observing release. Existing acquisition, live renewal,
+reacquisition, holder-safe release, retry/deadline and independent-stop
+contracts must continue to pass. Push, repository maintenance, repack and
+history recovery keep their existing stop-before-holder-checked-release
+ordering; their public call signatures do not change. Using one renewal
+owner is preferable to adding a second tombstone guard to duplicate policy.
+
+**Proof retained.** Twenty-nine shared-lock tests and ten hermetic heartbeat
+tests pass; minimal coordination compilation passes. The opt-in real RustFS
+test passes on `crabbuild`, retaining only
+`qualification/lease-renewal-52316-1788428553880142000`. It acquires and
+explicitly releases a real claim, then exercises cached renewal and the real
+scheduled heartbeat, verifies cancellation, and compares bytes plus version.
+The test is ignored in ordinary suites, not silently counted as a provider
+pass. CI explicitly selects the hermetic contract on Linux, Windows and
+macOS and watches both owner paths. Updated release-shaped workflow proof
+and exact-candidate cross-platform results remain required.
+
+Four push-acquisition/handoff tests, the long-lived internal-owner renewal
+failure test and thirteen repack tests pass. Recovery tests are **7 passed,
+1 failed**: `pruning_old_root_makes_its_unique_pack_collectible` creates a
+manifest without a layout descriptor and fails at the first GC snapshot,
+before pruning or lease renewal. The strict snapshot-layout requirement was
+introduced earlier in this PR; this is not an unrelated-main or green-suite
+claim. Fixture-initialization approval is pending; production validation and
+the test assertions were not weakened. The `maintenance::tests` selector
+matches zero tests and is not counted as proof. Production-library
+correctness/suspicious Clippy, formatting and workflow syntax pass; other
+existing warning categories remain.
+
+**Remaining boundary.** This is revocation safety, not continuous lease
+fencing. A non-released expired claim and a later multi-object active-marker
+write still require separate ownership/publication proof. Version-1 readers
+treat active-marker presence as committed, so an in-place abort payload is
+not a safe extension. Durable receipts also require compactor cooperation;
+do not infer plan attribution from equal refs or transient journal markers.
+An explicit repository-format/writer upgrade decision is pending. No new
+format, automatic migration, terminal receipt or acceptance closure is
+implied by this packet.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context
