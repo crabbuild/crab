@@ -325,6 +325,26 @@ impl CacheCatalog {
         let connection = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
             .map_err(|source| index_error(&path, source))?;
+        // Aggregate conversion alone cannot detect negative rows offset by
+        // valid sizes. Validate both accounting owners in the same snapshot.
+        let malformed: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM cache_entries WHERE typeof(size) != 'integer' OR size < 0
+                   UNION ALL
+                   SELECT 1 FROM reservations WHERE typeof(size) != 'integer' OR size < 0
+                   LIMIT 1
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| index_error(&path, source))?;
+        if malformed {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: "catalog contains a non-integer or negative accounting size".into(),
+            });
+        }
         let (entries, total_bytes) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM cache_entries",
@@ -350,11 +370,19 @@ impl CacheCatalog {
             .query_row(
                 "SELECT value FROM catalog_meta WHERE key = 'last_maintenance_unix_ms'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    let value = row.get::<_, String>(0)?;
+                    value.parse::<u64>().map_err(|source| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(source),
+                        )
+                    })
+                },
             )
             .optional()
-            .map_err(|source| index_error(&path, source))?
-            .and_then(|value| value.parse().ok());
+            .map_err(|source| index_error(&path, source))?;
         Ok(Some(CacheCatalogStats {
             entries,
             total_bytes,

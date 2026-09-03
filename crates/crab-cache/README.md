@@ -72,6 +72,11 @@ same walker but still aborts on an unsafe entry. Missing roots/catalogs/hint
 databases are not initialized and unsafe or corrupt paths are not repaired.
 Standalone object/range statistics retain their narrower contracts.
 
+Catalog stats reject negative or non-integer entry/reservation sizes before
+aggregation, and reject malformed maintenance timestamps instead of presenting
+them as missing. These checks do not validate the complete catalog schema or
+replace writer-side admission validation.
+
 The live filesystem walk is not atomic, an integrity check, or unique-volume
 allocation accounting (shared filesystem extents can be counted more than
 once). It excludes unlinked open files and reports reservations separately.

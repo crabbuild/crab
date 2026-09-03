@@ -3709,6 +3709,43 @@ changes, not proven failures on `origin/main`. The protected policy inventories
 were not edited; their reconciliation requires explicit approval and review of
 the intended boundaries, not automatic acceptance of the observed graph.
 
+### Catalog accounting diagnostics checkpoint, 2026-09-03
+
+**Context.** Regression fixtures showed two false-success cases in read-only
+catalog stats: a corrupt negative size offset by a positive size returned a
+plausible unsigned sum, and a malformed maintenance timestamp became `None`.
+Malformed text/real sizes already returned conversion errors; they were not
+proven to be silently counted as zero. SQLite's per-column unsigned conversion
+validates only the aggregate, not its constituent rows.
+
+**Design.** Inside the existing pinned-root read-only transaction, inspect both
+`cache_entries.size` and `reservations.size` for non-integer or negative values
+before aggregation. Reject invalid accounting as corrupt rather than report a
+misleading total. Parse an existing maintenance marker as `u64` and retain its
+parse failure inside the SQLite source chain; only an absent row means missing.
+No schema mutation, index repair, or alternate database-open path is introduced.
+
+**Acceptance.** Table-driven fixtures cover both accounting tables with negative,
+text, real, and BLOB values, including positive rows masking negative sizes.
+Invalid, negative, and overflowing timestamps fail inspection. The health caller
+marks the catalog unavailable while preserving independent payload counts and
+database bytes. Existing missing-root and uncheckpointed-WAL non-mutation tests
+must continue passing.
+
+**Measured proof.** All 256 cache tests pass with `local-cache`,
+`xet-chunk-cache`, and `remote-client`; the six catalog-inspection tests and
+independent-family health regression also pass separately with local-only and
+range-only features. Strict all-target cache Clippy, workspace formatting, and
+whitespace checks pass. The marker tests prove absent/zero/maximum-u64 values
+remain distinguishable and invalid values retain a typed `ParseIntError`.
+The earlier installed RustFS run is not evidence for this diagnostic change.
+
+**Remaining work.** This is diagnostic validation, not full catalog integrity or
+admission acceptance. Runtime admission still uses its existing aggregate path;
+validating that writer boundary against the same corrupted-row case remains
+Phase 3 work. Full schema/index/reference checks and bounded catalog scans remain
+open. Protected inventory and shipped-schema approvals remain pending.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

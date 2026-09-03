@@ -418,3 +418,50 @@ async fn corrupt_and_orphaned_catalogs_are_unavailable_not_empty_or_repaired() {
         );
     }
 }
+
+#[tokio::test]
+async fn malformed_catalog_totals_preserve_independent_payload_health() {
+    for (sql, kind) in [
+        (
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO reservations VALUES ('valid', 'valid', 17, 1, 0), ('bad', 'bad', -1, 1, 0);",
+            CacheIssueKind::Corrupt,
+        ),
+        (
+            "UPDATE catalog_meta SET value = 'invalid' WHERE key = 'last_maintenance_unix_ms';",
+            CacheIssueKind::Unavailable,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        fixture(&root, "shards/ab/hash", b"healthy");
+        CacheCatalog::new(root.clone(), u64::MAX)
+            .maintain()
+            .await
+            .unwrap();
+        let pinned = PinnedRoot::open(&root).unwrap();
+        let database = pinned
+            .open_database(
+                Path::new(".catalog.sqlite"),
+                crate::private_fs::DatabaseMode::Create,
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        database.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+        database.execute_batch(sql).unwrap();
+        drop(database);
+        let before = std::fs::read(root.join(".catalog.sqlite")).unwrap();
+
+        let report = inspect_cache(&root, u64::MAX, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(report.catalog, CacheCatalogHealth::Unavailable));
+        assert_eq!(report.issues.len(), 1);
+        assert_eq!(report.issues[0].family, Some("catalog"));
+        assert_eq!(report.issues[0].kind, kind);
+        assert!(report.scan_complete);
+        assert_eq!(report.families["shard"].usage.logical_bytes, 7);
+        assert_eq!(std::fs::read(root.join(".catalog.sqlite")).unwrap(), before);
+    }
+}

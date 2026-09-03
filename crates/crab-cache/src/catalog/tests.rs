@@ -48,6 +48,99 @@ fn read_only_stats_does_not_create_missing_root() {
     assert!(!root.exists());
 }
 
+#[test]
+fn read_only_stats_rejects_malformed_accounting_without_repair() {
+    for table in ["cache_entries", "reservations"] {
+        for invalid_size in ["-1", "'not-a-size'", "1.5", "x'00'"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("cache");
+            let connection = open_catalog(&root).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode = DELETE; PRAGMA ignore_check_constraints = ON;",
+                )
+                .unwrap();
+            let sql = match table {
+                "cache_entries" => format!(
+                    "INSERT INTO cache_entries VALUES ('valid', 'temporary', 'valid', 17, 0, 0), ('entry', 'temporary', 'key', {invalid_size}, 0, 0)"
+                ),
+                _ => format!(
+                    "INSERT INTO reservations VALUES ('valid', 'valid', 17, 1, 0), ('reservation', 'entry', {invalid_size}, 1, 0)"
+                ),
+            };
+            connection.execute_batch(&sql).unwrap();
+            drop(connection);
+            let before = std::fs::read(root.join(CATALOG_FILE)).unwrap();
+
+            let result = CacheCatalog::read_only_stats(&root);
+
+            assert!(
+                matches!(result, Err(CacheError::CorruptObject { .. })),
+                "{table}: {invalid_size}: {result:?}"
+            );
+            assert_eq!(std::fs::read(root.join(CATALOG_FILE)).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn read_only_stats_rejects_malformed_maintenance_marker() {
+    for value in ["not-a-timestamp", "-1", "18446744073709551616"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let connection = open_catalog(&root).unwrap();
+        connection
+            .execute(
+                "INSERT INTO catalog_meta VALUES ('last_maintenance_unix_ms', ?1)",
+                [value],
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = CacheCatalog::read_only_stats(&root);
+
+        assert!(
+            matches!(
+                &result,
+                Err(CacheError::Index {
+                    source: rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        source,
+                    ),
+                    ..
+                }) if source.is::<std::num::ParseIntError>()
+            ),
+            "{value}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn read_only_stats_preserves_absent_and_valid_maintenance_markers() {
+    for value in [None, Some(0_u64), Some(u64::MAX)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        let connection = open_catalog(&root).unwrap();
+        if let Some(value) = value {
+            connection
+                .execute(
+                    "INSERT INTO catalog_meta VALUES ('last_maintenance_unix_ms', ?1)",
+                    [value.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(
+            CacheCatalog::read_only_stats(&root)
+                .unwrap()
+                .last_maintenance_unix_ms,
+            value
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_stats_preserves_quiet_and_uncheckpointed_catalogs() {
