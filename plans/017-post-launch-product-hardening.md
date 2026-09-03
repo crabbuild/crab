@@ -5489,6 +5489,75 @@ claiming no performance regression. Supported Git/OS/provider coverage and
 the original Phase 2 acceptance criteria remain open. Do not erase prior
 failed reports or treat this local cache proof as remote-service evidence.
 
+### Fail closed on invalid filter framing, 2026-09-03 UTC
+
+**Context / baseline.** The loop previously swallowed header-reader errors
+and returned success. Its text reader also treated partial-header EOF as
+flush, and both text/content readers accepted `0001` and `0002` as filter
+terminators. An unknown command wrote an error response without consuming or
+rejecting its undefined body; subsequent payload could be parsed as another
+request. The new `invalid_filter_requests_are_terminal_without_acknowledgment`
+test fails against this behavior with `unknown command: Ok(())`.
+
+The retained release `400cb7c` confirms the failures in both real CLI entry
+points. `phase2-filter-header-red-400cb7c-20260903/report.json` records 30
+protocol exchanges plus unchanged-binary proof. All four positive exchanges
+pass (normal EOF and a bodyless query between ordinary/empty smudges, per
+entry point). All 26 negative exchanges fail the acceptance criteria: the
+two unknown-command/open-input cases need forced cleanup after ten seconds;
+the other 24 malformed/unsupported exchanges incorrectly exit zero. The
+report remains failed and is not a performance comparison.
+
+**Phase A — admit only defined request shapes.** The header parser returns
+a private `FilterOperation` enum containing clean, smudge and the bodyless
+blob-list query. Unknown operations terminate before dispatch; there is no
+fallback response or speculative drain. Content operations require a
+pathname. EOF is accepted only before a new request starts; a partial packet,
+missing header/capability flush or misplaced flush propagates to the CLI's
+terminal result. Only `0000` ends filter headers/content. Already completed
+responses remain valid; malformed input does not receive an acknowledgment.
+
+**Evidence map / design choice.** Both filter CLI entry points use the same
+header parser, dispatcher and outer cleanup owner. Strict text framing also
+protects the handshake; typed dispatch removes the unknown-operation branch.
+Clean/content-reader siblings use `frame_as_pktlines` (or the memory test's
+encoder), both of which emit actual `0000` flush packets. They do not rely on
+delimiters from another protocol. Bodyless blob-list and empty smudge behavior
+are explicitly retained. Read-only source inspection confirms current
+`origin/main` still has the swallowed-error and permissive-delimiter paths.
+The outer runner still closes staging and drains prefetch after an error;
+this slice does not claim new lease/cancellation fault-matrix evidence.
+
+Is this the best fix rather than just plausible? Returning a fresh error
+list and then continuing cannot recover an unknown request shape. Admitting
+only supported operations and propagating framing errors removes that path
+while keeping known, recoverable content errors in their existing response
+owner. The production delta is small and adds no configuration or compatibility
+mode. [Git's filter protocol](https://git-scm.com/docs/gitattributes#_long_running_filter_process)
+defines flush-delimited exchanges and permits process termination on protocol
+failure. [Git LFS's command implementation](https://github.com/git-lfs/git-lfs/blob/main/commands/command_filter_process.go)
+likewise terminates on unknown commands and non-EOF scanner errors. Neither
+contract promises recovery for unknown operations or truncated headers.
+
+**Phase B — executable acceptance.**
+
+- [x] 52 filter and 54 clean tests pass, including the new invalid-request
+      table and missing capability-flush regression, existing recovery,
+      bodyless queries, normal EOF, streaming and byte-integrity tests.
+- [ ] Build a committed release; run
+      `python3 crab/scripts/e2e/run_filter_framing_smoke.py --crab-bin <release> --root <workspace-qualification-root> --run-id <new-id>`.
+      Require all 30 exchanges and binary-identity proof to pass. Negative
+      exchanges need normal nonzero exit and exact prior handshake bytes,
+      without an invalid-request response. Timeouts/signals do not pass.
+- [ ] Re-run real-Git LFS cache-mutation qualification and both broken-output
+      probes with that same release to protect adjacent output behavior.
+
+**Phase C — broader gates.** Restore RustFS and re-run cold clone,
+protocol/mirror, Kubernetes lifecycle, full integrity and raw-byte proof.
+Supported Git/OS/provider coverage, capability negotiation, delayed-transfer
+failure/retry qualification and controlled performance remain separate gates;
+this checkpoint does not close the original Phase 2 acceptance criteria.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression

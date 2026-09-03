@@ -657,12 +657,19 @@ async fn acquire_writer(cell: &std::sync::Mutex<LazyStaging>) -> StagingAcquire 
 /// Filter command parsed from the protocol stream.
 #[derive(Debug, Clone)]
 struct FilterCommand {
-    command: String,
+    command: FilterOperation,
     pathname: String,
     /// Additional key=value metadata from the command header. Used to
     /// observe the `can-delay=1` capability that git sets on smudge
     /// commands eligible for delayed processing.
     metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterOperation {
+    Clean,
+    Smudge,
+    ListAvailableBlobs,
 }
 
 impl FilterCommand {
@@ -776,19 +783,14 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
         // Check for cancellation between operations.
         ctx.check_cancelled()?;
 
-        let cmd = match read_command(&mut input) {
-            Ok(Some(cmd)) => cmd,
-            Ok(None) => break, // EOF — git closed stdin
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read filter command, ending session");
-                break;
-            }
+        let Some(cmd) = read_command(&mut input)? else {
+            break;
         };
 
-        let is_lfs_clean = cmd.command == "clean"
+        let is_lfs_clean = cmd.command == FilterOperation::Clean
             && session.resolve_filter_for(&cmd.pathname)
                 == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
-        if cmd.command == "clean" && !is_lfs_clean && !file_index_checker_attempted {
+        if cmd.command == FilterOperation::Clean && !is_lfs_clean && !file_index_checker_attempted {
             file_index_checker_attempted = true;
             if let Some(handle) = handle.as_ref() {
                 install_clean_file_index_checker(&mut session, &ctx, handle);
@@ -819,7 +821,7 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
             Ok(Ok(())) => continue,
             Ok(Err(e)) => {
                 tracing::error!(
-                    command = %cmd.command,
+                    command = ?cmd.command,
                     path = %cmd.pathname,
                     error = %e,
                     "filter operation failed"
@@ -829,7 +831,7 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
             Err(panic_info) => {
                 let msg = panic_payload_to_string(&panic_info);
                 tracing::error!(
-                    command = %cmd.command,
+                    command = ?cmd.command,
                     path = %cmd.pathname,
                     panic = %msg,
                     "filter operation panicked"
@@ -851,7 +853,10 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
         // Git requires the content flush before an error response. Delayed
         // blob-list requests have no body; malformed content ends the session
         // because its next packet boundary cannot be recovered safely.
-        if matches!(cmd.command.as_str(), "clean" | "smudge") {
+        if matches!(
+            cmd.command,
+            FilterOperation::Clean | FilterOperation::Smudge
+        ) {
             while content.read_packet()?.is_some() {}
         }
         write_status(&mut output, "error")?;
@@ -1004,18 +1009,27 @@ fn handshake<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
 /// Read a single filter command header (command + pathname + metadata + flush).
 ///
 /// Returns `None` on EOF (git closed stdin).
-fn read_command<R: Read>(input: &mut R) -> Result<Option<FilterCommand>> {
-    // First line is "command=<cmd>".
-    let Some(command_line) = read_text_line(input)? else {
+fn read_command<R: BufRead>(input: &mut R) -> Result<Option<FilterCommand>> {
+    // EOF is normal only between requests. Once any header byte arrives,
+    // a missing packet or flush is a terminal framing error, not completion.
+    if input.fill_buf().map_err(CrabError::Io)?.is_empty() {
         return Ok(None);
-    };
+    }
+    let command_line = read_text_line(input)?
+        .ok_or_else(|| CrabError::Protocol("expected filter command, got flush".to_owned()))?;
 
-    let command = command_line
-        .strip_prefix("command=")
-        .ok_or_else(|| {
-            CrabError::Protocol(format!("expected 'command=...', got '{command_line}'"))
-        })?
-        .to_owned();
+    // Unknown operations have no agreed content shape. Reject them before
+    // dispatch instead of acknowledging or guessing how to drain their body.
+    let command = match command_line.strip_prefix("command=") {
+        Some("clean") => FilterOperation::Clean,
+        Some("smudge") => FilterOperation::Smudge,
+        Some("list_available_blobs") => FilterOperation::ListAvailableBlobs,
+        _ => {
+            return Err(CrabError::Protocol(format!(
+                "unsupported filter command: {command_line}"
+            )));
+        }
+    };
 
     // Read remaining key=value pairs until flush.
     let mut pathname = String::new();
@@ -1027,6 +1041,11 @@ fn read_command<R: Read>(input: &mut R) -> Result<Option<FilterCommand>> {
         } else if let Some((k, v)) = line.split_once('=') {
             metadata.insert(k.to_owned(), v.to_owned());
         }
+    }
+    if command != FilterOperation::ListAvailableBlobs && pathname.is_empty() {
+        return Err(CrabError::Protocol(
+            "filter content request has no pathname".to_owned(),
+        ));
     }
 
     Ok(Some(FilterCommand {
@@ -1057,8 +1076,8 @@ fn dispatch_command<R: Read, W: Write>(
     handle: Option<&tokio::runtime::Handle>,
     speculation: &Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
 ) -> Result<()> {
-    match cmd.command.as_str() {
-        "clean" => {
+    match cmd.command {
+        FilterOperation::Clean => {
             // Resolve ownership before touching XET staging. LFS has its own
             // cache and remote publication path and must never contend on the
             // XET staging lock in a mixed-repository filter session.
@@ -1105,7 +1124,7 @@ fn dispatch_command<R: Read, W: Write>(
 
             output.content_response(|output| write_content(output, &pointer_bytes))?;
         }
-        "smudge" => {
+        FilterOperation::Smudge => {
             let content = match read_smudge_input_until_flush(input)? {
                 SmudgeInput::PointerCandidate(content) => content,
                 SmudgeInput::PassthroughFile(path) => {
@@ -1236,7 +1255,7 @@ fn dispatch_command<R: Read, W: Write>(
 
             output.content_response(|output| write_smudge_output(output, &result))?;
         }
-        "list_available_blobs" => {
+        FilterOperation::ListAvailableBlobs => {
             // Git asks which delayed blobs are ready. Drain the queue's
             // completed list; each pathname is echoed back so git
             // retrieves those first.
@@ -1247,12 +1266,6 @@ fn dispatch_command<R: Read, W: Write>(
             };
 
             write_available_blobs_response(output, &ready)?;
-            output.flush().map_err(CrabError::Io)?;
-        }
-        other => {
-            tracing::warn!(command = %other, "unknown filter command");
-            write_status(output, "error")?;
-            write_flush(output)?;
             output.flush().map_err(CrabError::Io)?;
         }
     }
@@ -1721,14 +1734,9 @@ fn read_ready(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io::Resul
 /// Read a text line, stripping the trailing newline. Returns `None` on flush.
 fn read_text_line<R: Read>(input: &mut R) -> Result<Option<String>> {
     let mut buf = [0u8; 4];
-    match input.read_exact(&mut buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
-    }
+    input.read_exact(&mut buf).map_err(CrabError::Io)?;
 
-    // Check for flush/delimiter/response-end.
-    if &buf == b"0000" || &buf == b"0001" || &buf == b"0002" {
+    if &buf == b"0000" {
         return Ok(None);
     }
 
@@ -2050,10 +2058,9 @@ impl<R: Read> PktLineReader<R> {
         let mut hdr = [0u8; 4];
         self.inner.read_exact(&mut hdr).map_err(CrabError::Io)?;
 
-        // Flush and the other delimiter packets all have zero body length.
-        // Git's filter content stream uses `0000`; accepting the protocol's
-        // other zero-body delimiters preserves the existing recovery boundary.
-        if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
+        // Only flush ends filter content. Delimiter/response-end belong to
+        // other Git protocols and cannot certify a complete filter request.
+        if &hdr == b"0000" {
             self.state = ContentState::Finished;
             return Ok(None);
         }
@@ -2551,7 +2558,7 @@ mod tests {
         input.extend(pkt_flush());
 
         let cmd = read_command(&mut &input[..]).unwrap().unwrap();
-        assert_eq!(cmd.command, "clean");
+        assert_eq!(cmd.command, FilterOperation::Clean);
         assert_eq!(cmd.pathname, "large.bin");
     }
 
@@ -2560,6 +2567,74 @@ mod tests {
         let input: &[u8] = &[];
         let cmd = read_command(&mut &*input).unwrap();
         assert!(cmd.is_none());
+    }
+
+    #[test]
+    fn invalid_filter_requests_are_terminal_without_acknowledgment() {
+        let repo = tempfile::tempdir().unwrap();
+        let git_dir = repo.path().join(".git");
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let mut expected = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+        let smudge = [pkt_text("command=smudge"), pkt_text("pathname=plain.txt")].concat();
+        let requests = [
+            (
+                "unknown command",
+                [pkt_text("command=unsupported"), pkt_flush()].concat(),
+            ),
+            ("wrong command key", pkt_text("operation=smudge")),
+            ("partial length", b"001".to_vec()),
+            ("partial text", b"0010command=".to_vec()),
+            ("unexpected flush", pkt_flush()),
+            (
+                "missing list flush",
+                pkt_text("command=list_available_blobs"),
+            ),
+            (
+                "missing pathname",
+                [pkt_text("command=smudge"), pkt_flush(), pkt_flush()].concat(),
+            ),
+            (
+                "header delimiter",
+                [smudge.clone(), b"0001".to_vec(), pkt_flush()].concat(),
+            ),
+            (
+                "header response end",
+                [smudge.clone(), b"0002".to_vec(), pkt_flush()].concat(),
+            ),
+            (
+                "content delimiter",
+                [smudge.clone(), pkt_flush(), b"0001".to_vec()].concat(),
+            ),
+            (
+                "content response end",
+                [smudge, pkt_flush(), b"0002".to_vec()].concat(),
+            ),
+        ];
+        for (name, request) in requests {
+            let mut input = build_handshake_input();
+            input.extend(request);
+            let mut output = Vec::new();
+            let result = run_filter_loop(
+                &mut &input[..],
+                &mut output,
+                AppContext::default(),
+                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                None,
+                None,
+                None,
+                None,
+                Arc::new(std::sync::Mutex::new(None)),
+            );
+            assert!(result.is_err() && output == expected, "{name}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn handshake_requires_the_final_capability_flush() {
+        let mut input = build_handshake_input();
+        input.truncate(input.len() - 4);
+        assert!(handshake(&mut &input[..], &mut Vec::new()).is_err());
     }
 
     #[test]
