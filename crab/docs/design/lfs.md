@@ -362,6 +362,15 @@ Git LFS still sends that process one object at a time, so this mode is useful
 only when a future transfer implementation owns parallelism inside one
 request.
 
+### Shutdown
+
+The protocol loop authorizes each subsequent stdin read only after accepting
+the previous event. A fatal init/protocol decision or failed init response
+therefore stops and joins the reader even when the client keeps its pipe open.
+Normal termination still drains admitted transfers. This is not cancellation
+of an idle input read or a stalled transfer; those remain separate lifecycle
+boundaries.
+
 ### Resume for Large Objects
 
 Uploads stream through 8 MiB multipart parts with at most four parts in flight,

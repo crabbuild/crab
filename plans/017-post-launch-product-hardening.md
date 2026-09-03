@@ -2819,6 +2819,68 @@ frontier without historical transaction bodies. Those are not durable receipt
 contracts; ref equality alone remains insufficient to attribute a commit to a
 plan. Keep that original terminal-outcome/replay packet open.
 
+### Native-Git/mirror RustFS checkpoint: 2026-09-03 UTC
+
+Optimized `7dd22af` passes the unchanged native-Git/mirror harness: 464
+commands, 133 checks, no failed checks. It exercises native ref lifecycle,
+full/shallow/partial/filter/security reads, composed mirror hooks,
+plan/apply/reapply and approved deletion safety. The optional prior-release
+rollback binary was not supplied in this run; prior rollback proof is not
+silently attributed to this candidate.
+
+Report: `phase2-protocol-mirror-7dd22af-20260903/artifacts/report.json` under
+the external qualification root. Binary SHA-256:
+`b2c8baecc06759d62416f9a002692f1cb3010a15c924ec0cc7c908cb03901dce`.
+The reported binary/source revision matches. The report correctly records
+the checkout as dirty (unrelated generated Fumadocs/runtime files), so this
+is functional evidence on a concurrent development host, not a clean release
+candidate or controlled performance baseline. Original-history Kubernetes
+replay remains separate, pinned to `56d336a` and not yet complete.
+
+### Transfer-agent terminal input ownership: 2026-09-03 UTC
+
+**Context and reproduced failure.** On optimized `7dd22af`, a real
+`crab lfs-transfer-agent` process reports the unsupported-init error but does
+not exit while its parent keeps stdin open. Closing stdin lets it exit with
+code 1. The canonical protocol reader read ahead after sending an event,
+while the event loop attempted to abort and join that blocking task after
+a fatal semantic decision. The focused regression fails before the fix.
+
+**Design.** Each successfully parsed event carries a one-shot permission for
+the next read. The sole protocol owner releases it only when continuing;
+fatal init/order decisions drop it, and the reader exits before being joined.
+Failed init output uses the same cleanup path. Terminal cleanup joins the
+reader; no second parser, protocol/configuration extension or dependency is
+added. Pending parsed input is bounded to one event; admitted transfer
+concurrency remains owned by the existing coordinator. This protects both CLI entry points,
+`lfs-transfer-agent` and `lfs standalone-file`, without duplicating policy.
+
+**Contract and acceptance.** [Git LFS custom transfers](https://github.com/git-lfs/git-lfs/blob/main/docs/custom-transfers.md)
+defines fatal process errors separately from per-object completion errors;
+normal terminate expects cleanup with no reply. The pinned Tokio 1.52.1
+[blocking-task contract](https://docs.rs/tokio/1.52.1/tokio/task/fn.spawn_blocking.html)
+does not permit aborting a started blocking read. New loopback-stream tests
+keep input open across unsupported/duplicate init and pre-init upload,
+failed init output, and normal terminate. They assert both the result and
+reader closure before the peer closes, and unblock a regressed reader before
+failing so the test itself does not leak it. Existing transfer round-trip,
+progress, declared-size, duplicate-OID and concurrency tests pass. Forty-six
+focused tests pass: twenty-two agent, seven coordinator and seventeen batch
+tests. Cross-platform execution and an updated optimized-binary smoke remain
+required for the new reader handshake.
+
+Production-library correctness/suspicious Clippy and formatting pass. Broader
+test-target Clippy is not green: the crate-wide unwrap/expect/panic restrictions
+also cover test fixtures, including existing fixtures outside this change.
+No lint configuration or expectations were changed; this is not a claim of
+a clean all-target lint run.
+
+**Remaining boundary.** This fixes terminal decisions, not cancellation of
+an idle stdin read, whole-transfer storage cancellation, bounded JSON-line
+length, or asynchronous transfer-output error propagation. The session still
+creates its own coordinator cancellation token. Those original lifecycle
+gates remain open; passing this regression cannot close them.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context
