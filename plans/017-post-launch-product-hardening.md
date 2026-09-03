@@ -5173,6 +5173,42 @@ source/clone SHA-256 checks match both LFS files and the Crab payload. The
 follow-up change suppresses checkout stdout only in machine modes, retaining
 stderr diagnostics and text-mode output. The strict parser is unchanged.
 
+**Release evidence.** `08fb84f` builds successfully, SHA-256
+`18b54e2ffba7ceaec06cc456b044c3ff05193425ef5c910dd07ae1c9dabbb0c5`.
+`phase2-cold-lfs-08fb84f-20260903/artifacts/report.json` passes 30 commands
+and 22 checks: eager, lazy and selected hydration preserve both LFS payloads
+and the Crab payload, all successful clone JSON parses cleanly, and strict
+Git fsck passes. A denied LFS read produces a nonzero clone exit and one
+error envelope without success data. That failure still takes 60,630 ms;
+this is propagation proof, not prompt-error recovery proof.
+
+`phase2-protocol-mirror-cold-lfs-08fb84f-20260903/artifacts/report.json`
+passes 481 commands/139 checks, including native ref lifecycle, partial and
+shallow operations, exact pointer/LFS bytes, installed mixed-ref hooks,
+mirror plan/apply/replay and tagged v1.0.1 rollback.
+
+`phase2-k8s-cold-clone-08fb84f-20260903/artifacts/report.json` passes six
+commands/seven checks. It reuses the retained Kubernetes source and remote
+from the earlier `802dec8` lifecycle qualification as read-only inputs, then
+performs a new eager clone with an empty selected cache and strict single-JSON
+output. Revision and both 64 MiB payload hashes match the retained source;
+offline full Git fsck and authoritative Crab fsck pass. The source revision
+and selected binary remain unchanged. This requalifies current clone/read
+behavior, not a new add/commit/push lifecycle or controlled performance run.
+
+**Repeat-test finding.** The first focused 94-test run passed. Two repeats
+after the machine-stdout change produce 93 passes and a failure in
+`concurrent_cow_clone_publication_never_exposes_partial_content`: one writer
+returns `CoW hydrated file changed during publication`. That test calls
+`try_cow_clone_candidate` directly, without the changed reporting path.
+The function and its `VerifiedIndexStat` dependency are unchanged from current
+`origin/main`, confirmed by direct source comparison. Keep this concurrent
+publication gate open; do not weaken its assertion or represent the broad
+hydrate test surface as green. Web typecheck, lint, tests, build and links
+pass, with existing unrelated lint warnings; links cover 398 pages/4,301
+fragments. Generated user-owned web files were restored to their pre-build
+contents and are not committed.
+
 **Still open.** The filter error recovery path attempts to drain after the
 request's content flush was already consumed. This explains the observed idle
 wait and needs one request-framing owner across clean, smudge and delayed
