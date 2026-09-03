@@ -3,11 +3,15 @@
 | Field | Value |
 | --- | --- |
 | Status | Proposal for standardization; implementation inventory plus decision record |
-| Baseline | Source at `cf52d83`, also local `origin/main` when inspected |
+| Baseline | Initial inspection at `cf52d83`; source audit at `e26d139` |
 | Investigation date | 2026-09-03 UTC |
 | Scope | Direct object-storage repositories, authorized views, and currently implemented feature namespaces |
 | Existing contract | [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 | Intended readers | Storage, metadata, Git transport, coordination, service, workflow, and maintenance owners |
+
+The [evidence audit](object-store-key-layout-evidence.md) maps the factual
+claims below to pinned source locations, dependency versions, and saved
+measurements. It also records corrections and the limits of each proof.
 
 ## Contents
 
@@ -44,10 +48,16 @@ migration cost without addressing those problems.
 This document has three distinct kinds of statements:
 
 - **Current:** behavior traced in the baseline source, with live observations
-  identified separately. This does not establish that every behavior shipped.
+  identified separately. Source inspection establishes what these code paths
+  implement; it does not establish that every behavior shipped or passed E2E.
 - **Proposed:** the contract recommended for acceptance. “Must” in a proposed
   rule describes the target contract, not a claim that enforcement exists.
 - **Open:** a decision or proof gap that must be resolved before finalization.
+
+Recommendations, required retention edges, and acceptance criteria are design
+judgments. They are not measurements or claims that the implementation already
+satisfies them. “Immutable” in the key tables describes the owning format and
+writer contract, not a provider-enforced object lock or a ban on GC deletion.
 
 The existing architecture document remains the published normative reference.
 This proposal records discrepancies rather than silently superseding it.
@@ -107,9 +117,14 @@ not necessarily located at the bucket's `.crab` prefix. Trusted
 `StorageScope` values override both roots. An ACL view can use:
 
 ```text
-R = org/models/acl-views/v1/<scope-hash>/<generation>-<validation-digest>
-G = org/models/acl-views/v1/<scope-hash>/<generation>-<validation-digest>/.crab
+R = org/models/acl-views/v1/<scope-hash>/<generation>-<snapshot-state-digest>
+G = org/models/acl-views/v1/<scope-hash>/<generation>-<snapshot-state-digest>/.crab
 ```
+
+Here `snapshot-state-digest` is `snapshot.journal.state_digest`, passed by
+`materialize_view_with_store_and_credentials` to `view_prefix`. It is not the
+compacted manifest's `git_validation_digest`: the view identity includes
+journal state that may not yet have been compacted.
 
 Writers and readers must use the supplied roots; they must not derive `G`
 from `R`, assume all xorbs are bucket-global, or prepend an already-qualified
@@ -199,6 +214,7 @@ serializers and validators define the exact identities.
 | `h2` | First two hexadecimal characters of the associated full hash; 256 possible partitions |
 | `pack-id` | Crab's content identity for canonical pack bytes; distinct from the Git checksum inside the pack |
 | `validation-digest` | Identity of a validated Git state; not a generation number or pack checksum |
+| `snapshot-state-digest` | Ref-journal snapshot identity; `RefJournalSnapshot.state_digest`, used to name ACL views |
 | `generation20` / `index20` | Unsigned decimal number formatted to width 20 with leading zeroes |
 | `ref-hash` | BLAKE3 of the canonical full ref name's UTF-8 bytes |
 | `transaction-id` | BLAKE3 of the canonical serialized ref transaction; not a random UUID |
@@ -256,18 +272,19 @@ sections enumerate the additional feature paths and lifecycle rules.
     │   ├── git-visibility-pending/v1/<validation-digest>.json
     │   ├── git-visibility-edits/<hash>.json
     │   ├── shallow-closure/<validation-digest>.json
+    │   ├── shallow-closure/entries/<hash>.bin
     │   ├── commit-graph/layers/<hash>.bin
     │   └── replica-discovery.json
     ├── file_index_db/<opaque database children>
     ├── git_object_catalog_db/<opaque database children and checkpoint markers>
     ├── locks/...
     ├── gc/runs/<run-id>/...
-    ├── lfs/{objects,locks}/...
+    ├── lfs/{objects,receipts,locks}/...
     ├── workflow/...
     ├── refs/crab/...
     ├── staging/<push-id>/...
     ├── protected-push-sessions/...
-    └── acl-views/v1/<scope-hash>/<generation>-<validation-digest>/...
+    └── acl-views/v1/<scope-hash>/<generation>-<snapshot-state-digest>/...
 ```
 
 Physical `refs/crab/...` are feature-owned objects. Do not interpret an
@@ -312,14 +329,29 @@ turn these fields into unsupported configuration switches.
 | `metadata/git-visibility-pending/v1/{validation-digest}.json` | Visibility delta awaiting catalog-owner publication | Recovery state; current GC explicitly protects the current pending root |
 | `metadata/git-visibility-edits/{hash}.json` | Immutable visibility evidence for ref edits | Referenced by publication/recovery paths; transitive GC proof is a finalization gate |
 | `metadata/shallow-closure/{validation-digest}.json` | Bound shallow-fetch closure and its referenced objects | Immutable; descriptor and its dependencies form one closure |
+| `metadata/shallow-closure/entries/{hash}.bin` | Binary shallow selection: object IDs and boundary commits for a tip/depth | Immutable; entries are uploaded before their referring descriptor |
 | `manifests/commit-graph-{hash}` | Complete split commit-graph descriptor | Immutable, pinned by a manifest |
 | `metadata/commit-graph/layers/{hash}.bin` | Descriptor-referenced commit records and parent ordinals | Immutable; retain every layer needed by a retained descriptor |
 | `manifests/ref-registry-{hash}` | Optional bulk ref-registry dependency still recognized by manifest/recovery/GC readers | Immutable; no production publisher found at baseline; distinct from scope-wide `G/ref-registry/` records |
 | `metadata/replica-discovery.json` | Replication owner: routing hints for primary and replicas | Mutable overwrite; not a content-addressed metadata leaf or Git commit point |
 
 The general `manifests/{kind}-{hash}` helper does not authorize arbitrary new
-`kind` values. Register concrete production consumers. Current pack and shard
-lists use segmented indexes, not an alternate flat bulk-list reader.
+`kind` values. Register concrete production consumers. The canonical snapshot
+reader obtains pack and shard lists through segmented indexes. There is an
+implemented exception that must not be hidden by that description:
+
+| Noncanonical key relative to `R` | Current caller and behavior | Standardization status |
+| --- | --- | --- |
+| `manifests/shard-list` | CLI `run_compact_command` calls `run_compact_with_cancel`; `run_compact_inner` reads this standalone JSON list, CAS-updates it, then unions registry roots | Inconsistent with the canonical manifest's segmented shard-index path; not an alternate root used by `read_repository_snapshot` |
+
+`read_shard_list` in the compactor returns an empty default when that key is
+absent. Therefore a canonical-only repository can produce the compactor's
+“no shards” path despite having manifest-referenced shards. This is a source
+inference from the caller and callee, not an E2E result for the inspected repo.
+Resolve the ownership/publication mismatch before declaring all CLI paths
+conformant. See [compactor](../../src/cmd/compact.rs) and
+[CLI dispatch](../../src/main.rs).
+
 The optional bulk ref-registry field needs a release/ownership decision before
 being promoted as an actively published format or removed as an unused one.
 
@@ -329,6 +361,7 @@ Sources: [manifest store](../../../crates/crab-metadata/src/manifest_store.rs),
 [segmented storage](../../../crates/crab-metadata/src/segmented_store.rs),
 [visibility](../../../crates/crab-metadata/src/git_visibility.rs),
 [split commit graph](../../../crates/crab-metadata/src/split_commit_graph.rs),
+[shallow closures](../../../crates/crab-metadata/src/shallow_closure.rs),
 [receipts](../../../crates/crab-metadata/src/receipts.rs), and
 [replica discovery](../../src/replication/discovery.rs).
 
@@ -404,7 +437,7 @@ All keys in this table are relative to `G`.
 | `ref-registry/shard-roots/{repo-hash}/{root-partition}.json` | Bounded shard-root partition for one repository | CAS; update consistently with the registry protocol |
 | `ref-registry/coverage.json` | Registry-repair coverage proof | Exclusive repair owner; missing records are not proof of unreferenced content |
 | `gc/closures/{shard-hash}.json` | Bounded, verified summary of a shard's xorb closure | Immutable; bound to its shard and segment metadata |
-| `gc/closure-segments/{shard-hash}/{index20}.json` | Bounded xorb-hash lists for a closure | Immutable; segments currently bound to at most 4,096 hashes |
+| `gc/closure-segments/{shard-hash}/{index20}.json` | Bounded xorb-hash and file-hash lists for a closure | Immutable; publisher takes up to 4,096 entries from each list per segment, not 4,096 combined |
 
 Xorbs and shards have no file extension. The `h2` fan-out makes 256 partitions
 available to listing and maintenance. It does not force 256 requests for every
@@ -427,6 +460,14 @@ Sources: [layout](../../../crates/crab-storage/src/layout.rs),
 | `G/chunk_index_db/` | Metadata/staging owners using SlateDB | Chunk-to-xorb lookup and deduplication acceleration |
 | `R/file_index_db/` | Metadata owner using SlateDB | File-to-shard lookup |
 | `R/git_object_catalog_db/` | Exclusive Git locator writer using SlateDB | OID locations, ordinals, pack rows, and derived pack membership |
+
+These are standard/default placements, not proof that every configured
+database uses them. `MetaDbConfig::default` sets the chunk path literally to
+`.crab/chunk_index_db/`; `for_repo` sets the file path. The product's
+`build_metadb_config_from` accepts file/chunk path overrides, and database
+open uses the configured string. This audit has not established automatic
+propagation of a trusted scoped `G` through every such configuration caller;
+that remains a K1 gate. Inventory tools must resolve the actual configuration.
 
 Database directories may contain `sst/`, `wal/`, `manifest/`, `compactions/`,
 `gc/`, and checkpoint-related objects. Some files can be empty, and some
@@ -481,7 +522,7 @@ Sources: [catalog writer](../../../crates/crab-metadata/src/git_object_locator/w
 | `R/locks/internal/git-read-admission-{slot}/lock` | Bounded Git-read admission slot | Lease protocol; capacity comes from admission policy |
 | `R/locks/internal/push-admission/slots/{slot}` | Bounded push-admission slot | Admission lease; decimal slot, not a Git ref |
 | `D/locks/internal/gc-fence/state` | Coordination between writers and a destructive sweep in domain `D` | Dedicated fence state with epochs/holders; not a `PushLock` JSON body |
-| `{coordination-anchor}/clock` | Backend-time probe for the corresponding coordination object | Small overwritten object; name can be nested below `lock`, a slot, or fence `state` |
+| `{coordination-anchor}/clock` | Backend-time probe for the corresponding coordination object | Empty overwritten object; anchors include a lease `lock`, the push-admission `slots` prefix, or GC-fence `state` |
 | `R/locks/files/{path-hash}` | Native file lock | File-lock owner/payload and released-state protocol |
 | `R/lfs/locks/{path-hash}` | Git LFS protocol lock | LFS file-lock protocol; distinct from push leases |
 
@@ -504,14 +545,20 @@ An `expires_at` value of zero denotes a released tombstone. Backend object
 modification time plus the lease duration participates in expiry decisions;
 reading the wall-clock field alone is insufficient. Acquisition, takeover,
 renewal, and release use the owner identity and observed object version.
+`authoritative_expiry` also has an explicit branch for payloads with
+`lease_secs == 0`: it uses `expires_at` for a non-released record. This is
+current reader behavior; the code comment alone does not prove its claimed
+release history. Push admission uses its own expiry helper and does not apply
+that branch as a universal lease rule.
 
 Native/LFS file locks use their own fields, including released-state handling;
 they must not be decoded as push leases. GC fences also have a separate
 protocol. A generic “delete expired JSON under locks” job would conflate these
 contracts.
 
-Tombstones explain why locks remain after successful operations. Most cost
-comes from object count and requests rather than bytes. Bounded slot keys can
+Tombstones explain why locks remain after successful operations. The inspected
+59 released leases occupied part of a 4,493-byte coordination namespace; no
+billing or request-cost measurement was made. Bounded slot keys can
 be reused; content/request-derived resource names can accumulate. Any
 tombstone compaction needs an owner-approved concurrent acquire/release proof,
 including the associated clock objects.
@@ -559,12 +606,19 @@ not make a feature payload part of the core shared Xet namespace.
 | Key relative to `R` | Purpose | Lifecycle |
 | --- | --- | --- |
 | `lfs/objects/{aa}/{bb}/{sha256}` | Complete Git LFS object body; `aa` and `bb` are the first two pairs of its SHA-256 | Content-addressed, hash-verified; conditional corrupt-object repair is owner-specific |
+| `lfs/receipts/{aa}/{bb}/{sha256}.bin` | Verification receipt binding OID, size, physical object path, ETag/version, and verifier identity | Best-effort mutable overwrite; presence checks may use a matching receipt instead of streaming the body |
 | `lfs/locks/{path-hash}` | LFS lock protocol object | Owner-managed release/expiry |
 
 LFS bodies use SHA-256, not Xet chunk identities. Repository GC's general
 candidate list does not cover `lfs/`; lifecycle policy belongs to the LFS
 owner. Do not assume Xet deduplication, shared-scope placement, or ordinary
 repo-GC retention applies.
+
+Receipt failure or mismatch makes the reader hash the object body. The LFS
+`delete` method deletes the body only, and the lifecycle listing/policy targets
+`lfs/objects/`; receipt cleanup is not established by either path. Record this
+as a separate lifecycle gap rather than assuming receipts are removed with
+their bodies.
 
 Sources: [LFS objects](../../../crates/crab-lfs/src/object_store.rs) and
 [LFS lifecycle](../../src/lfs/lifecycle.rs).
@@ -629,25 +683,28 @@ Source: [artifact implementation and root visitor](../../../crates/crab-workflow
 | `staging/{push-id}/objects/{canonical-key}` | Staged upload envelope containing the fully qualified eventual object key |
 | `protected-push-sessions/{push-id}.json` | Protected-push session state |
 | `protected-push-sessions/{push-id}.verified.json` | Verified source materialization for the session |
-| `acl-views/v1/{scope-hash}/{generation}-{validation-digest}/...` | Materialized authorized repository placement, with its own `R`, `G`, and applicable core namespaces |
+| `acl-views/v1/{scope-hash}/{generation}-{snapshot-state-digest}/...` | Materialized authorized repository placement, with its own `R`, `G`, and applicable core namespaces |
 
 The staged `canonical-key` is deliberately fully qualified. A repeated
 repository prefix inside that envelope is not the accidental double-join
 forbidden at ordinary layout boundaries. Receive validation restricts which
 canonical destinations the envelope may publish.
 
-Successful receive cleans up the current staging area. Session cleanup has
-an owner-specific TTL, normally 24 hours, with separate active-session
-handling and a disable setting. These are service rules, not the repo GC
-grace period. Finalizing a uniform cleanup policy requires proving all live
-session roots, not just listing objects older than the TTL.
+After a successful receive, the helper attempts staging and prepare-record
+cleanup; failures are warnings. Expired cleanup defaults to 24 hours and is
+disabled when its TTL setting is zero. It excludes this context's push prefix
+and two session keys, then checks other objects' modification times. That is
+not proof that it discovers every other active session. These are service
+rules, not the repo GC grace period. Finalizing a uniform cleanup policy
+requires proving all live session roots, not just age or the current context.
 
 Authorized views are complete scoped placements, not harmless cached JSON.
 View expiry and retirement need a defined owner and reader-lease/checkpoint
 contract. This proposal does not invent an existing automatic view collector.
 
 Sources: [receive/session lifecycle](../../../crates/crab-auth-server/src/receive/session.rs),
-[receive validation](../../../crates/crab-auth-server/src/receive.rs), and
+[receive validation](../../../crates/crab-auth-server/src/receive.rs),
+[helper cleanup calls](../../../crates/crab-auth-server/src/bin/crab_auth_receive.rs), and
 [view builder](../../../crates/crab-auth-server/src/view.rs).
 
 ### 9.5 Explicitly outside this registry
@@ -664,7 +721,8 @@ are accepted.
 ### 10.1 Current publication protocol
 
 A correct snapshot is more than a recursive listing or an isolated GET of
-`R/manifest`.
+`R/manifest`. The sequence below describes journal-backed publication and its
+compaction into the ordinary object-store manifest.
 
 1. Data and immutable metadata needed by the publication are uploaded and
    validated first. Staged xorbs must be flushed before the dependent push
@@ -686,6 +744,15 @@ A correct snapshot is more than a recursive listing or an isolated GET of
 Direct manifest publication paths still have their manifest CAS boundary.
 The design must describe both paths. “The manifest is the only publication
 point” is not an accurate description of journal-backed publication.
+
+Active-active receive has an additional authority boundary. Its
+`commit_active_active_manifest` commits refs through the configured
+coordinator, then calls `materialize_active_active_manifest_projection` to
+write the regional `R/manifest`. That projection is not the coordinator's
+write authority. This document inventories the object-store keys; it does not
+specify the coordinator's separate persistence layout. See
+[receive finalization](../../../crates/crab-auth-server/src/receive/finalize.rs)
+and [manifest projection](../../../crates/crab-metadata/src/manifest_store.rs).
 
 Sources: [snapshot and compaction](../../../crates/crab-metadata/src/manifest_store.rs)
 and [transaction commit/cleanup](../../../crates/crab-metadata/src/ref_journal.rs).
@@ -743,6 +810,8 @@ claims that data loss occurred in the inspected repository.
 | Historical catalog usability | Old catalog markers/checkpoints can retire while historical catalog-proof JSON remains | State which self-contained proof or retained checkpoint guarantees each promised historical read |
 | Views and sessions | Service-owned cleanup exists for sessions; a complete view-retirement contract was not established | Document owner, active-reader protection, TTL/retention semantics, and retry behavior |
 | Physical key validation | Normative byte-preservation conflicts with generic SDK conversion | Add exact writer/list/reader conformance at the final boundary |
+| CLI shard compaction | Reachable CLI path reads/CAS-updates `manifests/shard-list`; canonical snapshot reads use segmented indexes | Reconcile the compactor with canonical publication and scoped roots; test a repository that only has canonical metadata |
+| LFS receipt retirement | `LfsObjectStore::delete` removes the body; the inspected lifecycle paths enumerate only `lfs/objects/` | Define receipt cleanup at the LFS owner and prove concurrent verification/repair behavior |
 
 The two repo-GC paths must share the same reachability invariant. A fix only
 in preview can report safety that execution does not provide; a fix only in
@@ -760,6 +829,12 @@ Git packs. The snapshot was taken at `2026-09-03T05:20:24Z` for bucket `crab`,
 prefix `k8s/`. These are logical object sizes, excluding storage-system
 replication/erasure-coding overhead and provider version history.
 
+The [saved evidence](evidence/k8s-object-store-2026-09-03.json) contains the
+235 key/size/time records, 16 attributed shared records, selected metadata
+fields, saved pack headers, and the original full-stream hash results.
+The [audit method](object-store-key-layout-evidence.md#saved-rustfs-evidence)
+explains which claims can be recomputed offline and which require live data.
+
 | Prefix under `k8s/` | Objects | Bytes | Interpretation |
 | --- | ---: | ---: | --- |
 | `packs/` | 15 | 1,321,391,505 | Three canonical packs with five members each |
@@ -773,10 +848,11 @@ replication/erasure-coding overhead and provider version history.
 | `manifest` and `layout` | 2 | 871 | Current compacted root and layout contract |
 | **Total** | **235** | **3,038,625,890** | Repository-prefix objects only |
 
-The current manifest was generation 3. Catalog/pack evidence accounted for
-1,646,517 Git objects: an initial 1,646,507-object import and two additions of
-four and six objects. The prefix also depended on 16 shared objects totaling
-579,388,387 bytes: two shards, four GC closure records/segments, and ten unique
+At the original snapshot, the manifest was generation 3. Its catalog recorded
+1,646,517 Git objects; the three distinct pack entries contained 1,646,507,
+four, and six objects. Those records establish the count breakdown, not which
+user commands created each pack. The prefix also depended on 16 shared objects
+totaling 579,388,387 bytes: two shards, four GC closure records/segments, and ten unique
 xorbs. This is a dependency attribution, not exclusive ownership of the shared
 bytes; shared database and registry overhead is not included.
 
@@ -786,13 +862,22 @@ in addition to pack metadata checks. One extra copy represented about 41.7%
 of the repository-prefix bytes. This supports canonical-pack reference reuse
 more directly than adding hash directories or renaming metadata prefixes.
 
-All observed generated-pack descriptors were older than the default 24-hour
-grace period. That supports a maintenance preview, not an unconditional
-deletion claim: actual collection must evaluate a fresh snapshot, references,
-fences, and the configured policy. Other large metadata included a historical
-self-contained visibility proof of roughly 71 MB. Its small catalog-based
+At the original snapshot, all observed generated-pack descriptors were older
+than the default 24-hour grace period. That supported a maintenance preview,
+not an unconditional deletion claim: collection must evaluate a fresh
+snapshot, references, fences, and configured policy. Other large metadata
+included a historical self-contained visibility proof of roughly 71 MB. Its small catalog-based
 counterpart was not proof that the large file could safely be removed after
 old checkpoint retirement.
+
+**Follow-up observation:** the read-only LIST at
+`2026-09-03T06:17:44.377640+00:00` returned **164 objects and 1,559,141,400 bytes**,
+including **zero generated-pack objects**. Relative to the original inventory,
+74 keys were absent (68 generated-pack and six metadata keys) and three keys
+had appeared under `gc/`. The listing does not establish who changed them or
+whether recovery/integrity checks pass. The duplicate-pack result above is
+historical evidence for the optimization proposal, not a current reclaimable
+byte estimate.
 
 Verification compared beginning/end listings and key metadata, followed
 manifest/index/segment dependencies, inspected all 37 pack headers, and
