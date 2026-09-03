@@ -88,6 +88,9 @@ def run(smoke, proxy):
     smoke.check("denied-content-is-a-terminal-clone-failure",
                 bool(proxy.denied_reads) and refused["exit_code"] not in (0, -124),
                 {"denied_reads": proxy.denied_reads, "duration_ms": refused["duration_ms"]})
+    smoke.check("denied-content-does-not-wait-for-filter-idle-timeout",
+                refused["duration_ms"] < 10_000,
+                {"duration_ms": refused["duration_ms"], "budget_ms": 10_000})
     failure = json.loads(smoke.stdout(refused))
     smoke.check("failed-clone-emits-error-without-success-data",
                 failure.get("schema") == "clone" and isinstance(failure.get("error"), dict)

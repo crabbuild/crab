@@ -5209,7 +5209,7 @@ pass, with existing unrelated lint warnings; links cover 398 pages/4,301
 fragments. Generated user-owned web files were restored to their pre-build
 contents and are not committed.
 
-**Still open.** The filter error recovery path attempts to drain after the
+**Follow-up identified by this run.** The filter error recovery path attempts to drain after the
 request's content flush was already consumed. This explains the observed idle
 wait and needs one request-framing owner across clean, smudge and delayed
 commands, with real interactive-pipe regression proof. Do not lower the idle
@@ -5220,6 +5220,72 @@ Cold plain-Git checkout setup, committed/configured remote precedence during
 checkout, cancellation, corrupt-content cases, all provider/OS rows and
 controlled performance remain broader gates; this change is not Phase 2
 completion.
+
+### Filter request-boundary recovery, 2026-09-03 UTC
+
+**Context and reproduced failure.** A failed non-lazy LFS smudge has already
+consumed its content flush. The loop then starts an independent raw drain,
+which blocks waiting for the next request or consumes its headers. The new
+`failed_smudge_preserves_the_next_request` regression fails against the
+unchanged implementation: only the first error response survives. This
+implementation is also present on the fetched `origin/main`. The retained
+`08fb84f` RustFS report above records the corresponding 60,630 ms failure.
+
+**Phase A — one framing owner.** The loop constructs one `PktLineReader`
+per request and lends it to clean/smudge dispatch and recovery. Flush ends
+that reader permanently. A partial packet read, malformed framing or panic
+during reading poisons it: the session terminates with the original error
+instead of guessing a boundary. Recoverable operation errors and panics drain
+only the remaining content, emit one error status and flush output. Bodyless
+`list_available_blobs` requests do not enter content recovery. The old raw
+drain parser and duplicated error-response path are removed. Existing idle
+timeout, streaming memory bounds, storage layouts and public signatures stay
+unchanged; only reading beyond a terminal content boundary is prohibited.
+
+**Evidence map / fix selection.** Both filter CLI entry points reach
+`run_filter_loop_with_lfs_source`; the loop owns request boundaries, while
+`dispatch_command`, `CleanSession::clean_stream` and the smudge input helper
+consume content. `clean_file`, prepared clean, LFS clean and the memory-probe
+integration test all construct or receive one reader per content stream;
+none intentionally read the next command through that reader. The outer
+async runner still closes staging after a returned loop error. Git requires
+the content flush before replying and allows reuse after an error
+([upstream protocol](https://git-scm.com/docs/gitattributes#_long_running_filter_process)).
+Is this the best fix rather than merely plausible? Keeping the framing owner
+across dispatch and recovery directly enforces that contract; lowering the
+timeout or suppressing one LFS diagnostic does not prevent request loss.
+
+**Phase B — executable acceptance.**
+
+- [x] Focused filter/clean suites pass, including consecutive requests after
+      operation failure and panic, malformed/truncated packet refusal, and
+      terminal-reader behavior.
+- [x] An open Unix socket receives no response before content flush, receives
+      the error within five seconds afterward, and then serves a bodyless
+      delayed-blob query and another file on the same connection. Cover early
+      clean failure with unread packets and late smudge failure.
+- [ ] Exact-source release RustFS qualification passes eager/lazy/selected
+      clone bytes, strict JSON and Git integrity. Scoped denied LFS reads fail
+      within ten seconds, independently of the unchanged 60-second idle guard.
+- [ ] Native protocol, partial/shallow operations, mirror reconciliation and
+      tagged rollback remain passing against that release binary.
+
+Run the existing cold-LFS and protocol-v2 RustFS drivers with unique run IDs,
+the candidate release binary, matching source checkout, local endpoint and
+existing `crabbuild` bucket. The cold-LFS driver now includes the ten-second
+fault-response bound. This is a local failure-liveness check, not a controlled
+performance comparison. Preserve the earlier slow/failed reports.
+
+Local proof: 45 filter tests and 54 clean tests pass, including the open-socket
+exchange and injected partial-read panic. `cargo fmt --all` and diff whitespace
+checks pass. Production code shrinks by 19 lines; added tests exercise protocol
+behavior, not an alternate implementation. Release evidence remains pending.
+
+**Scope limits.** This change owns input framing, not output-response phase
+tracking: a file/output error after success/content has started still needs
+separate fault proof and correct terminal-response handling. Unknown command
+framing, the observed CoW concurrent-publication race, provider/OS matrices,
+controlled performance and the other Phase 2 acceptance gates remain open.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
