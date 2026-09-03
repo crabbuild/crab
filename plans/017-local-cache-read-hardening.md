@@ -1589,7 +1589,56 @@ binary: `rust-lld` terminated with signal 7 (bus error), before workspace test
 execution completed. See run `33801077920`, job `100800970479`. This does not
 prove an application test failure or a passing workspace suite; cause and broad
 proof remain open. Multi-crate guardrails also remain red and unwaived.
-Installed qualification for this slice is pending. Atomic manifest pairing,
+
+**Installed proof.** Make installed the stable CLI/read/cache source at
+`f77a446225ad49293aed3a10e008df544fa4fad8`; CLI SHA-256 is
+`63e86d38ea2070aeb034823b6a7d6f71508ca34290437fa7f8ed955ed0748db2`.
+The existing RustFS image and requested local credential pair were rechecked;
+all runs use bucket `crabbuild`, with no shared service reset or remote cleanup.
+As before, the cache-server binary built alongside unrelated dirty evidence
+changes is not claimed as the committed artifact being qualified.
+
+- `generation-f77a446.DplIMs/report.json`: 63 checks / 53 commands / 1,570
+  gateway requests. Real add/commit/push/lazy-clone, SHA-256 identity, corrupt
+  range recovery, unsafe/unbound-cache bypass, clean/prune, fsck, and clean Git
+  state pass. Initial duplicate/delta data stores 135,479,727 xorb bytes; the
+  next exact duplicate stores no new xorbs; a one-MiB edit stores 1,404,471
+  bytes. Cold hydrate/fetch use 20/22 xorb GETs. Warm hydrate and fetch-to-hydrate
+  use zero with xorb GETs denied. Cold denial exits 7 with pointers intact;
+  restored origin succeeds. Earlier fixtures/concurrency differ: these counts
+  are not a controlled performance comparison or proof of no amplification.
+- `prune-accounting-f77a446.1oAOXq/report.json`: eight checks / seven commands.
+  Five ranges / 136,574,853 bytes removed. Remaining four catalog entries /
+  421,777 bytes exactly match payload families; linked inventory is 462,761
+  logical / 479,232 allocated bytes. Hydrated worktree bytes remain unchanged.
+- `generation-f77a446.DplIMs/catalog-diagnostics-9x7a_8ny/report.json`: 33
+  checks / 12 commands. Both stats aliases and doctor report injected catalog
+  errors without changing healthy-family counts or filesystem identity/bytes.
+  Restored SQL restores baseline counts and retains the independent warning.
+- `object-read-repair-f77a446.tWNvIb/report.json`: 35 checks / 24 commands /
+  406 gateway requests. A fresh private cache is manually seeded from the five
+  exact qualified origin xorbs; clone, hydrate, dehydrate, validation, and repair
+  then use the installed CLI. Warm full-xorb hydration makes zero xorb GETs with
+  bodies denied and retains all healthy seed bytes. Payload-bit corruption and
+  truncation recover byte-identically through 18/13 origin xorb GETs. Five
+  payload-corrupt seeds and one truncated seed are removed; remaining seeded
+  files are unchanged. Every successful hydration leaves a clean checkout.
+
+The new retained harness is `qualify_object_reads.py`, SHA-256
+`2ff8feed0b296b243084588d510839d354fc47e6f07340070e56cdf2b1b717af`.
+The initial source (`qualify_object_reads_initial.py`, SHA-256
+`abc8c1b0a5e5c9604400422b0c4ab17e32006fed37aaa77c44fd30e175965291`)
+and passing initial run `object-read-repair-f77a446.8uM0N1` are retained. The
+repeat changes only an over-specific check label/comment: remaining files do
+not prove they were unrequested rather than busy. Assertions are unchanged.
+Neither run proves every corrupt seed is synchronously removed or identifies
+why each remaining file was retained. Conditional repair remains best-effort;
+healthy-output/fallback proof must not be presented as complete reclamation.
+Installed recovery does not inject the delayed-refill interleaving; that is
+covered separately by deterministic publication tests. These external harnesses
+remain prototypes rather than maintained repository qualification tooling.
+
+Atomic manifest pairing,
 LRU touch identity, catalog-generation changes during reads, external in-place
 mutation, cancellation/resource/platform qualification, and outstanding approval
 boundaries remain open; this checkpoint does not complete Phase 2.
