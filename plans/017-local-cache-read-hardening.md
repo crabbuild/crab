@@ -61,6 +61,14 @@ Status: PARTIAL. Draft PR #147 is an implementation checkpoint, not phase
 acceptance or permission to merge unfinished work. Retained local results are
 below; provider, native mount, resource, and full lifecycle gates remain open.
 
+**Newly reproduced Phase 3 failure, 2026-09-03:** explicit prune leaves deleted
+payloads charged in the catalog. A fresh, fully private installed RustFS run at
+`863911c` removed 268,374,371 bytes, but stats still reported 268,796,148 catalog
+bytes against 462,761 observed linked logical bytes. Both inventories were
+complete and error-free. The earlier 63-check workflow did not assert catalog
+reconciliation and does not close this gate. See the Phase 3 deletion-lifecycle
+execution slice below.
+
 ### Installed RustFS command checkpoint, 2026-09-03
 
 Run `cache-f410.E7nt8I` used the existing RustFS service on port 9000 and unique
@@ -1517,6 +1525,58 @@ establish a bounded disk budget.
 - Scale proxy with at least one million catalog entries and bounded peak RAM,
   file descriptors, and scan concurrency.
 - Filesystem-size reconciliation before and after every destructive test.
+
+### Deletion-lifecycle execution slice
+
+**Context and observed failure.** Retained installed probe
+`prune-accounting-863911c.B0fpdY/report.json` cloned the previously qualified
+RustFS remote into a new reader/cache, hydrated all four large files, lowered
+the budget to one MiB, pruned, and inspected the quiescent cache. Independent
+file hashes still match. Prune reports eight range files removed, freeing
+268,374,371 bytes; linked allocation is then 479,232 bytes. Catalog entries and
+bytes remain unchanged at 12 / 268,796,148. This run has no unsafe sentinel,
+no inventory errors, and complete scans before and after. Its reconciliation
+assertion fails and remains recorded as a failure, not a passed qualification.
+Harness SHA-256:
+`72d96279b1be503f868008dfb7534230e214a87ec05ef8325e2950004200bfe1`.
+
+**Evidence map.** `crab/src/cmd/prune.rs::run_prune_with_cancel` invokes separate
+object and range pruning. `local_cache/maintenance.rs` and `xet_chunk_cache.rs`
+delete through `PinnedRoot::remove_file_if` without deleting catalog rows.
+Explicit clean's `private_fs/platform/cleanup.rs` similarly removes payloads
+directly. Targeted `LocalCache::evict` and read-side corrupt-entry removal share
+that gap. In contrast, `catalog.rs::evict_candidate` holds an immediate writer
+transaction across its final owner check, filesystem removal, and row deletion.
+Its full reconciliation path can repair stale rows later, but is not invoked by
+explicit prune and aborts on an unsafe unrelated entry. These are distinct
+paths; removing the sentinel is neither the fix nor required to reproduce it.
+
+**Implementation sequence.** Move successful payload deletion and accounting
+retirement behind one cache-owned boundary, used by explicit prune, verify,
+clean, targeted eviction, and read-side corruption removal. Retain the pinned
+root and database generation. Serialize the final reservation/lease check and
+row retirement with publication; a post-unlink pathname reopen cannot safely
+remove a row belonging to a replacement. Preserve dry-run non-mutation and
+descriptor leases. Keep SQLite ownership above the filesystem mechanics rather
+than making the low-level directory walker own catalog policy. Do not add a
+full-root reconciliation after each deleted range: that increases work and can
+fail on unrelated retained state. Preserve the tagged `v1.1.0` cleanup contract
+that payload cleanup does not require a usable disposable index; any optional
+accounting path needs explicit error reporting and must not hide stale totals.
+This design still needs implementation and lifecycle review, not only wiring.
+
+**Acceptance.** Repeat the retained installed probe against the new binary with
+the same reconciliation assertion. Add sibling regressions for object/range
+prune, corrupt-entry verify/read eviction, explicit clean, and targeted eviction.
+Assert no missing payload remains charged after successful healthy-catalog
+deletion; dry-run changes neither bytes nor rows. Race a replacement writer,
+active readers, cancellation, and root/database replacement against deletion;
+the new entry's row and all protected payloads must survive. Missing/corrupt/
+busy catalog fixtures must retain safe cleanup/origin availability and provide
+honest accounting diagnostics. Repeat the larger RustFS byte/dedup/denied-warm
+workflow after the canonical deletion change. Physical database/temp allocation,
+global low-watermark policy, and all-family lifecycle acceptance remain separate
+requirements, not waived by passing this slice.
 
 **STOP if** cataloging requires a repository-sized in-memory map, an active
 lease can be evicted, or any budgeted subtree is not provably disposable.
