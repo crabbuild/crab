@@ -3,7 +3,7 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use base64::Engine as _;
 use crab::cache::{CacheKey, LocalCache, XetChunkCacheHandle};
@@ -43,6 +43,73 @@ fn command(directory: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
         String::from_utf8_lossy(&output.stderr)
     );
     output.stdout
+}
+
+#[test]
+fn filter_process_creates_a_private_cache_under_public_umask() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("missing-cache");
+    let mut protocol = Vec::new();
+    for lines in [
+        &["git-filter-client\n", "version=2\n"][..],
+        &["capability=clean\n", "capability=smudge\n"][..],
+    ] {
+        for line in lines {
+            protocol.extend_from_slice(format!("{:04x}{line}", line.len() + 4).as_bytes());
+        }
+        protocol.extend_from_slice(b"0000");
+    }
+    // The real filter saves session state even after a smudge-only/empty Git
+    // session. Start with a missing root: precreating it hides the producer bug.
+    for _ in 0..2 {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "umask 022; exec \"$@\"", "sh"])
+            .arg(env!("CARGO_BIN_EXE_crab"))
+            .arg("filter-process")
+            .current_dir(temp.path())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CRAB_CACHE_DIR", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&protocol).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("git-filter-server"));
+        for (path, mode) in [
+            (root.clone(), 0o700),
+            (root.join("hints"), 0o700),
+            (root.join("hints/clean-bloom.bin"), 0o600),
+        ] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        assert!(
+            LocalCache::new(root.clone())
+                .read_clean_bloom()
+                .unwrap()
+                .is_some()
+        );
+    }
+    command(
+        temp.path(),
+        &root,
+        &["optimize", "cache", "prune", "--json"],
+    );
+    command(temp.path(), &root, &["cache", "clean"]);
+    assert!(!root.join("hints/clean-bloom.bin").exists());
 }
 
 #[tokio::test]

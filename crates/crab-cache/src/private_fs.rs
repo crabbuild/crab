@@ -182,6 +182,28 @@ pub(crate) async fn open_read(root: &Path, path: &Path) -> Result<tokio::fs::Fil
     result.map(tokio::fs::File::from_std)
 }
 
+#[cfg(feature = "local-cache")]
+pub(crate) fn read_bounded_sync(root: &Path, path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let file = platform::open_read(root, path)?;
+    if file.metadata()?.len() > max_bytes {
+        return Err(CacheError::CorruptObject {
+            path: path.display().to_string(),
+            reason: format!("cache entry exceeds {max_bytes} bytes"),
+        });
+    }
+    let mut data = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > max_bytes {
+        return Err(CacheError::CorruptObject {
+            path: path.display().to_string(),
+            reason: format!("cache entry grew beyond {max_bytes} bytes"),
+        });
+    }
+    Ok(data)
+}
+
 /// Replace a cache entry atomically without resolving its parent again.
 #[cfg(test)]
 pub(crate) async fn atomic_write(root: &Path, path: &Path, data: &[u8]) -> Result<()> {
@@ -228,6 +250,15 @@ impl PendingFile {
         // cancellation. Rename can publish complete immutable bytes safely
         // even when the caller stops waiting after publication begins.
         self.commit().await
+    }
+
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn write_sync(self, data: &[u8]) -> Result<()> {
+        use std::io::Write as _;
+        let mut writer = self.0.file();
+        writer.write_all(data)?;
+        writer.sync_all()?;
+        self.0.commit()
     }
 
     pub(crate) async fn commit(self) -> Result<()> {

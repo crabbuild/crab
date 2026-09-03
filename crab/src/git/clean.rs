@@ -100,31 +100,16 @@ impl FileHashBloom {
         [h1 % self.num_bits, h2 % self.num_bits, h3 % self.num_bits]
     }
 
-    /// Persist the bloom filter to disk so subsequent filter-process
-    /// sessions can reuse it without rebuilding from the file-index.
-    fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
-        let parent = path.parent().unwrap_or(std::path::Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let tmp = path.with_extension("tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        // Header: 8 bytes for num_bits.
-        f.write_all(&self.num_bits.to_le_bytes())?;
-        // Body: raw u64 words.
+    fn encode(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8 + self.bits.len() * 8);
+        data.extend_from_slice(&self.num_bits.to_le_bytes());
         for word in &self.bits {
-            f.write_all(&word.to_le_bytes())?;
+            data.extend_from_slice(&word.to_le_bytes());
         }
-        f.flush()?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        data
     }
 
-    /// Load a previously persisted bloom filter from disk.
-    ///
-    /// Returns `None` on any I/O or format error — the caller falls
-    /// back to an empty bloom.
-    fn load(path: &std::path::Path) -> Option<Self> {
-        let data = std::fs::read(path).ok()?;
+    fn decode(data: &[u8]) -> Option<Self> {
         if data.len() < 8 {
             return None;
         }
@@ -1474,25 +1459,36 @@ impl CleanSession {
         }
     }
 
-    /// Load a previously persisted bloom filter from the cache directory.
-    ///
-    /// Falls back to an empty bloom if the file doesn't exist or is corrupt.
+    /// Load advisory bloom state through the private cache owner.
     pub fn load_bloom_from_cache(&mut self) {
-        let path = crate::cache::default_cache_root().join("bloom.bin");
-        if let Some(bloom) = FileHashBloom::load(&path) {
-            tracing::debug!(
-                num_bits = bloom.num_bits,
-                "loaded persisted bloom filter from cache"
-            );
-            self.bloom = bloom;
+        let cache = crate::cache::LocalCache::with_limits(
+            crate::cache::default_cache_root(),
+            self.ctx.config().cache.max_bytes,
+            None,
+        );
+        match cache.read_clean_bloom() {
+            Ok(Some(data)) => {
+                if let Some(bloom) = FileHashBloom::decode(&data) {
+                    self.bloom = bloom;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, "clean bloom unavailable; using session bloom");
+            }
         }
     }
 
-    /// Persist the current bloom filter to the cache directory.
+    /// Persist advisory bloom state within the configured private-cache budget.
     pub fn save_bloom_to_cache(&self) {
-        let path = crate::cache::default_cache_root().join("bloom.bin");
-        if let Err(e) = self.bloom.save(&path) {
-            tracing::debug!(error = %e, "failed to persist bloom filter (non-fatal)");
+        let cache = crate::cache::LocalCache::with_limits(
+            crate::cache::default_cache_root(),
+            self.ctx.config().cache.max_bytes,
+            None,
+        );
+        let data = self.bloom.encode();
+        if let Err(error) = cache.put_clean_bloom(&data) {
+            tracing::debug!(%error, "failed to persist bloom filter (non-fatal)");
         }
     }
 
@@ -2747,13 +2743,24 @@ mod tests {
     }
 
     #[test]
-    fn bloom_load_rejects_zero_bit_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bloom.bin");
-        std::fs::write(&path, 0u64.to_le_bytes()).unwrap();
+    fn bloom_roundtrip_retains_known_hashes() {
+        let mut bloom = FileHashBloom::new(100);
+        bloom.insert(&[0xAB; 32]);
+        let decoded = FileHashBloom::decode(&bloom.encode()).unwrap();
+        assert!(decoded.maybe_contains(&[0xAB; 32]));
+    }
 
+    #[test]
+    fn bloom_decode_rejects_malformed_geometry() {
+        for data in [vec![], vec![1], u64::MAX.to_le_bytes().to_vec(), vec![1; 9]] {
+            assert!(FileHashBloom::decode(&data).is_none());
+        }
+    }
+
+    #[test]
+    fn bloom_decode_rejects_zero_bit_cache() {
         assert!(
-            FileHashBloom::load(&path).is_none(),
+            FileHashBloom::decode(&0u64.to_le_bytes()).is_none(),
             "corrupt bloom cache must degrade to an empty bloom, not panic on modulo by zero"
         );
     }

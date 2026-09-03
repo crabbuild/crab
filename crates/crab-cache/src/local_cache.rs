@@ -225,6 +225,32 @@ impl LocalCache {
         self.catalog.max_bytes()
     }
 
+    /// Read advisory clean-filter bloom bytes without creating a missing cache.
+    ///
+    /// The caller validates the bloom encoding and treats cache errors as misses.
+    pub fn read_clean_bloom(&self) -> Result<Option<Vec<u8>>> {
+        let path = self.root.join("hints/clean-bloom.bin");
+        match crate::private_fs::read_bounded_sync(&self.root, &path, 1024 * 1024) {
+            Ok(data) => Ok(Some(data)),
+            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Publish advisory clean-filter bloom bytes through private, budgeted storage.
+    ///
+    /// Concurrent sessions may replace this hint; a hit still needs remote proof.
+    pub fn put_clean_bloom(&self, data: &[u8]) -> Result<()> {
+        let path = self.root.join("hints/clean-bloom.bin");
+        if data.len() > 1024 * 1024 {
+            return Err(CacheError::CorruptObject {
+                path: path.display().to_string(),
+                reason: "clean bloom exceeds the 1 MiB safety limit".to_owned(),
+            });
+        }
+        self.catalog.write_sync(&path, "bloom", data)
+    }
+
     /// Get a cached object, or fetch and cache it.
     ///
     /// Hash-verifies on read; evicts and refetches on mismatch.
@@ -2243,6 +2269,88 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = LocalCache::new(dir.path().join("cache"));
         (dir, cache)
+    }
+
+    #[tokio::test]
+    async fn clean_bloom_is_private_budgeted_and_disposable() {
+        let (_dir, cache) = temp_cache();
+        assert!(cache.read_clean_bloom().unwrap().is_none());
+        assert!(!cache.root.exists());
+        cache.put_clean_bloom(b"hint").unwrap();
+        let reopened = LocalCache::new(cache.root.clone());
+        assert_eq!(reopened.read_clean_bloom().unwrap().unwrap(), b"hint");
+        assert_eq!(
+            crate::CacheCatalog::read_only_stats(&cache.root)
+                .unwrap()
+                .total_bytes,
+            4
+        );
+        let report = crate::clean_cache(
+            &cache.root,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.bytes_reclaimed, 4);
+        assert!(reopened.read_clean_bloom().unwrap().is_none());
+    }
+
+    #[test]
+    fn clean_bloom_over_budget_does_not_create_a_root() {
+        let (dir, _cache) = temp_cache();
+        let cache = LocalCache::with_limits(dir.path().join("tiny"), 1, None);
+        cache.put_clean_bloom(b"hint").unwrap();
+        assert!(!cache.root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_bloom_never_follows_unsafe_roots_or_leaf_links() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let (dir, cache) = temp_cache();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"retained").unwrap();
+        symlink(dir.path(), &cache.root).unwrap();
+        assert!(cache.put_clean_bloom(b"hint").is_err());
+        assert!(cache.read_clean_bloom().is_err());
+        std::fs::remove_file(&cache.root).unwrap();
+
+        std::fs::create_dir(&cache.root).unwrap();
+        std::fs::set_permissions(&cache.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(cache.put_clean_bloom(b"hint").is_err());
+        assert!(cache.read_clean_bloom().is_err());
+        assert_eq!(
+            std::fs::metadata(&cache.root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::remove_dir(&cache.root).unwrap();
+
+        cache.put_clean_bloom(b"hint").unwrap();
+        let path = cache.root.join("hints/clean-bloom.bin");
+        std::fs::remove_file(&path).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(cache.read_clean_bloom().is_err());
+        // Descriptor-relative rename replaces the link itself, never its
+        // target. Reads reject the link; a fresh private publication is safe.
+        cache.put_clean_bloom(b"replacement").unwrap();
+        assert_eq!(cache.read_clean_bloom().unwrap().unwrap(), b"replacement");
+        assert_eq!(std::fs::read(&target).unwrap(), b"retained");
+    }
+
+    #[test]
+    fn clean_bloom_rejects_oversized_reads_and_writes() {
+        let (_dir, cache) = temp_cache();
+        let oversized = vec![0; 1024 * 1024 + 1];
+        assert!(cache.put_clean_bloom(&oversized).is_err());
+        assert!(!cache.root.exists());
+        cache.put_clean_bloom(b"hint").unwrap();
+        let path = cache.root.join("hints/clean-bloom.bin");
+        std::fs::write(path, &oversized).unwrap();
+        assert!(matches!(
+            cache.read_clean_bloom(),
+            Err(CacheError::CorruptObject { .. })
+        ));
     }
 
     fn test_xorb(data: &[u8]) -> (MerkleHash, Bytes) {

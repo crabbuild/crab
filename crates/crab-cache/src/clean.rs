@@ -63,7 +63,8 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
 
 pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     match parts {
-        ["chunks" | "xorbs" | "shards" | "stages" | "manifests"] => EntryKind::Directory,
+        ["chunks" | "xorbs" | "shards" | "stages" | "manifests" | "hints"] => EntryKind::Directory,
+        ["hints", "clean-bloom.bin"] => EntryKind::Payload,
         ["manifests", name]
             if [".json", ".etag"].iter().any(|suffix| {
                 name.strip_suffix(suffix)

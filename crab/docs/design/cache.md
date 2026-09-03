@@ -54,7 +54,7 @@ which means a process may use two roots.
 ├── buckets/<scope>/chunk-index.sqlite   persistent dedup lookup
 ├── xorb-index/index.db                   remote proofs and local placement rows
 ├── shard-hints.json                      advisory file-to-shard hints
-└── bloom.bin                             clean-filter bloom state
+└── hints/clean-bloom.bin                  private clean-filter bloom state
 ```
 
 | Family | Producer/consumer | Validation | Current capacity policy |
@@ -132,7 +132,13 @@ storage identity.
 
 The clean-filter bloom is also advisory. A definite miss can skip work; a
 possible hit still requires an authoritative lookup. Corrupt persisted bloom
-state degrades to an empty bloom.
+state degrades to an empty bloom. Its synchronous reader and writer now use
+the shared private cache boundary, with a one-MiB format safety bound and the
+configured product cache budget. Publication retains its reservation and
+payload lease until catalog registration. Scoped clean recognizes this fixed
+hint path; the former root-level `bloom.bin` is not read or migrated. Concurrent
+sessions may replace the hint, but cannot turn it into authoritative remote
+existence proof. Existing unsafe cache roots are rejected, not chmodded.
 
 ## Hydration owners and current wiring
 

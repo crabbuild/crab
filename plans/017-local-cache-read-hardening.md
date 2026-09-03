@@ -57,9 +57,89 @@ Execution and acceptance:
    from skipped or blocked gates; RustFS alone is not AWS/GCS/Azure or native
    mount qualification.
 
-Status: OPEN. Existing local RustFS detected; no qualifying workload result is
-claimed by this checkpoint. The draft PR is an implementation checkpoint, not
-phase acceptance or permission to merge unfinished work.
+Status: PARTIAL. Draft PR #147 is an implementation checkpoint, not phase
+acceptance or permission to merge unfinished work. Retained local results are
+below; provider, native mount, resource, and full lifecycle gates remain open.
+
+### Installed RustFS command checkpoint, 2026-09-03
+
+Run `cache-f410.E7nt8I` used the existing RustFS service on port 9000 and unique
+repository prefix `cache-qualification/cache-f410.E7nt8I` in `crabbuild`.
+No pre-existing service data was deleted. The installed CLI was built by
+`make install` at revision `67d3a9f`; SHA-256
+`df2266780679f5af3da66037ebe43e6aa0794f503633343759ac651f84a9e1e9`.
+RustFS image identity:
+`sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21`.
+Generated inputs, command logs, hashes, request records, and failed attempts
+are retained outside the checkout on the workspace volume under that run ID.
+
+| Measured case | Result and retained evidence |
+|---|---|
+| Initial add/commit/push/lazy clone | Three 128 MiB files, including an exact duplicate and a one-MiB variant; add preserves bytes and Git stores pointers. Push creates four xorbs totaling 135,467,870 bytes. |
+| Fresh reader, cold/warm hydration | Independent hashes pass. Cold hydration makes 14 xorb GETs; warm hydration with all origin xorb GETs denied makes zero. No complete xorb cache entries installed. `fresh-reader-workload/report.json`. |
+| Separate-process fetch then hydrate | Fetch makes 10 xorb GETs and leaves pointers. Later hydrate succeeds with xorb GETs denied, zero attempted xorb reads, matching hashes, and clean Git state. Same report. |
+| Corruption, clean, unavailable origin | Corrupt seven real range entries, recover correct bytes from origin; scoped clean preserves an unrelated sentinel; denied cold origin fails and leaves all pointers unchanged; restored origin succeeds. Same report. |
+| Incremental duplicate/delta | A fourth exact duplicate adds no xorbs. A one-MiB edit creates one 1,154,373-byte xorb, retaining existing xorbs. Updated 512 MiB checkout hydrates correctly. `incremental-workload/report.json`. |
+| Unsafe root | A root symlink is bypassed; origin hydration succeeds and its external target contains only the unchanged sentinel. Same report. |
+| Natural root/prune | FAIL on the installed checkpoint: filter-process creates `bloom.bin` under a 0755 root; later private-cache access is disabled and prune rejects it. `incremental-workload/report-with-prune.json`. Earlier warm fixtures precreated 0700 roots and did not cover this producer. |
+
+The first request gateway rejected SlateDB checkpoint writes and caused a
+timed-out cold hydrate. The corrected gateway permits bounded writes only to
+this run's repository metadata; it still denies xorb body reads when requested.
+The interrupted attempt and its empty temporary files remain recorded; the
+fresh-reader run uses a separate checkout, not erased failure evidence.
+
+Open findings: hydrate JSONL labels failed per-file reads `skipped` and the
+batch boundary loses typed causes; cold range hydration transfers substantially
+more bytes than the unique xorb set; reusable qualification tooling has not yet
+been integrated into the repository. These passes do not close those gaps.
+
+### Fresh-root bloom producer repair — focused and installed proof
+
+`CleanSession` now delegates persistence to `LocalCache` at the fixed disposable
+path `hints/clean-bloom.bin`. The standalone ambient writer and unbounded reader
+are removed. The synchronous cache boundary reuses pinned descriptor access,
+the existing byte reservation, publication lease, and completed-file catalog
+registration. Encoding remains product-owned; input is capped at one MiB.
+No new configuration, runtime, dependency, or remote format is introduced.
+The synchronous `CleanSession` signatures present in tag `v1.1.0` are preserved.
+The old root-level `bloom.bin` is not read or migrated and remains outside
+automatic cleanup authority. Existing unsafe roots are not silently chmodded.
+
+Focused proof passes: two actual filter processes under umask 022 create/reopen
+a missing root with private modes, followed by successful prune and clean.
+All 218 cache tests pass with all features, 166 with only `local-cache`, and
+116 with only `xet-chunk-cache`; strict all-target cache Clippy passes each
+feature combination. The 56 clean and 37 filter-process tests pass, as do six
+actual CLI clean/maintenance tests. Read/write bounds, missing-root inspection,
+budget bypass, symlink target preservation, catalog registration, and scoped
+cleanup have new regressions. The new leaf-link fixture initially assumed
+publication must reject a symlink; the shared `renameat` contract safely
+replaces the link itself. The corrected fixture proves read rejection and
+unchanged external target bytes, without changing the production primitive.
+Installed RustFS requalification passes all 24 command steps in
+`fixed-bloom-workload/report.json`, without precreating any cache root and with
+umask 022. Artifact SHA-256:
+`f819746058ed08a29187d6995b9a03dc47837b903f78d83557289964e58e8913`;
+build label `67d3a9f-bloom-dirty`, with the exact source-diff fingerprint retained
+in the report. The four 128 MiB files independently match their expected hashes.
+Cold hydrate makes 15 xorb body requests; warm hydrate makes zero even with
+origin xorb reads denied. Cold fetch makes 14, and a separate hydrate process
+again makes zero under denial. Eight corrupt ranges recover correctly; cache
+clean preserves unrelated state. Cold denial returns nonzero with all pointers
+unchanged, and restoring origin recovers the files. Adding unchanged hydrated
+content leaves Git's index unchanged. Configuring a one-MiB budget, pruning the
+naturally created root, and hydrating again all succeed; the sentinel survives,
+no retained range file exceeds that entry budget, and Git state is clean.
+This closes the reproduced bloom root-poisoning path, not physical-root byte
+accounting, the JSONL failure diagnostic, or the other producer/platform gates.
+Workspace formatting and whitespace checks pass. Strict CLI library Clippy
+still stops in `crates/crab-vfs/src/nfs.rs` and `coordinator.rs` on eight
+previously recorded diagnostics; no suppression or unrelated fix is included.
+The sibling global JSON shard-hint writer, optional profiling producer, and
+persistent index owners still require the Phase 4/5 audit. Bloom positives still
+require the canonical remote file-index/shard proof, so last-writer-wins hint
+replacement cannot itself authorize omitting staged content.
 
 - **Priority**: P1
 - **Effort**: XL, eight independently landable phases

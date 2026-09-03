@@ -166,25 +166,50 @@ impl CacheCatalog {
     ) -> Result<CacheMaintenanceStats> {
         let catalog = self.clone();
         tokio::task::spawn_blocking(move || {
-            // Keep the published file charged to its fill until registration
-            // commits. Releasing first would let another writer spend those
-            // bytes while the completed payload was absent from accounting.
-            let root = Arc::clone(&reservation.root);
-            let path = catalog.root.join(&reservation.relative_path);
-            catalog.record_sync(&root, family, &path, &logical_key, size)?;
-            drop(reservation);
-            let total = catalog.total_registered_bytes_sync(&root)?;
-            if total > catalog.max_bytes {
-                catalog.maintain_at(&root, 0)
-            } else {
-                Ok(CacheMaintenanceStats {
-                    final_bytes: total,
-                    ..CacheMaintenanceStats::default()
-                })
-            }
+            catalog.record_completed_sync(family, &logical_key, size, reservation)
         })
         .await
         .map_err(|error| CacheError::Internal(format!("cache maintenance task failed: {error}")))?
+    }
+
+    fn record_completed_sync(
+        &self,
+        family: &'static str,
+        logical_key: &str,
+        size: u64,
+        reservation: CacheReservation,
+    ) -> Result<CacheMaintenanceStats> {
+        // Both sync hints and async payloads retain the fill and its file lease
+        // until registration commits. Releasing first permits uncharged bytes.
+        let root = Arc::clone(&reservation.root);
+        let path = self.root.join(&reservation.relative_path);
+        self.record_sync(&root, family, &path, logical_key, size)?;
+        drop(reservation);
+        let total = self.total_registered_bytes_sync(&root)?;
+        if total > self.max_bytes {
+            self.maintain_at(&root, 0)
+        } else {
+            Ok(CacheMaintenanceStats {
+                final_bytes: total,
+                ..CacheMaintenanceStats::default()
+            })
+        }
+    }
+
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn write_sync(&self, path: &Path, family: &'static str, data: &[u8]) -> Result<()> {
+        let size = data.len() as u64;
+        if size > self.max_bytes {
+            return Ok(());
+        }
+        let Some(mut reservation) = self.reserve_sync(path, size)? else {
+            return Ok(());
+        };
+        let pending = reservation.root.pending_file(&reservation.relative_path)?;
+        reservation.payload_lease = Some(pending.lease()?);
+        pending.write_sync(data)?;
+        self.record_completed_sync(family, family, size, reservation)?;
+        Ok(())
     }
 
     /// Reconcile the catalog with disk and evict deterministic LRU entries.
