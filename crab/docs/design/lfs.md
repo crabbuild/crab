@@ -681,10 +681,21 @@ the existing scan budget; each input record is bounded separately. Missing selec
 revisions, malformed timestamped commit records and cancelled Git queries
 fail rather than returning an incomplete successful selection.
 
-This commit selection is not complete Git LFS previous-version parity: an
-object replaced inside the window can have its previous version in a parent
-outside the window. Exact previous-version discovery and prune's remaining
-unchecked inventory paths still need separate qualification.
+Fetch scans current selected trees, then the old sides of changes in the
+selected recent commits. The previous blob is included even when its parent
+commit predates the cutoff. A non-recursive raw Git log emits NUL-framed old
+object IDs and paths; the shared bounded batch reader verifies the actual
+blob bytes before interpreting pointers. No patch-text pointer parser or
+whole-parent-tree scan is used. Each merge parent is compared separately;
+rename heuristics and content transforms are disabled. Display settings cannot
+silently suppress merge parents. Historical aliases remain distinct until
+path filtering and transfer deduplication. Malformed/truncated records,
+missing or corrupt old blobs, and conflicting declared sizes fail the entire
+inventory before any LFS transfers begin.
+
+Prune still uses its separate all-ancestry inventory. Its error handling,
+retention scope, staged-index/stash coverage and flag contracts need further
+qualification; fetch's previous-object proof does not certify prune safety.
 
 ### Configuration Precedence
 

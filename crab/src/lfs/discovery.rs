@@ -17,49 +17,55 @@ pub(crate) enum GitObjectAccess {
     PromisorAllowed,
 }
 
-pub(crate) fn collect_pointers_from_trees_in(
+pub(crate) fn collect_pointers_for_fetch_in(
     repo_dir: &Path,
     refs: &[String],
+    recent_commits: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
     check_cancelled(cancel)?;
     let mut entries = Vec::new();
     let mut seen: HashMap<[u8; 32], (u64, HashSet<String>)> = HashMap::new();
     let mut remaining = MAX_CAPTURE_BYTES;
+    let mut retain = |path: String, pointer: LfsPointer| {
+        if let Some((size, paths)) = seen.get(&pointer.oid) {
+            if *size != pointer.size {
+                return Err(CrabError::LfsObjectCorrupt {
+                    oid: hex_encode(&pointer.oid),
+                });
+            }
+            if paths.contains(&path) {
+                return Ok(());
+            }
+        }
+        // Preserve every path until include/exclude and checkout policy run.
+        // Deduplicating by OID here would hide aliases and skip hydration.
+        spend_scan_budget(
+            &mut remaining,
+            pointer_memory(&path, &pointer)
+                + std::mem::size_of::<([u8; 32], (u64, HashSet<String>))>()
+                + std::mem::size_of::<String>()
+                + path.len(),
+        )?;
+        seen.entry(pointer.oid)
+            .or_insert_with(|| (pointer.size, HashSet::new()))
+            .1
+            .insert(path.clone());
+        entries.push((path, pointer));
+        Ok(())
+    };
     for revision in refs {
         visit_lfs_pointers_in_tree(
             repo_dir,
             revision,
             GitObjectAccess::PromisorAllowed,
             cancel,
-            |path, pointer| {
-                if let Some((size, paths)) = seen.get(&pointer.oid) {
-                    if *size != pointer.size {
-                        return Err(CrabError::LfsObjectCorrupt {
-                            oid: hex_encode(&pointer.oid),
-                        });
-                    }
-                    if paths.contains(&path) {
-                        return Ok(());
-                    }
-                }
-                // Preserve every path until include/exclude and checkout policy run.
-                // Deduplicating by OID here would hide aliases and skip hydration.
-                spend_scan_budget(
-                    &mut remaining,
-                    pointer_memory(&path, &pointer)
-                        + std::mem::size_of::<([u8; 32], (u64, HashSet<String>))>()
-                        + std::mem::size_of::<String>()
-                        + path.len(),
-                )?;
-                seen.entry(pointer.oid)
-                    .or_insert_with(|| (pointer.size, HashSet::new()))
-                    .1
-                    .insert(path.clone());
-                entries.push((path, pointer));
-                Ok(())
-            },
+            &mut retain,
         )?;
+    }
+    for (path, pointer) in previous_pointers_in_commits(repo_dir, recent_commits, cancel)? {
+        check_cancelled(cancel)?;
+        retain(path, pointer)?;
     }
     Ok(entries)
 }
@@ -156,7 +162,145 @@ pub(crate) fn visit_lfs_pointers_in_tree(
     )
 }
 
-type DiscoveryParser = fn(&[u8], &mut Option<String>) -> Result<Option<(String, String)>>;
+type DiscoveryParser<State = Option<String>> =
+    fn(&[u8], &mut State) -> Result<Option<(String, String)>>;
+
+fn previous_pointers_in_commits(
+    repo_dir: &Path,
+    commits: &[String],
+    cancel: &CancellationToken,
+) -> Result<Vec<(String, LfsPointer)>> {
+    check_cancelled(cancel)?;
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    if commits.iter().any(|oid| !is_git_object_id(oid)) {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidInput, "expected frozen commit IDs").into(),
+        );
+    }
+    let mut command = git_command_in(repo_dir, GitObjectAccess::PromisorAllowed);
+    // Diff only the selected commits, including each merge parent. Old-side
+    // blobs can predate the cutoff; scanning resulting trees misses them.
+    // Pin formatting so display preferences cannot hide a parent or change framing.
+    command.args([
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "log.diffMerges=separate",
+        "log",
+        "--stdin",
+        "--no-walk=unsorted",
+        "--format=",
+        "--raw",
+        "-z",
+        "-m",
+        "--root",
+        "--no-renames",
+        "--no-abbrev",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-decorate",
+        "--no-notes",
+        "--no-relative",
+    ]);
+    let write_commits = |mut stdin: ChildStdin| -> Result<()> {
+        for commit in commits {
+            check_cancelled(cancel)?;
+            writeln!(stdin, "{commit}")?;
+        }
+        Ok(())
+    };
+    let output = process::run(command, cancel, Some(write_commits), |stdout| {
+        let (pointers, state) = read_pointer_inventory(
+            repo_dir,
+            stdout,
+            b'\0',
+            parse_previous_object,
+            GitObjectAccess::PromisorAllowed,
+            cancel,
+        )?;
+        state.finish()?;
+        Ok(pointers)
+    })?;
+    successful_git("log", output)
+}
+
+#[derive(Default)]
+enum PreviousObject {
+    #[default]
+    Header,
+    Path(Option<String>),
+}
+
+impl PreviousObject {
+    fn finish(self) -> Result<()> {
+        if matches!(self, Self::Path(_)) {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "missing previous-object path").into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn parse_previous_object(
+    record: &[u8],
+    state: &mut PreviousObject,
+) -> Result<Option<(String, String)>> {
+    if let PreviousObject::Path(oid) = std::mem::take(state) {
+        if record.is_empty() {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "empty previous-object path").into(),
+            );
+        }
+        return oid
+            .map(|oid| {
+                let path = std::str::from_utf8(record)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                Ok((oid, path.to_owned()))
+            })
+            .transpose();
+    }
+    let header = std::str::from_utf8(record)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let parts: Vec<_> = header.split(' ').collect();
+    let valid_mode =
+        |mode: &str| matches!(mode, "000000" | "100644" | "100755" | "120000" | "160000");
+    if parts.len() != 5
+        || !parts[0].starts_with(':')
+        || !valid_mode(&parts[0][1..])
+        || !valid_mode(parts[1])
+        || !is_git_object_id(parts[2])
+        || !is_git_object_id(parts[3])
+        || parts[2].len() != parts[3].len()
+        || !matches!(parts[4], "A" | "D" | "M" | "T")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "malformed previous-object header",
+        )
+        .into());
+    }
+    let old_mode = &parts[0][1..];
+    let old_missing = parts[2].bytes().all(|byte| byte == b'0');
+    let new_missing = parts[3].bytes().all(|byte| byte == b'0');
+    if (old_mode == "000000") != old_missing
+        || (parts[1] == "000000") != new_missing
+        || (parts[4] == "A") != old_missing
+        || (parts[4] == "D") != new_missing
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inconsistent previous-object header",
+        )
+        .into());
+    }
+    let old_blob = matches!(old_mode, "100644" | "100755" | "120000");
+    *state = PreviousObject::Path(old_blob.then(|| parts[2].to_owned()));
+    Ok(None)
+}
 
 fn visit_lfs_blobs_in_git_command(
     repo_dir: &Path,
@@ -174,24 +318,13 @@ fn visit_lfs_blobs_in_git_command(
         cancel,
         None::<fn(ChildStdin) -> Result<()>>,
         |stdout| {
-            let mut pointers = Vec::new();
-            let mut remaining = MAX_CAPTURE_BYTES;
-            read_discovery(
+            let (pointers, _) = read_pointer_inventory(
+                repo_dir,
                 stdout,
                 record_terminator,
                 parse_record,
+                access,
                 cancel,
-                MAX_CAPTURE_BYTES,
-                |records| {
-                    pointers.extend(read_lfs_batch(
-                        repo_dir,
-                        records,
-                        access,
-                        cancel,
-                        &mut remaining,
-                    )?);
-                    Ok(())
-                },
             )?;
             Ok(pointers)
         },
@@ -205,6 +338,36 @@ fn visit_lfs_blobs_in_git_command(
         visitor(path, pointer)?;
     }
     Ok(())
+}
+
+fn read_pointer_inventory<State: Default>(
+    repo_dir: &Path,
+    stdout: impl Read,
+    terminator: u8,
+    parse_record: DiscoveryParser<State>,
+    access: GitObjectAccess,
+    cancel: &CancellationToken,
+) -> Result<(Vec<(String, LfsPointer)>, State)> {
+    let mut pointers = Vec::new();
+    let mut remaining = MAX_CAPTURE_BYTES;
+    let state = read_discovery(
+        stdout,
+        terminator,
+        parse_record,
+        cancel,
+        MAX_CAPTURE_BYTES,
+        |records| {
+            pointers.extend(read_lfs_batch(
+                repo_dir,
+                records,
+                access,
+                cancel,
+                &mut remaining,
+            )?);
+            Ok(())
+        },
+    )?;
+    Ok((pointers, state))
 }
 
 fn read_lfs_batch(
@@ -247,19 +410,19 @@ fn read_lfs_batch(
     successful_git("cat-file", output)
 }
 
-fn read_discovery(
+fn read_discovery<State: Default>(
     stdout: impl Read,
     terminator: u8,
-    parse_record: DiscoveryParser,
+    parse_record: DiscoveryParser<State>,
     cancel: &CancellationToken,
     batch_bytes: u64,
     mut visit_batch: impl FnMut(&[(String, String)]) -> Result<()>,
-) -> Result<()> {
+) -> Result<State> {
     const MAX_RECORD_BYTES: u64 = 1024 * 1024;
     let mut reader = BufReader::new(stdout);
     let mut records = Vec::new();
     let mut record = Vec::new();
-    let mut state = None;
+    let mut state = State::default();
     let mut remaining = batch_bytes;
     loop {
         check_cancelled(cancel)?;
@@ -292,7 +455,7 @@ fn read_discovery(
     if !records.is_empty() {
         visit_batch(&records)?;
     }
-    Ok(())
+    Ok(state)
 }
 
 pub(crate) fn pointer_memory(path: &str, pointer: &LfsPointer) -> usize {

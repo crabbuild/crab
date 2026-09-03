@@ -2989,7 +2989,13 @@ correctness/suspicious Clippy and formatting pass; other existing warning
 categories are not claimed clean. Production code grows by approximately
 125 lines to own one bounded union walk instead of unchecked whole-output
 filtering; the larger test module now lives in `lfs/recent/tests.rs`.
-Exact-candidate release build and dated-history RustFS proof remain required.
+The optimized `742e60c` build subsequently passed the dated-history RustFS
+driver: 44 commands, 13 checks, full/partial clones, all four current/historical
+payload SHA-256 checks, Git/LFS fsck, prune dry-run and unchanged binary.
+Report `phase2-lfs-dated-742e60c-20260903/report.json`; binary SHA-256
+`d97cb4f3326662f97995552e2f91fda955cec16cf43f832bfc6023499cc2f09c`.
+Functional-only on a concurrent development host, not a controlled-performance
+or clean-release baseline. Exact-candidate CI is separate.
 
 The preceding `b44fe67` checkpoint now has terminal success in all nine
 [protocol CI jobs](https://github.com/crabbuild/crab/actions/runs/33741342130).
@@ -3017,6 +3023,91 @@ prune's unchecked alternate inventory paths and the `--force` contract remain
 open. No destructive prune or complete retention/parity claim is authorized
 by this evidence. Exact-candidate CI and controlled performance comparisons
 remain separate acceptance gates.
+
+### Previous versions across the recent-window boundary: 2026-09-03 UTC
+
+**Context and failure proof.** A pointer replaced or deleted within a selected
+tip's window can have its old version only in a parent outside the cutoff.
+Selecting resulting commit trees loses that version. A new real-Git fetch
+regression failed on `742e60c`; the optimized binary also failed the unchanged
+full/partial LFS qualification extended with commits ten days apart and a
+three-day history window. Current files passed; old pointer blobs stayed
+missing after recent fetch. Report
+`phase2-lfs-boundary-before-742e60c-20260903/report.json` retains 39 commands and
+the failed `recent-fetch-resolves-history-blobs` check.
+
+**Owner and implementation.** `cmd::lfs::fetch::collect_lfs_pointers` keeps
+selected current trees separate from frozen recent commit IDs. The existing
+`lfs::discovery` owner combines both into one path-preserving inventory. A
+single supervised `git log --stdin --no-walk=unsorted --raw -z` produces the
+old sides of selected changes. No second ancestry walk, whole-parent-tree
+scan, patch-text pointer decoder, new configuration or storage format.
+Raw old-object IDs feed the same bounded batch/checksum reader used by tree
+and publication discovery. The common record reader now returns parser state:
+the raw-change parser requires a final consumed path; the existing rev-list
+parser still permits its terminal unnamed commit/tree state.
+
+Every merge parent is compared separately. This is an explicit product rule
+for preserving versions replaced by merges, not a claim that an upstream
+text-log default always emits the same merge diffs. Pin merge display policy
+to separate diffs, disable rename inference, relative paths, signatures,
+notes, color and content transforms. A rename retains the old path; paths and
+OID aliases survive until include/exclude and transfer policy run. Additions
+and gitlinks have no old blob to fetch. Invalid modes/status/OIDs, inconsistent
+absence markers, missing paths, invalid historical path encoding and
+truncation reject the scan. Missing or corrupt old blobs and conflicting
+declared sizes invalidate the whole inventory, never current-only success.
+
+**Executable acceptance.** Run recent/fetch/prune/discovery focused tests and
+the exact optimized candidate against the boundary RustFS driver. Require:
+
+1. Replacement and deletion retain the old pointer from an outside-cutoff
+   parent; disabled recent selection does not walk older changes.
+2. Merge changes include each parent's previous version, but do not scan
+   ancestors of unselected commits. `log.diffMerges` preferences cannot change
+   this result. SHA-1 and SHA-256 Git IDs remain verified.
+3. Renamed, newline/tab-named and repeated aliases preserve their old path;
+   subdirectory invocation and display configuration do not narrow coverage.
+4. Truncated/malformed raw records, missing/corrupt old blobs, wrong declared
+   sizes and cancellation return failure before starting LFS payload transfer.
+   The shared bounded batch reader still streams history larger than one batch.
+5. Full clone and partial clone with initially missing pointer blobs both
+   retrieve the four 65 MiB versions ten days apart, then pass SHA-256/size,
+   Git/LFS fsck, dry-run prune and unchanged-binary checks. Record the candidate
+   commit/hash; do not promote concurrent-host timings to performance proof.
+
+**Sibling proof and remaining work.** Publication continues to use local-only
+range discovery, not the fetch/promisor path. Pull has no recent history and
+keeps its current-tree behavior. Prune currently expands its protected roots
+with `rev-list --objects`, including all ancestry of HEAD and each recent
+commit. Thus, when that inventory completes, outside-cutoff parents are already
+included; routing it through this fetch-specific path would neither fix its
+unchecked errors nor establish correct retention scope. Its canonical
+fail-closed inventory, worktree indexes/stashes, selected-remote fetch scope,
+flag contract and cancellation remain explicit follow-up work. No destructive
+prune, full compatibility closure, production-provider or controlled-performance
+claim follows from this packet.
+
+**Local proof.** All 72 recent/fetch/prune/discovery tests pass, including the
+new replacement/deletion regression, raw framing and bounded batches, all
+merge parents under conflicting display preferences, renamed aliases,
+SHA-256 Git history and missing/corrupt previous objects. Production-library
+correctness/suspicious Clippy and formatting pass. A further 31 selected
+publication, LFS-push, mirror-command and subprocess-owner tests pass, including
+real Git dependency upload and local-only inspection. Existing warning classes
+are not claimed clean. This adds approximately 175 production lines for the
+old-object parser/selection boundary and shares the batch/checksum mechanics;
+fetch tests move to a separate module without dropping prior assertions.
+Optimized build, exact-binary boundary/provider proof and fresh CI remain
+required at this source checkpoint.
+
+**Dependency contracts.** Git LFS's
+[previous-version scanner](https://github.com/git-lfs/git-lfs/blob/main/lfs/gitscanner_log.go)
+defines old-side selection. Git 2.30 documents
+[non-recursive log selection](https://git-scm.com/docs/git-log/2.30.0) and the
+[raw diff framing and parent comparisons](https://git-scm.com/docs/git-diff-tree/2.30.0).
+Git's [merge-option implementation](https://github.com/git/git/blob/v2.50.1/diff-merges.c)
+shows why `-m` alone does not override configured merge display policy.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

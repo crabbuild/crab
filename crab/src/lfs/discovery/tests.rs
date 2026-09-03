@@ -2,6 +2,8 @@ use super::*;
 use sha2::Digest;
 use std::process::Stdio;
 
+mod previous;
+
 fn git_oid(byte: u8) -> String {
     format!("{byte:02x}").repeat(20)
 }
@@ -33,9 +35,10 @@ fn tree_scan_preserves_aliases_and_nul_framed_path_names() {
     let (dir, oid, pointer) = pointer_object_fixture();
     let names = ["a.bin", "line\nname.bin", "z.bin"];
     let tree = tree_with_blobs(dir.path(), &names.map(|name| (oid.as_str(), name)));
-    let entries = collect_pointers_from_trees_in(
+    let entries = collect_pointers_for_fetch_in(
         dir.path(),
         &[tree.clone(), tree],
+        &[],
         &CancellationToken::new(),
     )
     .unwrap();
@@ -57,7 +60,7 @@ fn tree_scan_rejects_conflicting_sizes_across_aliases() {
     assert!(output.status.success());
     let other = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     let tree = tree_with_blobs(dir.path(), &[(&oid, "a.bin"), (&other, "b.bin")]);
-    let result = collect_pointers_from_trees_in(dir.path(), &[tree], &CancellationToken::new());
+    let result = collect_pointers_for_fetch_in(dir.path(), &[tree], &[], &CancellationToken::new());
     assert!(matches!(result, Err(CrabError::LfsObjectCorrupt { .. })));
 }
 
@@ -531,7 +534,7 @@ fn range_scans_verify_sha1_and_sha256_and_reject_disguised_pointer_bodies() {
             && error.to_string().contains("checksum differs"))
         );
         let error =
-            collect_pointers_from_trees_in(dir.path(), std::slice::from_ref(&head), &cancel)
+            collect_pointers_for_fetch_in(dir.path(), std::slice::from_ref(&head), &[], &cancel)
                 .unwrap_err();
         assert!(matches!(error, CrabError::Io(error)
             if error.kind() == io::ErrorKind::InvalidData
