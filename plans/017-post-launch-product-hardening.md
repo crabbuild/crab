@@ -5030,8 +5030,9 @@ mode is an unreleased implementation, not a compatibility contract.
 The driver installs real mirror/LFS hooks, stages a new 128 KiB LFS payload,
 denies only the disposable repository's admission-slot PUTs, and records any
 LFS mutation attempts. It requires failure without changed refs or uploaded
-LFS content, then restores admission, retries, freshly clones, verifies exact
-LFS bytes and runs strict Git fsck. Collaboration and native Crab destinations
+LFS content, then restores admission, retries, freshly clones in default lazy
+mode, explicitly hydrates exact LFS bytes and runs strict Git fsck.
+Collaboration and native Crab destinations
 are separate cases. The existing bucket and other prefixes are never faulted;
 no GC or bucket cleanup runs.
 
@@ -5063,8 +5064,47 @@ pages and 4,300 fragments.
 scoped admission driver and existing installed mixed-ref hook qualification,
 and retain exact binary/source identities. Acceptance requires both denied
 push cases to produce no LFS writes, preserve both ref sets and successfully
-retry to byte-identical fresh clones. This gate is pending until release
-reports are recorded below; unit results alone do not close it.
+retry to byte-identical LFS hydration from fresh lazy clones. This narrow gate
+passes in the release reports below; it does not qualify eager first checkout.
+
+Release `ace8d98` builds successfully; SHA-256
+`9640cb035479174f1bff672f0303da83ca288c607b1a60537fe39cc732f7edd5`.
+`phase2-hook-admission-lazy-clone-ace8d98-20260903/artifacts/report.json`
+passes 43 commands/14 checks. Both collaboration and native pushes reach the
+denied admission slot, produce zero LFS mutation requests and leave no object
+at the fresh dependency key. Both remotes remain unchanged; retry converges,
+fresh lazy-clone explicit LFS hydration matches bytes, and strict Git fsck
+passes. `phase2-mirror-hook-single-owner-ace8d98-20260903/artifacts/report.json`
+passes the existing mixed-ref installed-hook slice: 61 commands/16 checks,
+including pointer/LFS bytes, detached HEAD, revision expressions, annotated
+tags, rewrites/deletions, collaboration rejection/retry and divergence refusal.
+Both bind the unchanged release binary. These are local RustFS/macOS
+functional results, not controlled performance or a full CI/support matrix.
+
+**New open gate — cold eager LFS checkout.** Preserve both failed exploratory
+reports rather than relabeling them as passes. The initial
+`phase2-hook-admission-ace8d98-20260903` run fails because plain Git clone
+inherits the host's standard Git LFS filter. The explicit-filter probe
+`phase2-hook-admission-filtered-clone-ace8d98-20260903` successfully clones
+without checkout and installs Crab's local LFS filter, then eager checkout
+fails: `collaboration.bin` needs a remote before `crab.toml` is materialized.
+The log records the missing project configuration and a 60-second filter
+idle timeout before Git exits 128. Admission denial and retry already passed
+in both runs; the native-destination case had not yet run in those probes.
+
+Context for the next bounded implementation: the lazy store loader calls the
+project-file-only LFS resolver without an explicit remote. Crab's clone path
+already supplies `CRAB_CLONE_REMOTE_URL` to checkout, but that resolver does
+not use the general Config resolver's clone-time URL. Separately,
+`checkout_head` currently logs a warning and returns success after a failed
+Git checkout. Inspect both filter entry points, standalone reads, committed
+configuration precedence and tagged contracts before choosing the fix.
+Acceptance: cold native/Crab eager checkout must either hydrate exact LFS
+bytes through the selected repository or return a prompt actionable failure;
+no successful clone result may hide an incomplete checkout. Include missing
+configuration, denied/corrupt content, cancellation and lazy-mode regressions.
+The passing admission driver intentionally qualifies lazy clone plus explicit
+hydration, not this still-failing eager path; the broader Phase 2 gate stays open.
 
 **Remaining boundary.** This consolidation does not move pointer/deduplication
 classification or terminal mirror read-back under the publication permit.

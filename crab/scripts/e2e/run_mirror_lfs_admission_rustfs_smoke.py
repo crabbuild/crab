@@ -103,7 +103,9 @@ def run(smoke, proxy):
         smoke.check(f"{label}-retry-converges", refs("origin", f"{label} retried origin")
                     == refs(destination, f"{label} retried Crab"))
         clone = smoke.run_root / f"{label}-clone"
-        smoke.run_git(smoke.run_root, ["clone", destination, str(clone)], name=f"{label} fresh clone")
+        # Qualify the default lazy-clone then explicit-hydration workflow.
+        # Eager first-checkout configuration is a separate qualification gate.
+        smoke.run_cmd(f"{label} fresh lazy clone", [str(smoke.crab_bin), "clone", "--lazy", destination, str(clone)], smoke.run_root)
         pointer = smoke.git_value(clone, ["show", f"HEAD:{filename}"], name=f"{label} committed LFS pointer")
         hydrated = smoke.artifacts / f"{label}-hydrated.bin"
         smoke.run_binary(f"{label} fresh clone LFS smudge", [str(smoke.crab_bin), "lfs", "smudge", filename],
