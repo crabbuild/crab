@@ -3386,6 +3386,25 @@ run group. That does not reproduce or resolve the Linux failure. The next
 investigation must capture its actual returned error before selecting a fix;
 no assertion or dependency has been changed to hide it.
 
+### Origin-integrity failure diagnosis checkpoint, 2026-09-03
+
+The existing Linux regression failed while extracting the typed source, but
+its `Option::unwrap` panic discarded the returned error's diagnostic context.
+The test now prints that error on the same failing condition. It still requires
+`CacheStoreError::OriginIntegrity` and its underlying `CacheError`; no error is
+accepted as a substitute and production behavior is unchanged.
+
+The focused test passes locally. A retained diagnostic-binary run at
+`cache-f410.E7nt8I/cache-health.F6Bvs2/origin-integrity-concurrent-v1` repeats
+that exact test 256 times with at most four subprocesses and a 30-second limit
+per subprocess: all pass. Its report binds the test binary SHA-256 and retains
+failure output when present. This is additional macOS evidence, not a Linux
+fix or qualification. Do not keep adding passing repetitions as a substitute
+for capturing the Linux failure's returned error. Dependency source contains
+multiple cancellation/error handoff paths; selecting one as the cause remains
+unproven. The next Linux run must retain the new diagnostic before a production
+fix or dependency change is proposed.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

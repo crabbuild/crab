@@ -642,7 +642,8 @@ mod tests {
             .reconstruct_from_pointer(&pointer.serialize())
             .await
             .unwrap_err();
-        let source = source_of::<crab_cache_store::CacheStoreError>(&error).unwrap();
+        let source = source_of::<crab_cache_store::CacheStoreError>(&error)
+            .unwrap_or_else(|| panic!("missing origin-integrity source in {error:#?}"));
         assert!(matches!(
             source,
             crab_cache_store::CacheStoreError::OriginIntegrity { .. }
