@@ -14318,9 +14318,16 @@ impl PushPipeline {
                 key: "push store".to_owned(),
                 origin: "candidate metadata writer requires canonical origin".to_owned(),
             })?;
+        // Preserve immutable metadata warming when replacing the planning reader.
+        // The adapter still writes to origin first and bypasses caching for
+        // mutable discovery and conditional reads; dropping it leaves new tables cold.
+        let metadb_object_store = self
+            .caching_store
+            .as_ref()
+            .map(crab_cache_store::CachingStore::object_store);
         let writer = build_push_metadb_guard_with_object_store(
             store,
-            None,
+            metadb_object_store,
             &self.router,
             self.metrics.clone(),
             &self.config.metadb,
@@ -21913,6 +21920,102 @@ mod tests {
         chunk_store.delete_legacy(&mut txn, &MerkleHash::from([3; 32]));
         guard.commit(txn).await.expect("writer transaction");
         guard.close().await.expect("close writer");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn candidate_writer_warming_preserves_origin_commit() {
+        use axum::{Router, extract::Path, http::StatusCode, routing::put};
+        use crab_cache::path_class::{PathClass, classify_path};
+
+        for response_status in [StatusCode::OK, StatusCode::SERVICE_UNAVAILABLE] {
+            let temp = tempfile::tempdir().expect("cache tempdir");
+            let warmed = Arc::new(Mutex::new(HashMap::<String, Bytes>::new()));
+            let captured = Arc::clone(&warmed);
+            let app = Router::new().route(
+                "/v1/{*key}",
+                put(move |Path(key): Path<String>, body: Bytes| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        captured.lock().expect("captured writes").insert(key, body);
+                        response_status
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("cache listener");
+            let addr = listener.local_addr().expect("cache address");
+            let stop = CancellationToken::new();
+            let shutdown = stop.clone();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown.cancelled_owned())
+                    .await
+                    .expect("cache server");
+            });
+            let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+            let router = StoreLayout::new(store.clone(), "candidate-warming".to_owned());
+            let cache_config = crab_cache_store::CacheConfig {
+                service_url: Some(format!("http://{addr}")),
+                ..Default::default()
+            };
+            let cache = crab_cache_store::CachingStore::new_with_local_cache(
+                store.clone(),
+                &cache_config,
+                Arc::new(crab_cache::LocalCache::new(temp.path().join("cache"))),
+            )
+            .expect("cache adapter");
+            let pipeline = PushPipeline::new(
+                PushConfig::default(),
+                Vec::new(),
+                Some(store.clone()),
+                Some(cache),
+                None,
+                router.repo_prefix().to_owned(),
+                router,
+                None,
+                CancellationToken::new(),
+                None,
+            );
+            pipeline
+                .promote_metadb_to_candidate_writer()
+                .await
+                .expect("candidate writer");
+            let guard = pipeline.metadb.lock().await.take().expect("writer owner");
+            let files = guard.file_index().await.expect("file index");
+            let mut txn = guard.new_transaction().expect("transaction");
+            files.save_legacy(
+                &mut txn,
+                &MerkleHash::from([3; 32]),
+                &MerkleHash::from([4; 32]),
+            );
+            guard.commit(txn).await.expect("commit file index");
+            guard.flush_memtables().await.expect("flush tables");
+            guard.close().await.expect("close writer");
+            stop.cancel();
+            server.await.expect("join cache server");
+
+            let prefix = ObjectPath::from("candidate-warming/file_index_db/");
+            let objects = store.list_prefix(&prefix).await.expect("origin inventory");
+            let mut expected = HashMap::new();
+            for object in objects {
+                if classify_path(object.location.as_ref()) == PathClass::Immutable {
+                    let (body, _) = store
+                        .get_with_etag(&object.location)
+                        .await
+                        .expect("origin bytes");
+                    expected.insert(object.location.to_string(), body);
+                }
+            }
+            assert!(
+                !expected.is_empty(),
+                "real SlateDB must publish immutable objects"
+            );
+            assert!(
+                *warmed.lock().expect("captured writes") == expected,
+                "promoted writer must attempt warming its committed immutable origin bytes: {response_status}"
+            );
+        }
     }
 
     use crate::test::git_repo::{CleanGitEnvGuard, GitDirGuard};

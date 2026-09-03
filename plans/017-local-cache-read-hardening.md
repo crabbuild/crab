@@ -2279,6 +2279,67 @@ descriptor caps, contention bounds, crash durability, independent side-file
 identity, native mounted reads, or cloud-provider parity. Required CI is still
 not green; the PR remains draft.
 
+#### Cache-service CI: metadata-writer wiring
+
+The retained failed artifact for run `33734708208` reports byte-identical
+`cli-cold-hydrate`, zero origin xorb/shard GETs, and three service origin
+fetches. The proxy records file-index manifests, a WAL SST, and a compacted SST
+alongside mutable repository discovery. The failed total-fetch assertion is
+not waived or narrowed to payload counters.
+
+Source audit found a concrete client integration gap:
+`crab/src/git/push.rs::promote_metadb_to_candidate_writer` supplied `None` for
+the metadata object-store override. Planning retained the configured
+`CachingStore`, but the actual candidate writer bypassed its existing
+origin-first PUT and immutable-object warming. The same gap exists in current
+`main` (`e26d139`) and the tagged `v1.1.0` post-commit promotion path; preserving
+absent warming is not a compatibility requirement. The existing helper already
+documents cache-aware versioned metadata as safe for writers and readers.
+
+The continuation passes the configured adapter through writer promotion. It
+does not change candidate visibility, writer fencing, protected-push handling,
+provider identity, conditional requests, mutable-path classification, or
+origin-first write ordering. No server implementation, new warming mechanism,
+configuration, dependency, or report-verifier change is introduced. Net
+production growth is seven lines: retain existing wiring rather than add a
+parallel writer/observer abstraction.
+
+The real-SlateDB/loopback regression first failed with the original promotion
+path and passed after the wiring repair. Its expanded table covers successful
+and HTTP 503 warming responses, comparing attempted immutable PUT bodies with
+the independently read committed origin inventory after flush and close.
+Source-level dependency proof: SlateDB 0.15.0 defaults readers to managed
+checkpoints, which create new versioned manifests; SST writing uses
+`object_store` 0.14.1's adaptive `BufWriter`. Small buffered objects use
+`put_opts`; multipart objects bypass current adapter warming. This repair
+therefore does not claim all metadata sizes or future reader checkpoints were
+warmed by a prior push.
+
+Focused proof passes: the new success/503 writer regression, three MetaDB
+store/scope routing tests, the existing reader-promotion test, **61** cache-store
+tests, and a locked default CLI debug build. Formatting and whitespace pass;
+the existing Darwin unwind-table warning remains. No full CLI Clippy or CI
+pass is claimed.
+
+The adjacent cache-only staging selection is **1/2** under the default umask.
+The shard fixture fails at `preload shard cache` with `UnsafeRoot`, before
+constructing its pipeline; the file-index fixture passes. That setup already
+exists at `7d80065`: it points `CacheDirGuard` directly at `tempfile::tempdir()`.
+Pinned tempfile 3.27.0 documents default-permission, potentially world-readable
+temporary directories. This is not evidence against writer promotion, but it
+is an unresolved branch qualification gap, not a green or waived sibling test.
+No existing assertion, fixture, or production private-root rule was changed.
+The unchanged two-test selection passes under a process-local `umask 077`,
+confirming the setup's permissions sensitivity. That diagnostic rerun does not
+replace the retained failure under the normal environment or qualify permissive
+umask behavior.
+
+Acceptance still required: rerun the unchanged full installed cache-service
+smoke and all report-verifier consumers, retaining per-key/per-type counters;
+repeat same-artifact push/dedup/hydration with unavailable cache service;
+qualify multipart metadata warming separately with bounded resources. A passing
+small-object regression is not proof that the CI failure is fully resolved.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
