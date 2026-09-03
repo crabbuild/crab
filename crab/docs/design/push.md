@@ -1220,6 +1220,12 @@ Without conditional delete support, release marks the holder expired and the
 next acquirer reuses the same object via CAS. This prevents a stale owner from
 deleting a fresh holder's lock after TTL expiry.
 
+Ref-journal prepare rollback follows the same ownership rule. It restores
+the original head only with the version returned by that prepare write. A
+new head rolls back to the version-1 empty-head representation, not an
+unconditional delete. The empty head publishes no ref and is reusable by the
+next writer; a successor's changed version makes stale rollback fail its CAS.
+
 If the active marker is already visible, its immutable edit binds the exact
 lock holder that crossed the final ref-critical boundary. A contender may
 release that holder immediately with a holder-checked CAS. Prepared

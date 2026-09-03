@@ -719,8 +719,11 @@ async fn rollback_prepared_heads(
 ) {
     for (original, written) in prepared.iter().rev() {
         let path = router.ref_journal_head_path(&ref_name_hash(&original.head.ref_name));
-        let result = match (&original.etag, &written.etag) {
-            (Some(_), Some(written_etag)) => match serialize(&original.head) {
+        // Restore new heads to the existing empty-head shape, not absence.
+        // Ownership may have moved while another ref failed preparation;
+        // unconditional deletion would erase the successor's committed head.
+        let result = match &written.etag {
+            Some(written_etag) => match serialize(&original.head) {
                 Ok(body) => store
                     .update(&path, Bytes::from(body), written_etag.clone())
                     .await
@@ -728,8 +731,7 @@ async fn rollback_prepared_heads(
                     .map_err(MetadataError::from),
                 Err(error) => Err(error),
             },
-            (None, Some(_)) => store.delete(&path).await.map_err(MetadataError::from),
-            _ => Ok(()),
+            None => Ok(()),
         };
         if let Err(error) = result {
             warn!(ref_name = %original.head.ref_name, %error, "failed to roll back uncommitted ref journal head");
@@ -1034,6 +1036,146 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    async fn rollback_preserves_successor(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        existing: bool,
+    ) {
+        let ref_name = "refs/heads/main";
+        if existing {
+            let (initial, heads) = transaction_for(store, layout, vec![edit(ref_name, 'a')]).await;
+            commit_ref_transaction(store, layout, &initial, &heads)
+                .await
+                .unwrap();
+        }
+        let mut abandoned_edit = edit(ref_name, 'b');
+        abandoned_edit.old_oid = existing.then(|| "a".repeat(40));
+        let (abandoned, original) = transaction_for(store, layout, vec![abandoned_edit]).await;
+        let written = prepare_head(store, layout, &original[0], &abandoned.id().unwrap())
+            .await
+            .unwrap();
+
+        // Schedule a successor after the original holder has lost ownership,
+        // but before its delayed rollback. Both start from the same visible ref.
+        let mut successor_edit = edit(ref_name, 'c');
+        successor_edit.old_oid = existing.then(|| "a".repeat(40));
+        let (successor, heads) = transaction_for(store, layout, vec![successor_edit]).await;
+        commit_ref_transaction(store, layout, &successor, &heads)
+            .await
+            .unwrap();
+        let successor_head = read_ref_head(store, layout, ref_name).await.unwrap();
+        rollback_prepared_heads(store, layout, &[(&original[0], written)]).await;
+        let after = read_ref_head(store, layout, ref_name).await.unwrap();
+        assert_eq!(after.head, successor_head.head);
+        assert_eq!(after.etag, successor_head.etag);
+
+        let mut next_edit = edit(ref_name, 'd');
+        next_edit.old_oid = Some("c".repeat(40));
+        let (next, heads) = transaction_for(store, layout, vec![next_edit]).await;
+        commit_ref_transaction(store, layout, &next, &heads)
+            .await
+            .unwrap();
+        let visible = materialize(store, layout, &Manifest::default_for_repo(ref_name)).await;
+        assert_eq!(visible.refs[ref_name], "d".repeat(40));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delayed_rollback_preserves_successor_for_new_and_existing_heads() {
+        for existing in [false, true] {
+            let (store, layout) = fixture();
+            rollback_preserves_successor(&store, &layout, existing).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_multi_ref_prepare_rolls_back_without_publishing() {
+        let (store, layout) = fixture();
+        let left = "refs/heads/left";
+        let right = "refs/heads/right";
+        let (transaction, stale_heads) =
+            transaction_for(&store, &layout, vec![edit(left, 'a'), edit(right, 'b')]).await;
+        let (winner, heads) = transaction_for(&store, &layout, vec![edit(right, 'c')]).await;
+        commit_ref_transaction(&store, &layout, &winner, &heads)
+            .await
+            .unwrap();
+
+        assert!(
+            commit_ref_transaction(&store, &layout, &transaction, &stale_heads)
+                .await
+                .is_err()
+        );
+        assert!(
+            !transaction_is_active(&store, &layout, &transaction.id().unwrap())
+                .await
+                .unwrap()
+        );
+        assert!(
+            read_ref_head(&store, &layout, left)
+                .await
+                .unwrap()
+                .visible_transaction
+                .is_none()
+        );
+        let before = materialize(&store, &layout, &Manifest::default_for_repo(right)).await;
+        assert_eq!(
+            before.refs,
+            BTreeMap::from([(right.to_owned(), "c".repeat(40))])
+        );
+
+        let (next, heads) = transaction_for(&store, &layout, vec![edit(left, 'd')]).await;
+        commit_ref_transaction(&store, &layout, &next, &heads)
+            .await
+            .unwrap();
+        let after = materialize(&store, &layout, &Manifest::default_for_repo(right)).await;
+        assert_eq!(after.refs[left], "d".repeat(40));
+    }
+
+    #[tokio::test]
+    async fn owned_rollback_restores_an_existing_visible_head() {
+        let (store, layout) = fixture();
+        let ref_name = "refs/heads/main";
+        let (initial, heads) = transaction_for(&store, &layout, vec![edit(ref_name, 'a')]).await;
+        commit_ref_transaction(&store, &layout, &initial, &heads)
+            .await
+            .unwrap();
+        let original = read_ref_head(&store, &layout, ref_name).await.unwrap();
+        let written = prepare_head(&store, &layout, &original, &"b".repeat(64))
+            .await
+            .unwrap();
+        rollback_prepared_heads(&store, &layout, &[(&original, written)]).await;
+        assert_eq!(
+            read_ref_head(&store, &layout, ref_name).await.unwrap().head,
+            original.head
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires AWS_BUCKET, AWS_ENDPOINT_URL and credentials for a writable S3-compatible test bucket"]
+    async fn s3_delayed_rollback_preserves_successor() {
+        let bucket = std::env::var("AWS_BUCKET").unwrap();
+        let endpoint = std::env::var("AWS_ENDPOINT_URL").unwrap();
+        let inner = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_endpoint(endpoint)
+            .with_client_options(crab_storage::provider_options::default_client_options())
+            .build()
+            .unwrap();
+        let store = Store::new(Arc::new(inner));
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prefix = format!(
+            "qualification/ref-journal-rollback-{}-{timestamp}",
+            std::process::id()
+        );
+        println!("retained qualification prefix: {prefix}");
+        for existing in [false, true] {
+            let layout = StoreLayout::new(store.clone(), format!("{prefix}/{existing}"));
+            rollback_preserves_successor(&store, &layout, existing).await;
+        }
     }
 
     #[tokio::test]

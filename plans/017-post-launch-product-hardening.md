@@ -2759,6 +2759,66 @@ contract. This requires a retention-specific correction and destructive-path
 tests; the new cancellation proof does not certify prune safety or Git LFS
 selection parity.
 
+### Ref-journal rollback ownership: 2026-09-03 UTC
+
+**Observed failure.** Tracing mirror apply into the canonical native push
+owner found a pre-publication cleanup race in
+`crates/crab-metadata/src/ref_journal.rs`. When a multi-ref prepare failed,
+rollback used CAS for a previously existing head but unconditional DELETE
+for a newly created head. After ownership moved to a successor, delayed
+cleanup could therefore erase that successor's committed head. A deterministic
+new-head/successor/late-rollback test fails before the correction: the visible
+head loses its transaction identity. Existing-head rollback already used CAS.
+
+**Correction.** Both cases now restore the original head using the exact
+version returned by the prepare write. The initially absent case restores
+the existing version-1 empty-head shape. That shape is accepted by tagged
+v1.0.1's validator, publishes no ref and can be prepared by the next writer.
+No journal schema, storage key, dependency or rollback implementation is
+added. Conditional-write conflict preserves the successor and remains a
+cleanup warning; the original commit failure still reaches the caller.
+Empty heads are retained rather than reclaimed by an unsafe delete.
+
+The dependency contract is `object_store 0.14.1`'s `PutMode::Update`: the
+provider atomically checks the supplied object version. Crab's `Store::update`
+preserves the complete ETag/version pair and does not blindly retry a stale
+CAS. [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
+document the corresponding If-Match refusal. RustFS proof verifies the actual
+configured service, not just a mock interpretation of that contract.
+
+**Acceptance and evidence.** Fourteen focused journal tests pass after the
+fix. Three new hermetic tests cover delayed rollback after a successor on
+both new/existing heads, ordinary restoration of an existing head, and an
+actual multi-ref prepare conflict with no marker/partial publication. They
+also verify a subsequent commit retains a coherent parent chain. An explicit
+opt-in S3 test passes on RustFS `crabbuild` with the same successor scenarios;
+its small isolated namespace is retained as
+`qualification/ref-journal-rollback-91961-1788425898401725000`. The test uses
+standard AWS endpoint/bucket/credential environment, introduces no product
+configuration, and is ignored unless explicitly requested. CI now selects the
+hermetic journal tests for Linux, Windows and macOS; live-provider tests are
+not silently counted as part of that default run.
+
+Both `storage`-only and `remote-index` feature selections pass the fourteen
+hermetic tests; the minimal no-default-features build also passes. Three
+selected Crab integration-owner tests pass, covering ref-journal push
+admission and generation-owner compaction. Correctness/suspicious Clippy,
+formatting and workflow syntax pass; existing unrelated warning classes
+remain. Exact-candidate cross-platform CI still needs a fresh run.
+
+**Sibling boundary and remaining work.** The changed function is the sole
+rollback callee of `commit_ref_transaction`; native mirror/direct pushes
+reach it through `crab/src/metadata/manifest.rs`. Promotion and existing-head
+restoration already use version-checked writes. Protected-server manifest
+publication has a separate CAS boundary and does not call this rollback.
+No immutable data, active marker or successor ref is deleted by the new path.
+This does not establish continuous lease fencing through marker publication,
+resolve uncertain commit responses, or implement plan-bound terminal receipts.
+The active marker is removed by compaction, and compacted reads can stop at a
+frontier without historical transaction bodies. Those are not durable receipt
+contracts; ref equality alone remains insufficient to attribute a commit to a
+plan. Keep that original terminal-outcome/replay packet open.
+
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 
 ### Context

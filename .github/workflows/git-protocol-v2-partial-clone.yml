@@ -150,6 +150,7 @@ jobs:
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+          cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
             --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
@@ -206,6 +207,9 @@ jobs:
 
       - name: Run visibility deletion contracts
         run: cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+
+      - name: Run ref-journal rollback contracts
+        run: cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
 
       - name: Run hook composition and frozen-ref discovery contracts
         run: |
