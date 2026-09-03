@@ -1544,7 +1544,6 @@ mod tests {
     use crab_storage::test_support::{CountingObjectStore, ObjectReadCounts, ObjectReadKind};
     use crab_xet::xorb::builder::{CompressionPolicy, FixedCompression, RunId, XorbBuilder};
     use crab_xet::xorb::format::{Chunk, CompressionScheme};
-    use crab_xet::xorb::parser::XorbParser;
     use futures_util::stream::BoxStream;
     #[cfg(feature = "remote-client")]
     use object_store::GetRange;
@@ -3463,11 +3462,6 @@ mod tests {
             .flat_map(|payload| payload.iter().copied())
             .collect::<Vec<_>>();
         let (xorb, hash) = test_raw_xorb(&payloads);
-        let chunk_hash = XorbParser::parse(xorb.clone())
-            .unwrap()
-            .chunk_meta(0)
-            .unwrap()
-            .hash;
         let path = content_path("xorbs", &hash.hex());
         let origin = origin_store();
         origin.put(&path, xorb).await.unwrap();
@@ -3488,13 +3482,7 @@ mod tests {
             vec![0, 32 * 1024, 64 * 1024, 96 * 1024, 128 * 1024]
         );
         assert!(cache.contains_verified(&CacheKey::Xorb(hash)).await);
-        assert!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[chunk_hash])
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!cache.root().join("xorb-index").exists());
     }
 
     #[tokio::test]

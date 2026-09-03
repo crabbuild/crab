@@ -5165,13 +5165,6 @@ async fn warm_uploaded_xorb_cache(
         }
         return stats;
     }
-    if !cache_needs_write && let Err(e) = cache.index_xorb_if_present(&hash).await {
-        warn!(
-            xorb = %hash.hex(),
-            error = %e,
-            "xorb cache index warm failed (non-fatal)",
-        );
-    }
     if !cache_needs_write && !remote_needs_warm {
         stats.cached = true;
         return stats;
@@ -33806,7 +33799,7 @@ mod tests {
     /// `upload_xorbs` fills in step 7), calls `post_success_cleanup`, and
     /// asserts the cache contains the xorb after step 13 returns.
     ///
-    /// The test redirects the cache root to a tempdir via
+    /// The test redirects the cache root to a private child of a tempdir via
     /// `CRAB_CACHE_DIR` (serialised by `CACHE_DIR_MUTEX`) so nothing
     /// touches the developer's real `~/.cache/crab`.
     #[tokio::test]
@@ -33816,7 +33809,8 @@ mod tests {
         use crate::test::git_repo::CacheDirGuard;
 
         let cache_tmp = tempfile::tempdir().expect("tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = CacheDirGuard::new(&cache_root);
 
         // Construct a pipeline with no caching_store wired — this exercises
         // the `default_cache_root()` fallback path in `post_success_cleanup`,
@@ -33842,13 +33836,17 @@ mod tests {
             })
             .collect();
         let uploaded_hashes: Vec<MerkleHash> = uploaded.iter().map(|x| x.hash).collect();
+        let uploaded_bytes = uploaded.iter().map(|x| x.len() as u64).sum::<u64>();
         *pipeline.uploaded_xorbs.lock().await = uploaded;
 
         // Run step 13.
-        pipeline.post_success_cleanup().await;
+        let stats = pipeline.post_success_cleanup().await;
+
+        assert_eq!(stats.xorb_cache_warm_items, uploaded_hashes.len() as u64);
+        assert_eq!(stats.xorb_cache_warm_bytes, uploaded_bytes);
 
         // Every uploaded xorb lands in the cache under `CacheKey::Xorb`.
-        let cache = LocalCache::new(cache_tmp.path().to_path_buf());
+        let cache = LocalCache::new(cache_root);
         for hash in &uploaded_hashes {
             assert!(
                 cache.contains(&CacheKey::Xorb(*hash)).await,
@@ -33871,7 +33869,8 @@ mod tests {
         use crate::test::git_repo::CacheDirGuard;
 
         let cache_tmp = tempfile::tempdir().expect("tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = CacheDirGuard::new(&cache_root);
 
         let (_, bytes, hash, _) = test_single_chunk_xorb(b"spilled xorb warms local cache");
         let payload = XorbPayload::from_bytes(bytes.clone(), 0)
@@ -33895,7 +33894,7 @@ mod tests {
 
         pipeline.post_success_cleanup().await;
 
-        let cache = LocalCache::new(cache_tmp.path().to_path_buf());
+        let cache = LocalCache::new(cache_root);
         let cached = cache
             .get_or_fetch(&CacheKey::Xorb(hash), || async {
                 panic!("spilled xorb should be cached")
@@ -33911,7 +33910,8 @@ mod tests {
         use crate::test::git_repo::CacheDirGuard;
 
         let cache_tmp = tempfile::tempdir().expect("tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = CacheDirGuard::new(&cache_root);
 
         let hash = MerkleHash::from([0x42u8; 32]);
         let bytes = Bytes::from(vec![0u8; XORB_CACHE_WARM_SYNC_TOTAL_LIMIT as usize + 1]);
@@ -33939,7 +33939,7 @@ mod tests {
         );
         assert_eq!(stats.xorb_cache_skipped_items, 1);
 
-        let cache = LocalCache::new(cache_tmp.path().to_path_buf());
+        let cache = LocalCache::new(cache_root);
         assert!(
             !cache.contains(&CacheKey::Xorb(hash)).await,
             "large advisory warm should not copy the xorb body into local cache"
@@ -33989,7 +33989,8 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let cache_tmp = tempfile::tempdir().expect("tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = CacheDirGuard::new(&cache_root);
 
         let (_, bytes, hash, _) = test_single_chunk_xorb(b"xorb bytes already on origin");
 
@@ -34097,15 +34098,13 @@ mod tests {
         use crate::test::git_repo::CacheDirGuard;
 
         let cache_tmp = tempfile::tempdir().expect("tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = CacheDirGuard::new(&cache_root);
 
         let (_, bytes, hash, _) = test_single_chunk_xorb(b"uploaded xorb repairs local cache");
-        let hex = hash.hex();
-        let path = cache_tmp.path().join("xorbs").join(&hex[..2]).join(&hex);
-        tokio::fs::create_dir_all(path.parent().expect("xorb parent"))
-            .await
-            .expect("create xorb cache dir");
-        tokio::fs::write(&path, b"corrupt cached xorb")
+        let cache = LocalCache::new(cache_root.clone());
+        cache
+            .put_unchecked_for_test(&CacheKey::Xorb(hash), b"corrupt cached xorb")
             .await
             .expect("seed corrupt xorb");
 
@@ -34125,7 +34124,7 @@ mod tests {
 
         pipeline.post_success_cleanup().await;
 
-        let cache = LocalCache::new(cache_tmp.path().to_path_buf());
+        let cache = LocalCache::new(cache_root);
         let repaired = cache
             .get_or_fetch(&CacheKey::Xorb(hash), || async {
                 panic!("repaired xorb should be cached")

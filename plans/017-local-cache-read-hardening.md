@@ -3405,6 +3405,83 @@ multiple cancellation/error handoff paths; selecting one as the cause remains
 unproven. The next Linux run must retain the new diagnostic before a production
 fix or dependency change is proposed.
 
+The next CI run at `f6c0c78` passed all protocol unit/transcript tests, so the
+Linux failure did not recur and produced no failing returned error to
+attribute. Binary/integration, cache-service, split-crate, offline-feature,
+NFS-feature, docs, and all three OS workflow suites also passed. The broad
+Rust job still ended while linking the CLI libtest (`ld` signal 7), and the
+guardrail job still reports the pre-existing dependency/inventory drift. No
+production error path or protected inventory was changed in response.
+
+### Local xorb-placement runtime cleanup checkpoint, 2026-09-03
+
+Repository-wide caller and tag proof separates two concepts that share
+`xorb-index/index.db`. The local `xorb_index` table and
+`CachedXorbCandidate` API have no production lookup consumer, while six
+full-xorb write paths and the push cache-warmer populated or repaired those
+rows. In contrast, push actively consumes `remote_xorb_proof` and
+`remote_xorb_index`. Tag `v1.0.1` contains all three tables in schema version
+1, so deleting the database or treating it as wholly disposable would discard
+live acceleration state.
+
+The runtime cleanup removes the local candidate API and exports, every
+placement write/read/repair path, the extra in-process SQLite writer lock, and
+placement cleanup from payload verification, eviction, and maintenance. A
+single replacement contract test exercises `put`, `put_bytes`,
+`get_or_fetch`, both file-copy writers, and read-through installation. It proves
+that the placement table stays empty while an adjacent remote proof remains
+reusable. A second fixture proves four concurrent xorb writers retain every
+payload without placement metadata. The high-coverage cache-store fixture now
+proves full-xorb installation without initializing the proof database.
+
+Local proof passes: 248 `crab-cache` tests and strict all-target Clippy with
+local-cache, xet-chunk-cache, and remote-client; 62 `crab-cache-store` tests and
+strict all-target Clippy with remote-client; and the whole Crab package check.
+Four focused step-13 tests cover memory, spilled, remote-only, and corrupt
+local xorb warming, plus the oversized-body skip. The first run exposed a test
+fixture that used a platform-created permissive temp directory as the cache
+root; every writer correctly rejected it as unsafe. The fixtures now point to
+a missing child root that Crab creates privately. The security check was not
+relaxed, and all focused tests pass.
+
+Installed RustFS proof uses Make-installed `crab 1.0.1`, SHA-256
+`c6a6b7d4d6552f001fb639416625c281edf7256d1bdd73db272f443ccaea5fbf`,
+and production/test source-diff fingerprint
+`3e30f7d1418f88aa9723773e5bbb9906226afabae21c87e34aecbf699639ea8c`.
+Run `placement-runtime-smoke-v1` uses fresh dedicated bucket
+`crabbuild-cache-placement-f6bvs2-v1`: all **1,192 checks / 89 commands** pass,
+including real add/commit/push/dedup, clone/hydrate, service restart, cache
+corruption repair, and single-push recovery. Cold, warm, and restart hydrates
+each record 15 service hits, zero service origin fetches, and 19
+metadata/control origin GETs; every output has SHA-256
+`dd684b30b522b2478b73e3b5337cc5ad132eef437db97d10337543dae3a2457d`.
+The packaged report audit passes all 1,192 checks and the released evidence
+binary passes 275 release-verification checks. This qualifies the runtime
+cleanup against RustFS; it is not AWS/GCS/Azure or native-mount proof.
+
+This is not yet Phase 5 acceptance. Schema version 1 still creates and
+validates the now-dormant table because removing it in place must preserve the
+two live remote tables. The remaining executable slice is a reviewed,
+transactional schema migration plus corrupt/contended/cancelled fixtures:
+
+1. Define the table-free canonical schema and validate both remote tables
+   before starting repair.
+2. Under the descriptor-bound database owner and one immediate transaction,
+   drop only `idx_xorb_index_xorb_hash` and `xorb_index`, then advance the
+   schema version. A failed validation or transaction must leave version 1 and
+   every remote row unchanged.
+3. Make fresh databases use only the canonical schema. Qualify existing
+   version-1 databases with nonempty remote proof/index tables, concurrent
+   push readers, corrupt schema objects, busy writers, rollback, and process
+   interruption.
+4. Remove transitional version-1 open support after the tagged upgrade window;
+   retain no fallback reader or silent whole-database reset.
+
+Acceptance for this slice requires zero production references to the local
+table/API, byte-for-byte preservation and reuse of both remote record families,
+no mutation during ordinary verification, and an installed RustFS push,
+hydrate, and clone run with no correctness or request-count regression.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
@@ -3497,9 +3574,11 @@ logical and allocated bytes, per-family partial failures, and versioned stats
 JSON. This inventory does not verify every family, establish all-family
 eviction, or bound aggregate SQL/WAL memory and elapsed time. The catalog's
 write-denying inspection boundary needs other-native-platform qualification
-and review of its OS-write-capable descriptor contract. Local xorb-placement rows are written but unused,
-while the live remote proof index shares their database. Shard hints use a
-global JSON read-modify-write that loses updates across processes.
+and review of its OS-write-capable descriptor contract. Local xorb-placement
+runtime access is removed, but the dormant v1.0.1 table still shares a database
+with live remote proof/index records pending an explicit preservation
+migration. Shard hints use a global JSON read-modify-write that loses updates
+across processes.
 
 **Work**
 

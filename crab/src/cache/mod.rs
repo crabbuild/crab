@@ -33,8 +33,8 @@ pub mod xet_chunk_cache;
 
 pub use crab_cache::ShardHintCache;
 pub use crab_cache::{
-    CacheKey, CacheStats, CachedXorbCandidate, LocalCache, PruneObjectKind, PruneOptions,
-    PruneStats, PrunedCacheObject, VerifyReport, default_cache_root,
+    CacheKey, CacheStats, LocalCache, PruneObjectKind, PruneOptions, PruneStats, PrunedCacheObject,
+    VerifyReport, default_cache_root,
 };
 pub use crab_vfs::ChunkCache;
 pub use hydrated_pointer::{HydratedEntry, HydratedPointerCache};

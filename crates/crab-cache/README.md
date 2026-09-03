@@ -81,9 +81,11 @@ Full-file xorb checks share one descriptor-owning worker implementation with
 maintenance. They validate aggregate identity, compressed chunks, and the
 footer's serialized-payload digest; metadata-only reads remain metadata-only.
 Operational read failures do not authorize maintenance deletion. Xorb index
-row cleanup now uses the descriptor-bound database owner below, but can still
-wait for its busy timeout. Complete payload/database root correlation and
-cancellation authority are not established by connection pinning alone.
+placement rows are no longer read, written, or cleaned up with payloads. The
+v1.0.1 schema object remains dormant until an explicit migration can remove it
+without discarding the live remote proof and parsed-index records beside it.
+Complete payload/database root correlation and cancellation authority are not
+established by connection pinning alone.
 
 Catalog eviction uses the same payload ownership and deletion boundary. Its
 final lease/reservation check and row removal share an immediate SQLite writer
@@ -92,16 +94,17 @@ inventory, and payload deletion. Inventory does not open SQLite files and aborts
 reconciliation on unsafe entries. Dropping an owner does not create a missing
 catalog.
 
-Catalog reads, writes, and owner cleanup plus the local xorb index now share
-a crate-private descriptor-bound SQLite owner on Linux/macOS. It checks the
-cache-owned chain and existing file metadata without extra database opens,
-rejects non-private files/links without permission repair, and creates new
-databases as `0600`. A connection-specific, non-default VFS retains the parent
-for main/journal/WAL/SHM/temp operations and unregisters only after close.
-Namespace changes use short directory locks; database/WAL coordination uses
-SQLite's standard byte ranges with open-file-description locks. Simultaneous
-in-process connections must all use this owner; native SQLite interoperability
-is tested across processes, not mixed owners on one inode in one process.
+Catalog reads, writes, and owner cleanup plus the remote xorb proof/index
+database now share a crate-private descriptor-bound SQLite owner on
+Linux/macOS. It checks the cache-owned chain and existing file metadata without
+extra database opens, rejects non-private files/links without permission
+repair, and creates new databases as `0600`. A connection-specific,
+non-default VFS retains the parent for main/journal/WAL/SHM/temp operations and
+unregisters only after close. Namespace changes use short directory locks;
+database/WAL coordination uses SQLite's standard byte ranges with
+open-file-description locks. Simultaneous in-process connections must all use
+this owner; native SQLite interoperability is tested across processes, not
+mixed owners on one inode in one process.
 
 Maintenance acquires its writer before reading owner rows, avoiding SQLite's
 non-waiting read-to-write upgrade race with reservation writers. Native macOS

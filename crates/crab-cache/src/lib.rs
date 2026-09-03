@@ -40,9 +40,9 @@ pub use error::{CacheError, Result};
 pub use key::CacheKey;
 #[cfg(feature = "local-cache")]
 pub use local_cache::{
-    CacheStats, CachedXorbCandidate, LocalCache, MAX_CACHE_CHUNK_BYTES, MAX_CACHE_MANIFEST_BYTES,
-    MAX_CACHE_SHARD_BYTES, MAX_CACHE_STAGE_BYTES, PruneObjectKind, PruneOptions, PruneStats,
-    PrunedCacheObject, VerifyReport,
+    CacheStats, LocalCache, MAX_CACHE_CHUNK_BYTES, MAX_CACHE_MANIFEST_BYTES, MAX_CACHE_SHARD_BYTES,
+    MAX_CACHE_STAGE_BYTES, PruneObjectKind, PruneOptions, PruneStats, PrunedCacheObject,
+    VerifyReport,
 };
 pub use path_class::cache_key_for_path;
 pub use root::default_cache_root;

@@ -24,7 +24,6 @@ impl LocalCache {
             return Ok(PruneStats::default());
         }
         let root_path = self.root.clone();
-        let index_path = self.xorb_index_path();
         with_pinned_root(
             &self.root,
             &CancellationToken::new(),
@@ -34,7 +33,6 @@ impl LocalCache {
                 evict_oldest(
                     root,
                     &root_path,
-                    &index_path,
                     &entries,
                     target_bytes,
                     PruneOptions::default(),
@@ -50,7 +48,6 @@ impl LocalCache {
     /// Unknown and busy entries are retained. Unsafe recognized paths fail closed.
     pub async fn prune_with_options(&self, options: PruneOptions) -> Result<PruneStats> {
         let root_path = self.root.clone();
-        let index_path = self.xorb_index_path();
         let large_max = self.chunk_max_bytes;
         let shard_max = self.shard_max_bytes;
         with_pinned_root(
@@ -69,26 +66,11 @@ impl LocalCache {
                     entries.partition_point(|entry| entry.kind != PruneObjectKind::Shard);
                 let (large, shards) = entries.split_at(boundary);
                 let target = total_bytes(large)?.saturating_sub(large_max);
-                let mut stats = evict_oldest(
-                    root,
-                    &root_path,
-                    &index_path,
-                    large,
-                    target,
-                    options,
-                    cancel,
-                )?;
+                let mut stats = evict_oldest(root, &root_path, large, target, options, cancel)?;
                 if let Some(max) = shard_max {
                     let target = total_bytes(shards)?.saturating_sub(max);
-                    let shard_stats = evict_oldest(
-                        root,
-                        &root_path,
-                        &index_path,
-                        shards,
-                        target,
-                        options,
-                        cancel,
-                    )?;
+                    let shard_stats =
+                        evict_oldest(root, &root_path, shards, target, options, cancel)?;
                     stats.shards_evicted = shard_stats.shards_evicted;
                     stats.bytes_freed = stats.bytes_freed.saturating_add(shard_stats.bytes_freed);
                     stats.entries.extend(shard_stats.entries);
@@ -105,7 +87,6 @@ impl LocalCache {
     /// failures return errors; they do not authorize deletion. Manifests and
     /// workflow stages have logical keys and are not content-hash verified here.
     pub async fn verify(&self) -> Result<VerifyReport> {
-        let index_path = self.xorb_index_path();
         with_pinned_root(
             &self.root,
             &CancellationToken::new(),
@@ -126,9 +107,6 @@ impl LocalCache {
                         Err(error) => return Err(error),
                     };
                     if removed {
-                        if kind == PruneObjectKind::Xorb {
-                            remove_xorb_index_entries(&index_path, &object_hash(path)?)?;
-                        }
                         report.corrupt += 1;
                     } else {
                         report.valid += 1;
@@ -283,7 +261,6 @@ fn unavailable(error: &std::io::Error) -> bool {
 fn evict_oldest(
     root: &PinnedRoot,
     root_path: &Path,
-    index_path: &Path,
     entries: &[ObjectEntry],
     target: u64,
     options: PruneOptions,
@@ -308,15 +285,7 @@ fn evict_oldest(
         match entry.kind {
             PruneObjectKind::Chunk => stats.chunks_evicted += 1,
             PruneObjectKind::Shard => stats.shards_evicted += 1,
-            PruneObjectKind::Xorb => {
-                stats.xorbs_evicted += 1;
-                if !options.dry_run {
-                    let hash = object_hash(&entry.path)?;
-                    if let Err(error) = remove_xorb_index_entries(index_path, &hash) {
-                        warn!(xorb = %hash.hex(), %error, "local xorb cache index eviction cleanup failed");
-                    }
-                }
-            }
+            PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
         }
         stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
         if options.record_entries {

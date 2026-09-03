@@ -46,7 +46,7 @@ output-writer failure.
 `xorb_chunk_metadata` verifies bounded footer/metadata ranges and the xorb
 identity without reading payload. Selective chunk reads verify the requested
 payload ranges. High-coverage reads may install a verified complete xorb, but
-never register it in the add-side placement index. Hydration's
+do not publish any local placement metadata. Hydration's
 `get_xorb_chunks_without_install` reads a bounded complete body and installs
 no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 

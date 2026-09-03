@@ -12,10 +12,8 @@
 //! by mtime ascending and removes the oldest entries until the cache
 //! fits within its configured byte budget.
 
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -28,7 +26,7 @@ use crate::key::CacheKey;
 use crab_xet::hash::{compute_data_hash, xorb_hash};
 #[cfg(test)]
 use crab_xet::xorb::builder::FOOTER_SIZE;
-use crab_xet::xorb::format::{ChunkMeta, ChunkPlacement, MAX_XORB_SIZE, MerkleHash};
+use crab_xet::xorb::format::{ChunkMeta, MAX_XORB_SIZE, MerkleHash};
 use crab_xet::xorb::parser::XorbParser;
 
 mod maintenance;
@@ -152,16 +150,6 @@ pub struct CacheStats {
     pub manifest_count: u64,
 }
 
-/// Verified local xorb candidate that may cover one or more requested chunks.
-#[derive(Debug, Clone)]
-pub struct CachedXorbCandidate {
-    pub xorb_hash: MerkleHash,
-    pub path: PathBuf,
-    pub bytes: u64,
-    pub payload_hash: [u8; 32],
-    pub placements: Vec<ChunkPlacement>,
-}
-
 /// Parsed remote xorb metadata proven against a provider object identity token.
 #[derive(Debug, Clone)]
 pub struct CachedRemoteXorbIndex {
@@ -180,7 +168,6 @@ pub struct LocalCache {
     /// Shared byte ceiling for large data objects: chunk fragments and xorbs.
     chunk_max_bytes: u64,
     shard_max_bytes: Option<u64>,
-    xorb_index_write_lock: Arc<std::sync::Mutex<()>>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
 }
 
@@ -193,7 +180,6 @@ impl LocalCache {
             root,
             chunk_max_bytes: DEFAULT_CHUNK_MAX_BYTES,
             shard_max_bytes: None,
-            xorb_index_write_lock: Arc::new(std::sync::Mutex::new(())),
             fill_locks: new_fill_locks(),
         }
     }
@@ -208,7 +194,6 @@ impl LocalCache {
             root,
             chunk_max_bytes: chunk_max,
             shard_max_bytes: shard_max,
-            xorb_index_write_lock: Arc::new(std::sync::Mutex::new(())),
             fill_locks: new_fill_locks(),
         }
     }
@@ -341,14 +326,6 @@ impl LocalCache {
                 enforce_size_limit(key, &data, max_bytes).map_err(E::from)?;
                 verify_xorb_payload(&data, hash).map_err(E::from)?;
                 self.atomic_write(&path, &data).await.map_err(E::from)?;
-                let payload_hash = *blake3::hash(&data).as_bytes();
-                self.index_cached_xorb_file_best_effort(
-                    hash,
-                    &path,
-                    data.len() as u64,
-                    payload_hash,
-                )
-                .await;
                 Ok(data)
             }
             CacheKey::Stage(_) => {
@@ -379,11 +356,10 @@ impl LocalCache {
         }
     }
 
-    /// Cache a committed remote xorb without publishing an add-side candidate.
+    /// Cache a committed remote xorb after verifying its identity and serialized digest.
     ///
-    /// Remote xorbs are already discoverable through the canonical global chunk
-    /// index. Avoiding the local placement index keeps bulk reads from serializing
-    /// thousands of redundant SQLite writes while retaining the full-xorb cache.
+    /// Read-through consumers verify the requested decoded chunks separately;
+    /// this path does not decompress unrelated chunks merely to install the file.
     pub async fn put_read_xorb(&self, hash: &MerkleHash, data: Bytes) -> Result<()> {
         let key = CacheKey::Xorb(*hash);
         let path = self.hash_path(&key);
@@ -440,7 +416,7 @@ impl LocalCache {
                     .await
             }
             CacheKey::Xorb(hash) => {
-                self.try_read_xorb_limited(&self.hash_path(key), hash, max_bytes)
+                self.try_read_xorb_bytes_limited(&self.hash_path(key), hash, max_bytes)
                     .await
             }
             CacheKey::Stage(_) => {
@@ -532,16 +508,6 @@ impl LocalCache {
             CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
                 self.atomic_write(&path, data).await?;
-                if let CacheKey::Xorb(hash) = key {
-                    let payload_hash = *blake3::hash(data).as_bytes();
-                    self.index_cached_xorb_file_best_effort(
-                        hash,
-                        &path,
-                        data.len() as u64,
-                        payload_hash,
-                    )
-                    .await;
-                }
                 Ok(())
             }
             CacheKey::Manifest { name, etag } => {
@@ -568,16 +534,6 @@ impl LocalCache {
             CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
                 let path = self.hash_path(key);
                 self.atomic_write(&path, &data).await?;
-                if let CacheKey::Xorb(hash) = key {
-                    let payload_hash = *blake3::hash(&data).as_bytes();
-                    self.index_cached_xorb_file_best_effort(
-                        hash,
-                        &path,
-                        data.len() as u64,
-                        payload_hash,
-                    )
-                    .await;
-                }
                 Ok(())
             }
             CacheKey::Manifest { name, etag } => {
@@ -612,12 +568,10 @@ impl LocalCache {
         };
         let temporary = reservation.pending_file().await?;
         let mut file = temporary.file()?;
-        let payload_hash = copy_xorb_temp_file_with_blake3(source, &mut file, expected_len).await?;
+        copy_xorb_temp_file_with_blake3(source, &mut file, expected_len).await?;
         verify_xorb_file_payload(file, &path, expected_len, hash).await?;
         let reservation = temporary.commit().await?;
         self.record_completed_file("xorb", &path, hash.hex(), expected_len, reservation)
-            .await;
-        self.index_cached_xorb_file_best_effort(hash, &path, expected_len, payload_hash)
             .await;
         Ok(())
     }
@@ -656,8 +610,6 @@ impl LocalCache {
         drop(verify_xorb_file_identity(file, &path, expected_len, hash).await?);
         let reservation = temporary.commit().await?;
         self.record_completed_file("xorb", &path, hash.hex(), expected_len, reservation)
-            .await;
-        self.index_cached_xorb_file_best_effort(hash, &path, expected_len, expected_blake3)
             .await;
         Ok(())
     }
@@ -746,55 +698,6 @@ impl LocalCache {
             }
             CacheKey::Stage(_) | CacheKey::Manifest { .. } => self.contains(key).await,
         }
-    }
-
-    /// Ensure an existing cached xorb has a local placement-index entry.
-    ///
-    /// Returns `false` when the xorb file is absent. This is an optimization
-    /// hint for future adds; callers must still validate the xorb before
-    /// referencing it in pushed metadata.
-    pub async fn index_xorb_if_present(&self, hash: &MerkleHash) -> Result<bool> {
-        let path = self.hash_path(&CacheKey::Xorb(*hash));
-        let file = match crate::private_fs::open_read(&self.root, &path).await {
-            Ok(file) => file,
-            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        };
-        let metadata = file.metadata().await?;
-        let mut file = verify_xorb_file_identity(file, &path, metadata.len(), hash).await?;
-        let payload_hash = hash_file_blake3(&mut file).await?;
-        self.index_cached_xorb_file(hash, &path, metadata.len(), payload_hash)
-            .await?;
-        Ok(true)
-    }
-
-    /// Return locally cached xorbs that may cover at least one requested chunk.
-    ///
-    /// The lookup is bounded by `chunk_hashes`; it does not scan the xorb cache.
-    /// Stale index entries are ignored, and corrupt candidate files are evicted
-    /// and treated as misses.
-    pub async fn cached_xorb_candidates_for_chunks(
-        &self,
-        chunk_hashes: &[MerkleHash],
-    ) -> Result<Vec<CachedXorbCandidate>> {
-        if chunk_hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let records = query_xorb_index(&self.xorb_index_path(), chunk_hashes)?;
-        let mut candidates = Vec::new();
-        for record in records {
-            match self.cached_xorb_candidate_from_record(record).await {
-                Ok(Some(candidate)) => candidates.push(candidate),
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(error = %e, "cached xorb candidate skipped");
-                }
-            }
-        }
-        Ok(candidates)
     }
 
     /// Check whether a previous origin payload proof still matches object metadata.
@@ -895,15 +798,6 @@ impl LocalCache {
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
         crate::private_fs::remove_file(&self.root, &path).await?;
-        if let CacheKey::Xorb(hash) = key
-            && let Err(e) = remove_xorb_index_entries(&self.xorb_index_path(), hash)
-        {
-            warn!(
-                xorb = %hash.hex(),
-                error = %e,
-                "local xorb cache index eviction failed"
-            );
-        }
         Ok(())
     }
 
@@ -1019,134 +913,6 @@ impl LocalCache {
         }
     }
 
-    async fn index_cached_xorb_file(
-        &self,
-        hash: &MerkleHash,
-        path: &Path,
-        expected_len: u64,
-        payload_hash: [u8; 32],
-    ) -> Result<()> {
-        let file = crate::private_fs::open_read(&self.root, path).await?;
-        let (chunks, actual) = read_xorb_file_metadata(file, path, expected_len).await?;
-        if actual != *hash {
-            return Err(CacheError::HashMismatch {
-                requested: hash.hex(),
-                actual: actual.hex(),
-            });
-        }
-
-        let mut entries = Vec::with_capacity(chunks.len());
-        let xorb_hash: [u8; 32] = (*hash).into();
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let chunk_index = u32::try_from(idx).map_err(|_| CacheError::CorruptObject {
-                path: path.display().to_string(),
-                reason: "xorb chunk index does not fit u32".to_owned(),
-            })?;
-            entries.push(XorbIndexEntry {
-                chunk_hash: chunk.hash.into(),
-                xorb_hash,
-                chunk_index,
-                uncompressed_size: chunk.uncompressed_len,
-                xorb_bytes: expected_len,
-                payload_hash,
-            });
-        }
-        let index_path = self.xorb_index_path();
-        let write_lock = Arc::clone(&self.xorb_index_write_lock);
-        tokio::task::spawn_blocking(move || {
-            let _guard = write_lock.lock().map_err(|_| {
-                CacheError::Internal("local xorb index writer lock poisoned".to_owned())
-            })?;
-            write_xorb_index_entries(&index_path, &entries)
-        })
-        .await
-        .map_err(|e| CacheError::Internal(format!("local xorb index writer task failed: {e}")))?
-    }
-
-    async fn index_cached_xorb_file_best_effort(
-        &self,
-        hash: &MerkleHash,
-        path: &Path,
-        expected_len: u64,
-        payload_hash: [u8; 32],
-    ) {
-        if let Err(e) = self
-            .index_cached_xorb_file(hash, path, expected_len, payload_hash)
-            .await
-        {
-            warn!(
-                xorb = %hash.hex(),
-                error = %e,
-                "local xorb cache index update failed"
-            );
-        }
-    }
-
-    async fn cached_xorb_candidate_from_record(
-        &self,
-        record: IndexedXorbRecord,
-    ) -> Result<Option<CachedXorbCandidate>> {
-        let path = self.hash_path(&CacheKey::Xorb(record.xorb_hash));
-        let file = match crate::private_fs::open_read(&self.root, &path).await {
-            Ok(file) => file,
-            Err(CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let metadata = file.metadata().await?;
-        if !metadata.is_file() || metadata.len() != record.xorb_bytes {
-            return Ok(None);
-        }
-
-        let (chunks, actual) = match read_xorb_file_metadata(file, &path, metadata.len()).await {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "cached xorb metadata check failed — evicting"
-                );
-                let _ = crate::private_fs::remove_file(&self.root, &path).await;
-                remove_xorb_index_entries(&self.xorb_index_path(), &record.xorb_hash)?;
-                return Ok(None);
-            }
-        };
-        if actual != record.xorb_hash {
-            warn!(
-                path = %path.display(),
-                expected = %record.xorb_hash.hex(),
-                actual = %actual.hex(),
-                "cached xorb identity mismatch — evicting"
-            );
-            let _ = crate::private_fs::remove_file(&self.root, &path).await;
-            remove_xorb_index_entries(&self.xorb_index_path(), &record.xorb_hash)?;
-            return Ok(None);
-        }
-
-        let mut placements = Vec::with_capacity(chunks.len());
-        for (idx, chunk) in chunks.iter().enumerate() {
-            placements.push(ChunkPlacement {
-                chunk_hash: chunk.hash,
-                xorb_hash: record.xorb_hash,
-                chunk_index: u32::try_from(idx).map_err(|_| CacheError::CorruptObject {
-                    path: path.display().to_string(),
-                    reason: "xorb chunk index does not fit u32".to_owned(),
-                })?,
-                uncompressed_size: chunk.uncompressed_len,
-            });
-        }
-
-        crate::private_fs::touch(&self.root, &path).await;
-        Ok(Some(CachedXorbCandidate {
-            xorb_hash: record.xorb_hash,
-            path,
-            bytes: record.xorb_bytes,
-            payload_hash: record.payload_hash,
-            placements,
-        }))
-    }
-
     // --- private helpers ---
 
     fn xorb_index_path(&self) -> PathBuf {
@@ -1222,43 +988,6 @@ impl LocalCache {
         None
     }
 
-    async fn try_read_xorb_limited(
-        &self,
-        path: &Path,
-        expected: &MerkleHash,
-        max_bytes: Option<u64>,
-    ) -> Option<Bytes> {
-        let data = self
-            .try_read_xorb_bytes_limited(path, expected, max_bytes)
-            .await?;
-        self.finish_xorb_cache_read(path, expected, data).await
-    }
-
-    async fn finish_xorb_cache_read(
-        &self,
-        path: &Path,
-        expected: &MerkleHash,
-        data: Bytes,
-    ) -> Option<Bytes> {
-        let index_path = self.xorb_index_path();
-        let expected_hash = *expected;
-        let expected_len = data.len() as u64;
-        let indexed = tokio::task::spawn_blocking(move || {
-            indexed_xorb_install_matches(&index_path, &expected_hash, expected_len)
-        })
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .unwrap_or(false);
-        if indexed {
-            return Some(data);
-        }
-        let payload_hash = *blake3::hash(&data).as_bytes();
-        self.index_cached_xorb_file_best_effort(expected, path, data.len() as u64, payload_hash)
-            .await;
-        Some(data)
-    }
-
     async fn try_read_xorb_bytes_limited(
         &self,
         path: &Path,
@@ -1281,7 +1010,6 @@ impl LocalCache {
                     "local cache read failed"
                 );
                 let _ = crate::private_fs::remove_file(&self.root, path).await;
-                let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
                 return None;
             }
         };
@@ -1297,7 +1025,6 @@ impl LocalCache {
             "cached xorb identity mismatch — evicting"
         );
         let _ = crate::private_fs::remove_file(&self.root, path).await;
-        let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
         None
     }
 
@@ -1322,7 +1049,6 @@ impl LocalCache {
             "cached xorb payload check failed — evicting"
         );
         let _ = crate::private_fs::remove_file(&self.root, path).await;
-        let _ = remove_xorb_index_entries(&self.xorb_index_path(), expected);
         false
     }
 
@@ -1595,164 +1321,6 @@ fn verify_xorb_serialized_payload(data: &Bytes, expected: &MerkleHash) -> Result
     }
     parser.verify_payload_digest()?;
     Ok(parser)
-}
-
-async fn hash_file_blake3(file: &mut tokio::fs::File) -> Result<[u8; 32]> {
-    file.seek(std::io::SeekFrom::Start(0)).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(*hasher.finalize().as_bytes())
-}
-
-#[derive(Debug, Clone)]
-struct XorbIndexEntry {
-    chunk_hash: [u8; 32],
-    xorb_hash: [u8; 32],
-    chunk_index: u32,
-    uncompressed_size: u32,
-    xorb_bytes: u64,
-    payload_hash: [u8; 32],
-}
-
-#[derive(Debug, Clone)]
-struct IndexedXorbRecord {
-    xorb_hash: MerkleHash,
-    xorb_bytes: u64,
-    payload_hash: [u8; 32],
-}
-
-fn write_xorb_index_entries(index_path: &Path, entries: &[XorbIndexEntry]) -> Result<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let mut conn = open_xorb_index(index_path)?;
-    let tx = conn
-        .transaction()
-        .map_err(|source| cache_index_error(index_path, source))?;
-    {
-        let mut stmt = tx
-            .prepare(
-                "INSERT OR REPLACE INTO xorb_index
-                 (chunk_hash, xorb_hash, chunk_index, uncompressed_size, xorb_bytes, payload_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .map_err(|source| cache_index_error(index_path, source))?;
-        for entry in entries {
-            let xorb_bytes =
-                i64::try_from(entry.xorb_bytes).map_err(|_| CacheError::CorruptObject {
-                    path: index_path.display().to_string(),
-                    reason: "cached xorb byte count does not fit sqlite integer".to_owned(),
-                })?;
-            stmt.execute(params![
-                entry.chunk_hash.as_slice(),
-                entry.xorb_hash.as_slice(),
-                i64::from(entry.chunk_index),
-                i64::from(entry.uncompressed_size),
-                xorb_bytes,
-                entry.payload_hash.as_slice(),
-            ])
-            .map_err(|source| cache_index_error(index_path, source))?;
-        }
-    }
-    tx.commit()
-        .map_err(|source| cache_index_error(index_path, source))?;
-    Ok(())
-}
-
-fn query_xorb_index(
-    index_path: &Path,
-    chunk_hashes: &[MerkleHash],
-) -> Result<Vec<IndexedXorbRecord>> {
-    if !index_path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let conn = open_xorb_index(index_path)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT xorb_hash, xorb_bytes, payload_hash
-             FROM xorb_index
-             WHERE chunk_hash = ?1",
-        )
-        .map_err(|source| cache_index_error(index_path, source))?;
-    let mut seen_xorbs = HashSet::new();
-    let mut records = Vec::new();
-    for chunk_hash in chunk_hashes {
-        let chunk_hash_bytes: [u8; 32] = (*chunk_hash).into();
-        let row = stmt
-            .query_row(params![chunk_hash_bytes.as_slice()], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })
-            .optional()
-            .map_err(|source| cache_index_error(index_path, source))?;
-        let Some((xorb_hash, xorb_bytes, payload_hash)) = row else {
-            continue;
-        };
-        let Some(xorb_hash) = decode_fixed_hash(&xorb_hash) else {
-            continue;
-        };
-        let Some(payload_hash) = decode_fixed_hash(&payload_hash) else {
-            continue;
-        };
-        let Ok(xorb_bytes) = u64::try_from(xorb_bytes) else {
-            continue;
-        };
-        if seen_xorbs.insert(xorb_hash) {
-            records.push(IndexedXorbRecord {
-                xorb_hash: MerkleHash::from(xorb_hash),
-                xorb_bytes,
-                payload_hash,
-            });
-        }
-    }
-    Ok(records)
-}
-
-fn indexed_xorb_install_matches(
-    index_path: &Path,
-    xorb_hash: &MerkleHash,
-    expected_bytes: u64,
-) -> Result<bool> {
-    if !index_path.exists() {
-        return Ok(false);
-    }
-    let conn = open_xorb_index(index_path)?;
-    let xorb_hash: [u8; 32] = (*xorb_hash).into();
-    let stored_bytes = conn
-        .query_row(
-            "SELECT xorb_bytes FROM xorb_index WHERE xorb_hash = ?1 LIMIT 1",
-            params![xorb_hash.as_slice()],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(|source| cache_index_error(index_path, source))?;
-    Ok(stored_bytes.and_then(|bytes| u64::try_from(bytes).ok()) == Some(expected_bytes))
-}
-
-fn remove_xorb_index_entries(index_path: &Path, xorb_hash: &MerkleHash) -> Result<()> {
-    if !index_path.exists() {
-        return Ok(());
-    }
-    let conn = open_xorb_index(index_path)?;
-    let xorb_hash: [u8; 32] = (*xorb_hash).into();
-    conn.execute(
-        "DELETE FROM xorb_index WHERE xorb_hash = ?1",
-        params![xorb_hash.as_slice()],
-    )
-    .map_err(|source| cache_index_error(index_path, source))?;
-    Ok(())
 }
 
 fn record_remote_xorb_proof(
@@ -2136,6 +1704,9 @@ fn open_xorb_index_once(index_path: &Path) -> Result<crate::private_fs::Database
         return Err(noncanonical_xorb_index_error(index_path, schema_version));
     }
     conn.execute_batch(
+        // v1.0.1 shipped this table beside the live remote-proof tables. It
+        // remains only until an explicit migration can preserve those proofs;
+        // runtime code no longer reads or writes local placement rows.
         "CREATE TABLE xorb_index (
             chunk_hash BLOB PRIMARY KEY NOT NULL,
             xorb_hash BLOB NOT NULL,
@@ -2256,6 +1827,7 @@ async fn read_string_if_exists(root: &Path, path: &Path) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -2672,33 +2244,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xorb_lru_eviction_removes_index_candidate() {
-        let (_dir, cache) = temp_cache();
-        let (chunk_hashes, xorb_hash, xorb_data) = test_xorb_with_chunks(&[b"chunk-a", b"chunk-b"]);
-        cache
-            .put(&CacheKey::Xorb(xorb_hash), xorb_data.as_ref())
-            .await
-            .unwrap();
-        assert!(
-            !cache
-                .cached_xorb_candidates_for_chunks(&chunk_hashes)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
-        let cache = LocalCache::with_limits(cache.root.clone(), 1, None);
-        let stats = cache.prune().await.unwrap();
-
-        assert_eq!(stats.xorbs_evicted, 1);
-        let candidates = cache
-            .cached_xorb_candidates_for_chunks(&chunk_hashes)
-            .await
-            .unwrap();
-        assert!(candidates.is_empty());
-    }
-
-    #[tokio::test]
     async fn evict_bytes_removes_oldest_entries_until_target_is_met() {
         let (_dir, cache) = temp_cache();
 
@@ -2812,13 +2357,6 @@ mod tests {
         assert_eq!(report.valid, 0);
         assert_eq!(report.corrupt, 1);
         assert!(!path.exists());
-        assert!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[compute_data_hash(b"corrupt cached xorb")])
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]
@@ -2994,44 +2532,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_xorb_read_does_not_rewrite_install_index() {
-        let (_dir, cache) = temp_cache();
-        let (hash, data) = test_xorb(b"warm indexed xorb payload");
-        let key = CacheKey::Xorb(hash);
-        cache.put(&key, data.as_ref()).await.unwrap();
-
-        let index_path = cache.xorb_index_path();
-        let conn = open_xorb_index(&index_path).expect("open xorb index");
-        conn.execute_batch(
-            "CREATE TABLE xorb_index_write_audit (writes INTEGER NOT NULL);
-             INSERT INTO xorb_index_write_audit VALUES (0);
-             CREATE TRIGGER audit_xorb_index_insert
-             AFTER INSERT ON xorb_index BEGIN
-                 UPDATE xorb_index_write_audit SET writes = writes + 1;
-             END;",
-        )
-        .expect("install xorb index audit");
-        let fetched = cache
-            .get_or_fetch(&key, || async { panic!("warm xorb should not fetch") })
-            .await
-            .expect("read warm xorb");
-
-        assert_eq!(fetched, data);
-        let writes: i64 = conn
-            .query_row("SELECT writes FROM xorb_index_write_audit", [], |row| {
-                row.get(0)
-            })
-            .expect("read xorb index audit");
-        assert_eq!(writes, 0);
-    }
-
-    #[tokio::test]
     async fn xorb_index_rejects_non_v1_schema_without_mutation() {
         let (_dir, cache) = temp_cache();
         let (hash, data) = test_xorb(b"strict v1 xorb index");
         cache
-            .put(&CacheKey::Xorb(hash), data.as_ref())
-            .await
+            .record_remote_xorb_proof(
+                &hash,
+                blake3::hash(&data).as_bytes(),
+                data.len() as u64,
+                Some("origin-etag"),
+                None,
+            )
             .unwrap();
         let index_path = cache.xorb_index_path();
         let conn = Connection::open(&index_path).unwrap();
@@ -3045,9 +2556,108 @@ mod tests {
             .unwrap();
         assert_eq!(version, 2);
         let rows: i64 = conn
-            .query_row("SELECT COUNT(1) FROM xorb_index", [], |row| row.get(0))
+            .query_row("SELECT COUNT(1) FROM remote_xorb_proof", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert!(rows > 0);
+    }
+
+    #[tokio::test]
+    async fn every_xorb_writer_leaves_local_placements_unused_and_remote_proofs_reusable() {
+        let (temp, cache) = temp_cache();
+        let proof_hash = MerkleHash::from([0x42; 32]);
+        let proof_digest = [0x24; 32];
+        assert!(
+            cache
+                .record_remote_xorb_proof(
+                    &proof_hash,
+                    &proof_digest,
+                    41,
+                    Some("origin-etag"),
+                    None,
+                )
+                .unwrap()
+        );
+        let conn = open_xorb_index(&cache.xorb_index_path()).unwrap();
+        let placements = || {
+            conn.query_row("SELECT COUNT(*) FROM xorb_index", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(placements(), 0);
+
+        let (put_hash, put) = test_xorb(b"put");
+        cache.put(&CacheKey::Xorb(put_hash), &put).await.unwrap();
+        let (bytes_hash, bytes) = test_xorb(b"put bytes");
+        cache
+            .put_bytes(&CacheKey::Xorb(bytes_hash), bytes)
+            .await
+            .unwrap();
+        let (fetch_hash, fetch) = test_xorb(b"fetch");
+        cache
+            .get_or_fetch(&CacheKey::Xorb(fetch_hash), || async { Ok(fetch) })
+            .await
+            .unwrap();
+        let (file_hash, file) = test_xorb(b"file");
+        let file_path = temp.path().join("file.xorb");
+        std::fs::write(&file_path, &file).unwrap();
+        cache
+            .put_xorb_file(&file_hash, &file_path, file.len() as u64)
+            .await
+            .unwrap();
+        let (verified_hash, verified) = test_xorb(b"preverified file");
+        let verified_path = temp.path().join("verified.xorb");
+        std::fs::write(&verified_path, &verified).unwrap();
+        cache
+            .put_preverified_xorb_file(
+                &verified_hash,
+                &verified_path,
+                verified.len() as u64,
+                *blake3::hash(&verified).as_bytes(),
+            )
+            .await
+            .unwrap();
+        let (read_hash, read) = test_xorb(b"read-through");
+        cache.put_read_xorb(&read_hash, read).await.unwrap();
+
+        assert_eq!(placements(), 0);
+        assert!(
+            cache
+                .remote_xorb_proof_matches(
+                    &proof_hash,
+                    &proof_digest,
+                    41,
+                    Some("origin-etag"),
+                    None,
+                )
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_xorb_writers_without_placement_metadata_remain_present() {
+        let (_temp, cache) = temp_cache();
+        let xorbs = (0..4)
+            .map(|index| test_xorb(format!("concurrent xorb {index}").as_bytes()))
+            .collect::<Vec<_>>();
+        let keys = xorbs
+            .iter()
+            .map(|(hash, _)| CacheKey::Xorb(*hash))
+            .collect::<Vec<_>>();
+
+        tokio::try_join!(
+            cache.put_bytes(&keys[0], xorbs[0].1.clone()),
+            cache.put_bytes(&keys[1], xorbs[1].1.clone()),
+            cache.put_bytes(&keys[2], xorbs[2].1.clone()),
+            cache.put_bytes(&keys[3], xorbs[3].1.clone()),
+        )
+        .unwrap();
+
+        for (hash, _) in xorbs {
+            assert!(cache.contains(&CacheKey::Xorb(hash)).await);
+        }
     }
 
     #[cfg(unix)]
@@ -3069,92 +2679,6 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o644
-        );
-    }
-
-    #[tokio::test]
-    async fn put_xorb_indexes_candidate_by_chunk() {
-        let (_dir, cache) = temp_cache();
-        let (chunk_hashes, xorb_hash, data) =
-            test_xorb_with_chunks(&[b"indexed chunk one", b"indexed chunk two"]);
-
-        cache
-            .put(&CacheKey::Xorb(xorb_hash), data.as_ref())
-            .await
-            .unwrap();
-
-        let candidates = cache
-            .cached_xorb_candidates_for_chunks(&[chunk_hashes[1]])
-            .await
-            .unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].xorb_hash, xorb_hash);
-        assert_eq!(candidates[0].bytes, data.len() as u64);
-        assert_eq!(candidates[0].payload_hash, *blake3::hash(&data).as_bytes());
-        assert_eq!(candidates[0].placements.len(), 2);
-        assert_eq!(candidates[0].placements[1].chunk_hash, chunk_hashes[1]);
-    }
-
-    #[tokio::test]
-    async fn xorb_index_lock_wait_does_not_block_async_cache_work() {
-        let (_dir, cache) = temp_cache();
-        let index_path = cache.xorb_index_path();
-        drop(open_xorb_index(&index_path).expect("initialize xorb index"));
-
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        let locked_index_path = index_path.clone();
-        let lock_thread = std::thread::spawn(move || {
-            let conn = Connection::open(locked_index_path).expect("open lock connection");
-            conn.execute_batch("BEGIN EXCLUSIVE")
-                .expect("lock xorb index");
-            ready_tx.send(()).expect("signal lock");
-            std::thread::sleep(Duration::from_millis(500));
-            conn.execute_batch("COMMIT").expect("release xorb index");
-        });
-        ready_rx.recv().expect("wait for xorb index lock");
-
-        let (xorb_hash, data) = test_xorb(b"runtime responsiveness while sqlite is locked");
-        let key = CacheKey::Xorb(xorb_hash);
-        let started = std::time::Instant::now();
-        let put = cache.put(&key, data.as_ref());
-        let heartbeat = async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            started.elapsed()
-        };
-        let (put_result, heartbeat_elapsed) = tokio::join!(put, heartbeat);
-        lock_thread.join().expect("join lock thread");
-
-        put_result.expect("cache xorb");
-        assert!(
-            heartbeat_elapsed < Duration::from_millis(250),
-            "sqlite lock wait blocked the async runtime for {heartbeat_elapsed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn evict_xorb_removes_index_candidate() {
-        let (_dir, cache) = temp_cache();
-        let (chunk_hashes, xorb_hash, data) = test_xorb_with_chunks(&[b"evicted indexed chunk"]);
-        let key = CacheKey::Xorb(xorb_hash);
-
-        cache.put(&key, data.as_ref()).await.unwrap();
-        assert_eq!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[chunk_hashes[0]])
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        cache.evict(&key).await.unwrap();
-
-        assert!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[chunk_hashes[0]])
-                .await
-                .unwrap()
-                .is_empty()
         );
     }
 
@@ -3336,14 +2860,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_xorb_cache_does_not_publish_add_candidate() {
+    async fn read_xorb_cache_does_not_initialize_proof_database() {
         let (_dir, cache) = temp_cache();
         let (hash, data) = test_xorb(b"remote read-through xorb payload");
-        let chunk_hash = XorbParser::parse(data.clone())
-            .unwrap()
-            .chunk_meta(0)
-            .unwrap()
-            .hash;
         cache.put_read_xorb(&hash, data.clone()).await.unwrap();
 
         let warm = cache
@@ -3352,13 +2871,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(warm, data);
-        assert!(
-            cache
-                .cached_xorb_candidates_for_chunks(&[chunk_hash])
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!cache.xorb_index_path().exists());
     }
 
     #[tokio::test]
