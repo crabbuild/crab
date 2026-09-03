@@ -67,6 +67,12 @@ do not treat it as a proven hard limit on total disk usage yet. The old
 `chunk_cache_bytes`, `shard_cache_bytes`, and `[cache].chunk_cache_dir` fields
 are no longer supported.
 
+Within one process, all live decoded-range handles for the same canonical cache
+directory must resolve the same `max_bytes` value. A conflicting caller bypasses
+its local range cache and continues through verified origin reads instead of
+silently using another repository's limit. The directory can reopen with a new
+budget after its final live handle closes.
+
 ## Inspecting the Cache
 
 ```bash

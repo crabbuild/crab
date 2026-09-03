@@ -353,7 +353,9 @@ impl XetChunkCacheHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError::Io`] when the directory cannot be created.
+    /// Returns [`CacheError::Io`] when the directory cannot be created, or
+    /// [`CacheError::BudgetConflict`] when a live handle already owns the same
+    /// canonical directory with a different byte budget.
     pub fn open(directory: impl Into<PathBuf>, size_bytes: u64) -> Result<Self> {
         let directory = directory.into();
         if let Some(cache_root) = directory.parent() {
@@ -365,21 +367,27 @@ impl XetChunkCacheHandle {
         let mut handles = handles
             .lock()
             .map_err(|_| CacheError::Internal("range-cache handle registry poisoned".into()))?;
-        let cache = handles
-            .get(&directory)
-            .and_then(Weak::upgrade)
-            .unwrap_or_else(|| {
-                let cache_root = directory
-                    .parent()
-                    .map_or_else(|| directory.clone(), Path::to_path_buf);
-                let cache = Arc::new(CrabRangeCache {
-                    root: directory.clone(),
-                    capacity: size_bytes,
-                    catalog: crate::catalog::CacheCatalog::new(cache_root, size_bytes),
+        let cache = if let Some(cache) = handles.get(&directory).and_then(Weak::upgrade) {
+            if cache.capacity != size_bytes {
+                return Err(CacheError::BudgetConflict {
+                    path: directory.display().to_string(),
+                    active_bytes: cache.capacity,
+                    requested_bytes: size_bytes,
                 });
-                handles.insert(directory.clone(), Arc::downgrade(&cache));
-                cache
+            }
+            cache
+        } else {
+            let cache_root = directory
+                .parent()
+                .map_or_else(|| directory.clone(), Path::to_path_buf);
+            let cache = Arc::new(CrabRangeCache {
+                root: directory.clone(),
+                capacity: size_bytes,
+                catalog: crate::catalog::CacheCatalog::new(cache_root, size_bytes),
             });
+            handles.insert(directory.clone(), Arc::downgrade(&cache));
+            cache
+        };
 
         debug!(
             directory = %directory.display(),
@@ -998,6 +1006,37 @@ mod tests {
         let second = XetChunkCacheHandle::open(cache_dir, 64 * 1024).unwrap();
 
         assert!(Arc::ptr_eq(&first.cache, &second.cache));
+    }
+
+    #[tokio::test]
+    async fn live_same_root_handles_reject_conflicting_budgets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache").join("chunks");
+        let first = XetChunkCacheHandle::open(cache_dir.clone(), 64 * 1024).unwrap();
+
+        let error = XetChunkCacheHandle::open(cache_dir.clone(), 32 * 1024).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CacheError::BudgetConflict {
+                path,
+                active_bytes: 65_536,
+                requested_bytes: 32_768,
+            } if path == cache_dir.canonicalize().unwrap().display().to_string()
+        ));
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn root_accepts_a_new_budget_after_last_handle_closes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("cache").join("chunks");
+        let first = XetChunkCacheHandle::open(cache_dir.clone(), 64 * 1024).unwrap();
+        drop(first);
+
+        let reopened = XetChunkCacheHandle::open(cache_dir, 32 * 1024).unwrap();
+
+        assert_eq!(reopened.size_bytes, 32 * 1024);
     }
 
     #[tokio::test]

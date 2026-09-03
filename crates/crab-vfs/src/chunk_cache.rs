@@ -288,6 +288,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn conflicting_live_budget_bypasses_only_the_second_vfs_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache/chunks");
+        let first = ChunkCache::open(cache_dir.clone(), Some(1024 * 1024)).unwrap();
+        let second = ChunkCache::open(cache_dir, Some(512 * 1024)).unwrap();
+        let data = b"first cache remains available";
+        let hash = make_hash(data);
+
+        first.put(hash, Bytes::from_static(data));
+
+        assert_eq!(first.get(&hash).as_deref(), Some(&data[..]));
+        assert!(second.get(&hash).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn valid_record_checksum_does_not_authorize_wrong_chunk_bytes() {
         let (_dir, cache) = temp_cache(1024 * 1024);
         let hash = make_hash(b"expected");

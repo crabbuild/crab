@@ -18,6 +18,16 @@ pub enum CacheError {
     #[error("unsafe cache path {path}: {reason}")]
     UnsafeRoot { path: String, reason: String },
 
+    /// One live process tried to assign conflicting budgets to the same cache root.
+    #[error(
+        "cache budget conflict at {path}: active budget is {active_bytes} bytes, requested {requested_bytes} bytes"
+    )]
+    BudgetConflict {
+        path: String,
+        active_bytes: u64,
+        requested_bytes: u64,
+    },
+
     /// The cache service returned an invalid or unsupported response.
     #[error("cache service error: {reason}")]
     Service { reason: String },

@@ -3589,8 +3589,8 @@ the shard-hint database.
 `663cc8fa804d49d40d4210a3390d118aeb1ea6983b9f4c82fa4abb9f704bbef6`,
 uses retained run `installed-hint-health-ae3cc72` beneath the existing
 `cache-f410.E7nt8I/cache-health.F6Bvs2` group. Healthy `cache stats --json`
-reports two private
-hint files and zero issues; before/after inode, mode, mtime, size, and SHA-256
+reports two private hint files and zero issues; before/after inode, mode, mtime,
+size, and SHA-256
 values are identical. A native-SQLite 32-character TEXT scope produces one
 precise corrupt issue and exit 1; installed `doctor --json` emits the expected
 preserve-and-diagnose warning without repair. While native SQLite holds an
@@ -3604,6 +3604,41 @@ or I/O after a read transaction starts. `quick_check` and the exact global row
 count are explicit operator diagnostics but do not yet have a progress-handler
 deadline. Payload bodies, unrelated indexes, Windows private SQLite ownership,
 and all-family repair remain open Phase 5 release evidence.
+
+### Live decoded-range budget identity checkpoint, 2026-09-03
+
+**Context.** `XetChunkCacheHandle` already canonicalizes handles by directory,
+but the registry previously reused a live handle without comparing budgets. The
+first caller's immutable `CrabRangeCache::capacity` and `CacheCatalog::max_bytes`
+therefore governed later handles while each returned handle reported its own
+requested size. In a multi-repository or mixed VFS/read process, this could
+silently exceed a smaller caller's effective limit or evict against a larger
+caller's unexpected limit.
+
+**Design.** One canonical directory remains one live cache, catalog, fill-lock
+domain, and byte budget. Reopening it with the same budget shares the Arc.
+Reopening it with a different budget returns a typed `BudgetConflict` carrying
+the canonical path plus active and requested byte counts. Shared-read and VFS
+composition retain their established optional-cache policy: only the conflicting
+caller disables range caching and continues with verified origin data; the
+existing owner is neither reconfigured nor replaced. Once the last Arc closes,
+the stale weak registry entry can be replaced and the persisted directory may
+open under a new budget. No second manager or minimum/maximum budget arbitration
+path is introduced.
+
+**Acceptance criteria and focused proof.** Same-directory/same-budget opens
+still share one Arc. Same-directory/different-budget opens return the exact
+typed conflict. Dropping the final handle admits a new budget. Focused
+`crab-cache`, `crab-read`, and `crab-vfs` tests prove both caller fallbacks and
+that the first cache remains usable. The product error adapter attributes a
+direct conflict to `cache.max_bytes` instead of an internal or storage failure.
+
+**Remaining work.** This prevents silent in-process budget drift; it does not
+make repository-local configurations agree across separate processes, unify the
+legacy VFS daemon's 1 GiB/4 GiB defaults with the product's 10 GiB default, or
+complete all-family physical admission and low-watermark reconciliation. Those
+composition decisions remain Phase 3/6 work and must not be hidden by another
+registry key or fallback manager.
 
 ### Cache-write completion checkpoint
 

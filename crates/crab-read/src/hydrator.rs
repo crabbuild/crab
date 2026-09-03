@@ -1000,6 +1000,18 @@ mod tests {
         assert_eq!(std::fs::read(root).unwrap(), b"untouched");
     }
 
+    #[test]
+    fn conflicting_live_budget_disables_only_the_second_runtime_cache() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().join("private-cache");
+        let first = runtime(&root, 1024 * 1024);
+
+        let second = runtime(&root, 512 * 1024);
+
+        assert!(first.chunk_cache.is_some());
+        assert!(second.chunk_cache.is_none());
+    }
+
     struct PartialVectoredWriter;
 
     impl Write for PartialVectoredWriter {

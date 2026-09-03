@@ -1018,6 +1018,10 @@ impl From<crab_cache::CacheError> for CrabError {
                 std::io::ErrorKind::PermissionDenied,
                 error,
             )),
+            error @ crab_cache::CacheError::BudgetConflict { .. } => Self::Configuration {
+                key: "cache.max_bytes".into(),
+                origin: error.to_string(),
+            },
             crab_cache::CacheError::HashMismatch { requested, actual } => {
                 Self::HashMismatch { requested, actual }
             }
@@ -3896,6 +3900,20 @@ mod tests {
         };
         assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(source.get_ref().unwrap().is::<crab_cache::CacheError>());
+    }
+
+    #[test]
+    fn cache_budget_conflict_is_a_configuration_error() {
+        let error = CrabError::from(crab_cache::CacheError::BudgetConflict {
+            path: "cache/chunks".into(),
+            active_bytes: 1024,
+            requested_bytes: 512,
+        });
+        let CrabError::Configuration { key, origin } = error else {
+            panic!("cache budget conflicts must retain configuration attribution");
+        };
+        assert_eq!(key, "cache.max_bytes");
+        assert!(origin.contains("active budget is 1024 bytes, requested 512 bytes"));
     }
 
     #[test]

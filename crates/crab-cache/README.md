@@ -51,6 +51,12 @@ or reported as valid. Dropping an async scan cancels its blocking worker via a
 child token. This does not qualify catalog reservation protection, database
 ownership, complete physical accounting, or bounded-time LRU reconciliation.
 
+Decoded-range handles are canonicalized by cache directory within one process.
+Every live handle for that directory must use the same byte budget; a conflicting
+caller receives a typed configuration error and uses its existing verified-origin
+fallback instead of silently inheriting the first caller's limit. After the last
+handle closes, the same persisted directory may reopen with a new budget.
+
 Product stats and doctor use `health::inspect_cache`: one pinned root, one
 streaming filesystem walk, a read-only catalog transaction, and read-only
 validation of the shard-hint database schema, row shape, row bound, and SQLite
