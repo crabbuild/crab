@@ -160,7 +160,7 @@ pub fn run_prune_with_cancel(
 
     // Step 2: Build all referenced OIDs and the Git LFS-style protected subset.
     let referenced = collect_referenced_oids()?;
-    let protected = collect_protected_oids(options.recent || options.force)?;
+    let protected = collect_protected_oids(options.recent || options.force, cancel)?;
 
     tracing::debug!(
         referenced_count = referenced.len(),
@@ -451,10 +451,14 @@ fn parse_hex32(hex: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-fn collect_protected_oids(prune_recent: bool) -> Result<HashSet<String>> {
+fn collect_protected_oids(
+    prune_recent: bool,
+    cancel: &CancellationToken,
+) -> Result<HashSet<String>> {
     let mut protected = HashSet::new();
 
-    for rev_args in protected_revision_arg_sets(prune_recent)? {
+    for rev_args in protected_revision_arg_sets(prune_recent, cancel)? {
+        check_cancelled(cancel)?;
         if rev_args.is_empty() {
             continue;
         }
@@ -464,7 +468,11 @@ fn collect_protected_oids(prune_recent: bool) -> Result<HashSet<String>> {
     Ok(protected)
 }
 
-fn protected_revision_arg_sets(prune_recent: bool) -> Result<Vec<Vec<String>>> {
+fn protected_revision_arg_sets(
+    prune_recent: bool,
+    cancel: &CancellationToken,
+) -> Result<Vec<Vec<String>>> {
+    check_cancelled(cancel)?;
     let mut sets = Vec::new();
 
     sets.push(vec!["HEAD".to_owned()]);
@@ -479,14 +487,14 @@ fn protected_revision_arg_sets(prune_recent: bool) -> Result<Vec<Vec<String>>> {
     sets.push(unpushed_revision_args()?);
 
     if !prune_recent {
-        let offset_days = crate::lfs::recent::git_config_u64("lfs.pruneoffsetdays", 3)?;
-        let recent_refs = crate::lfs::recent::recent_ref_oids(offset_days)?;
+        let offset_days = crate::lfs::recent::git_config_u64("lfs.pruneoffsetdays", 3, cancel)?;
+        let recent_refs = crate::lfs::recent::recent_ref_oids(offset_days, cancel)?;
         let mut recent_roots = vec!["HEAD".to_owned()];
         recent_roots.extend(recent_refs.iter().cloned());
         if !recent_refs.is_empty() {
             sets.push(recent_refs.clone());
         }
-        let recent_commits = crate::lfs::recent::recent_commit_oids(&recent_roots)?;
+        let recent_commits = crate::lfs::recent::recent_commit_oids(&recent_roots, cancel)?;
         if !recent_commits.is_empty() {
             sets.push(recent_commits);
         }
@@ -991,6 +999,18 @@ fn format_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn cancelled_prune_selection_stops_before_git_queries() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        for prune_recent in [false, true] {
+            assert!(matches!(
+                collect_protected_oids(prune_recent, &cancel),
+                Err(CrabError::Cancelled)
+            ));
+        }
+    }
 
     #[test]
     fn format_size_display() {

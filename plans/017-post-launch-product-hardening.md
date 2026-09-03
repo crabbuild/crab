@@ -2668,10 +2668,11 @@ the monotonically increasing command index for uniqueness and preserve full
 command names/arguments in the report. Text and binary command paths share
 this logger. Performance fixture labels and other qualification runners are
 unchanged; this is not a claim that their separate log owners are bounded.
-Two filesystem tests fail before the correction and pass afterward: long
-ASCII/multibyte labels remain writable, repeated/truncated labels do not
-overwrite logs, and short labels stay readable. The protocol CI job runs
-these tests; ten existing matrix-verifier tests and workflow syntax pass.
+Two filesystem tests pass after the correction; the long-label regression
+fails beforehand. Long ASCII/multibyte labels remain writable, repeated or
+truncated labels do not overwrite logs, and short labels stay readable. The
+protocol CI job runs these tests; ten existing matrix-verifier tests and
+workflow syntax pass.
 No expected-failure list, check inventory or evidence baseline is weakened.
 Require a fresh terminal current-Git matrix run to close this failure.
 
@@ -2690,6 +2691,73 @@ Retain that failed report and unchanged-source proof. Correct the fixture to
 explicitly track visible paths, assert two staged identities and unchanged
 Git index before any long replay, then rerun in a new namespace. This failure
 neither proves a native push regression nor completes original-history proof.
+
+### Recent-selection process ownership: 2026-09-03 UTC
+
+**Context.** After fetch/pull adopted verified LFS discovery, the preceding
+recent-ref selection still used four unsupervised Git command sites:
+integer/boolean config, ref listing and commit listing. Fetch carried its
+caller token around those calls but not into them. Prune called the same
+helpers without a token while retaining its repository-scoped prune lock.
+This left a stalled config/ref query outside the shared process lifetime.
+
+**Implementation boundary.** `crab/src/lfs/recent.rs` now routes all four
+sites through the existing `git::process` owner. Fetch and prune pass their
+same caller token; no fresh token replaces it. Stdout and stderr each have
+the existing 64 MiB capture bound, and pipe workers are joined before return.
+An oversized stream fails the operation rather than exposing partial output.
+Spawn/read errors retain their I/O source. The shared owner retains its
+10-second cancellation grace and platform process-tree cleanup. This is a
+per-stream bound, not a total-memory SLO. No dependency, config option,
+alternate transport policy or subprocess supervisor is added.
+
+Git config still owns typed canonicalization and missing-key status. The
+helper preserves existing defaults and invalid-value errors: integer suffixes
+remain accepted, zero remains meaningful and negative unsigned values fail.
+The contract comes from [Git config](https://git-scm.com/docs/git-config) and
+the supported old client's
+[`get_value` implementation](https://github.com/git/git/blob/v2.30.9/builtin/config.c#L297-L381).
+
+**Acceptance.** Focused tests must prove pre-cancelled queries do not access
+a repository; fresh real-Git ref/commit selection and previous LFS pointer
+versions remain visible; typed config defaults, suffixes and invalid values
+behave identically; excess output on either pipe fails; and a stalled real
+Git child is stopped/joined before cancellation returns. CI runs recent and
+prune tests in Linux and native Windows/macOS profiles. The stalled-child and
+oversized-pipe fixtures are Unix-only; generic Windows cleanup still requires
+its separate process-owner contracts. Qualification is not complete until
+these changes have exact-candidate terminal evidence.
+
+Local checkpoint: 55 selected recent, fetch, prune and shared-discovery tests
+pass on macOS, including seven new tests. Correctness/suspicious Clippy,
+workspace formatting and workflow syntax pass. Other Clippy warning classes
+remain in unchanged fetch/prune code; this is not an all-warnings-clean claim.
+The new production lines carry the existing token across command signatures
+and consolidate four command captures behind one private owner call; they do
+not introduce a second selection algorithm.
+
+**Remaining sibling work; not silently treated as fixed.** Prune still has
+unsupervised ref/worktree/object commands, an unchecked batch parser and an
+optional in-process walker that skips read errors. Both recent callers still
+inherit Git's existing repository/transport environment; unifying that policy
+requires resolving the whole prune selection against one explicit repository.
+The tagged recent implementation's ambiguous-revision-as-empty behavior and
+malformed-row skipping remain unchanged in this cancellation-only patch.
+Replace those with typed unborn-ref handling and fail-closed inventory proof
+in the next selection packet. Acceptance: invalid/missing selected revisions
+must never produce a successful incomplete retention set or deletion.
+
+The [Git LFS config contract](https://github.com/git-lfs/git-lfs/blob/main/docs/man/git-lfs-config.adoc)
+also reveals selection gaps independent of process ownership: previous-change
+windows are relative to each selected ref's tip, remote refs belong to the
+selected remote, and prune offsets apply to both recent windows. Current
+helpers use wall-clock commit cutoffs and all remote refs. Qualify old ref
+tips, two remotes, non-monotonic commit dates, offset boundaries, unborn HEAD
+and staged-only pointers before changing policy. Prune's current `--force`
+path also disables recent retention despite the documented confirmation-only
+contract. This requires a retention-specific correction and destructive-path
+tests; the new cancellation proof does not certify prune safety or Git LFS
+selection parity.
 
 ## Phase 3: Close metadata, maintenance, and GC scale gates
 

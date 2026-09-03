@@ -270,6 +270,11 @@ actions describe Crab's object-store path instead of a Git LFS HTTP endpoint.
 `lfs.fetchrecentrefsdays` / `lfs.fetchrecentremoterefs` and commits selected by
 `lfs.fetchrecentcommitsdays`.
 
+Git subprocesses used for recent-ref selection honor command cancellation and
+cap captured stdout and stderr independently at 64 MiB. Oversized output is
+an error, not a truncated selection. This bound does not cover total command
+memory or imply that every prune traversal is cancellable.
+
 ### Example
 
 ```bash

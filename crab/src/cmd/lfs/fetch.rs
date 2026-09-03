@@ -472,12 +472,14 @@ fn collect_lfs_pointers(
         refs.to_vec()
     };
     if recent {
-        let recent_refs = crate::lfs::recent::recent_ref_oids_in(repo_dir, 0)?;
+        let recent_refs = crate::lfs::recent::recent_ref_oids_in(repo_dir, 0, cancel)?;
         check_cancelled(cancel)?;
         let mut roots = selected.clone();
         roots.extend(recent_refs.iter().cloned());
         selected.extend(recent_refs);
-        selected.extend(crate::lfs::recent::recent_commit_oids_in(repo_dir, &roots)?);
+        selected.extend(crate::lfs::recent::recent_commit_oids_in(
+            repo_dir, &roots, cancel,
+        )?);
     }
     check_cancelled(cancel)?;
     let mut seen = HashSet::new();
@@ -696,6 +698,32 @@ mod tests {
             .expect("fetch must resolve promised Git blobs before LFS transfer");
 
         assert_eq!(entries, [("asset.bin".to_owned(), ptr)]);
+    }
+
+    #[test]
+    fn recent_fetch_includes_previous_pointer_versions() {
+        let _guard = crate::test::git_repo::GIT_DIR_MUTEX.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fixture_git(root, &["init", "-q"]);
+        fixture_git(root, &["config", "lfs.fetchrecentcommitsdays", "7"]);
+        fixture_git(root, &["config", "lfs.fetchrecentrefsdays", "7"]);
+        fixture_git(root, &["config", "lfs.fetchrecentremoterefs", "false"]);
+        let previous = pointer(b"previous version");
+        fs::write(root.join("asset.bin"), previous.serialize()).unwrap();
+        commit_fixture(root);
+        let current = pointer(b"current version");
+        fs::write(root.join("asset.bin"), current.serialize()).unwrap();
+        commit_fixture(root);
+        let entries =
+            collect_lfs_pointers(root, false, true, &[], &CancellationToken::new()).unwrap();
+        assert_eq!(
+            entries,
+            [
+                ("asset.bin".to_owned(), current),
+                ("asset.bin".to_owned(), previous)
+            ]
+        );
     }
 
     #[test]
