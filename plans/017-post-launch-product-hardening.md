@@ -4862,13 +4862,15 @@ the source retains tags absent from the earlier main-only publication. This is
 successful full pointer inspection and drift classification, not convergence
 or permission to publish those tags. Observed cold/warm durations were
 106,418/70,032 ms; neither uncontrolled development-host timings nor the separate
-debug run establish a performance improvement. The debug candidate run
-`phase2-k8s-readonly-union-debug-d45ac62-20260903` remains separate and pending.
+debug run establish a performance improvement. The separate debug candidate
+run `phase2-k8s-readonly-union-debug-d45ac62-20260903` also completed with
+status `ok`, nine commands, ten checks, and one discovered/verified pointer
+hash in both inspections. It does not qualify the later cancellation fix.
 
 The controlled regression gate, long destination-only remote ancestry, and
-GC lifetime remain open. Independently qualify caller-abortion ownership of
-the pointer-scan blocking worker: cooperative cancellation coverage alone does
-not prove that dropping the caller retains its cache until that worker exits.
+GC lifetime remain open. The pointer worker's caller-abortion ownership proof
+is recorded below: cooperative cancellation coverage alone does not prove
+that dropping the caller retains its cache until that worker exits.
 
 ### Pointer-scan cancellation ownership: 2026-09-03 UTC
 
@@ -4903,11 +4905,40 @@ Both pointer-collector callers now express their actual ownership boundary.
 passes: competing acquisition fails until the worker drains, then the cache
 is reusable and the parent token remains active. A real Git raw-blob test
 checks ownership during verification and release after both success and an
-injected terminal error. All 72 mirror tests pass. Before treating this as
-release-qualified, build the committed candidate and rerun mutation-denying
-RustFS inspection, cancellation/cache reuse, and cold/warm full-ref Kubernetes
-inspection with recorded binary identity. These functional checks do not
-establish controlled performance or complete Phase 2's remaining gates.
+injected terminal error. All 72 mirror tests pass; the two focused tests also
+pass after tightening the worker-drain check to include actual lock release.
+
+The release build of committed candidate `86744b7` succeeds; binary SHA-256:
+`e319c2f960421d0b9982034c5740b8489c40a8086f39b8c4cfe95a180ce3a685`.
+`phase2-mirror-readonly-pointer-owner-86744b7-20260903/artifacts/report.json`
+passes 31 commands/12 checks: equal/source-ahead/Crab-ahead/diverged inspection,
+incomplete-cache recovery, missing/corrupt immutable data refusal, and zero
+inspection mutation attempts. SIGTERM during the blocked canonical index read
+returns exit 10 in 323 ms before the response is released; retry reuses that
+cache successfully. This exercises command cancellation, while the unit
+regression specifically covers dropping the pointer worker's async caller.
+
+`phase2-mirror-hook-pointer-owner-86744b7-20260903/artifacts/report.json`
+passes 61 commands/16 checks by invoking the existing installed-hook batch
+qualification directly. Custom hook location, detached HEAD, revision
+expressions, annotated tags, mixed ref updates/deletion, pointer/LFS bytes,
+strict clone fsck, second-remote rejection/retry, explicit rewrite and
+whole-batch conflict refusal all pass. Binary identity is unchanged. No
+mirror-cache use/clean markers appear inside the hook source repository.
+
+`phase2-k8s-pointer-owner-release-86744b7-20260903/artifacts/report.json`
+is `ok`, with nine commands/11 checks. Cold/warm inspection retains all 1,246
+refs, matches the published main ref, discovers/verifies the one managed file
+hash, and yields matching recipe digests. Source and binary identities remain
+unchanged; there are zero remote mutation attempts. Both results correctly
+remain `source_ahead`/`ci_passed: false` because the source's tags were not part
+of the earlier main-only publication. Observed durations are 109,911/69,729 ms,
+not a controlled baseline/candidate performance comparison.
+
+These functional checks do not establish controlled performance or complete
+Phase 2's remaining gates. The retained dirty GC regression and generated web
+files are not part of the release source change; their presence is recorded
+by the qualification provenance rather than claimed to be a clean checkout.
 
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
