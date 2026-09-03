@@ -2340,6 +2340,105 @@ repeat same-artifact push/dedup/hydration with unavailable cache service;
 qualify multipart metadata warming separately with bounded resources. A passing
 small-object regression is not proof that the CI failure is fully resolved.
 
+#### Installed metadata warming and smoke isolation, 2026-09-03
+
+Exact-source revision `ff581146458d0851d4f7af79b26ff02d34cd7b0b` is installed
+through isolated `make install`, including both release CLI feature shapes and
+the cache server. `crab version` identifies `ff58114`, built
+`2026-09-03 09:48:57 UTC`. SHA-256 fingerprints:
+
+- CLI: `b8c8b582def9168c0bd45eba07cb29a14d32ce116d486b8336766e1648411984`.
+- Server: `754e61ccdf005d5be02ef66d32e41fb9f21ec6f6423828f1d8efba4d16750e64`.
+
+The full cache-service CI job passes on this commit: run `33740603915`, job
+`100601444011`. This closes that reproduced small-object CI warming failure,
+not all CI: architecture guardrails remain red, and Rust quality run
+`33740603989`, job `100601622405`, fails linking the CLI test binary with
+signal 7 / Bus error. Native mount/provider jobs are skipped, not qualified.
+
+**Qualification safety incident — unresolved cleanup.** Running the old
+cache-service harness against shared bucket `crabbuild` passed 1,167 checks /
+78 commands but unconditionally wrote four 4,096-byte synthetic objects under
+`.crab/chunk_index_db/`: `compacted/00000000000000000005.sst`,
+`manifest/00000000000000000006.manifest`, `wal/00000000000000000007.sst`, and
+`compactions/00000000000000000008.compactions`. The preflight audit missed
+these fixed global fixture keys. Report and fixture bytes remain retained at
+`metadata-warming.o3ZGRC/cache-service-ff58114/artifacts/`, relative to the
+workspace-volume qualification root `cache-f410.E7nt8I`.
+
+Read-only inspection shows versioning is off; the inspected manifest fixture
+has only its current null version. Prior contents or prior absence cannot be
+proved, and no claim of harmlessness or recoverable historical contents is
+made. Existing metadata GC boundaries predate these writes but do not establish
+prior absence. No repair, deletion, service reset, or bucket-wide GC occurred.
+The user was notified and asked to approve removing only these exact four
+keys after verifying their current bodies still match the retained fixtures,
+with local copies retained. That approval and comparison remain pending.
+The old harness redirected real chunk-index writes into its run prefix;
+synthetic global route probes bypassed that isolation. This incident must not
+be described as a normal global-index update or a clean isolation pass.
+
+The maintained harness now rejects an existing owned bucket before writes,
+requires a fresh non-traversing run directory, and preserves failed status on
+unexpected exceptions without swallowing their original traceback. It uses
+the default chunk-index path in a new disposable bucket. Raw synthetic writes
+are confined to the run's two explicit prefixes and use `If-None-Match: *`.
+Global metadata probes reuse nonempty objects observed from the real push;
+empty WAL fencing markers are not replaced. All 14 immutable route families
+remain covered, including read/range/warming and corruption repair.
+
+Dependency contract: AWS documents that [CreateBucket can return success for
+an already-owned bucket in us-east-1](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateBucket.html),
+so success alone is not ownership proof. Preflight checks the signed
+[ListBuckets inventory](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListBuckets.html)
+first and fails closed on listing errors. This requires bucket-listing
+permission and an exclusively assigned fresh name, not concurrent reuse of
+the same name. [PutObject's create-only condition](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html)
+protects each synthetic key independently. No dependency or product
+configuration is added, and existing report assertions are not weakened.
+
+Retained attempts and proof, all beneath `metadata-warming.o3ZGRC/`:
+
+| Run | Result |
+|---|---|
+| `cache-service-safe-ff58114` | Failed: no global compacted object among 424 checks / 49 commands, because the old run-prefix override remained. Retained unchanged. |
+| `cache-service-isolated-ff58114` | Failed with an uncaught stale-selector `AttributeError` after 938 checks / 62 commands. Its last report still says running; that is incomplete evidence, not success. Caller migration and failed-status persistence are now repaired. |
+| `cache-service-isolated-v3-ff58114` | **1,179 checks / 82 commands pass**, in dedicated bucket `crabbuild-cache-ff58114-o3zgrc-v3`, on the unchanged installed `ff58114` binaries. All advertised immutable families use real global objects or scoped synthetic fixtures. |
+| `fixture-create-only-ff58114` | Two checks / three commands: first write succeeds, differing second write receives `PreconditionFailed`, subsequent GET returns original bytes. The denied command is intentional; object and local report remain retained. |
+| `existing-bucket-rejection-ff58114` | Expected nonzero preflight rejection against the dedicated v3 bucket. Only `list-buckets` executes; no bucket creation or object write follows. |
+
+The successful v3 run uses harness SHA-256
+`374482ace1ca9a9b448d5e478a54fce6c16cb60d463fa6cd27b3aa51810bc0b9`.
+Cold-named, warm, and restart hydration each have 18 service hits, zero service
+misses/fetches, and zero origin xorb/shard GETs. Each reconstructed 512 KiB file
+matches independent SHA-256
+`dac1b96daa3a0961937f0be49f611a3ca71622537dbeb1de393a4cfbeae4da29`.
+Control-plane metadata GETs remain present and expected. The standalone Python
+verifier passes 1,025 checks; installed Rust `evidence verify` and `summarize`
+both pass, reporting 249 verified checks. These verify the same evidence,
+not three independent workload repetitions.
+
+The embedded harness `--audit-report` remains **red** on two stale total-origin
+GET assertions: its cold/warm check requires an empty complete key map, unlike
+the live harness and standalone Python/Rust consumers, which require zero
+payload GETs and zero service fetches while permitting control-plane traffic.
+No verifier has been edited to hide this disagreement. Canonicalizing these
+contracts with negative fixtures is a remaining qualification task.
+
+Eight new harness safety tests pass. CI now selects and runs them when either
+the harness or its safety test changes. Workspace formatting, whitespace,
+documentation content audit (192 pages, no findings), and link validation
+(398 rendered pages / 4,292 fragments) pass. Full web/native/provider and fresh
+post-harness-change CI are not claimed. The existing two generated Fumadocs
+files remain excluded from this work.
+
+Next acceptance: resolve authorized incident cleanup without claiming recovery
+of unknown prior data; reconcile report consumers; repeat unavailable-service
+push/dedup/hydration and multipart metadata warming; integrate the separate
+large-file local-cache qualification prototypes. The dedicated-bucket service
+smoke supplements the earlier requested `crabbuild` command workload and does
+not replace or close the remaining Plan 017 phases.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

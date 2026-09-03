@@ -152,6 +152,14 @@ and the active doctor probe.
 For S3-compatible staging environments such as RustFS or MinIO, run the
 RustFS smoke before rollout:
 
+Use a new dedicated disposable bucket, never a production or shared repository
+bucket. Existing owned buckets are rejected before writes; bucket-listing
+permission is required. Real push operations update the bucket-global chunk
+index. Synthetic origin fixtures are create-only and restricted to each run's prefixes; global
+metadata route probes reuse real objects written by that run. Choose a fresh
+`--run-id` when specifying one: an existing run directory is rejected to retain
+its evidence. The harness does not delete the bucket after completion.
+
 ```bash
 cd crab
 make cache-service-rustfs-smoke

@@ -7,6 +7,10 @@ reads, then pushes and hydrates a real Crab repository through the cache
 service. A local forwarding proxy sits between the cache server and RustFS so
 the report can prove how many origin GET and PUT requests actually reached
 object storage.
+
+Use a new dedicated disposable bucket and a fresh run ID. Synthetic origin objects
+are create-only and confined to run prefixes; global metadata route probes use
+real objects observed during this run's push. Existing reports are never reused.
 """
 
 from __future__ import annotations
@@ -803,7 +807,16 @@ class CacheServiceRustfsSmoke:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.run_id = args.run_id or make_run_id()
+        if self.run_id in {".", ".."} or any(
+            not (character.isascii() and (character.isalnum() or character in "._-"))
+            for character in self.run_id
+        ):
+            raise SmokeError("run ID must be one non-traversing ASCII path component")
         self.run_root = args.root / self.run_id
+        try:
+            self.run_root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise SmokeError("run directory already exists; choose a fresh run ID") from exc
         self.logs = self.run_root / "logs"
         self.artifacts = self.run_root / "artifacts"
         self.private = self.run_root / "private"
@@ -843,7 +856,7 @@ class CacheServiceRustfsSmoke:
                 "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "CRAB_CACHE_DIR": str(self.client_cache),
                 "CRAB_CACHE_PSK": self.args.cache_psk,
-                "CRAB_METADB_CHUNK_INDEX_PATH": f"{REMOTE_PREFIX}/{self.run_id}/metadb/chunk_index_db/",
+                "CRAB_METADB_CHUNK_INDEX_PATH": ".crab/chunk_index_db/",
                 "GIT_TERMINAL_PROMPT": "0",
             }
         )
@@ -1284,7 +1297,6 @@ class CacheServiceRustfsSmoke:
         return server_config_path
 
     def preflight(self) -> None:
-        self.run_root.mkdir(parents=True, exist_ok=True)
         self.logs.mkdir(parents=True, exist_ok=True)
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.private.mkdir(parents=True, exist_ok=True)
@@ -1332,17 +1344,20 @@ class CacheServiceRustfsSmoke:
             return
         self.check("rustfs-endpoint-reachable", status < 500, {"status": status})
 
-        record = self.run_aws(
-            "create bucket",
-            ["create-bucket", "--bucket", self.args.bucket],
-            check=False,
-        )
-        stderr = Path(record.stderr_log).read_text(encoding="utf-8", errors="replace")
-        already_exists = "BucketAlready" in stderr or "already" in stderr.lower()
+        self.create_disposable_bucket()
+
+    def create_disposable_bucket(self) -> None:
+        # CreateBucket can succeed for an already-owned bucket. Refuse reuse
+        # before any write; real push exercises the default bucket-global index.
+        record = self.run_aws("list buckets", ["list-buckets", "--output", "json"])
+        buckets = load_json_file(Path(record.stdout_log))["Buckets"]
         self.check(
-            "bucket-create-or-exists",
-            record.exit_code == 0 or already_exists,
-            {"exit_code": record.exit_code, "already_exists": already_exists},
+            "bucket-is-new",
+            all(bucket["Name"] != self.args.bucket for bucket in buckets),
+            {"bucket": self.args.bucket},
+        )
+        self.run_aws(
+            "create bucket", ["create-bucket", "--bucket", self.args.bucket]
         )
 
     def start_origin_proxy(self) -> None:
@@ -2158,11 +2173,21 @@ class CacheServiceRustfsSmoke:
         return f"{REMOTE_PREFIX}/{self.run_id}/direct/{name}/packs/{identity}.pack"
 
     def put_origin_object(self, key: str, data: bytes) -> None:
+        # Synthetic bodies must never become bucket-global metadata or overwrite
+        # another run. Real global objects are created only through Crab's push.
+        prefixes = (f"{REMOTE_PREFIX}/{self.run_id}/", f"{REMOTE_PREFIX}-denied/{self.run_id}/")
+        if not key.startswith(prefixes) or "\\" in key or any(
+            part in {"", ".", ".."} for part in key.split("/")
+        ):
+            raise SmokeError(f"synthetic origin write is outside this run's prefixes: {key}")
         body_path = self.artifacts / f"{slug(key)}.bin"
         body_path.write_bytes(data)
         self.run_aws(
             "put " + key,
-            ["put-object", "--bucket", self.args.bucket, "--key", key, "--body", str(body_path)],
+            [
+                "put-object", "--bucket", self.args.bucket, "--key", key,
+                "--body", str(body_path), "--if-none-match", "*",
+            ],
         )
 
     def get_origin_object(self, key: str) -> bytes:
@@ -3601,34 +3626,26 @@ class CacheServiceRustfsSmoke:
                 "{repo}/file_index_db/compactions/*.compactions",
                 f"{prefix}/file_index_db/compactions/00000000000000000004.compactions",
             ),
-            (
-                ".crab/chunk_index_db/compacted/*.sst",
-                ".crab/chunk_index_db/compacted/00000000000000000005.sst",
-            ),
-            (
-                ".crab/chunk_index_db/manifest/*.manifest",
-                ".crab/chunk_index_db/manifest/00000000000000000006.manifest",
-            ),
-            (
-                ".crab/chunk_index_db/wal/*.sst",
-                ".crab/chunk_index_db/wal/00000000000000000007.sst",
-            ),
-            (
-                ".crab/chunk_index_db/compactions/*.compactions",
-                ".crab/chunk_index_db/compactions/00000000000000000008.compactions",
-            ),
         ]
         return [
             (pattern, key, deterministic_bytes(4096, f"{self.run_id}:{pattern}"))
             for pattern, key in specs
         ]
 
-    def origin_key_matching(self, pattern: str, predicate: Any) -> str:
+    def origin_object_matching(self, pattern: str, predicate: Any) -> tuple[str, bytes]:
         state = self.require_proxy_state()
-        keys = sorted(key for key in state.put_counts_snapshot() if predicate(key))
+        keys = sorted(
+            (key for key in state.put_counts_snapshot() if predicate(key)), reverse=True
+        )
         name = f"route-contract-origin-key-{slug(pattern)}"
         self.check(name, bool(keys), {"matches": keys[:5]})
-        return keys[0]
+        for key in keys:
+            body = self.get_origin_object(key)
+            # SlateDB also uploads empty WAL fencing markers. Exercise range
+            # reads using a real non-empty table rather than replacing a marker.
+            if len(body) > 3:
+                return key, body
+        raise SmokeError(f"no non-empty origin object produced by this run for {pattern}")
 
     def verify_advertised_mutable_route_contract_behavior(self) -> None:
         before_stats = self.cache_admin_stats()
@@ -3710,24 +3727,33 @@ class CacheServiceRustfsSmoke:
         )
 
     def verify_advertised_immutable_route_contract_behavior(self) -> None:
-        xorb_key = self.origin_key_matching(
+        xorb_key, xorb_body = self.origin_object_matching(
             ".crab/xorbs/{first-two-hex}/{hash}",
             lambda key: key.startswith(".crab/xorbs/"),
         )
-        shard_key = self.origin_key_matching(
+        shard_key, shard_body = self.origin_object_matching(
             ".crab/shards/{first-two-hex}/{hash}",
             lambda key: key.startswith(".crab/shards/"),
         )
-        xorb_body = self.get_origin_object(xorb_key)
-        shard_body = self.get_origin_object(shard_key)
         synthetic_specs = self.synthetic_immutable_route_specs()
+        real_specs = [
+            (".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body),
+            (".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body),
+        ]
+        for family, extension in (
+            ("compacted", "sst"), ("manifest", "manifest"),
+            ("wal", "sst"), ("compactions", "compactions"),
+        ):
+            prefix = f".crab/chunk_index_db/{family}/"
+            suffix = f".{extension}"
+            pattern = f"{prefix}*{suffix}"
+            key, body = self.origin_object_matching(
+                pattern, lambda key: key.startswith(prefix) and key.endswith(suffix)
+            )
+            real_specs.append((pattern, key, body))
 
-        self.assert_immutable_route_pattern_cached(
-            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key
-        )
-        self.assert_immutable_route_pattern_cached(
-            ".crab/shards/{first-two-hex}/{hash}", shard_key
-        )
+        for pattern, key, _body in real_specs:
+            self.assert_immutable_route_pattern_cached(pattern, key)
         for pattern, key, data in synthetic_specs:
             self.assert_immutable_route_pattern_cached(pattern, key, data)
         self.check(
@@ -3736,13 +3762,7 @@ class CacheServiceRustfsSmoke:
             == sorted(EXPECTED_IMMUTABLE_ROUTE_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_route_behaviors]},
         )
-        self.assert_immutable_route_pattern_push_warmed(
-            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body
-        )
-        self.assert_immutable_route_pattern_push_warmed(
-            ".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body
-        )
-        for pattern, key, data in synthetic_specs:
+        for pattern, key, data in real_specs + synthetic_specs:
             self.assert_immutable_route_pattern_push_warmed(pattern, key, data)
         self.check(
             "route-contract-immutable-write-patterns-covered",
@@ -4884,12 +4904,12 @@ class CacheServiceRustfsSmoke:
                 lambda key: key.startswith(".crab/shards/"),
             ),
         ):
-            key = self.origin_key_matching(pattern, predicate)
+            key, origin_body = self.origin_object_matching(pattern, predicate)
             object_type, cache_file = self.cache_file_for_integrity_key(key)
             status, headers, body = self.cache_get(key)
             self.check(
                 f"integrity-repair-{object_type}-pre-restart-hot-read",
-                status == 200 and headers.get("x-cache") == "HIT",
+                status == 200 and headers.get("x-cache") == "HIT" and body == origin_body,
                 {"status": status, "x-cache": headers.get("x-cache", "")},
             )
             self.check(
@@ -6189,14 +6209,19 @@ def main() -> int:
         print(f"evidence_manifest: {summary['evidence_manifest']}")
         return 0
 
-    smoke = CacheServiceRustfsSmoke(args)
+    smoke = None
     try:
+        smoke = CacheServiceRustfsSmoke(args)
         smoke.run()
-    except SmokeError as exc:
-        smoke.report.status = "failed"
-        smoke.write_report()
+    except Exception as exc:
+        if smoke is not None:
+            smoke.report.status = "failed"
+            smoke.write_report()
+        if not isinstance(exc, SmokeError):
+            raise
         print(f"FAILED: {exc}", file=os.sys.stderr)
-        print(f"report: {smoke.report.artifacts.get('report', '')}", file=os.sys.stderr)
+        if smoke is not None:
+            print(f"report: {smoke.report.artifacts.get('report', '')}", file=os.sys.stderr)
         return 1
     print("PASS cache-service RustFS smoke")
     print(f"report: {smoke.report.artifacts.get('report', '')}")

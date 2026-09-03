@@ -28,7 +28,7 @@ on:
       - "crab/deploy/cache-service/**"
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
-      - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
+      - "crab/scripts/e2e/*cache_service_rustfs_smoke.py"
       - "packages/web/content/docs/cli/cache-service/**"
   pull_request:
     paths:
@@ -54,7 +54,7 @@ on:
       - "crab/deploy/cache-service/**"
       - "crab/scripts/validate-cache-service-manifests.sh"
       - "crab/scripts/verify-cache-service-smoke-report.py"
-      - "crab/scripts/e2e/run_cache_service_rustfs_smoke.py"
+      - "crab/scripts/e2e/*cache_service_rustfs_smoke.py"
       - "packages/web/content/docs/cli/cache-service/**"
   workflow_dispatch:
 
@@ -106,6 +106,9 @@ jobs:
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           aws --version
+
+      - name: Check smoke storage isolation
+        run: python3 crab/scripts/e2e/test_run_cache_service_rustfs_smoke.py
 
       - name: Validate cache service manifests
         working-directory: crab
