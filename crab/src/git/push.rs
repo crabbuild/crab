@@ -16579,47 +16579,6 @@ impl PushPipeline {
             None
         };
 
-        // LFS objects are dependencies of the Git refs just like xorbs and
-        // packs. Publish and re-verify them at this shared boundary before
-        // either native or remote-helper pushes can make a ref visible.
-        if let (Some(store), Some((sha_map, decisions))) = (self.store.as_ref(), preflight.as_ref())
-        {
-            let tips: Vec<String> = self
-                .specs
-                .iter()
-                .filter(|spec| {
-                    !spec.src.is_empty()
-                        && matches!(
-                            decisions.get(&spec.dst),
-                            Some(RefUpdateDecision::Proceed { .. })
-                        )
-                })
-                .filter_map(|spec| sha_map.get(&spec.src).cloned())
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect();
-            // Existing remote closures already passed this durability gate.
-            // Excluding every pinned remote tip keeps partial-clone pushes
-            // proportional to newly introduced history instead of re-reading
-            // every ordinary blob in the repository on every push.
-            let remote_tips = self
-                .base_manifest()
-                .await
-                .as_ref()
-                .map(|manifest| manifest.refs.values().cloned().collect())
-                .unwrap_or_default();
-            let publication = crate::lfs::publication::publish_reachable(
-                store.as_storage().clone(),
-                self.router.repo_prefix().to_owned(),
-                self.common_git_dir()?,
-                tips,
-                remote_tips,
-                &self.cancel,
-            )
-            .await;
-            self.at_stage(PushFailureStage::Preflight, publication)?;
-        }
-
         // Steps 1–4: data preparation (classify phase)
         let classify_result = async {
             self.enumerate_pointers().await?;
@@ -16749,6 +16708,47 @@ impl PushPipeline {
         preflight: PushPreflight,
         mut admission_commit: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<PushResult> {
+        // LFS publication belongs inside the existing writer admission, not
+        // preflight: a waiting/rejected push must not upload dependencies while
+        // a sweep owns the fence. Managed pushes still use private staging.
+        if let (Some(store), Some((sha_map, decisions))) = (self.store.as_ref(), preflight.as_ref())
+        {
+            let tips: Vec<String> = self
+                .specs
+                .iter()
+                .filter(|spec| {
+                    !spec.src.is_empty()
+                        && matches!(
+                            decisions.get(&spec.dst),
+                            Some(RefUpdateDecision::Proceed { .. })
+                        )
+                })
+                .filter_map(|spec| sha_map.get(&spec.src).cloned())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            // Existing remote closures already passed this durability gate.
+            // Excluding every pinned remote tip keeps partial-clone pushes
+            // proportional to newly introduced history instead of re-reading
+            // every ordinary blob in the repository on every push.
+            let remote_tips = self
+                .base_manifest()
+                .await
+                .as_ref()
+                .map(|manifest| manifest.refs.values().cloned().collect())
+                .unwrap_or_default();
+            let publication = crate::lfs::publication::publish_reachable(
+                store.as_storage().clone(),
+                self.router.repo_prefix().to_owned(),
+                self.common_git_dir()?,
+                tips,
+                remote_tips,
+                &self.cancel,
+            )
+            .await;
+            self.at_stage(PushFailureStage::Preflight, publication)?;
+        }
+
         // Step 5-7: one bounded read -> pack -> resume-proof -> upload DAG.
         // Git reachability/locator preparation is independent and joins
         // the same lifecycle. `join!` (not `try_join!`) ensures every stage
@@ -21322,6 +21322,94 @@ mod tests {
                 );
                 assert_eq!(result.failure_stage, Some(PushFailureStage::GitPackUpload));
                 assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gc_sweep_blocks_lfs_publication_before_push_admission() {
+        use sha2::{Digest as _, Sha256};
+
+        let _git_env = CleanGitEnvGuard::new();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for global in [false, true] {
+                    let (source, pipeline, store) = gated_pack_pipeline(2).await;
+                    let content = b"LFS publication must own GC protection";
+                    let pointer = crab_git::lfs_pointer::LfsPointer {
+                        oid: Sha256::digest(content).into(),
+                        size: content.len() as u64,
+                        extensions: Vec::new(),
+                    };
+                    std::fs::write(source.path().join("asset.bin"), pointer.serialize()).unwrap();
+                    for args in [["add", "asset.bin"].as_slice(), &["commit", "-qm", "LFS fixture"]] {
+                        assert!(
+                            Command::new("git")
+                                .current_dir(source.path())
+                                .args(args)
+                                .output()
+                                .unwrap()
+                                .status
+                                .success()
+                        );
+                    }
+                    let local_lfs =
+                        crate::lfs::config::LfsConfig::resolve_storage_dir(source.path()).unwrap();
+                    crate::lfs::cache::install_bytes(
+                        &local_lfs, &pointer.oid, pointer.size, content,
+                    )
+                    .unwrap();
+                    let domain = if global {
+                        pipeline.router.global_prefix()
+                    } else {
+                        pipeline.router.repo_prefix()
+                    };
+                    let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+                        pipeline.store.as_ref().unwrap().inner(),
+                        domain,
+                        Duration::from_secs(60),
+                    )
+                    .await
+                    .unwrap();
+                    let task_pipeline = Arc::clone(&pipeline);
+                    let task =
+                        tokio::task::spawn_local(async move { task_pipeline.execute().await });
+                    let admission = Path::from(
+                        crab_coordination::push_admission::push_admission_prefix(
+                            pipeline.router.repo_prefix(),
+                        )
+                        .unwrap(),
+                    );
+                    let reached_admission = tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            let slots = store.inner.list(Some(&admission))
+                                .try_collect::<Vec<_>>().await.unwrap();
+                            if !slots.is_empty() {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .is_ok();
+                    pipeline.cancel.cancel();
+                    let result = tokio::time::timeout(Duration::from_secs(10), task)
+                        .await.unwrap().unwrap();
+                    let remote = crab_lfs::LfsObjectStore::new(
+                        pipeline.store.as_ref().unwrap().as_storage().clone(),
+                        pipeline.router.repo_prefix(),
+                    );
+                    let uploaded = remote.exists(&pointer.oid).await.unwrap();
+                    sweep.release().await.unwrap();
+                    let (manifest, _) = read_manifest(
+                        pipeline.store.as_ref().unwrap(), &pipeline.router,
+                    ).await.unwrap();
+                    assert!(manifest.refs.is_empty());
+                    let objects = store.inner.list(None).try_collect::<Vec<_>>().await.unwrap();
+                    assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+                    assert!(reached_admission && !result.all_ok() && !uploaded,
+                        "LFS publication escaped writer admission: global={global}, reached={reached_admission}, uploaded={uploaded}");
+                }
             })
             .await;
     }

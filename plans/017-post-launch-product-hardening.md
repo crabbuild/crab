@@ -4940,6 +4940,44 @@ Phase 2's remaining gates. The retained dirty GC regression and generated web
 files are not part of the release source change; their presence is recorded
 by the qualification provenance rather than claimed to be a clean checkout.
 
+### LFS publication admission ordering: 2026-09-03 UTC
+
+**Observed gap.** The shared native/remote-helper push pipeline published LFS
+dependencies during preflight, before repository capacity and GC writer
+admission. Current `main` has the same ordering. A real-Git fixture with a
+locally available LFS payload holds a sweep lease, starts the push, waits for
+its admission attempt, and cancels it. Before the change, the repository-sweep
+case fails because the LFS object has already been uploaded. This proves an
+upload outside admission, not that current GC deletes LFS content or that a
+ref was acknowledged with missing data.
+
+**Change and ownership.** Move the existing reachable-LFS publication gate
+into `execute_admitted`, ahead of the pack/upload work. Keep the same scanner,
+transfer coordinator, byte verification and exact proceeding-ref selection;
+use the refreshed, under-lock base for exclusion tips. Do not add a lease,
+setting, format or second upload implementation. Direct pushes now perform
+this work while their existing capacity/GC permit is renewed. Active-active
+pushes have already acquired their existing writer fences. Managed helpers
+still upload into session-private staging; service-side promotion remains
+inside `ReceiveWriterFences`, not a new client-side repository lease.
+
+**Acceptance.** Repository and global sweep fixtures must reach admission,
+then cancel with no LFS upload, unchanged refs and all acquired push/admission
+leases released. Existing LFS publication, bounded pack/cancellation and
+mirror tests must pass. Both sweep cases now pass, including unchanged refs
+and lease release; the focused 80-test run passes. Qualify the committed release with the installed
+mixed-ref hook and protocol/mirror workflows, including fresh-clone pointer
+and LFS bytes. A passing admission fixture is not the full publication
+lifetime gate.
+
+**Explicit follow-up.** Pointer/deduplication classification still precedes
+writer admission; its reused dependencies require revalidation under the
+publication owner. Mirror's separately composed LFS pre-push guard also runs
+before the prepared push and needs consolidation with that owner. Protection
+through final read-back, managed-grant fault qualification and read-only GC
+observation remain open. Do not mark those sibling surfaces complete from
+this shared-pipeline ordering change.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression
