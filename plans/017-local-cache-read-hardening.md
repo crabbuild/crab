@@ -2101,6 +2101,101 @@ Acceptance still open; do not infer full Phase 4 completion from these tests:
    not a feature-gated variant or an infrastructure failure. Preserve its source
    and canonical product diagnostic policy; do not add a wildcard to hide it.
 
+The continuation integrates `main` at `e26d139` without changing dependencies,
+lockfiles, or the user's generated web files. The missing multipart arm now
+borrows the journal source's display and retains the original error chain.
+The comparison fixture includes interrupted I/O, denied I/O, and opaque journal
+failures: code, exit, category, hints, details, display, retry class, and retained
+storage-source identity must equal direct product conversion. It deliberately
+preserves current CLI `object_store::Generic` policy, including its transient
+retry class; the storage-layer journal retry class remains fatal. Reconciling
+that pre-existing cross-layer policy difference is separate from fixing the
+compile failure and is not silently changed by the borrowed mapping.
+
+The combined default library/binary check and the exact NFS/gix-all binary
+check pass locally. The latter still emits existing reduced-feature unused/dead
+code warnings; it is not a strict-lint pass or native mounted-read proof.
+The full CLI error module passes **59** tests, including the new multipart
+table cases and actual Xet reconstruction classification; all **41** filter-
+process tests pass after integration. The locked default debug CLI binary also
+builds, retaining the existing Darwin unwind-table linker warning. The following
+installed repeat qualifies that integrated artifact; broader CI remains open.
+
+#### Integrated installed repeat, 2026-09-03
+
+Production source `00893ee39937b0a6354923abab433fc3934ded56`; installed through
+`make install` with both install destinations isolated on the workspace volume.
+Version `crab 1.0.1 (00893ee)`, built at `2026-09-03 08:46:47 UTC`; binary SHA-256
+`4533d4ac8c0d2fbef29af4ae217284455ffcd34fb46395e05c8c41b1dc393988`.
+Both release feature shapes and the cache server build successfully. The
+existing RustFS image is unchanged from the command checkpoint above. No
+credentials, global installation, service reset, or remote deletion is part of
+the retained evidence.
+
+All report paths below are relative to workspace-volume run `cache-f410.E7nt8I`.
+The binary lives in `generation-00893ee.IIsZIA/bin/crab`; all three successful
+reports record the same binary fingerprint. They contain **206 passing checks
+across 111 commands**, with no timeouts. Expected origin-denial commands exit 7;
+these are asserted failure-path successes, not successful hydration commands.
+
+| Installed workload | Result / report |
+|---|---|
+| Fresh add/commit/push/clone/read/fault/maintenance workflow | **62 checks / 53 commands**. `generation-00893ee-repeat.9Ej4hE/report.json`; fresh repository prefix `cache-qualification/cache-f410.E7nt8I/generation-00893ee-repeat.9Ej4hE`. Three 128 MiB inputs become four files/512 MiB after the duplicate commit. Fresh initial push adds four xorbs/135,414,077 bytes; duplicate push adds zero; one-MiB edit adds one xorb/1,160,702 bytes. Earlier CAS objects remain unchanged. Independent hashes, pointer commits, final Git state, and `fsck` pass. |
+| Cold versus warm payload reads | Fresh cold hydrate: 18 xorb GETs/943,036,827 bytes and seven shard GETs. Cold fetch: 19 xorb GETs/877,046,757 bytes and seven shard GETs. Warm hydrate and separate fetch→hydrate: **zero xorb and shard GETs**, with xorb GET denial enforced. Ordinary hydration installs decoded ranges, not full-xorb entries. These are observed request counts, not a cold-transfer efficiency pass. |
+| Cache faults and maintenance | Real corrupted ranges recover. An incomplete catalog owner plus retained WAL bytes causes cache bypass: healthy origin hydrates identical bytes; main/owner/WAL hashes stay unchanged and no decoded ranges are admitted. Unsafe-root targets and clean/prune sentinels survive. A one-MiB budget is applied through `crab config set`; existing lazy-checkout settings survive, prune succeeds, and over-budget hydration remains correct. Same fresh report. |
+| Concurrent publication repeat | **111 checks / 50 commands**, `publication-generation/report.json`. Existing retained remote/manifest, fresh reader/cache roots; ten rounds of two linked-worktree hydrators. Byte identity, zero warm xorb attempts under denial, sibling worktree, unchanged add/index, and clean Git state pass. |
+| Diagnostic outcome repeat | **33 checks / 8 commands**, `hydrate-outcomes-generation/report.json`. JSON, ordinary/manifest JSONL, partial local recovery with denied origin, unchanged failed pointers, restored-origin hashes, and clean Git state pass. Denials retain `CRAB-E0031`, non-retryable/permanent classification, exit 7, and the xorb cause path. |
+
+The first fresh attempt is retained separately in
+`generation-00893ee.IIsZIA/report.json`: **55 checks / 47 commands**, one failed
+harness assertion that `.crab/local.toml` should not already exist. Clone's
+`setup_crab_config` / `configure_lazy_checkout` deliberately create it. The
+corrected fresh run uses the product config setter and compares the complete
+TOML before/after, allowing only the requested budget change. The failed report
+is neither erased nor counted as a passing run. The prototype needs Python
+3.11+ for `tomllib`; the successful run used the already-bundled Python 3.12.
+
+These external prototypes are not maintained Phase 7 qualification tooling.
+They do not establish peak process resources, generation-publication crash
+safety, all index-owner behavior, native mounts/OSes, or AWS/GCS/Azure parity.
+Cold transfer amplification remains visible despite successful warm reuse.
+
+CI on `00893ee`: NFS feature gate, binary/integration contracts, protocol
+unit/transcript tests, offline feature/evidence gates, and documentation quality
+pass. Architecture guardrails still fail on the previously recorded protected
+inventory/scope findings (run `33734708275`, job `100582451435`). Rust quality
+still fails while linking tests with signal 7 (run `33734708302`, job
+`100582714721`); no resource cause is inferred solely from that signal.
+Cache-service smoke still fails `cli-cold-hydrate-cache-service-origin-fetches-flat`
+(run `33734708208`, job `100582451687`). Its server unit/integration and evidence
+tests passing does not waive the failed real-command smoke. Required CI remains
+red; skipped native/provider jobs are not qualification evidence.
+
+#### Next executable slice: catalog owners across connection lifetimes
+
+Status: design/read-path audit only, **not implemented or qualified**. Current
+`catalog.rs::reserve_sync` and `lease_sync` return owners retaining the root but
+not `database/generation.rs::Generation`; their registration connection closes.
+`record_completed_sync` later calls `record_sync`, which opens/initializes a
+catalog again. `remove_owner_row` opens existing state, but has no captured
+main/owner identity to compare. Existing root-replacement and missing/symlink
+tests do not prove safety for a valid replacement main with copied owner rows.
+This is a source-evidenced gap, not a newly reproduced runtime failure.
+
+| Ordered slice / context | Execution and acceptance |
+|---|---|
+| 1. Capture database ownership before connection close | Extend the existing private database owner with a retained main/owner binding, without holding a SQLite connection per reservation or adding another catalog reader. A live reservation/lease must keep the owner lock and main descriptor alive. Prove a new normal opener cannot rebind a replaced main until all old owners release; root renames must remain valid. |
+| 2. Reopen only the captured generation | Route registration and owner-row cleanup through that binding before any schema/row mutation. Check both main and owner identity: holding an old owner-file lock alone cannot protect against replacement of the owner file itself. Copied matching lease/reservation rows in a valid replacement catalog must remain unchanged after old-owner Drop and failed registration. Missing state must not be recreated. |
+| 3. Couple publication to that authority | Cover byte-backed `CacheReservation::write`, streamed `ReservedFile::commit`, and synchronous `write_sync` bloom persistence. Reject a stale generation before publishing/registering; a preflight check followed by an unguarded reopen is insufficient. Preserve descriptor-relative temporary cleanup and the payload lease through registration. No healthy-origin hydration may fail solely because the cache becomes unavailable. |
+| 4. Qualify lifecycle and cost | Add deterministic swaps before temporary creation, before commit, and before registration/Drop; include independent owner-file swaps and same-root copied catalogs. Repeat original-root publication, concurrent reservation capacity, object/range registration, clean/prune/verify, and cross-process locking fixtures. Measure retained descriptors and contention, cancellation/kill recovery, both cache feature selections, and fresh installed RustFS fault/warm-read behavior before closing this slice. |
+
+Production SQL leases currently have fixture consumers, whereas actual payload
+readers use file leases. Resolve that redundancy with the complete consumer and
+tagged-contract audit already required above; do not silently delete the public
+lease surface or mistake its tests for production read wiring. This slice does
+not replace the separate side-file identity, inode-reuse, non-mutating health,
+remaining index-owner, or platform acceptance gates.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,
