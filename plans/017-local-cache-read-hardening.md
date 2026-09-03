@@ -2025,6 +2025,82 @@ hold actual file leases. Resolve that redundant ownership surface before
 accepting the complete lifecycle, rather than claiming SQL leases alone now
 protect all callers.
 
+### Main-inode replacement checkpoint — local qualification
+
+Two additional regressions on `434915d` failed before this change:
+
+- `main_replacement_preserves_replacement_side_files_during_cleanup`:
+  rollback-mode commit/close removed a private replacement journal after the
+  original main and side files were renamed aside.
+- `replaced_main_cannot_replay_another_database_wal`: opening a valid replacement
+  main while the original WAL remained returned the original database's row.
+  Checking only the old connection's `HAS_MOVED` callback would miss this case.
+
+Dependency evidence: bundled SQLite in libsqlite3-sys 0.32.0 calls `xDelete`
+after closing the rollback journal in `pager_end_transaction`. Its
+`databaseIsUnmoved` hook does not cover every finalization operation. WAL
+recovery does not establish which main inode owns its pages. SQLite documents
+the corruption risk of mismatching a main file and its journal, and of renaming
+an open database, in [How To Corrupt An SQLite Database File](https://sqlite.org/howtocorrupt.html).
+Crab must establish ownership outside the journal format, without modifying
+SQLite or claiming that native SQLite protects against arbitrary replacement.
+
+The local implementation adds `database/generation.rs` to the existing owner:
+
+| Contract | Implementation / acceptance |
+|---|---|
+| Persistent main binding | `<database>-owner`, private 0600 regular single-link file. Exactly 24 bytes: `CRABDB01`, little-endian 64-bit device, little-endian 64-bit inode. Main/owner descriptors remain open through SQLite close. This is disposable local metadata, not a remote or SQLite format change. |
+| Concurrent lifetime | Initialization occurs under the retained directory's mutation lock. A shared fs4 flock on the owner survives for the connection lifetime; rebinding requires an exclusive owner lock. Existing SQLite OFD byte-range locks remain unchanged. |
+| Initialization and recovery | Only `Create` may initialize/rebind, only with no other generation lease and no journal/WAL/SHM entries, including empty entries. A matching owner permits ordinary SQLite recovery. Missing or incomplete ownership plus recovery files fails closed, leaving the recovery bytes intact. No journal deletion, mode change, permissive reader, or dependency patch is introduced. |
+| Main replacement during use | SQLite receives a clone of the already-bound main descriptor. Main/owner identity is rechecked on named open/access/delete, page read/write/truncate, and new database/WAL lock/mapping activity. Unlock still releases original locks after replacement. Parent-directory renames remain valid because checks use the retained directory. |
+| Existing-only callers | `ReadOnly` and `ReadWrite` never create/rebind ownership. Missing ownership for an existing main returns an ownership error, not `NotFound`; catalog stats must not label it empty. Explicit cleanup retains owner files and catalog inventory accounts for their ordinary file length. |
+
+The namespace-concurrency fixture now races side-file creation/deletion through
+real database registrations. Repeatedly unlinking the fixture's main file is
+no longer a valid healthy operation under the new lifetime contract. Its eight
+threads and 100 iterations retain the original open-success/exclusion property.
+The static unsafe-entry and permissive-umask fixtures additionally cover owner
+files. A cleanup-fixture expansion initially double-counted two files inside
+one retained subtree; the redundant added fixture entry was removed, preserving
+the established one-count-per-retained-subtree report contract.
+
+Focused native macOS proof passes: all-feature cache **223** tests, minimal
+`local-cache` **171**, minimal `xet-chunk-cache` **121**, and cache-store **60**.
+Strict cache all-target Clippy passes for all features and both minimal
+selections. Formatting and whitespace checks pass. The additional production
+code owns a persistent binding and connection-lifetime lease; it replaces
+pathname reopening for SQLite's main descriptor rather than adding a second
+reader. Installed/native-platform/performance proof remains open below.
+
+Acceptance still open; do not infer full Phase 4 completion from these tests:
+
+1. Carry the database generation through catalog reservation/lease lifetimes,
+   not only through their short-lived connections. A root token alone does not
+   prevent a later cleanup connection from accepting another main generation.
+   Acceptance: copied replacement catalogs retain matching owner rows; old
+   reservations cannot publish/register/release against the replacement.
+2. Bind independent journal/WAL/SHM replacement and cleanup to their own leaf
+   identity. Acceptance: side-file-only swaps, without a main swap, cannot
+   redirect deletion, mappings, or recovery. Current main-binding tests do not
+   establish that stronger property.
+3. Qualify identity reuse after every old descriptor closes, owner-file loss,
+   injected fsync/write errors, native-process interaction, and kill/restart at
+   binding-publication boundaries. Device/inode alone is not proof against
+   inode reuse across lifetimes. Acceptance: no stale WAL adoption, no loss of
+   recoverable committed rows, no unrelated repair; native OS and filesystem
+   results name their supported identity/locking contract.
+4. Measure extra descriptors, identity-check syscalls, binding fsync cost, and
+   contention against the existing workload. Repeat installed RustFS cold/warm,
+   corrupt/unavailable-cache recovery, and concurrent hydration with this exact
+   artifact. Earlier installed results predate this source and cannot qualify it.
+5. Reconcile `main` before the next pushed implementation checkpoint. CI for
+   `434915d` fails compilation of the synthetic merge because `main` adds
+   `StorageError::MultipartJournal` and the borrowed diagnostic match lacks that
+   variant. Rust quality run `33732227574`, job `100574723219`, and NFS gate run
+   `33732227513`, job `100574571078`, report E0004. This is an integration defect,
+   not a feature-gated variant or an infrastructure failure. Preserve its source
+   and canonical product diagnostic policy; do not add a wildcard to hide it.
+
 ### Cache-write completion checkpoint
 
 The integrated configured-hydration fixture initially failed after prefetch,

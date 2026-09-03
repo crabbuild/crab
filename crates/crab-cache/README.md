@@ -100,10 +100,22 @@ verify, and targeted object eviction skip the active payload. Directory
 operations reopen independent descriptors so their namespace locks exclude
 each other; payload descriptor clones intentionally retain one shared lease.
 
-Main-database replacement within the retained directory, remaining index caller
-ownership, non-mutating WAL inspection, complete temporary-byte accounting,
-bounded cancellation, and other native-platform qualification remain open.
-Read-only main connections may still update WAL/SHM bookkeeping.
+Private SQLite connections also retain the main descriptor and a shared lease
+on a `-owner` file recording its device/inode. Opens, namespace cleanup, page
+I/O, and new database/WAL locks reject a different main or owner inode. New
+connections reject a mismatched binding while an owner is alive or any
+journal/WAL/SHM exists. Only creating opens may bind quiescent state without
+recovery files; read-only inspection never initializes the binding or reports
+a missing binding as an empty catalog. Cleanup retains owner files.
+
+This is a main-inode replacement checkpoint, not complete database-generation
+qualification. Side-file-only replacement, identity reuse after all descriptors
+close, reservation lifetimes beyond the connection, remaining index callers,
+non-mutating WAL inspection, complete temporary-byte accounting, bounded
+cancellation, and other native-platform qualification remain open. Read-only
+main connections may still update WAL/SHM bookkeeping. Native SQLite does not
+participate in Crab's generation lease; cross-process transaction locking is
+qualified, but arbitrary external replacement or repair is not authorized.
 
 Admission includes the incoming file and other active reservations when making
 space, even below the current-usage high watermark. The final capacity check

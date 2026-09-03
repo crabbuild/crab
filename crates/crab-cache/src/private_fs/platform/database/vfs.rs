@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use rusqlite::ffi;
 
 use super::super::{Directory, validate_metadata};
+use super::generation::Generation;
 use super::locking::DatabaseLock;
 use super::shm::SharedMemory;
 use crate::{CacheError, Result};
@@ -21,6 +22,7 @@ pub(super) struct Context {
     name: CString,
     native: *mut ffi::sqlite3_vfs,
     busy_timeout: Duration,
+    generation: Generation,
 }
 
 impl Context {
@@ -65,6 +67,12 @@ impl Context {
         // openat(O_CREAT) can report ENOENT when the leaf is concurrently
         // unlinked even though the pinned parent still exists.
         let _mutation = self.mutation()?;
+        self.validate_generation()?;
+        if name == self.name.as_c_str() {
+            // SQLite must use the inode bound under the initialization lock.
+            // Reopening the pathname here could select another generation.
+            return self.generation.main.try_clone().map_err(io_code);
+        }
         let path = self.directory.path.join(OsStr::from_bytes(name.to_bytes()));
         validate_metadata(
             &self.directory.file.metadata().map_err(io_code)?,
@@ -104,10 +112,15 @@ impl Context {
         CString::new(name).map_err(|_| ffi::SQLITE_CANTOPEN)
     }
 
+    pub(super) fn validate_generation(&self) -> std::result::Result<(), i32> {
+        self.generation.validate(&self.directory, &self.name)
+    }
+
     pub(super) fn unlink(&self, name: &CString) -> std::result::Result<(), i32> {
         // Never wait for SQLite while holding this short namespace lock.
         // Bounded waiting uses the owning caller's existing busy policy.
         let _mutation = self.mutation()?;
+        self.validate_generation()?;
         self.directory.remove(name).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 ffi::SQLITE_IOERR_DELETE_NOENT
@@ -130,7 +143,12 @@ pub(super) struct Registration {
 unsafe impl Send for Registration {}
 
 impl Registration {
-    pub(super) fn new(directory: Directory, name: CString, busy_timeout: Duration) -> Result<Self> {
+    pub(super) fn new(
+        directory: Directory,
+        name: CString,
+        generation: Generation,
+        busy_timeout: Duration,
+    ) -> Result<Self> {
         // SAFETY: SQLite initializes and serializes its built-in VFS registry.
         let native = unsafe { ffi::sqlite3_vfs_find(c"unix".as_ptr()) };
         if native.is_null() {
@@ -147,6 +165,7 @@ impl Registration {
             name,
             native,
             busy_timeout,
+            generation,
         });
         let mut vfs = Box::new(ffi::sqlite3_vfs {
             iVersion: 2,
@@ -378,6 +397,7 @@ unsafe extern "C" fn access(
         }
         let context = context(vfs);
         let component = context.component(unsafe { CStr::from_ptr(name) })?;
+        context.validate_generation()?;
         let stat = match context.directory.stat_component(&component) {
             Ok(stat) => stat,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -479,17 +499,19 @@ mod tests {
                 let start = &start;
                 let root = &root;
                 scope.spawn(move || {
-                    let context = Context {
-                        directory: Directory::root(root, false).unwrap(),
-                        name: c"entry".to_owned(),
-                        native: ptr::null_mut(),
-                        busy_timeout: Duration::from_secs(5),
-                    };
+                    let connection = super::super::open_database(
+                        root,
+                        &root.join("entry"),
+                        crate::private_fs::DatabaseMode::Create,
+                        Duration::from_secs(5),
+                    )
+                    .unwrap();
+                    let context = &connection.registration._context;
                     start.wait();
                     for _ in 0..100 {
-                        let result = context.open(c"entry", true, false, false);
+                        let result = context.open(c"entry-journal", true, false, false);
                         assert!(result.is_ok(), "{result:?}");
-                        let _ = context.unlink(&c"entry".to_owned());
+                        let _ = context.unlink(&c"entry-journal".to_owned());
                     }
                 });
             }

@@ -7,6 +7,8 @@ use crate::{CacheError, Result};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod file;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod generation;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod lifetime_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -111,22 +113,31 @@ pub(in crate::private_fs) fn open_database_at(
     let filename = path
         .file_name()
         .ok_or_else(|| unsafe_path(path, "database has no filename"))?;
-    for suffix in ["-journal", "-wal", "-shm"] {
+    let mut recovery_files = false;
+    for suffix in ["-journal", "-wal", "-shm", "-owner"] {
         let mut side_name = filename.to_os_string();
         side_name.push(suffix);
-        validate_file(&directory, &side_name)?;
+        let exists = validate_file(&directory, &side_name)?;
+        recovery_files |= exists && suffix != "-owner";
     }
     if !validate_file(&directory, filename)? {
         if mode != DatabaseMode::Create {
             return Err(io::Error::from(io::ErrorKind::NotFound).into());
+        }
+        if recovery_files {
+            return Err(unsafe_path(
+                path,
+                "missing database has recovery side files",
+            ));
         }
         // Exclusive creation cannot touch an existing SQLite inode. The fd is
         // closed before SQLite opens, and no later pathname chmod is needed.
         drop(directory.open_component(&name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, path)?);
         directory.file.sync_all()?;
     }
+    let generation = generation::Generation::open(&directory, &name, mode)?;
     drop(_mutation);
-    let registration = vfs::Registration::new(directory, name, busy_timeout)?;
+    let registration = vfs::Registration::new(directory, name, generation, busy_timeout)?;
     let flags = if mode == DatabaseMode::ReadOnly {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     } else {
@@ -386,7 +397,7 @@ mod tests {
 
     #[test]
     fn unsafe_database_entries_are_rejected_without_mutation() {
-        for suffix in ["", "-journal", "-wal", "-shm"] {
+        for suffix in ["", "-journal", "-wal", "-shm", "-owner"] {
             for unsafe_kind in ["symlink", "hardlink", "public"] {
                 let tmp = tempfile::tempdir().unwrap();
                 let root = tmp.path().join("cache");
@@ -511,7 +522,11 @@ mod tests {
         let path = root.join("database.sqlite");
         let connection = open_database(&root, &path, DatabaseMode::Create, Duration::ZERO).unwrap();
         connection.execute_batch("CREATE TABLE values_table(value INTEGER); BEGIN IMMEDIATE; INSERT INTO values_table VALUES (1);").unwrap();
-        for path in [&path, &root.join("database.sqlite-journal")] {
+        for path in [
+            &path,
+            &root.join("database.sqlite-journal"),
+            &root.join("database.sqlite-owner"),
+        ] {
             assert_eq!(
                 std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
                 0o600

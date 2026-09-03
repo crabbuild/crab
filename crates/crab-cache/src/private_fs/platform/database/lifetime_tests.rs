@@ -77,6 +77,175 @@ fn first_transaction_uses_the_parent_retained_at_open() {
 }
 
 #[test]
+fn main_replacement_preserves_replacement_side_files_during_cleanup() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for journal in ["DELETE", "WAL"] {
+        for outcome in ["COMMIT", "ROLLBACK", "DROP"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("cache");
+            let connection = open(&root);
+            connection
+                .pragma_update(None, "journal_mode", journal)
+                .unwrap();
+            connection.execute_batch("CREATE TABLE entries(value); INSERT INTO entries VALUES(1); BEGIN IMMEDIATE; INSERT INTO entries VALUES(2)").unwrap();
+            let names = [
+                DATABASE,
+                "database.sqlite-journal",
+                "database.sqlite-wal",
+                "database.sqlite-shm",
+            ];
+            for name in names {
+                let path = root.join(name);
+                if path.exists() {
+                    // Rename, never truncate a live mapping or SQLite handle.
+                    std::fs::rename(&path, root.join(format!("saved-{name}"))).unwrap();
+                }
+                std::fs::write(&path, name.as_bytes()).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            if outcome != "DROP" {
+                let _ = connection.execute_batch(outcome);
+                let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+            }
+            drop(connection);
+            for name in names {
+                assert_eq!(
+                    std::fs::read(root.join(name)).ok().as_deref(),
+                    Some(name.as_bytes()),
+                    "{journal}/{outcome}: {name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn replaced_main_cannot_replay_another_database_wal() {
+    const ROOT: &str = "CRAB_TEST_REPLACED_DATABASE_ROOT";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let root = PathBuf::from(root);
+        for mode in [
+            DatabaseMode::Create,
+            DatabaseMode::ReadWrite,
+            DatabaseMode::ReadOnly,
+        ] {
+            assert!(open_database(&root, &root.join(DATABASE), mode, Duration::ZERO).is_err());
+        }
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let original = open(&root);
+    original.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE entries(value); INSERT INTO entries VALUES('original')").unwrap();
+    let replacement_root = tmp.path().join("replacement");
+    let replacement = open(&replacement_root);
+    replacement.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE entries(value); INSERT INTO entries VALUES('replacement')").unwrap();
+    drop(replacement);
+    std::fs::rename(root.join(DATABASE), root.join("saved.sqlite")).unwrap();
+    std::fs::rename(replacement_root.join(DATABASE), root.join(DATABASE)).unwrap();
+    let result = open_database(
+        &root,
+        &root.join(DATABASE),
+        DatabaseMode::ReadWrite,
+        Duration::ZERO,
+    );
+    match result {
+        Err(_) => (),
+        Ok(connection) => {
+            let value = connection.query_row("SELECT value FROM entries", [], |row| {
+                row.get::<_, String>(0)
+            });
+            assert!(
+                value.is_err(),
+                "a replacement main with an unrelated live WAL must fail closed; read {value:?}"
+            );
+        }
+    }
+    drop(original);
+    // A different process must reject the stale WAL even after the old owner
+    // closes; an in-memory registry would not establish recovery ownership.
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "private_fs::platform::database::lifetime_tests::replaced_main_cannot_replay_another_database_wal"])
+        .env_clear().env(ROOT, &root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn idle_live_generation_prevents_rebinding_even_without_side_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let original = open(&root);
+    original
+        .execute_batch("CREATE TABLE entries(value)")
+        .unwrap();
+    std::fs::rename(root.join(DATABASE), root.join("saved.sqlite")).unwrap();
+    let owner_before = std::fs::read(root.join("database.sqlite-owner")).unwrap();
+    assert!(
+        open_database(
+            &root,
+            &root.join(DATABASE),
+            DatabaseMode::Create,
+            Duration::ZERO
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(root.join("database.sqlite-owner")).unwrap(),
+        owner_before
+    );
+    drop(original);
+    let replacement = open(&root);
+    replacement
+        .execute_batch("CREATE TABLE entries(value); INSERT INTO entries VALUES(1)")
+        .unwrap();
+    assert_eq!(count(&replacement), 1);
+}
+
+#[test]
+fn incomplete_owner_can_reinitialize_only_without_recovery_files() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    for side in [None, Some("-journal"), Some("-wal"), Some("-shm")] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cache");
+        drop(open(&root));
+        let owner = root.join("database.sqlite-owner");
+        std::fs::write(&owner, b"partial").unwrap();
+        if let Some(suffix) = side {
+            let path = root.join(format!("{DATABASE}{suffix}"));
+            std::fs::write(&path, b"recovery").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let result = open_database(
+            &root,
+            &root.join(DATABASE),
+            DatabaseMode::Create,
+            Duration::ZERO,
+        );
+        if let Some(suffix) = side {
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&owner).unwrap(), b"partial");
+            assert_eq!(
+                std::fs::read(root.join(format!("{DATABASE}{suffix}"))).unwrap(),
+                b"recovery"
+            );
+        } else {
+            let connection = result.unwrap();
+            connection
+                .execute_batch("CREATE TABLE entries(value)")
+                .unwrap();
+            assert_eq!(count(&connection), 0);
+        }
+    }
+}
+
+#[test]
 fn native_and_private_sqlite_writers_exclude_each_other_across_processes() {
     const ROOT: &str = "CRAB_TEST_DATABASE_LOCK_ROOT";
     const OWNER: &str = "CRAB_TEST_DATABASE_LOCK_OWNER";

@@ -149,6 +149,7 @@ mod tests {
             ".catalog.sqlite",
             ".catalog.sqlite-wal",
             ".catalog.sqlite-shm",
+            ".catalog.sqlite-owner",
             "xorb-index/index.sqlite",
             "repos/repo/chunk-index.sqlite",
             "buckets/bucket/index.sqlite",

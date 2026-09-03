@@ -39,6 +39,7 @@ unsafe extern "C" fn read(
     offset: i64,
 ) -> c_int {
     with_file(raw, |state| {
+        file_context(state).validate_generation()?;
         if length < 0 || offset < 0 {
             return Err(ffi::SQLITE_IOERR_READ);
         }
@@ -73,6 +74,7 @@ unsafe extern "C" fn write(
     offset: i64,
 ) -> c_int {
     with_file(raw, |state| {
+        file_context(state).validate_generation()?;
         if state.read_only {
             return Err(ffi::SQLITE_READONLY);
         }
@@ -90,6 +92,7 @@ unsafe extern "C" fn write(
 
 unsafe extern "C" fn truncate(raw: *mut ffi::sqlite3_file, size: i64) -> c_int {
     with_file(raw, |state| {
+        file_context(state).validate_generation()?;
         if state.read_only {
             return Err(ffi::SQLITE_READONLY);
         }
@@ -148,7 +151,10 @@ unsafe extern "C" fn size(raw: *mut ffi::sqlite3_file, output: *mut i64) -> c_in
 }
 
 unsafe extern "C" fn lock(raw: *mut ffi::sqlite3_file, level: c_int) -> c_int {
-    with_file(raw, |state| state.locks.acquire(&state.file, level))
+    with_file(raw, |state| {
+        file_context(state).validate_generation()?;
+        state.locks.acquire(&state.file, level)
+    })
 }
 
 unsafe extern "C" fn unlock(raw: *mut ffi::sqlite3_file, level: c_int) -> c_int {
@@ -233,6 +239,7 @@ unsafe extern "C" fn shm_map(
         *output = ptr::null_mut();
     }
     with_file(raw, |state| {
+        file_context(state).validate_generation()?;
         if state.shm.is_none() {
             state.shm = Some(SharedMemory::open(file_context(state))?);
         }
@@ -253,6 +260,11 @@ unsafe extern "C" fn shm_lock(
     flags: c_int,
 ) -> c_int {
     with_file(raw, |state| {
+        // Unlock must still release the old inode after replacement. New WAL
+        // activity may not acquire locks or use that generation's mappings.
+        if flags & ffi::SQLITE_SHM_LOCK != 0 {
+            file_context(state).validate_generation()?;
+        }
         state
             .shm
             .as_mut()

@@ -48,6 +48,23 @@ fn read_only_stats_does_not_create_missing_root() {
     assert!(!root.exists());
 }
 
+#[test]
+fn read_only_stats_does_not_report_an_unbound_catalog_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    drop(open_catalog(&root).unwrap());
+    let path = root.join(CATALOG_FILE);
+    let before = std::fs::read(&path).unwrap();
+    let owner = root.join(format!("{CATALOG_FILE}-owner"));
+    std::fs::rename(&owner, root.join("saved-owner")).unwrap();
+    assert!(matches!(
+        CacheCatalog::read_only_stats(&root),
+        Err(CacheError::UnsafeRoot { .. })
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(!owner.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn catalog_access_rejects_database_links_without_changing_the_target() {
