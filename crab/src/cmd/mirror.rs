@@ -23,6 +23,7 @@ use crate::git::url::CrabUrl;
 mod cache;
 mod history;
 mod hook;
+mod pointers;
 mod pre_push;
 mod process;
 mod reconcile;

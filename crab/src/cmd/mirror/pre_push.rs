@@ -95,8 +95,8 @@ pub async fn run_mirror_pre_push(
                 .map(|oid| (update.remote_ref.clone(), oid.clone()))
         })
         .collect::<BTreeMap<_, _>>();
-    let pointers = super::reconcile::collect_source_pointers(
-        &worktree.common_git_dir,
+    let pointers = super::pointers::collect(
+        super::pointers::Source::Repository(worktree.common_git_dir.clone()),
         &source_refs,
         cancel,
         &mut runner,

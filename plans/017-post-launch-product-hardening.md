@@ -4870,6 +4870,45 @@ GC lifetime remain open. Independently qualify caller-abortion ownership of
 the pointer-scan blocking worker: cooperative cancellation coverage alone does
 not prove that dropping the caller retains its cache until that worker exits.
 
+### Pointer-scan cancellation ownership: 2026-09-03 UTC
+
+**Context and reproduced gap.** The pointer collector previously moved only
+the Git directory path into `spawn_blocking`. Dropping its async caller also
+dropped the mirror cache owner, although the queued/running scan could still
+access that directory. A deterministic single-worker regression occupied the
+blocking pool, queued the real collector, and dropped its caller. Before the
+fix, a second cache owner could acquire the directory before the scan ran.
+This is separate from ordinary cooperative command cancellation.
+
+**Ownership change.** `crab/src/cmd/mirror/pointers.rs` is now the shared
+collector for reconciliation and the collaboration hook. Its source owns
+either the mirror's `Arc<CacheUseGuard>` or the user's ordinary Git directory
+path. The worker retains that source while queued/running and returns it for
+the subsequent raw-blob verification. Dropping the caller cancels a child
+token; the parent operation is not cancelled. The ordinary hook source does
+not create mirror-cache markers in the user's repository. The old collector
+is removed; traversal, limits, pointer validation and raw-byte verification
+remain one canonical path. The small non-test growth establishes lifetime
+ownership instead of adding a second scanner or compatibility path.
+
+**Dependency and sibling proof.** Tokio's installed `spawn_blocking` contract
+does not stop a started worker when its awaiter is dropped; tokio-util's child
+token and drop guard provide one-way cancellation. Cache lifecycle ownership
+must outlive all cache workers. The ancestry loader already follows this
+ownership rule; raw Git verification uses the existing synchronous owned
+process runner, which stops children and joins pipe workers before returning.
+Both pointer-collector callers now express their actual ownership boundary.
+
+**Acceptance and current evidence.** The reproduced queued-worker regression
+passes: competing acquisition fails until the worker drains, then the cache
+is reusable and the parent token remains active. A real Git raw-blob test
+checks ownership during verification and release after both success and an
+injected terminal error. All 72 mirror tests pass. Before treating this as
+release-qualified, build the committed candidate and rerun mutation-denying
+RustFS inspection, cancellation/cache reuse, and cold/warm full-ref Kubernetes
+inspection with recorded binary identity. These functional checks do not
+establish controlled performance or complete Phase 2's remaining gates.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
 
 **Evidence and limit.** The local regression
