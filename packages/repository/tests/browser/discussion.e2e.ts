@@ -30,10 +30,18 @@ async function openDiscussion(page: Page) {
     } else if (path === "/api/repos/team/project/issues/1") {
       if (request.method() === "PATCH") {
         const update = request.postDataJSON() as {
+          version: number;
           title?: string;
           body?: string;
           state?: string;
         };
+        if (update.version !== issue.version) {
+          await route.fulfill({
+            status: 409,
+            json: { error: { code: "conflict", message: "Content changed" } },
+          });
+          return;
+        }
         issue = { ...issue, ...update, version: issue.version + 1 };
       }
       json = issue;
@@ -48,16 +56,25 @@ async function openDiscussion(page: Page) {
         comments.push(comment);
         json = comment;
       } else json = { items: comments, next: null };
-    } else if (
-      path === "/api/repos/team/project/issues/1/comments/1" &&
-      request.method() === "PATCH"
-    ) {
-      const input = request.postDataJSON() as { body: string };
-      comments[0] = {
-        ...comments[0],
-        body: input.body,
-        version: comments[0].version + 1,
-      };
+    } else if (path === "/api/repos/team/project/issues/1/comments/1") {
+      if (request.method() === "PATCH") {
+        const input = request.postDataJSON() as {
+          body: string;
+          version: number;
+        };
+        if (input.version !== comments[0].version) {
+          await route.fulfill({
+            status: 409,
+            json: { error: { code: "conflict", message: "Content changed" } },
+          });
+          return;
+        }
+        comments[0] = {
+          ...comments[0],
+          body: input.body,
+          version: comments[0].version + 1,
+        };
+      }
       json = comments[0];
     } else
       throw new Error(
@@ -72,6 +89,19 @@ async function openDiscussion(page: Page) {
   await expect(
     page.getByRole("button", { name: "Edit comment", exact: true }),
   ).toBeVisible();
+  return {
+    changeIssue: (body: string) => {
+      issue = {
+        ...issue,
+        title: "Updated elsewhere",
+        body,
+        version: issue.version + 1,
+      };
+    },
+    changeComment: (body: string) => {
+      comments[0] = { ...comments[0], body, version: comments[0].version + 1 };
+    },
+  };
 }
 
 test("issue editing and state changes retain a keyboard continuation point", async ({
@@ -246,4 +276,109 @@ test("header controls remain reachable on narrow screens in both themes", async 
       await header.locator("summary").click();
     }
   }
+});
+
+for (const kind of ["issue", "comment"] as const) {
+  test(`${kind} conflicts require explicit review and retain drafts through repeated races`, async ({
+    page,
+  }) => {
+    const fixture = await openDiscussion(page);
+    const change =
+      kind === "issue" ? fixture.changeIssue : fixture.changeComment;
+    const edit = page.getByRole("button", {
+      name: kind === "issue" ? "Edit issue" : "Edit comment",
+      exact: true,
+    });
+    await edit.click();
+    const form =
+      kind === "issue"
+        ? page.locator(".discussion-compose.panel")
+        : page.locator(".comment-edit");
+    const draft = form.getByRole("textbox", {
+      name: kind === "issue" ? "Description" : "Edit comment",
+      exact: true,
+    });
+    const save = form.getByRole("button", {
+      name: kind === "issue" ? "Save changes" : "Save comment",
+      exact: true,
+    });
+    let writes = 0;
+    page.on("request", (request) => {
+      if (request.method() === "PATCH") writes++;
+    });
+    await draft.fill("My unsaved changes");
+    if (kind === "issue")
+      await form.getByLabel("Title", { exact: true }).fill("My title");
+    change("Saved **elsewhere** <script>untrusted</script>");
+    await save.click();
+    const review = form.getByRole("region", { name: "Review newer content" });
+    await expect(review).toContainText(
+      "Saved **elsewhere** <script>untrusted</script>",
+    );
+    await expect(review).toBeFocused();
+    await expect(save).toBeDisabled();
+    await expect(draft).toHaveValue("My unsaved changes");
+    await review
+      .getByRole("button", { name: "Continue with my draft" })
+      .click();
+    await expect(save).toBeFocused();
+    await expect(draft).toHaveValue("My unsaved changes");
+    expect(writes).toBe(1);
+    change("Another concurrent edit");
+    await save.click();
+    await expect(review).toContainText("version 3");
+    await expect(review).toContainText("Another concurrent edit");
+    await review.getByRole("button", { name: "Use saved content" }).click();
+    await expect(draft).toHaveValue("Another concurrent edit");
+    if (kind === "issue")
+      await expect(form.getByLabel("Title", { exact: true })).toHaveValue(
+        "Updated elsewhere",
+      );
+    expect(writes).toBe(2);
+    await draft.fill("Another concurrent edit\n\nMy additions");
+    await save.click();
+    await expect(edit).toBeFocused();
+    const rendered =
+      kind === "issue"
+        ? page.locator(".issue-detail > .discussion-card")
+        : page.locator("#comment-1");
+    await expect(rendered).toContainText("My additions");
+    await page.reload();
+    await expect(rendered).toContainText("Another concurrent edit");
+    await expect(rendered).toContainText("My additions");
+    expect(writes).toBe(3);
+  });
+}
+
+test("a failed conflict read retains the draft and can be retried without publishing", async ({
+  page,
+}) => {
+  const fixture = await openDiscussion(page);
+  await page.getByRole("button", { name: "Edit issue", exact: true }).click();
+  const draft = page.getByRole("textbox", { name: "Description", exact: true });
+  await draft.fill("Keep this draft through read failures");
+  fixture.changeIssue("Saved while editing");
+  const url = /\/issues\/1\?/;
+  await page.route(url, (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({
+          status: 502,
+          json: { error: { message: "Storage unavailable" } },
+        })
+      : route.fallback(),
+  );
+  const save = page.getByRole("button", { name: "Save changes", exact: true });
+  await save.click();
+  const review = page.getByRole("region", { name: "Review newer content" });
+  await expect(
+    review.getByRole("alert").filter({ hasText: "Unable to load" }),
+  ).toBeVisible();
+  await expect(save).toBeDisabled();
+  await expect(draft).toHaveValue("Keep this draft through read failures");
+  await page.unroute(url);
+  await review.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(review).toContainText("Saved while editing");
+  await review.getByRole("button", { name: "Continue with my draft" }).click();
+  await expect(draft).toHaveValue("Keep this draft through read failures");
+  await expect(save).toBeEnabled();
 });
