@@ -1723,6 +1723,7 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
+    "crab-write",
     "crab-http-server",
     "crab-auth",
     "crab-auth-store",
@@ -1751,6 +1752,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-cache-server": {"crab", "crab-cache-store"},
 }
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-write": {"normal": {"crab-git", "crab-metadata", "crab-storage", "crab-xet"}, "dev": {"crab-remote-git"}},
     "crab-http-server": {"normal": {"crab-read", "crab-remote-git", "crab-storage"}},
     "crab": {
         "normal": {
@@ -1769,6 +1771,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-storage",
             "crab-types",
             "crab-workflow",
+            "crab-write",
             "crab-xet",
             "crab-vfs",
         },
@@ -1847,6 +1850,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "crab-write": "crates/crab-write",
     "crab-http-server": "crates/crab-http-server",
     "crab-auth": "crates/crab-auth",
     "crab-auth-server": "crates/crab-auth-server",

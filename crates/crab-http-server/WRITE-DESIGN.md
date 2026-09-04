@@ -271,6 +271,24 @@ implementation and native client round-trip qualification.
 
 ## Existing code and the semantic mismatch
 
+`crab-write::catalog::publish_inventory` now owns the catalog engine formerly
+inside the CLI push module. CLI push/reader repair and the generation owner both
+use it. It validates local/remote index evidence, writes current rows before
+sweeping stale slots, rebuilds/replays changed ordinal catalogs when permitted,
+and rechecks the manifest before advancing coverage. The caller still owns its
+writer lease, GC fences, close and checkpoint lifecycle. The public publication
+path reads bounded index sidecars and pack trailers without a local repository.
+
+Three existing CLI tests pass through the shared code, covering generation
+advances, stale rows, mixed sibling evidence and kind metadata. A direct test
+rejects cancellation, mismatched local evidence and a truncated index without
+coverage, closes/reopens its writer, and then
+reads the exact commit/tree/blob through `crab-remote-git` after the source Git
+repository has been discarded. A separate RustFS qualification also verifies
+all three objects after discarding the local repository; catalog publication
+took 21 ms for that small fixture. This proves the extracted catalog component,
+not journal publication or an accepted HTTP push.
+
 `crates/crab-auth-server/src/receive/workflow.rs` exposes `prepare_receive`,
 `verify_receive` and `commit_receive`. These consume a `ProtectedPushPlan` with
 staged objects, a candidate manifest and a base-bound dependency receipt. Native
@@ -336,8 +354,9 @@ The native CLI's `commit_ref_journal` makes an immutable transaction visible by
 its active marker; `compact_ref_journal_for_owner` subsequently folds it into a
 generation under the manifest owner lease. `crab-remote-git` deliberately returns
 `RepositoryIndexing` while committed journal transactions remain uncompacted.
-The HTTP server therefore needs a shared generation-owner path, including
-locator/visibility readiness and restart repair, as well as the journal commit.
+The HTTP server therefore still needs a shared generation-owner orchestration
+path around the extracted catalog engine, including visibility readiness and
+restart repair, as well as the journal commit.
 A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
 visibility or coexist correctly with native CLI writers.
 

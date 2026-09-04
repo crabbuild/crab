@@ -1,0 +1,27 @@
+[package]
+name = "crab-write"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+description = "Shared Git publication and generation maintenance for Crab."
+
+[dependencies]
+bytes = { workspace = true }
+crab-git = { workspace = true }
+crab-metadata = { workspace = true, features = ["remote-index"] }
+crab-storage = { workspace = true }
+crab-xet = { workspace = true }
+futures-util = { workspace = true }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+crab-remote-git = { workspace = true }
+object_store = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
