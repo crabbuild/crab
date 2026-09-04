@@ -180,12 +180,14 @@ async fn publish(
             tracing::warn!(error = ?error, "Git receive validation rejected");
             let mut bytes = Vec::new();
             let unpack = matches!(error, ReceiveError::Pack(_)).then_some("incoming pack rejected");
-            receive_wire::report(
-                &mut bytes,
-                &request.updates,
-                unpack,
-                Some("incoming refs or graph rejected"),
-            )?;
+            let reason = match &error {
+                ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Ref {
+                    reason,
+                    ..
+                }) => *reason,
+                _ => "incoming refs or graph rejected",
+            };
+            receive_wire::report(&mut bytes, &request.updates, unpack, Some(reason))?;
             return Ok(bytes);
         }
         Err(error) => return Err(error),

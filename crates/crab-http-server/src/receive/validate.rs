@@ -125,6 +125,11 @@ pub(super) async fn prepare(
     updates: Vec<RefUpdate>,
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
+    let default_branch = repository
+        .refs()
+        .head
+        .as_ref()
+        .map(|head| head.name.clone());
     let base: BTreeMap<_, _> = repository
         .refs()
         .entries
@@ -181,8 +186,8 @@ pub(super) async fn prepare(
                 &incoming,
                 &base,
                 &updates,
-                |_| RefPolicy {
-                    allow_delete: true,
+                |name| RefPolicy {
+                    allow_delete: default_branch.as_deref() != Some(name),
                     allow_non_fast_forward: false,
                 },
                 &mut source,

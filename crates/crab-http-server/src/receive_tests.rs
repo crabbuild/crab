@@ -88,7 +88,9 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn native_http_push_publishes_exact_objects_and_rejects_rewrites_atomically() {
-    exercise(maintenance_tests::fixture().await).await;
+    for branch in ["main", "trunk"] {
+        exercise(maintenance_tests::fixture().await, branch).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -119,10 +121,10 @@ async fn native_http_push_rustfs() {
     repo.config.prefix = prefix;
     repo.store = store;
     repo.layout = layout;
-    exercise(server).await;
+    exercise(server, "trunk").await;
 }
 
-async fn exercise(mut server: Arc<Server>) {
+async fn exercise(mut server: Arc<Server>, branch: &str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     Arc::get_mut(&mut server).unwrap().port = port;
@@ -140,7 +142,12 @@ async fn exercise(mut server: Arc<Server>) {
     let url = format!("http://127.0.0.1:{port}/git/team/repo");
     success(
         path,
-        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+        &[
+            "init",
+            &format!("--initial-branch={branch}"),
+            "--object-format=sha1",
+            ".",
+        ],
     )
     .await;
     std::fs::write(path.join("README.md"), "first content\n").unwrap();
@@ -148,18 +155,18 @@ async fn exercise(mut server: Arc<Server>) {
     success(path, &["commit", "-m", "first commit"]).await;
     let first = success(path, &["rev-parse", "HEAD"]).await;
     success(path, &["tag", "-a", "v1", "-m", "first tag"]).await;
-    success(path, &["push", "--atomic", &url, "main", "refs/tags/v1"]).await;
+    success(path, &["push", "--atomic", &url, branch, "refs/tags/v1"]).await;
     std::fs::write(path.join("README.md"), "second content\n").unwrap();
     success(path, &["commit", "-am", "second commit"]).await;
     let second = success(path, &["rev-parse", "HEAD"]).await;
-    success(path, &["-c", "http.postBuffer=1", "push", &url, "main"]).await;
+    success(path, &["-c", "http.postBuffer=1", "push", &url, branch]).await;
     let rejected = git(
         path,
         &[
             "push",
             "--atomic",
             &url,
-            &format!("+{first}:refs/heads/main"),
+            &format!("+{first}:refs/heads/{branch}"),
             "HEAD:refs/heads/rejected",
         ],
     )
@@ -168,6 +175,19 @@ async fn exercise(mut server: Arc<Server>) {
         !rejected.status.success(),
         "non-fast-forward batch was accepted"
     );
+    for extra in [None, Some("HEAD:refs/heads/replacement")] {
+        let deletion = format!(":refs/heads/{branch}");
+        let mut args = vec!["push", "--atomic", &url, &deletion];
+        args.extend(extra);
+        let rejected = git(path, &args).await;
+        assert!(
+            !rejected.status.success(),
+            "default branch deletion was accepted"
+        );
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("deletion is prohibited"));
+    }
+    success(path, &["push", &url, "HEAD:refs/heads/temporary"]).await;
+    success(path, &["push", &url, ":refs/heads/temporary"]).await;
     success(path, &["push", &url, "HEAD:refs/tags/existing-object"]).await;
     success(
         path,
@@ -182,11 +202,12 @@ async fn exercise(mut server: Arc<Server>) {
     let visible: serde_json::Value =
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(visible["refs"][0]["oid"], second);
+    assert_eq!(visible["head"]["name"], format!("refs/heads/{branch}"));
     let reader = tempfile::tempdir().unwrap();
     success(reader.path(), &["init", "--bare", "."]).await;
     success(
         reader.path(),
-        &["-c", "protocol.version=2", "fetch", &url, "main"],
+        &["-c", "protocol.version=2", "fetch", &url, branch],
     )
     .await;
     assert_eq!(
@@ -212,7 +233,7 @@ async fn exercise(mut server: Arc<Server>) {
         .collect();
     assert_eq!(
         refs,
-        BTreeMap::from([("refs/heads/main".into(), second.clone())])
+        BTreeMap::from([(format!("refs/heads/{branch}"), second.clone())])
     );
     let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
     let mut expected = Vec::new();
