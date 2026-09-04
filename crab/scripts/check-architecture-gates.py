@@ -1832,6 +1832,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-cache",
             "crab-cache-store",
             "crab-diff",
+            "crab-git",
+            "crab-lfs",
             "crab-metadata",
             "crab-remote-git",
             "crab-storage",

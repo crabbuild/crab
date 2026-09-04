@@ -181,7 +181,7 @@ replace admission and an overall deadline for the complete receive operation.
 Selection and content evidence are not publication authority. The publisher must
 acquire writer/GC fences and recheck its exact base before publication. Pointer
 hints and file-index hits alone are insufficient. Admission/deadline integration
-for the remaining receive stages, LFS dependencies and fenced publication remain
+for the remaining receive stages, LFS HTTP transfer and fenced publication remain
 pending; HTTP push is still disabled.
 
 Six focused tests cover repeated compressed content, empty files, missing or
@@ -229,6 +229,45 @@ the typed source of admission/worker failures. This also fixes the missing CLI
 match arm exposed by CI after the lookup-limit variant was introduced. Two CLI
 error tests and one protected-service error test pass; CLI compilation and the
 architecture gates also pass.
+
+## Combined dependency preflight
+
+`crab-read::dependency_proof::verify_dependencies` connects the validated Git
+pointer list to captured-snapshot shard selection and origin content proof.
+Before I/O it rejects excessive pointer counts, individual/aggregate file sizes,
+unrecognized dependencies and conflicting sizes for one content identity.
+Repeated content is verified once, with Crab and LFS identities kept distinct.
+One deadline covers the complete selection/content batch, including admission
+waits. Storage traffic has the lookup budget plus at most pointer count times
+the per-content read budget; transport retries remain separately bounded.
+
+`LfsObjectStore::verify_origin` hashes the exact stored bytes without trusting
+or writing receipts and without replica fallback. It rejects mismatched response
+size before consuming the stream, then checks actual length and SHA-256. The
+canonical receipt-miss path shares its body verifier. Four admitted LFS bodies
+may overlap per process, and blocking hash jobs retain capacity through caller
+cancellation. This preserves the existing receipt/fallback behavior for ordinary
+LFS operations while giving publication preflight an explicit origin contract.
+
+The primary LFS OID/size identify the stored bytes after extension processing;
+extension hashes describe client transform inputs, not additional server
+objects ([upstream specification](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md)).
+
+Five combined preflight tests and 32 LFS storage tests pass, including deduped
+mixed batches, no storage mutations, early limits, cancellation/deadlines,
+missing/corrupt content, receipt bypass, fallback isolation and existing
+multipart/receipt/read paths. A native Git commit containing one Crab pointer
+and two distinct LFS pointer blobs (one with an extension) passes strict fsck,
+quarantine and graph/ref validation. RustFS verification reconstructs the Crab
+file's 16,384 bytes and hashes the shared five-byte LFS payload once. It rejects
+corruption and deletion of the isolated LFS fixture and passes after restoration.
+All four listed repository objects retain their sizes and ETags during the
+successful preflight; refs remain unchanged. The combined proof took 3.139 ms
+locally, a small synthetic observation rather than production push latency.
+
+No HTTP endpoint accepts these candidates yet. Writer fences, canonical
+publication/recovery, write authorization and receive-pack wiring still need
+implementation and native client round-trip qualification.
 
 ## Existing code and the semantic mismatch
 
