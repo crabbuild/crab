@@ -130,7 +130,10 @@ export function App() {
           )}
           {session.data?.user && (
             <div className="session-control">
-              <GitAccess session={session.data} />
+              <GitAccess
+                session={session.data}
+                repositories={catalog.data?.repositories ?? []}
+              />
               <span title={session.data.user.subject}>
                 {session.data.user.name}
               </span>
