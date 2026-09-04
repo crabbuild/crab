@@ -30,6 +30,8 @@ The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository
   identity and local Git layout;
+- `receive_plan` for exact atomic ref comparisons, policy checks and bounded
+  commit/tree/tag connectivity with generation-pinned proof frontiers;
 - `incoming_pack` for bounded full/thin-pack quarantine, with injected authorized
   base lookup and automatic private spool cleanup; `delta` for the shared bounded
   decoder used by incoming packs and remote reads;
@@ -131,7 +133,23 @@ object IDs/kinds/bytes, and removes its files when dropped.
 
 This is an integrity boundary, not a Git publisher. It validates the complete pack
 checksum, compressed streams, entry framing and delta reconstruction. Callers
-must separately validate object syntax, graph connectivity, pointer dependencies
-and ref policy, and publish metadata under the existing writer fences. Storage
+use `receive_plan::validate` for object syntax, graph connectivity and exact ref
+checks, then prove pointer payload dependencies and publish metadata under the
+existing writer fences. Storage
 credentials, canonical writes and receive-pack protocol responses belong above
 this crate. HTTP push remains unavailable until those layers are implemented.
+
+`receive_plan::GraphSource` supplies committed objects and an optional trusted
+kind. A trusted kind must come from a generation-bound proof of the object's
+complete closure; pack/locator presence alone does not suffice. Without that proof,
+validation traverses the object. The planner checks every incoming object, supports
+raw-byte tree names and external gitlinks, and rejects malformed/sortedness/mode
+violations and protected `.git` aliases. It also preserves source lookup errors.
+
+The plan applies all old-tip comparisons before reading objects, validates the
+final ref namespace, requires commits for branch tips, checks ancestry when force
+updates are prohibited, and peels annotated tags without changing submitted OIDs.
+The caller supplies per-ref deletion/non-fast-forward policy; Git's wire protocol
+has no separate force flag. Returned pointer dependencies still require artifact
+storage checks. Recheck the pinned base under writer locks before publishing; a
+validated plan alone is not an atomic commit or evidence of working HTTP push.
