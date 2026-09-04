@@ -74,6 +74,7 @@ pub async fn commit_ref_journal_transaction(
         &router,
         transaction,
         expected_heads,
+        || false,
     )
     .await
     .map_err(CrabError::from)

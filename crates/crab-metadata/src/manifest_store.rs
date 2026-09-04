@@ -1560,7 +1560,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let committed = commit_ref_transaction(&store, &router, &transaction, &[head])
+        let committed = commit_ref_transaction(&store, &router, &transaction, &[head], || false)
             .await
             .unwrap();
         assert!(
@@ -1624,7 +1624,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &router, &second, &[head])
+        commit_ref_transaction(&store, &router, &second, &[head], || false)
             .await
             .unwrap();
 
@@ -1678,7 +1678,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &router, &transaction, &[head])
+        commit_ref_transaction(&store, &router, &transaction, &[head], || false)
             .await
             .unwrap();
 
@@ -1737,7 +1737,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &router, &transaction, &[head])
+        commit_ref_transaction(&store, &router, &transaction, &[head], || false)
             .await
             .unwrap();
 

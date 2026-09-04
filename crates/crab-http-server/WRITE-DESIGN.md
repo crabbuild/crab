@@ -389,6 +389,25 @@ inventing an unchanged-ref result; Git's [report-status contract](https://git-sc
 reports the actual outcome for each requested ref. Prepared heads are never
 rolled back after a marker write is attempted.
 
+Ref creation/deletion now acquires the shared `git-ref-namespace` lease after
+edited-ref leases, rereads a coherent snapshot and checks the complete candidate
+namespace. This closes the race where separately locked `feature` and
+`feature/sub` both passed validation. The plain CLI initial-manifest path uses the
+same gate; ordinary existing-ref updates still need only their per-ref locks.
+Cancellation before the active marker rolls back prepared heads. After its
+attempt, recovery drains to a known or uncertain outcome; a late namespace lease
+failure cannot turn an accepted commit into rejection. A RustFS race accepts one
+create and rejects its conflicting sibling, then publishes byte-identical remote
+commit/tree/blob reads after removing the local fixture.
+
+This guarantee covers cooperating journal writers and the plain CLI initial
+publisher. Protected receive still publishes a complete manifest through
+`crab-auth-server::receive::finalize::commit_receive_manifest`; active-active
+writers publish through the versioned coordinator and materialize a projection.
+Neither enters this gate. Their authority/coexistence and namespace validation
+need separate integration and qualification before HTTP push supports those
+repository modes. Payload validation alone does not enforce ref-name conflicts.
+
 `crab-write::journal` now owns both generation-owner and reader compaction.
 The CLI delegates to it, preserving bounded handoff waits, non-waiting reader
 admission, metadata CAS/visibility publication and holder-checked ref cleanup.
