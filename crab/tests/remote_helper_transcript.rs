@@ -143,6 +143,61 @@ fn head_symref_in_list_output() {
     ");
 }
 
+#[cfg(unix)]
+#[test]
+fn native_git_list_omits_unborn_head() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let directory = tempfile::tempdir().expect("helper fixture directory");
+    let helper = directory.path().join("git-remote-crab-ref-test");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\nwhile IFS= read -r command; do\ncase \"$command\" in\ncapabilities) printf 'fetch\\n\\n';;\nlist) cat \"$2\";;\n\"\") exit;;\n*) exit 1;;\nesac\ndone\n",
+    )
+    .expect("write helper");
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+        .expect("executable helper");
+    let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("helper search path");
+    let advertisement = directory.path().join("refs");
+    let oid = "a".repeat(40);
+    for refs in [
+        Vec::new(),
+        vec![RefEntry {
+            sha: oid.clone(),
+            ref_name: "refs/tags/v1".into(),
+            peeled: None,
+        }],
+    ] {
+        let expected = refs
+            .iter()
+            .map(|reference| format!("{}\t{}\n", reference.sha, reference.ref_name))
+            .collect::<String>();
+        std::fs::write(
+            &advertisement,
+            format_list_output(&ListOutput {
+                refs,
+                head_symref: Some("refs/heads/main".into()),
+            }),
+        )
+        .expect("write advertisement");
+        let output = Command::new("git")
+            .current_dir(directory.path())
+            .env("PATH", &path)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(["-c", "protocol.version=0", "ls-remote", "--symref"])
+            .arg(format!("crab-ref-test::{}", advertisement.display()))
+            .output()
+            .expect("native Git ref listing");
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(String::from_utf8(output.stdout).expect("listing"), expected);
+    }
+}
+
 #[test]
 fn list_for_push_omits_head_symref() {
     let output = ListOutput {

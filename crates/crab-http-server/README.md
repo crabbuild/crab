@@ -77,6 +77,12 @@ milliseconds. It excludes HTTP transmission; the browser also measures the
 complete fetch/JSON round trip. Cached reads are not cold-storage measurements.
 Ctrl-C cancels requests, drains publication jobs and shuts down the shared runtime.
 
+Unborn default branches are exposed through the refs API and Git protocol v2's
+explicit `unborn` advertisement, including repositories that already contain tags.
+The older remote-helper `list` format omits unresolved HEAD: Git otherwise treats
+it as an all-zero object ID. Concrete tags remain available; no tag is substituted
+as the default branch. Use protocol v2 to retain the remote's unborn branch name.
+
 When a read finds committed refs awaiting indexing, the server runs the shared
 read-readiness pass under the generation-owner lease and global/repository GC
 writer fences, then retries the read. Requests for one repository share that

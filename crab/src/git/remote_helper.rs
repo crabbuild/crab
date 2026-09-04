@@ -113,12 +113,16 @@ pub fn parse_head_symref(body: &[u8]) -> Result<String> {
 /// Each concrete ref is emitted as `{sha} {ref_name}\n`. Annotated tags
 /// carrying a `peeled` target additionally emit `{peeled} {ref}^{{}}\n`
 /// immediately after so clients can resolve the tag's target without a
-/// second round trip. If a HEAD symref is present, `@{target} HEAD\n`
-/// is emitted first. The response is terminated by a blank line.
+/// second round trip. A HEAD symref whose target occurs in the concrete refs
+/// is emitted first as `@{target} HEAD\n`. The response ends with a blank line.
 pub fn format_list_output(output: &ListOutput) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
-    if let Some(target) = &output.head_symref {
+    // Git's helper-list parser leaves an unresolved symref with a null OID.
+    // Only protocol v2 can represent unborn HEAD without inventing an object.
+    if let Some(target) = &output.head_symref
+        && output.refs.iter().any(|entry| &entry.ref_name == target)
+    {
         let _ = writeln!(buf, "@{target} HEAD");
     }
     for entry in &output.refs {
@@ -4763,18 +4767,6 @@ mod tests {
             head_symref: None,
         };
         assert_eq!(format_list_output(&output), "aaa111 refs/tags/v1.0\n\n");
-    }
-
-    #[test]
-    fn format_list_output_head_symref_line_format() {
-        // Verify the `@target HEAD` format specifically
-        let output = ListOutput {
-            refs: Vec::new(),
-            head_symref: Some("refs/heads/release/v2".into()),
-        };
-        let formatted = format_list_output(&output);
-        assert!(formatted.starts_with("@refs/heads/release/v2 HEAD\n"));
-        assert!(formatted.ends_with("\n\n"));
     }
 
     // --- list for-push filtering ---
