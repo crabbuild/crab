@@ -2899,7 +2899,6 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             "remote-client": ["active-probe", "dep:futures-util", "dep:tokio"],
             "xet-chunk-cache": [
                 "dep:async-trait",
-                "dep:base64",
                 "dep:crc32fast",
                 "dep:errno",
                 "dep:fs4",
@@ -2915,7 +2914,6 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
 
     for name in (
         "async-trait",
-        "base64",
         "crc32fast",
         "errno",
         "filetime",
@@ -3010,7 +3008,6 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
             ],
             required={
                 "async-trait",
-                "base64",
                 "crc32fast",
                 "errno",
                 "fs4",

@@ -69,6 +69,9 @@ warnings-as-errors CLI invocation does not: dependency traversal encounters
 eight VFS lints (the offending statements also exist on main); `--no-deps`
 reports 497 CLI lints on Rust 1.98.0. The latter set has not been exhaustively
 attributed against main. No suppressions were added to manufacture a pass.
+The cache feature-budget gate initially still required the removed Base64
+dependency. Its exact contract now matches the hex implementation; the full
+architecture checker and its three regression tests pass locally.
 
 **Provider evidence mitigation:** `pb-provider-qualification.yml` now retains
 the S3 canary's report and redacted command logs separately from the provider
