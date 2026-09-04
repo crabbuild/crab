@@ -32,6 +32,8 @@ pub(crate) enum ReceiveError {
     NotFound,
     #[error("write access required")]
     Forbidden,
+    #[error("protected branch requires a pull request")]
+    Protected,
     #[error("Git transfers are busy")]
     Busy,
     #[error("receive cancelled or deadline exceeded")]
@@ -80,6 +82,10 @@ impl IntoResponse for ReceiveError {
         let (status, message) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "Repository not found"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "Write access required"),
+            Self::Protected => (
+                StatusCode::FORBIDDEN,
+                "Protected branch requires a pull request",
+            ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Git transfers are busy; retry shortly",

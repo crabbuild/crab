@@ -826,6 +826,16 @@ main {
 .merge-action button {
   margin-top: 12px;
 }
+.protected-branch-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.protected-branch-note svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--fgColor-accent);
+}
 .merge-action .notice {
   margin-bottom: 0;
 }
