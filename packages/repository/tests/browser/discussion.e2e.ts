@@ -206,3 +206,44 @@ test("failed posts preserve drafts and slow replies do not steal focus", async (
     release();
   }
 });
+
+test("header controls remain reachable on narrow screens in both themes", async ({
+  page,
+}) => {
+  await openDiscussion(page);
+  const header = page.locator(".global-header");
+  for (const theme of ["light", "dark"]) {
+    await header.getByLabel("Appearance").selectOption(theme);
+    for (const width of [320, 390, 640, 900, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      const obscured = await header
+        .locator("a:visible, summary:visible, button:visible, select:visible")
+        .evaluateAll((controls) =>
+          controls
+            .filter((control) => {
+              const rect = control.getBoundingClientRect();
+              const hit = document.elementFromPoint(
+                rect.x + rect.width / 2,
+                rect.y + rect.height / 2,
+              );
+              return (
+                rect.left < 0 ||
+                rect.right > innerWidth ||
+                !hit ||
+                !control.contains(hit)
+              );
+            })
+            .map((control) => control.textContent?.trim()),
+        );
+      expect(obscured, `${theme} at ${width}px`).toEqual([]);
+      await header.locator("summary").click();
+      const popover = header.locator(".git-popover");
+      await expect(popover.getByRole("heading")).toBeVisible();
+      const bounds = await popover.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+      await header.locator("summary").click();
+    }
+  }
+});
