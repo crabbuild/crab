@@ -2202,6 +2202,7 @@ dependencies = [
  "bstr",
  "bytes",
  "crab-types",
+ "flate2",
  "gix",
  "gix-discover",
  "gix-features",
