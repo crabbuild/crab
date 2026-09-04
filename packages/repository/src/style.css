@@ -635,7 +635,8 @@ main {
   display: block;
   margin: 12px 0 6px;
 }
-.git-popover input {
+.git-popover input,
+.git-popover select {
   width: 100%;
   padding: 8px;
   margin-bottom: 10px;

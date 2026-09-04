@@ -6,19 +6,45 @@ interface GitToken {
   username: string;
   token: string;
   expires_in: number;
+  owner: string;
+  repository: string;
+  access: "read" | "write";
 }
 
-export function GitAccess({ session }: { session: Session }) {
+export function GitAccess({
+  session,
+  repositories,
+}: {
+  session: Session;
+  repositories: Repository[];
+}) {
   const [token, setToken] = useState<GitToken>();
+  const [selected, setSelected] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
+  const repository = repositories.find(
+    (repo) => `${repo.owner}/${repo.name}` === selected,
+  );
   async function change(method: "POST" | "DELETE") {
+    if (method === "POST" && !repository) return;
     setPending(true);
+    setToken(undefined);
     setMessage(undefined);
     try {
       const response = await fetch("/api/git-token", {
         method,
-        headers: { "X-CSRF-Token": session.csrf ?? "" },
+        headers: {
+          "X-CSRF-Token": session.csrf ?? "",
+          "Content-Type": "application/json",
+        },
+        body:
+          method === "POST" && repository
+            ? JSON.stringify({
+                owner: repository.owner,
+                repository: repository.name,
+                access: "read",
+              })
+            : undefined,
       });
       if (!response.ok)
         throw new Error("Could not update Git access. Reload and try again.");
@@ -42,15 +68,39 @@ export function GitAccess({ session }: { session: Session }) {
         <h2>Git access token</h2>
         <p>
           Use <code>crab</code> as your Git username and this token as the
-          password. It can read your repositories and expires when this sign-in
-          expires or you sign out.
+          password. It can read only the selected repository and expires when
+          this sign-in expires or you sign out.
         </p>
         <p>Save it in your Git credential manager. It is shown only here.</p>
+        <label htmlFor="git-token-repository">Repository</label>
+        <select
+          id="git-token-repository"
+          value={selected}
+          disabled={pending}
+          onChange={(event) => {
+            setSelected(event.target.value);
+            setToken(undefined);
+            setMessage(undefined);
+          }}
+        >
+          <option value="">Choose a repository</option>
+          {repositories.map((repo) => {
+            const name = `${repo.owner}/${repo.name}`;
+            return (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            );
+          })}
+        </select>
+        {repositories.length === 0 && (
+          <p>No repositories available for a token.</p>
+        )}
         {token && (
           <>
             <label htmlFor="git-token">
-              Token · expires in about {Math.ceil(token.expires_in / 60)}{" "}
-              minutes
+              Read token for {token.owner}/{token.repository} · expires in about{" "}
+              {Math.ceil(token.expires_in / 60)} minutes
             </label>
             <input
               id="git-token"
@@ -79,7 +129,7 @@ export function GitAccess({ session }: { session: Session }) {
         <div className="git-actions">
           <Button
             variant="primary"
-            disabled={pending}
+            disabled={pending || !repository}
             onClick={() => change("POST")}
           >
             {pending ? "Updating…" : "Generate token"}
