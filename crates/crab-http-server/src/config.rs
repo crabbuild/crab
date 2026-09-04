@@ -40,6 +40,8 @@ pub struct BranchProtection {
     pub branch: String,
     #[serde(default)]
     pub required_approvals: u8,
+    #[serde(default)]
+    pub required_checks: Vec<String>,
 }
 
 /// A provider subject's explicit repository permission.
@@ -105,14 +107,23 @@ impl Config {
             let mut protected = HashSet::new();
             for rule in &repository.protected_branches {
                 let reference = format!("refs/heads/{}", rule.branch);
+                let mut checks = HashSet::new();
                 if rule.branch.is_empty()
                     || rule.branch.starts_with("refs/")
                     || crab_git::validate_push_refname(&reference).is_err()
                     || rule.required_approvals > 20
+                    || rule.required_checks.len() > 50
+                    || rule.required_checks.iter().any(|check| {
+                        check.trim() != check
+                            || check.is_empty()
+                            || check.chars().count() > 100
+                            || check.chars().any(char::is_control)
+                            || !checks.insert(check.to_lowercase())
+                    })
                     || !protected.insert(&rule.branch)
                 {
                     return Err(Error::Config(
-                        "protected branches must be unique valid names with at most 20 required approvals",
+                        "protected branches require unique valid names, at most 20 approvals, and at most 50 unique check names",
                     ));
                 }
             }
@@ -216,6 +227,9 @@ mod tests {
             "[{branch='release..next'}]",
             "[{branch='main'},{branch='main'}]",
             "[{branch='main',required_approvals=21}]",
+            "[{branch='main',required_checks=['']}]",
+            "[{branch='main',required_checks=['ci/test','CI/Test']}]",
+            "[{branch='main',required_checks=['ci/test', 'ci/test']} ]",
             "[{branch='main',unexpected=true}]",
         ] {
             let source = format!(
@@ -226,7 +240,7 @@ mod tests {
             }
         }
         let config: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=[{branch='main',required_approvals=2},{branch='release/v1'}]",
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=[{branch='main',required_approvals=2,required_checks=['ci/test']},{branch='release/v1'}]",
         )
         .unwrap();
         assert!(config.validate().is_ok());
@@ -236,6 +250,13 @@ mod tests {
                 .unwrap()
                 .required_approvals,
             2
+        );
+        assert_eq!(
+            config.repositories[0]
+                .protection("refs/heads/main")
+                .unwrap()
+                .required_checks,
+            ["ci/test"]
         );
         assert!(
             config.repositories[0]

@@ -200,6 +200,7 @@ impl Harness {
                 protected_branches: vec![crate::BranchProtection {
                     branch: "main".into(),
                     required_approvals: 1,
+                    required_checks: vec!["ci/test".into()],
                 }],
             },
             store: store.clone(),

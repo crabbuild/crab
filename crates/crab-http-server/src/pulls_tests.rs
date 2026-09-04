@@ -300,6 +300,7 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
         .protected_branches = vec![crate::BranchProtection {
         branch: "main".into(),
         required_approvals: 0,
+        required_checks: vec![],
     }];
     let stop = CancellationToken::new();
     let stopped = stop.clone();

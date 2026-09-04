@@ -846,6 +846,63 @@ main {
   flex: 0 0 auto;
   margin-top: 3px;
 }
+.required-checks {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.required-checks-summary,
+.required-checks li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.required-checks-summary {
+  background: var(--bgColor-muted);
+}
+.required-checks-summary strong {
+  min-width: 0;
+  flex: 1;
+}
+.required-checks ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.required-checks li + li {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.required-checks li > span {
+  min-width: 0;
+  flex: 1;
+}
+.required-checks li strong,
+.required-checks li small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.required-checks li small {
+  color: var(--fgColor-muted);
+}
+.required-checks a {
+  flex: 0 0 auto;
+}
+.required-checks.success svg,
+.required-checks li.success svg {
+  color: var(--fgColor-success);
+}
+.required-checks.failure svg,
+.required-checks li.failure svg,
+.required-checks li.error svg {
+  color: var(--fgColor-danger);
+}
+.required-checks.pending svg,
+.required-checks li.pending svg,
+.required-checks li.expected svg {
+  color: var(--fgColor-attention);
+}
 .merge-action .notice {
   margin-bottom: 0;
 }

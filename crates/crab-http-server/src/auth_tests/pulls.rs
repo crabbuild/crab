@@ -26,6 +26,24 @@ async fn mutate(
     (status, body)
 }
 
+async fn report_status(h: &Harness, token: &str, oid: &str, body: Value) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .post(format!(
+            "{}/api/repos/team/private/statuses/{oid}",
+            h.origin
+        ))
+        .basic_auth("crab", Some(token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
 #[tokio::test]
 async fn pull_routes_require_membership_and_csrf_before_repository_access() {
     let h = Harness::new(false).await;
@@ -104,11 +122,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(token.0, StatusCode::OK);
+    let git_token = token.1["token"].as_str().unwrap().to_owned();
     let mut git_url = Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
     git_url.set_username("crab").unwrap();
-    git_url
-        .set_password(Some(token.1["token"].as_str().unwrap()))
-        .unwrap();
+    git_url.set_password(Some(&git_token)).unwrap();
     let source = tempfile::tempdir().unwrap();
     let path = source.path();
     crate::server::receive_tests::success(
@@ -185,6 +202,104 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["version"], 2);
     assert_eq!(ready["merge_requirements"]["approvals"], 1);
+    assert_eq!(
+        ready["merge_requirements"]["checks"][0]["state"],
+        Value::Null
+    );
+    assert_eq!(ready["merge_requirements"]["checks_satisfied"], false);
+    assert_eq!(ready["merge_requirements"]["satisfied"], false);
+    assert_eq!(ready["can_merge"], false);
+    let blocked = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/merge"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000021",
+            "version":ready["version"],
+            "method":"fast_forward",
+            "base_oid":ready["base_oid"],
+            "head_oid":ready["head_oid"]
+        }),
+    )
+    .await;
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+    assert_eq!(blocked.1["error"]["code"], "merge_blocked");
+    let pending = report_status(
+        &h,
+        &git_token,
+        &first_head,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000017",
+            "context":"ci/test",
+            "state":"pending",
+            "description":"Tests are running",
+            "target_url":"https://ci.example.test/build/17"
+        }),
+    )
+    .await;
+    assert_eq!(pending.0, StatusCode::CREATED, "{}", pending.1);
+    assert_eq!(pending.1["state"], "pending");
+    assert_eq!(
+        mutate(
+            &h,
+            &bob,
+            bob_csrf,
+            reqwest::Method::POST,
+            &format!("/api/repos/team/private/statuses/{first_head}"),
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000018",
+                "context":"ci/test",
+                "state":"success"
+            }),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let success = report_status(
+        &h,
+        &git_token,
+        &first_head,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000019",
+            "context":"CI/Test",
+            "state":"success",
+            "description":"Tests passed",
+            "target_url":"https://ci.example.test/build/19"
+        }),
+    )
+    .await;
+    assert_eq!(success.0, StatusCode::CREATED);
+    assert_eq!(success.1["state"], "success");
+    let replay = report_status(
+        &h,
+        &git_token,
+        &first_head,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000017",
+            "context":"ci/test",
+            "state":"pending",
+            "description":"Tests are running",
+            "target_url":"https://ci.example.test/build/17"
+        }),
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::CREATED);
+    assert_eq!(replay.1["state"], "pending");
+    let statuses = h
+        .json(
+            &format!("/api/repos/team/private/commits/{first_head}/status"),
+            &bob,
+        )
+        .await;
+    assert_eq!(statuses["state"], "success");
+    assert_eq!(statuses["statuses"].as_array().unwrap().len(), 1);
+    assert_eq!(statuses["statuses"][0]["context"], "CI/Test");
+    let ready = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(ready["merge_requirements"]["checks"][0]["state"], "success");
+    assert_eq!(ready["merge_requirements"]["checks_satisfied"], true);
     assert_eq!(ready["merge_requirements"]["satisfied"], true);
     assert_eq!(ready["can_merge"], true);
     let edited = mutate(
@@ -242,6 +357,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     crate::server::receive_tests::success(path, &["push", git_url.as_str(), "feature"]).await;
     let stale = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(stale["merge_requirements"]["approvals"], 0);
+    assert_eq!(
+        stale["merge_requirements"]["checks"][0]["state"],
+        Value::Null
+    );
     assert_eq!(stale["merge_requirements"]["satisfied"], false);
     assert_eq!(stale["can_merge"], false);
     let reviews = h.json(&format!("{ROOT}/1/reviews"), &bob).await;
@@ -284,7 +403,35 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(ready["version"], 4);
     assert_eq!(ready["merge_requirements"]["approvals"], 1);
     assert_eq!(ready["merge_requirements"]["changes_requested"], 0);
+    assert_eq!(ready["merge_requirements"]["checks_satisfied"], false);
+    assert_eq!(ready["merge_requirements"]["satisfied"], false);
+    let success = report_status(
+        &h,
+        &git_token,
+        &second_head,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000020",
+            "context":"ci/test",
+            "state":"success"
+        }),
+    )
+    .await;
+    assert_eq!(success.0, StatusCode::CREATED);
+    let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["satisfied"], true);
+    crate::server::receive_tests::success(path, &["push", git_url.as_str(), ":feature"]).await;
+    let replay = report_status(
+        &h,
+        &git_token,
+        &second_head,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000020",
+            "context":"ci/test",
+            "state":"success"
+        }),
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::CREATED);
     source.close().unwrap();
     h.close().await;
 }

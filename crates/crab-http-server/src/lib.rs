@@ -12,6 +12,7 @@ mod maintenance;
 mod pulls;
 mod receive;
 mod server;
+mod statuses;
 
 pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
