@@ -92,7 +92,9 @@ jobs:
   rust:
     name: Rust quality and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # Full workspace proof can consume 35 minutes before the build cache's
+    # post-job upload; leave cleanup headroom without dropping any checks.
+    timeout-minutes: 45
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     steps:
