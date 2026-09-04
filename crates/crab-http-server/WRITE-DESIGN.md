@@ -6,6 +6,28 @@ planning are qualified; publication and HTTP receive wiring remain pending.
 Crab pointer content verification is qualified separately against RustFS.
 The passing intake tests do not prove an accepted push or an updated ref.
 
+## Implemented receive framing and authorization
+
+`crab-git::receive_wire` parses bounded command sections without consuming pack
+bytes, advertises supported capabilities and encodes known atomic outcomes.
+Native Git tests cover branch/tag creation, deletion without a pack, empty packs
+and visible rejection/unpack failures. HTTP receive admission and publication
+must still compose this framing with the intake and commit boundaries below.
+
+Repository members now have explicit `read`/`write` grants. Git tokens bind one
+owner/repository and requested permission to a browser session; effective access
+intersects the grant and token scope. Revocation invalidates retained principals
+on their next authorization check. The browser offers scoped read tokens; the
+token API permits explicit write scope only for a configured writer. The future
+receive endpoint must check `Principal::can_write` before intake and publication.
+These permissions do not make HTTP push available.
+
+The RustFS browser smoke signs in, creates a token, reads the exact Kubernetes tip
+through Git HTTP, rejects another repository mapping and observes 401 after
+revocation. Write-token issuance succeeds for the writer's repository and returns
+403 for a read-only grant. Config, HTTP tests and mobile browser checks cover
+explicit scope, revocation, selection and failure/retry behavior.
+
 ## Implemented intake boundary
 
 `crab-git::incoming_pack::quarantine` privately spools one complete incoming pack,
@@ -266,7 +288,7 @@ successful preflight; refs remain unchanged. The combined proof took 3.139 ms
 locally, a small synthetic observation rather than production push latency.
 
 No HTTP endpoint accepts these candidates yet. Writer fences, canonical
-publication/recovery, write authorization and receive-pack wiring still need
+publication/recovery and authorized receive-pack wiring still need
 implementation and native client round-trip qualification.
 
 ## Existing code and the semantic mismatch
