@@ -10,6 +10,7 @@ import {
 } from "./api";
 import { Link, Result } from "./ui";
 import { ConflictReview, useMutation } from "./discussion-mutations";
+import { DiscussionSearch } from "./discussion-search";
 import {
   DiscussionMarkdown,
   Editor,
@@ -79,8 +80,9 @@ export function Issues({
 function IssueList({ repo, url }: { repo: Repository; url: URL }) {
   const state = url.searchParams.get("state") ?? "open";
   const before = url.searchParams.get("before") ?? undefined;
+  const query = url.searchParams.get("q") ?? "";
   const page = useRequest<Page<Issue>>(
-    endpoint(repo, "issues", { state, before }),
+    endpoint(repo, "issues", { state, before, q: query || undefined }),
   );
   return (
     <section className="issues-page">
@@ -98,6 +100,20 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
       <p className="muted">
         Track work, report problems, and discuss changes with your team.
       </p>
+      <DiscussionSearch
+        label="Search issues"
+        placeholder="Search titles, descriptions, or authors"
+        value={query}
+        onSearch={(value) =>
+          navigate(
+            repoHref(repo, {
+              view: "issues",
+              state,
+              q: value || undefined,
+            }),
+          )
+        }
+      />
       <div className="issues-filters">
         <nav aria-label="Issue state">
           {["open", "closed", "all"].map((value) => (
@@ -105,7 +121,11 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
               key={value}
               className={state === value ? "active" : ""}
               aria-current={state === value ? "page" : undefined}
-              href={repoHref(repo, { view: "issues", state: value })}
+              href={repoHref(repo, {
+                view: "issues",
+                state: value,
+                q: query || undefined,
+              })}
             >
               {value === "all"
                 ? "All issues"
@@ -157,20 +177,32 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
               <div className="notice issue-empty">
                 <IssueOpenedIcon size={32} />
                 <h3>
-                  {data.next
-                    ? "No matching issues in this range"
-                    : "No matching issues"}
+                  {query
+                    ? `No issues match “${query}”`
+                    : data.next
+                      ? "No matching issues in this range"
+                      : "No matching issues"}
                 </h3>
                 <p>
-                  {data.next
-                    ? "Continue to older issues or choose another filter."
-                    : "Start a discussion by opening a new issue."}
+                  {query
+                    ? data.next
+                      ? "Try another search or continue to older issues."
+                      : "Try another title, description, or author."
+                    : data.next
+                      ? "Continue to older issues or choose another filter."
+                      : "Start a discussion by opening a new issue."}
                 </p>
               </div>
             )}
             <div className="discussion-pagination">
               {before && (
-                <Link href={repoHref(repo, { view: "issues", state })}>
+                <Link
+                  href={repoHref(repo, {
+                    view: "issues",
+                    state,
+                    q: query || undefined,
+                  })}
+                >
                   Newest issues
                 </Link>
               )}
@@ -179,6 +211,7 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                   href={repoHref(repo, {
                     view: "issues",
                     state,
+                    q: query || undefined,
                     before: String(data.next),
                   })}
                 >

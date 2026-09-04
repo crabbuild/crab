@@ -223,6 +223,30 @@ pub(crate) fn title(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
+pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.chars().count() > 256 || value.chars().any(char::is_control) {
+        return Err(Error::Invalid(
+            "Search query must be at most 256 characters without controls",
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(value.to_lowercase()))
+}
+
+pub(crate) fn matches_query(query: Option<&str>, fields: &[&str]) -> bool {
+    query.is_none_or(|query| {
+        fields
+            .iter()
+            .any(|field| field.to_lowercase().contains(query))
+    })
+}
+
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {
     if value.len() > 65_536 || value.contains('\0') || (required && value.trim().is_empty()) {
         return Err(Error::Invalid(

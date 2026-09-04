@@ -180,7 +180,16 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         created = true;
         return route.fulfill({ status: 201, json: pull() });
       }
-      return route.fulfill({ json: { items: [pull()], next: null } });
+      const query = url.searchParams.get("q")?.toLowerCase();
+      const item = pull();
+      const matches =
+        !query ||
+        [item.title, item.body, item.author].some((value) =>
+          value.toLowerCase().includes(query),
+        );
+      return route.fulfill({
+        json: { items: matches ? [item] : [], next: null },
+      });
     }
     if (/\/pulls\/\d+$/.test(path)) {
       if (request.method() === "PATCH") {
@@ -258,6 +267,20 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   });
 
   await page.goto("/team/project?view=pulls");
+  await expect(
+    page.getByRole("link", { name: "Improve the README", exact: true }),
+  ).toBeVisible();
+  const search = page.getByRole("search", { name: "Search pull requests" });
+  await search.getByRole("textbox").fill("missing workflow");
+  await search.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page).toHaveURL(/q=missing\+workflow/);
+  await expect(
+    page.getByRole("heading", {
+      name: "No pull requests match “missing workflow”",
+    }),
+  ).toBeVisible();
+  await search.getByRole("button", { name: "Clear", exact: true }).click();
+  await expect(page).not.toHaveURL(/q=/);
   await expect(
     page.getByRole("link", { name: "Improve the README", exact: true }),
   ).toBeVisible();

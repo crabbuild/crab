@@ -1097,6 +1097,16 @@ main {
   justify-content: space-between;
   margin: 20px 0;
 }
+.discussion-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 12px;
+}
+.discussion-search-field {
+  min-width: 0;
+  flex: 1;
+}
 .issues-filters nav a {
   color: var(--fgColor-muted);
   padding: 8px 12px;
@@ -1385,6 +1395,12 @@ main {
   .issues-filters {
     align-items: flex-start;
     gap: 4px;
+  }
+  .discussion-search {
+    flex-wrap: wrap;
+  }
+  .discussion-search-field {
+    flex-basis: 100%;
   }
   .issues-filters nav {
     gap: 0;
