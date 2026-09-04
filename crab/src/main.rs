@@ -1981,6 +1981,21 @@ enum LogsCmd {
 
 #[derive(Subcommand)]
 enum MigrateCmd {
+    /// Upgrade one explicitly selected, quiesced GC coordination domain.
+    GcFence {
+        /// Direct Crab repository URL used to resolve the backing store.
+        #[arg(long)]
+        remote: String,
+        /// Exact coordination domain (repository prefix or global data domain).
+        #[arg(long)]
+        domain: String,
+        /// Apply the validated migration; otherwise inspect without writes.
+        #[arg(long, requires = "quiesced")]
+        apply: bool,
+        /// Confirm all writers/sweepers sharing the domain are stopped.
+        #[arg(long, requires = "apply")]
+        quiesced: bool,
+    },
     /// Show which file types would benefit from crab tracking.
     Info {
         /// Only consider files above this size in bytes (default: 1MB).
@@ -4487,6 +4502,15 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Migrate(sub)) => {
             let _span = tracing::info_span!("migrate").entered();
             match sub {
+                MigrateCmd::GcFence {
+                    remote,
+                    domain,
+                    apply,
+                    ..
+                } => {
+                    crab::cmd::migrate::run_gc_fence_upgrade(&remote, &domain, apply, &cancel)
+                        .await?;
+                }
                 MigrateCmd::Info { above, top } => {
                     let args = crab::cmd::migrate::MigrateInfoArgs { above, top };
                     crab::cmd::migrate::run_migrate_info(&args)?;
@@ -6155,6 +6179,24 @@ mod tests {
 
             assert_eq!(categorized.len(), categorized_count);
             assert_eq!(categorized, expected);
+        });
+    }
+
+    #[test]
+    fn gc_fence_migration_requires_explicit_quiescence_to_apply() {
+        parse_cli_on_large_stack(|| {
+            let args = [
+                "crab",
+                "migrate",
+                "gc-fence",
+                "--remote",
+                "crab://bucket/org/repo",
+                "--domain",
+                "org/repo",
+            ];
+            assert!(Cli::try_parse_from(args).is_ok());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply", "--quiesced"])).is_ok());
         });
     }
 

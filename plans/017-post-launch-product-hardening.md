@@ -5675,7 +5675,532 @@ preserved `Could`); its dependent Git matrix/RustFS jobs are skipped. That
 assertion remains unchanged pending approval. Local RustFS still refuses
 connections and there is no registered dedicated large-repository runner.
 
+### Native RustFS and current-candidate Kubernetes qualification, 2026-09-03 UTC
+
+**Context / service recovery.** Docker remains untouched. The official
+macOS ARM64 standalone RustFS beta.8 archive is available, so local
+qualification no longer depends on force-quitting the hung Docker desktop.
+Archive SHA-256
+`6d81e4160d297181b3a4375c698a30424deb711815c69b67c2a719b31a7a87ed`
+matches its published GitHub asset digest; extracted binary SHA-256 is
+`c758fa3ba0a9e4f25cc1d947d9868dc8417fea9dc16140806027ac385d2f4b61`.
+The binary reports tag `1.0.0-beta.8`, commit
+`64c0ede0261eeb7ccd415221d6f102aa70829b6a`. See the official
+[native macOS procedure](https://docs.rustfs.com/en/installation/macos).
+
+**Phase A — isolated local service.** The API and console bind only
+`127.0.0.1:9000` and `127.0.0.1:9001`, using the requested local test
+credentials and fresh storage under the qualification root's
+`rustfs-native-beta8-20260903/data`. Existing Docker containers, volumes and
+bucket contents are not imported, overwritten or reset. The native instance
+creates its own `crabbuild` bucket. Its retained `provenance.json` records
+release/binary identity, start time, process/session and successful readiness;
+storage, IAM and lock services are connected, and the console returns HTTP 200.
+This is a local test process, not an installed production service.
+
+**Phase B — exact candidate and functional gates.** Rebuild at `0a05ca2`;
+release SHA-256 is
+`dccce3ab4b4ebd47de4022e992d538801355375f8cb4e23e1a9e521772d3ec1b`.
+The earlier cold-clone report `phase2-native-rustfs-cold-lfs-620aaa7-20260903`
+remains failed: its binary revision differed from the newer documentation
+commit. It reached no product verdict; no provenance check was weakened.
+
+Passed reports, each beneath `<qualification-root>/<run-id>/artifacts/report.json`:
+
+| Run ID | Evidence | Scope |
+| --- | --- | --- |
+| `phase2-native-rustfs-cold-lfs-0a05ca2-20260903` | 32 commands / 25 checks | Cold eager/lazy/selective LFS clones, exact bytes, denied-read terminal failure, strict Git fsck, both broken-output routes |
+| `phase2-native-rustfs-protocol-mirror-0a05ca2-20260903` | 481 commands / 139 checks | Real Git filter/lazy-fetch matrix, mirror plans/apply/replay, hook batches, missing-data rejection and checksum-verified tagged v1.0.1 rollback |
+| `phase2-native-rustfs-k8s-0a05ca2-20260903` | 63 commands / 48 checks | Both Crab and native Git add/commit/push paths, empty-cache clone, hydrate/dehydrate/rehydrate and unchanged source checkout |
+| `phase2-native-rustfs-k8s-integrity-0a05ca2-20260903` | 11 commands / 13 checks | Offline full Git fsck, authoritative Crab fsck with zero errors/repair failures, exact HEAD and managed bytes for both clones |
+| `phase2-native-rustfs-k8s-bytes-0a05ca2-20260903` | 12 commands / 5 checks | 1,000 deterministic raw objects per source/clone pair; exact types, sizes and 28,169,810-byte stream digest |
+
+Kubernetes source is the read-only pinned checkout
+`160bd16d98b7f688ce4f3b5ab0c5e4c045f36233` with 140,777 commits. Each
+workflow adds one commit and two identical 64 MiB managed files. Hydrated
+SHA-256 values are
+`42479a3569f35c8f07bc416f621ab6cc845c843e06b1c99b6e2f834c512557e4`
+(Crab add/push) and
+`71cf998d8b6ecf189c1c5720a86f862eeadbeeb71f88cd0bc8b6789b46d9db86`
+(Git add/push); duplicates and rehydration match. The sampled raw-object
+stream digest is
+`5168883b61da07077b6a4214f7e354241e0f61b2c19342a9e722bcfb3fd29572`
+for both paths. These are functional checks, not a claim that every object
+was independently compared byte-for-byte or that performance is qualified.
+Both clones also pass the supplemental offline `git fsck --strict --full`
+checks, recorded in the lifecycle's `artifacts/strict-git-fsck.json`.
+
+Reproduce the main lifecycle with
+`python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py --crab-bin <exact-release> --root <qualification-root> --run-id <new-id> --source <pinned-kubernetes-checkout> --endpoint-url http://127.0.0.1:9000 --bucket crabbuild --size-mib 64 --timeout 600 --push-timeout 900`.
+Use the cold-LFS and protocol/mirror drivers above with the same release,
+fresh run IDs and the native endpoint. Retain binary identity before/after;
+never overwrite a failed report. Original sources remain read-only inputs.
+
+**Phase C — hosted evidence retention and unresolved canary.** Hosted run
+[33817022239](https://github.com/crabbuild/crab/actions/runs/33817022239)
+is now terminal failure: all 12 provider-contract checks and release build
+passed, but the subsequent canary stopped at `missing-pack refs remain
+coherent`. The existing artifact contains only the provider report and
+service log, because the canary's report/logs live outside that upload root.
+Keep those provider checks as scoped evidence, not a successful canary.
+
+The workflow now gives the canary an explicit step ID and separately uploads
+its redacted report and command logs after success or failure. Existing
+provider artifact layout and all test expectations stay unchanged. YAML and
+step/path checks plus 6 evidence-schema and 9 source-workflow Python tests
+pass. Acceptance still requires a hosted run proving that failed-canary
+diagnostics are downloadable; do not infer that from configuration alone.
+
+The unchanged full canary reproduces locally in
+`phase2-native-rustfs-provider-canary-0a05ca2-20260903/artifacts/report.json`.
+After deleting only its disposable fixture pack, clone correctly exits 128
+without a local HEAD or checked-out payload, but default protocol-v2
+`ls-remote` also exits 128 with `CRAB-E0030`. Explicit protocol-v0 discovery
+returns the original HEAD/main OID. The v2 owner opens its verified repository
+before terminal handoff and `ls-refs`; legacy list reads canonical metadata.
+This establishes a protocol-dependent discovery result, not ref deletion.
+Native Git 2.50.1 returns that same HEAD/main under both protocol versions
+after the sole pack is moved out of a new task-owned bare clone. The original
+source is unchanged and the pack is retained, not deleted. Commands and output
+are retained in `native-git-missing-pack-contract-20260903/report.json`.
+[Git's v2 reference implementation](https://github.com/git/git/blob/v2.50.1/ls-refs.c)
+enumerates refs independently of fetch admission; optional peeling does not
+make pack availability a prerequisite for emitting a ref.
+
+**Follow-up implementation, in progress.** `serve_admitted` captures canonical,
+journal-projected ref metadata before handoff and defers the existing verified
+repository/catalog admission until the first fetch request. The shared
+`RepositoryRefs` parser is exposed as `TryFrom<&Manifest>` rather than copied.
+The admitted HEAD, refs, peeled targets and immutable pack inventory must
+equal the captured journal-projected view. Inventory matching belongs to
+`RemoteGitRepository`; it checks pack identities, sizes and object counts and
+rejects duplicate entries. A changed Git view produces a terminal retry error.
+Each negotiation round retains the same admitted handle and proof. Promisor fetch
+keeps the existing admission path; its ref-filtering call now accepts the same
+reference value directly. No fetch integrity check or canary expectation is
+removed, and no protocol-v0 fallback is introduced.
+
+The first local candidate, retained at
+`phase2-ref-discovery-wip-canary-20260904/artifacts/report.json`, used equality
+of the stored Git-validation digest. It failed at ordinary fetch after push:
+admission compacted committed journal entries and advanced the generation
+without changing the advertised Git view. That check was too restrictive.
+The revised comparison deliberately accepts this metadata compaction while
+still rejecting changed refs or packs. The first candidate separately lists
+the retained missing-pack remote successfully under v2, but its failed full
+canary is not a passing release result. Its patch and binary identities are
+retained alongside the report; do not overwrite it with a rerun.
+
+The second uncommitted candidate has binary SHA-256
+`cbde48f76f5bd617d30381bf81babdac24afaf0f818c6b7e2f53498875840de2`
+and source-patch SHA-256
+`2e5430e4d978bc7262892a3df0862c52a7d36325c837fcc7491b7a4a20daf58f`.
+Both identities and the exact patch are retained with
+`phase2-ref-discovery-wip2-canary-20260904/artifacts/report.json`; this is
+dirty-worktree qualification, not a clean CI artifact. The scoped protocol
+run passes 35 tests, excluding only the separately reported incomplete empty
+fixture, and all 17 repository-owner tests pass. The unchanged protocol/mirror
+driver passes 481 commands and 139 checks in
+`phase2-ref-discovery-wip2-protocol-mirror-20260904/artifacts/report.json`,
+including tagged rollback and missing-data mirror CI rejection.
+
+The second full canary advances through ordinary fetch, missing-pack and
+missing-index checks. Both missing-object cases preserve remote refs while
+clone fails without HEAD or checkout. It then stops at
+`corrupt-idx-clone-surfaces-integrity-error`: clone safely exits 128 without a
+local ref, but its error is `CRAB-E0099` rather than an integrity diagnostic.
+`PackLocationIter::open` preserves an `IndexOpen` source; the gix-pack 0.70.0
+index initializer distinguishes corrupt bytes from filesystem I/O. However,
+`From<crab_git::pack::PackError> for CrabError` stringifies the locator error
+through its generic internal-error arm. The sibling legacy
+`RemoteFetchStore::validate_pack_index` already labels invalid indexes as
+corrupt objects. This newly reached error-classification gap is unresolved;
+do not weaken the canary to accept an internal error.
+A live protocol-v0 clone of that same corrupt-index remote returns
+`CRAB-E0020`, retained in `artifacts/corrupt-index-legacy-diagnostic.json`.
+
+Follow-up packet: preserve typed pack/locator causes at the product error
+boundary and classify corrupt-index, checksum, missing-object, local I/O and
+cancellation outcomes explicitly. Cover locator repair, push evidence,
+legacy fetch and protocol-v2 fetch; do not fix only the observed log phrase.
+Acceptance: the unchanged corrupt-index canary passes, source-chain tests
+retain the dependency error, missing/I/O failures keep their own diagnostics,
+and the error-catalog contract is updated only with explicit approval where
+an inventory change is required.
+
+The same second candidate passes both real Kubernetes workflows in
+`phase2-ref-discovery-wip2-k8s-20260904/artifacts/report.json`: 63 commands,
+48 checks, exact clone/hydrate/dehydrate/rehydrate bytes, and the original
+source checkout unchanged. Each workflow adds two identical 64 MiB managed
+files. Their SHA-256 values are
+`54e98da949b97c86176d9f3182588e0040ce2919e132bb35fac015c017146eea`
+(Crab add/push) and
+`5bbb7e4a8ca2703fb76b7ec087bf38039d1a92cf11b89aec8bb2b46f0f371a12`
+(Git add/push). Both clones pass offline `git fsck --strict --full`, retained
+in `artifacts/strict-git-fsck.json`. The companion
+`phase2-ref-discovery-wip2-k8s-bytes-20260904/artifacts/report.json` passes
+12 commands and 5 checks, comparing 1,000 objects and 28,169,810 raw stream
+bytes per workflow with the same exact stream digest recorded above.
+`phase2-ref-discovery-wip2-k8s-integrity-20260904/artifacts/report.json`
+also passes all 11 commands and 13 checks: full offline Git fsck,
+authoritative Crab fsck with zero errors/repair failures, matching HEADs and
+managed bytes, and unchanged candidate/source identities.
+These remain shared-host functional checks, not an isolated no-regression
+performance result or evidence that the full corruption canary passed.
+
+Acceptance before publishing this fix:
+
+1. Metadata-only discovery advertises exact visible HEAD/branch/peeled-tag
+   lines without pack payloads or locator indexes; a session whose Git view
+   changes after discovery emits one terminal error and no pack. Existing
+   empty/unborn/hidden-ref and malformed-request checks must also pass. The
+   existing empty-repository fixture currently lacks a canonical layout and
+   fails the strengthened discovery boundary; completing that fixture, with
+   assertions unchanged, is awaiting approval.
+2. Run the unchanged full RustFS canary through missing-pack, missing-index,
+   corrupt-index and concurrent-push cases, then the protocol/mirror matrix.
+   Broken repositories must remain discoverable but must not complete fetch
+   or advance local refs. Capture precise candidate source and binary hashes.
+3. Repeat large-repository lifecycle/integrity proof and compare discovery and
+   fetch resource costs. The metadata capture now also reads canonical layout
+   and journal/index metadata; release those temporary inventories before
+   serving commands. Do not infer a no-regression result from unit tests.
+
+All original Phase 2 gates remain in force: production-provider and supported
+OS/Git coverage, protected inspection/publication lifetime, GC incarnation
+decision, host merge enforcement and isolated performance proof are not
+closed by this local RustFS checkpoint. The separate pull diagnostic casing
+expectation remains unmodified pending approval.
+
+### Typed pack-integrity diagnostics: implementation, 2026-09-04 UTC
+
+The corrupt-index failure above is addressed locally at the product error
+boundary. `CrabError::GitPackCorrupt` retains `PackLocatorError` as its typed
+source and uses the existing corrupt-object contract (`CRAB-E0020`, integrity
+category, exit 4). Both pack evidence and repack locator failures use this
+conversion. Index-open filesystem failures and reverse-index I/O retain their
+original I/O kind plus the locator cause; interrupted checksum validation
+remains cancellation. Corruption follows the existing one-retry storage policy.
+No catalog inventory, golden file, dependency, or stored format changes.
+
+The dependency distinction is explicit: gix-pack 0.70.0 index initialization
+separates I/O, corrupt contents, and unsupported versions. Checksum errors
+separate interruption, hash verification, and hashing failure; gix-hash 0.25.0
+defines its hashing failure as collision detection. Locator diagnostics now
+include the dependency message as well as the path. Tests use a real invalid
+index and absent file, with constructed permission and checksum failures to
+verify the remaining classification boundaries and typed source chain.
+
+Owner/caller evidence: protocol-v2 admission invokes locator repair through
+`validate_locator_pack_evidence` and the shared pack conversion. Repack has a
+separate locator wrapper and now delegates to the same conversion. The legacy
+`RemoteFetchStore::validate_pack_index` already emits `CRAB-E0020`; its retained
+live corrupt-index result above remains the sibling classification reference.
+The auth-server pack conversion already classifies corruption separately and
+is unchanged; this packet does not claim to improve its string-based source
+representation. A central conversion is preferable to matching the canary's
+observed text or changing only one repair call site.
+
+Focused proof: 57 core/error-catalog tests, 22 retry tests, 9 shared pack-locator
+tests, 2 unchanged error-code golden/catalog integration tests, 35 protocol
+tests and the legacy missing/empty/corrupt-index test pass. The protocol run
+still excludes the incomplete empty-repository fixture pending approval.
+Formatting and diff checks pass; no full-suite success is claimed.
+
+The new release binary SHA-256 is
+`9651ae8946e7952c6037af865c566549d293d84cac930dc6329b6ec1e6edfbc6`;
+source-patch SHA-256 is
+`f71c035df5e399def91b36ab2f40a5790d618d42cbac0f659f79ff3baf659cb6`.
+The exact patch and provenance are retained under
+`phase2-pack-integrity-wip3-canary-20260904/artifacts/`. The unchanged
+protocol/mirror driver passes 481 commands and 139 checks in
+`phase2-pack-integrity-wip3-protocol-mirror-20260904/artifacts/report.json`.
+
+The first full canary passes missing-pack, missing-index, corrupt-index,
+concurrent push and committed-restage checks, then its Python driver aborts
+on a read-only SQLite query in the partial-overlap case. It completed 244
+commands and 84 checks. Its original report remains `running` because the
+driver does not catch `sqlite3.OperationalError`; `artifacts/termination.json`
+records the actual exit-1 result. Never treat that report as passed or active.
+The 27-byte corrupt index now emits `CRAB-E0020` plus the dependency reason,
+with clone exit 128, no local HEAD/checkout, and unchanged remote refs.
+
+System Python and system SQLite 3.51.0 reproduce the same read-only-open error
+on the retained staging database. Bundled Python with SQLite 3.53.1 opens the
+same database using the same `mode=ro` URI, reports `integrity_check: ok`, and
+reads 450 prepared chunks. An immutable read after the writer exited also
+succeeds. This narrows the failure to the system runtime's read-only/WAL path;
+it does not establish a general SQLite defect or justify ignoring a live WAL.
+See SQLite's [read-only WAL contract](https://www.sqlite.org/wal.html#read_only_databases).
+The unchanged full driver passes under the bundled runtime: 326 commands,
+132 checks, both managed-file workflows, missing/corrupt immutable objects,
+concurrent push, committed restage, partial overlap, and cross-repository
+duplicates. Report: `phase2-pack-integrity-wip3b-canary-20260904/artifacts/report.json`.
+The failed report and database remain intact.
+
+The overlapping Kubernetes run fails at its first push: 25 commands, 19 checks,
+no completed lifecycle case. Report:
+`phase2-pack-integrity-wip3-k8s-20260904/artifacts/report.json`. The dependency
+reports a fenced compactor and manifest writer; the command exits 3 with
+`CRAB-E0088` wrapping `CRAB-E0503` for `chunk_index_db`, "detected newer DB
+client". The source fixture remains unchanged. This is a real failed push,
+not a passing result or proof of corrupted repository contents.
+
+The ownership contract explains the risk: `promote_metadb_to_candidate_writer`
+already documents a short-lived single-writer bucket-global chunk index;
+`RemoteIndexConfig::for_repo` selects the same `.crab/chunk_index_db/` across
+repositories. SlateDB 0.15.0 defines a fenced instance as closed and unusable.
+Independent run prefixes do not isolate this shared writer. The exact
+competing command and root-cause fix are not yet established. Read-back of
+the failed run's exact remote exits 0 with no advertised refs, matching the
+push's zero-ref outcome; `artifacts/fenced-push-readback.json` retains this
+check. No retry or cleanup of that failed repository was performed. Do not
+suppress the error or claim that a serialized pass establishes safe concurrent
+publication.
+
+The serialized rerun passes both workflows in
+`phase2-pack-integrity-wip3b-k8s-20260904/artifacts/report.json`: 63 commands,
+48 checks, and two identical 64 MiB files per case. Clone, hydration,
+dehydration and rehydration preserve their exact SHA-256 values:
+`f6774b354f2375e245b54f9f52c236bc2e6be0cde9fe10608f9d3cd79031274a`
+for Crab add/push and
+`eac62dcc9f435c700b572ce6f6c06d0950ccd33c92096eb9b2e9495bc8a10ac2`
+for Git add/push. The pinned Kubernetes source remains unchanged. The raw-byte
+companion report `phase2-pack-integrity-wip3b-k8s-bytes-20260904/artifacts/report.json`
+passes 12 commands and 5 checks: 1,000 sampled objects and 28,169,810 raw stream
+bytes per case match the source with SHA-256
+`5168883b61da07077b6a4214f7e354241e0f61b2c19342a9e722bcfb3fd29572`.
+These are sampled raw-byte comparisons, not an independent byte comparison of
+every object. Both clones also pass offline `git fsck --strict --full`, retained
+in the lifecycle's `artifacts/strict-git-fsck.json`. The authoritative companion
+`phase2-pack-integrity-wip3b-k8s-integrity-20260904/artifacts/report.json`
+passes 11 commands and 13 checks: full offline Git fsck, authoritative Crab
+fsck with zero errors/repair failures, matching HEADs/bytes, and unchanged
+source and candidate identities. This uncontrolled local run does not
+establish an isolated performance no-regression result.
+
+Follow-up context: qualify overlapping publications to distinct repositories
+in one bucket, not only same-ref CAS. Trace every writer-opening owner before
+choosing coordination or index partitioning. Acceptance: repeated controlled
+overlap completes or returns an explicit retryable conflict with a proved
+read-back outcome, never false success; every handle closes; both resulting
+refs and hydrated bytes match; origin data remains GC-protected; cancellation
+and writer takeover cannot silently publish incomplete dependencies. Preserve
+the failed large-workload evidence when adding this gate. Original Phase 2
+acceptance and isolated performance gates remain open.
+
+### Writer ownership and terminal qualification evidence, 2026-09-04 UTC
+
+**Controlled contract proof.** The new
+`writer_takeover_rejects_stale_durable_batches` test opens two real SlateDB
+writers through Crab's `Db` wrapper, for both file and chunk indexes. The
+first writes a durable row; the second takes ownership; a later durable write
+from the first must fail within ten seconds with the typed
+`Closed(Fenced)` cause. After both owners are closed, an independent reader
+sees the first committed row and the replacement's row, but not the rejected
+stale row. All 19 database-wrapper tests pass, including the existing test
+that read-only opens do not fence writers. This proves the dependency's
+takeover/fail-closed boundary; it does not serialize two valid publications.
+
+**Ownership evidence.** `publish_candidate_metadb` promotes the CLI's planning
+reader to a writer before ref visibility; the writer survives the flush,
+local-cache warm and later close boundary. CLI rebuild and metadata GC also
+use the `MetaDb` writer path. Protected receive and view materialization use
+the shared `RemoteIndexWriter` instead. Its physical chunk-index path comes
+from the router's global prefix: default repositories may share one index,
+while a protected view deliberately uses its view-local prefix. Any owner
+must therefore coordinate the exact store/index identity, not merely a ref,
+repository name, process-local mutex, or assumed bucket-global path.
+
+The tagged v1.0.1 CLI already opens a raw SlateDB writer without a shared
+writer-admission lease. Current `RemoteIndexWriter::open_writer` also opens
+directly; the CLI-only `SYS_FORMAT_VERSION` check is not a universal writer
+gate. A new advisory lock or CLI format marker alone cannot establish
+mixed-version exclusion. Before changing this contract, decide the supported
+write-client transition and enforcement boundary; do not silently migrate a
+shared index, assume old writers cooperate, or add retries that reuse a
+fenced handle. The existing GC-incarnation decision below is separate and
+still requires approval.
+
+**Bounded cleanup fix.** Both `commit_service_metadata` and `commit_view_metadb`
+created a fallible temporary workspace after acquiring their writers but
+before entering the operation/close block. Workspace allocation now happens
+first, so that I/O failure cannot bypass explicit close. Both sibling paths
+are changed; the shared opener already attempts to close the file writer if
+chunk-writer acquisition fails. Existing service metadata and view-object
+tests pass (three tests, real SlateDB with in-memory object storage). The
+workspace-failure ordering is source-proven, not a live injected filesystem
+failure test. This does not solve cancellation or concurrent-writer ownership
+for all service paths, and does not qualify new service release binaries.
+
+**Terminal canary fix.** The driver now catches ordinary exceptions at its
+process boundary, marks an initialized report failed, and records a redacted
+`driver-completed: false` check for unexpected failures. Existing assertion
+failures still fail; assertions are not weakened, and unsafe source/run
+overlap still creates no report inside the source. This depends on the
+artifact destination remaining writable; abrupt process death is not covered.
+Ten Python tests pass, including SQLite, filesystem and unexpected runtime
+errors, terminal status, credential redaction, and the existing source/cache
+isolation tests.
+
+Live negative proof uses the system runtime's same read-only SQLite failure:
+`phase2-canary-terminal-system-20260904/artifacts/report.json` now correctly
+records `failed`, 15 commands, 17 checks, and an `OperationalError`; process
+exit is 1. The successful full path uses the bundled runtime:
+`phase2-canary-terminal-bundled-20260904/artifacts/report.json` passes 326
+commands and 132 checks with the same Crab binary SHA-256 recorded above.
+No existing failed report or staging database was rewritten. The system
+SQLite limitation remains a qualification-environment issue, not a newly
+accepted canary result.
+
+Next executable ownership packets:
+
+1. Decide and document writer-version admission for every direct, managed,
+   maintenance and view entry point. Acceptance: tagged-client behavior and
+   scoped credentials are proven before changing any stored coordination or
+   metadata contract; no process can bypass the selected exclusion boundary.
+2. Give one owner the exact physical index lease from before writer open
+   through flush and close. Keep expensive preparation and cache warming
+   outside that interval. Acceptance: deterministic competing owners, expiry,
+   cancellation and failed acquisition/close tests prove release ordering and
+   bounded wait; do not duplicate lease implementations in product callers.
+3. Revalidate the candidate after reacquiring ownership; preserve the typed
+   conflict through per-ref reporting. Acceptance: a fenced handle is never
+   reused, an uncertain ref commit is resolved by read-back, and retries never
+   turn missing dependencies into success.
+4. Repeat controlled cross-repository RustFS overlap, protected-service/view
+   cases, tagged-client cases and the Kubernetes workflows. Acceptance: exact
+   refs and hydration bytes, no unclosed handles or incomplete publication,
+   bounded contention cost, plus the original provider/OS/performance gates.
+
+### Failure-injection proof and acceptance audit, 2026-09-04 UTC
+
+The service workspace-ordering fix now has a real filesystem-failure
+regression for both receive and view metadata publication. Each test runs in
+a bounded, single-test child process and uses tempfile's process-local
+override to point at a regular file. It asserts an I/O error and unchanged
+object-store contents. The parent retains its normal environment and kills
+an over-deadline child. No production flag or runtime dependency is added.
+
+Both tests fail with the original writer-before-workspace ordering: receive
+creates file/chunk metadata manifests, WAL and compaction objects; view also
+creates metadata objects before the local workspace error. Restoring the fix
+makes both pass. The normal receive metadata test and both existing view
+tests pass too (five distinct tests). Original ordering was restored only
+temporarily to verify the regression, and the fixed source is present again.
+These tests use real filesystem errors and real SlateDB with in-memory
+object storage; they are not a production-provider or service-binary E2E row.
+
+The seven original Phase 2 gates remain unclosed:
+
+| Original acceptance gate | Current authoritative evidence | Remaining prerequisite/proof |
+|---|---|---|
+| Supported Git/OS/provider matrix | Local exact-binary RustFS canary, protocol/mirror and Kubernetes reports pass; PR 148 is still at `0a05ca2` with failed protocol gates and skipped downstream real-Git jobs. | Approve the necessary fixture/contract updates, publish a clean candidate, and qualify every claimed provider/platform cell. |
+| Unsupported capability rejection | Local transcript and real-Git rejection checks pass for the selected profile. | Complete exact-candidate cross-version/platform evidence; do not infer all supported cells from one local profile. |
+| Partial-clone object identity and hidden refs | Local protocol/mirror report passes 139 checks; Kubernetes raw-object samples and strict fsck pass. | Full declared matrix and resource-bound evidence, including error/provider cases. |
+| Cancellation, truncation and lease cleanup | Existing focused cancellation tests, takeover rejection, and new workspace-failure tests provide bounded slices. | GC observation/incarnation decision, one publication owner, abrupt-death and overlapping-writer matrix; current large concurrent push failure remains evidence against completion. |
+| Accurate mirror states without optimistic health | Local mirror status/reconciliation and missing-data CI rejection checks pass. | Complete non-mutating GC lifetime proof and managed/provider failure qualification. |
+| Host-enforced exact-candidate CI gate | Mirror CI can fail locally. GitHub reports no classic protection on `main`, no effective branch rules, and the repository's `Main` ruleset is disabled. | Explicit host/branch/check authorization and a controlled missing-data candidate proving merge/promotion rejection. No host settings changed. |
+| Plan-first, attributable, idempotent reconciliation | Local plan/apply/replay and tagged rollback checks pass. | Complete protected lifetime, recovery/receipt inventory approval, crash/expiry/provider fault table and concurrent publication proof. |
+
+Current external checks are terminal, not jobs still waiting: PR 148 remains
+open/draft at `0a05ca2c92cffa24eb6600c00ed1d781dd9b678b`. Protocol run
+`33818280283` failed on the preserved-diagnostic casing assertion; the local
+empty-repository test also still fails because its fixture has no layout.
+Replica run `33818280333` cannot compile `schema_validate.rs:557` because its
+`MirrorApplySummary` fixture omits `current`, `manifest_digest` and
+`transaction_id`. Architecture run `33818280444` reports the local-cache
+feature inventory mismatch (`fs4`/`tokio-util`) and the release archive check
+rejects `--rollback-crab-bin`; NFS gates inherit that release-contract failure.
+These are not made green by the new focused tests. The cache dependencies
+implement process-safe ownership/cancellation, and release rollback uses a
+separately hash-pinned tagged binary; do not remove those behaviors merely to
+silence the old inventories.
+
+The large-repository workflow requires a self-hosted macOS runner labelled
+`crab-large-repo`; GitHub currently returns zero registered repository runners.
+Local uncontrolled timings cannot replace that performance gate. Dedicated
+production-provider targets and authorization remain required separately from
+the user-authorized loopback RustFS bucket.
+
+Execution boundary: fixture/inventory changes require explicit approval under
+the repository rules. Coordination/receipt compatibility and old-writer
+admission must be decided before altering shared stored contracts; host
+enforcement and dedicated qualification resources require external setup or
+authorization. The corrections and decisions are still unapproved. No schema,
+snapshot, inventory, branch rule, provider target or older-client admission
+policy has been changed to bypass these gates. Full completion is unproven.
+
+### Approved coordination upgrade and review candidate, 2026-09-04 UTC
+
+The user approved the fixture/inventory corrections and explicit versioned
+coordination migration after the preceding acceptance audit. The earlier
+approval blockers are historical, not outstanding requests for consent.
+
+**Implemented contract.** GC fence schema 2 has a required UUIDv7 domain
+incarnation. Every new domain creation gets a fresh identity; release retains
+it. Renewal and release check the incarnation and reject expired ownership.
+Epoch changes are checked rather than saturating. Repository and bucket GC
+journals now use schema 2 and seal both incarnation and writer epoch. A changed
+incarnation invalidates a resume even when the numeric epoch is identical.
+Old journals are refused; operators must generate a fresh plan.
+
+**Migration boundary.** `crab migrate gc-fence --remote URL --domain DOMAIN`
+validates without writes. Applying requires `--apply --quiesced`, one exact
+domain, and externally stopped writers/sweepers. The shared migration owner
+accepts only strict schema-1 state with no holders or quarantine, rejects
+exhausted counters, and updates once using the observed provider version.
+There is no automatic conversion, retry after a CAS conflict, state deletion,
+fallback reader, dependency override or downgrade. Reapplying schema 2 is
+idempotent. Tagged v1.0.1 uses strict fields and schema-1 validation, so its
+writers reject migrated state. Arbitrarily restoring an older coordination
+object remains outside unversioned storage's observable guarantees.
+
+**Acceptance evidence.** The formerly red domain-recreation test passes.
+Eleven fence/migration tests cover identity, expiry, exhaustion, explicit and
+idempotent migration, and refusal of uncertain/malformed state. Eleven GC
+journal tests include equal-numeric-epoch/different-incarnation rejection.
+Thirty-six protocol tests, three mirror schema fixtures, eight history recovery
+tests and the explicit CLI-approval parser test pass. The casing correction
+preserves Git's diagnostic; empty-repository and history-GC fixtures initialize
+the canonical layout without changing assertions. The cache inventory now
+accounts for its existing lock/cancellation dependencies. The release contract
+allows rollback reads while requiring the pinned tagged artifact and checksum
+verification. Both contract scripts pass.
+
+The optimized candidate passed live RustFS migration and tagged writer refusal
+in `phase2-approved-gc-migration-20260904/artifacts/report.json`. Preview and
+repeat apply leave bytes unchanged; v1.0.1 fails without moving refs or changing
+the migrated fence. Its SHA-256 is
+`cfe8909ce3f336cd19ff0ac82862cd9b215846e934afce9d77e34ae30bfa9c19`.
+This is a dirty-worktree functional checkpoint, not clean release attestation.
+The idle loopback `crabbuild` global `.crab` domain was separately inspected and
+explicitly migrated, retaining epochs, in
+`phase2-approved-global-migration-20260904/artifacts/report.json`; no production
+provider or unrelated domain was migrated. CI now repeats the migration/old
+writer refusal against the exact candidate and hash-pinned v1.0.1 artifact in
+the Git-version matrix, retaining reports even on failure. The same optimized
+candidate then passed the full loopback canary: 326 commands, 132 checks in
+`phase2-approved-canary-20260904/artifacts/report.json`, including both
+add/push paths and clone/hydrate byte identity. This does not replace the
+separately retained failed overlapping Kubernetes run.
+
+**Rollout order and remaining gates.** Follow the public
+[`crab migrate` runbook](https://crab.build/docs/cli/reference/crab-migrate):
+quiesce every client sharing each physical domain, clear claims using the old
+version, inspect, apply per domain, upgrade clients, then create fresh GC plans.
+This packet does not implement non-writing lifetime observations across the
+complete mirror inspection or exclusive global metadata publication ownership.
+The observed overlapping Kubernetes writer failure, complete receipt/recovery
+fault matrix, dedicated performance/provider qualification and host-enforced
+merge checks remain separate requirements. No original full Phase 2 gate is
+closed merely by making this implementation available for review.
+
 ### GC observation identity: reproduced upgrade decision, 2026-09-03 UTC
+
+Historical decision record; the approval and implementation above supersede
+its pending-approval status. Its remaining observation/publication work is
+still explicitly open.
 
 **Evidence and limit.** The local regression
 `released_fence_identity_distinguishes_domain_recreation` acquires/releases a

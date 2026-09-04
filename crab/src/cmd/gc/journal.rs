@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use crab_coordination::GcWriterEpoch;
 use futures_util::TryStreamExt;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use crate::cmd::gc::ObjectMeta;
 use crate::core::error::{CrabError, Result};
 use crate::storage::store::Store;
 
-pub const GC_JOURNAL_SCHEMA_VERSION: u32 = 1;
+pub const GC_JOURNAL_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +43,7 @@ pub struct GcRunState {
     #[serde(default)]
     pub root_identity: String,
     #[serde(default)]
-    pub fence_epoch: Option<u64>,
+    pub fence_epoch: Option<GcWriterEpoch>,
     pub phase: GcRunPhase,
 }
 
@@ -328,7 +329,7 @@ impl GcRunJournal {
     }
 
     /// Pins the exclusive-fence epoch that sealed the current root snapshot.
-    pub async fn seal_fence_epoch(&mut self, epoch: u64) -> Result<()> {
+    pub async fn seal_fence_epoch(&mut self, epoch: GcWriterEpoch) -> Result<()> {
         if self.state.fence_epoch.is_some() {
             return Err(CrabError::Configuration {
                 key: "gc.journal.fence_epoch".to_owned(),
@@ -341,15 +342,16 @@ impl GcRunJournal {
 
     /// Refuses a delete batch when any writer crossed the fence since the
     /// root snapshot or previous committed batch.
-    pub fn ensure_next_fence_epoch(&self, observed: u64) -> Result<()> {
+    pub fn ensure_next_fence_epoch(&self, observed: GcWriterEpoch) -> Result<()> {
         let expected = self
             .state
             .fence_epoch
+            .as_ref()
             .ok_or_else(|| CrabError::Configuration {
                 key: "gc.resume.fence_epoch".to_owned(),
                 origin: "GC run has no valid sealed fence epoch".to_owned(),
             })?;
-        if observed != expected {
+        if &observed != expected {
             return Err(CrabError::Configuration {
                 key: "gc.resume.fence_epoch".to_owned(),
                 origin: "GC roots may have changed since planning; start a new sweep".to_owned(),
@@ -360,8 +362,8 @@ impl GcRunJournal {
 
     /// Commits a successful bounded fenced phase that did not advance an
     /// object candidate batch.
-    pub async fn advance_fence_epoch(&mut self, observed: u64) -> Result<()> {
-        self.ensure_next_fence_epoch(observed)?;
+    pub async fn advance_fence_epoch(&mut self, observed: GcWriterEpoch) -> Result<()> {
+        self.ensure_next_fence_epoch(observed.clone())?;
         self.state.fence_epoch = Some(observed);
         self.persist_state().await
     }
@@ -526,7 +528,7 @@ impl GcRunJournal {
         &mut self,
         deleted_keys: &[String],
         bytes: u64,
-        fence_epoch: Option<u64>,
+        fence_epoch: Option<GcWriterEpoch>,
     ) -> Result<()> {
         let batch = self.state.next_batch;
         let candidates = self.read_batch(batch).await?;
@@ -1213,11 +1215,25 @@ mod tests {
         )
         .await
         .unwrap();
-        journal.seal_fence_epoch(10).await.unwrap();
+        let identity = GcWriterEpoch {
+            incarnation: Uuid::now_v7().to_string(),
+            epoch: 10,
+        };
+        journal.seal_fence_epoch(identity.clone()).await.unwrap();
 
-        journal.ensure_next_fence_epoch(10).unwrap();
+        journal.ensure_next_fence_epoch(identity.clone()).unwrap();
         assert!(matches!(
-            journal.ensure_next_fence_epoch(12),
+            journal.ensure_next_fence_epoch(GcWriterEpoch {
+                incarnation: Uuid::now_v7().to_string(),
+                epoch: identity.epoch
+            }),
+            Err(CrabError::Configuration { .. })
+        ));
+        assert!(matches!(
+            journal.ensure_next_fence_epoch(GcWriterEpoch {
+                epoch: 12,
+                ..identity
+            }),
             Err(CrabError::Configuration { .. })
         ));
     }

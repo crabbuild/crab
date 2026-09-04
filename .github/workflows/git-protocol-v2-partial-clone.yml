@@ -182,6 +182,9 @@ jobs:
           cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
           cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
           cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo test -p crab-coordination --lib gc_fence:: --locked --features object-store-lock
+          cargo test -p crab --lib cmd::gc::journal::tests --locked --features gix-transport
+          cargo test -p crab --bin crab gc_fence_migration_requires_explicit --locked --features gix-transport
           cargo check -p crab-coordination --locked --no-default-features
           cargo test -p crab --lib coordination::heartbeat::tests --locked --features gix-transport
           cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
@@ -435,6 +438,23 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"
 
+      - name: Qualify explicit coordination upgrade and tagged writer refusal
+        run: |
+          set -euo pipefail
+          rollback="$RUNNER_TEMP/gc-fence-rollback"
+          mkdir -p "$rollback"
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
+            --output "$rollback/crab-linux-x86_64.tar.gz"
+          (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
+          tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
+          python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-crab-bin "$rollback/crab" \
+            --endpoint-url "$AWS_ENDPOINT_URL" --bucket "$CRAB_E2E_BUCKET" \
+            --root "$CRAB_E2E_ROOT" --run-id "${CRAB_E2E_RUN_ID}-migration" \
+            --only-gc-fence-upgrade
+
       - name: Capture RustFS logs
         if: always()
         run: |
@@ -450,6 +470,8 @@ jobs:
           path: |
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/artifacts/**
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-migration/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-migration/logs/**
             ${{ env.CRAB_E2E_ROOT }}/rustfs.log
           if-no-files-found: warn
           retention-days: 14

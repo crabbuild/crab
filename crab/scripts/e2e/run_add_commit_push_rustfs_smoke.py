@@ -2056,11 +2056,48 @@ class AddCommitPushSmoke:
             sha256_file(history_clone / "model.bin") == hashlib.sha256(first_content).hexdigest(),
         )
 
+    def run_gc_fence_upgrade_case(self) -> None:
+        repo, remote, domain = self.prepare_git_repo("gc-fence-upgrade")
+        key = f"{domain}/locks/internal/gc-fence/state"
+        legacy = json.dumps({
+            "schema_version": 1, "epoch": 0, "writer_epoch": 0,
+            "writers": [], "sweep": None, "quarantine": [],
+            "quarantine_block_until_backend": None,
+        }).encode()
+        status, _, _ = self.signed_s3_request("PUT", key, body=legacy, extra_headers={"if-none-match": "*"})
+        self.check("migration-fixture-created-only-if-absent", status == 200)
+        args = ["migrate", "gc-fence", "--remote", remote, "--domain", domain]
+        self.run_crab(repo, args, name="plan coordination migration")
+        status, _, body = self.signed_s3_request("GET", key)
+        self.check("migration-plan-does-not-change-state", status == 200 and body == legacy)
+        self.run_crab(repo, args + ["--apply", "--quiesced"], name="apply coordination migration")
+        status, _, upgraded = self.signed_s3_request("GET", key)
+        state = json.loads(upgraded)
+        self.check("migration-persists-new-incarnation", status == 200 and state["schema_version"] == 2 and bool(state["incarnation"]))
+        self.run_crab(repo, args + ["--apply", "--quiesced"], name="repeat coordination migration")
+        status, _, repeated = self.signed_s3_request("GET", key)
+        self.check("migration-repeat-is-idempotent", status == 200 and repeated == upgraded)
+        self.run_git(repo, ["commit", "--allow-empty", "-m", "qualification"])
+        before = self.run_git(repo, ["ls-remote", remote], name="refs before old writer")
+        old = self.run_cmd("tagged old writer refusal", [str(Path(self.args.rollback_crab_bin).resolve()), "push", "--json"], repo, check=False)
+        diagnostic = Path(old.stderr_log).read_text() + Path(old.stdout_log).read_text()
+        self.check("old-writer-refuses-new-fence-contract", old.exit_code != 0 and "incarnation" in diagnostic, {"exit_code": old.exit_code})
+        after = self.run_git(repo, ["ls-remote", remote], name="refs after old writer")
+        status, _, after_refusal = self.signed_s3_request("GET", key)
+        self.check("old-writer-leaves-fence-and-refs-unchanged", status == 200 and after_refusal == upgraded and self.read_stdout(before) == self.read_stdout(after))
+        self.report.artifacts["rollback_binary_sha256"] = sha256_file(Path(self.args.rollback_crab_bin))
+
     def run(self) -> None:
         if self.args.source:
             self.run_source_workflows()
             return
         self.preflight()
+        if self.args.only_gc_fence_upgrade:
+            self.run_gc_fence_upgrade_case()
+            self.check_credential_disclosure()
+            self.report.status = "passed"
+            self.write_report()
+            return
         if self.args.only_cross_repo_duplicate:
             self.run_cross_repository_remote_duplicate_case()
             self.check_credential_disclosure()
@@ -2189,7 +2226,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-cross-repo-duplicate", action="store_true")
     parser.add_argument("--only-partial-overlap", action="store_true")
     parser.add_argument("--only-committed-restage", action="store_true")
+    parser.add_argument("--only-gc-fence-upgrade", action="store_true")
+    parser.add_argument("--rollback-crab-bin", type=Path)
     args = parser.parse_args()
+    if args.only_gc_fence_upgrade and not args.rollback_crab_bin:
+        parser.error("--only-gc-fence-upgrade requires --rollback-crab-bin")
+    if args.only_gc_fence_upgrade and any((args.source, args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
+        parser.error("--only-gc-fence-upgrade cannot be combined with another case selector")
     if args.source and any((args.only_cross_repo_duplicate, args.only_partial_overlap, args.only_committed_restage)):
         parser.error("--source cannot be combined with a synthetic-case selector")
     return args
@@ -2200,12 +2243,22 @@ def main() -> int:
     smoke = AddCommitPushSmoke(args)
     try:
         smoke.run()
-    except SmokeError as exc:
+    except Exception as exc:
         smoke.report.status = "failed"
+        diagnostic = redact_credential_text(str(exc), smoke.credentials())
         # An unsafe source/run overlap is rejected before any report is created.
         if smoke.report_initialized:
+            # Unexpected driver failures must produce terminal evidence too;
+            # otherwise CI can retain a stopped run with status "running".
+            if not isinstance(exc, SmokeError):
+                smoke.report.checks.append({
+                    "name": "driver-completed",
+                    "ok": False,
+                    "detail": {"error_type": type(exc).__name__, "error": diagnostic},
+                    "timestamp": utc_now(),
+                })
             smoke.write_report()
-        print(f"FAILED: {exc}", file=os.sys.stderr)
+        print(f"FAILED: {diagnostic}", file=os.sys.stderr)
         if smoke.report_initialized:
             print(f"report: {smoke.report.artifacts.get('report', '')}", file=os.sys.stderr)
         return 1

@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -170,6 +171,36 @@ class SourceWorkflowTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as result:
                     SMOKE.parse_args()
         self.assertEqual(result.exception.code, 2)
+
+
+class CanaryTerminationTests(unittest.TestCase):
+    def test_unexpected_driver_failure_records_terminal_redacted_evidence(self) -> None:
+        for error_type in (SMOKE.sqlite3.OperationalError, OSError, RuntimeError):
+            with self.subTest(error_type=error_type.__name__), tempfile.TemporaryDirectory() as root:
+                secret = "fixture-secret-for-redaction"
+
+                def failed_run(smoke: SMOKE.AddCommitPushSmoke) -> None:
+                    smoke.write_report()
+                    raise error_type(f"driver failure with {secret}")
+
+                stderr = io.StringIO()
+                with patch.object(sys, "argv", [
+                    str(SCRIPT), "--root", root, "--run-id", "failure",
+                    "--crab-bin", sys.executable, "--secret-key", secret,
+                ]), patch.object(SMOKE.AddCommitPushSmoke, "run", failed_run):
+                    with contextlib.redirect_stderr(stderr):
+                        code = SMOKE.main()
+                report_text = (Path(root) / "failure/artifacts/report.json").read_text()
+                report = json.loads(report_text)
+                terminal = report["checks"][-1]
+                self.assertEqual(
+                    (code, report["status"], terminal["name"], terminal["ok"], terminal["detail"]),
+                    (1, "failed", "driver-completed", False, {
+                        "error_type": error_type.__name__,
+                        "error": "driver failure with <redacted>",
+                    }),
+                )
+                self.assertNotIn(secret, report_text + stderr.getvalue())
 
 
 if __name__ == "__main__":

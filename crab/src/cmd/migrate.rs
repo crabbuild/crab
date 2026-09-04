@@ -30,6 +30,28 @@ use crab_workflow::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Inspects or explicitly upgrades a single GC coordination domain.
+pub async fn run_gc_fence_upgrade(
+    remote: &str,
+    domain: &str,
+    apply: bool,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let url = crate::git::url::CrabUrl::parse(remote)?;
+    let config = crate::core::config::Config::resolve_local()?;
+    let store = crate::auth::build_repository_url_store(&config, url, "migrate", cancel).await?;
+    crate::core::error::check_cancelled(cancel)?;
+    let changed = crab_coordination::upgrade_gc_fence(store.inner(), domain, apply).await?;
+    if changed {
+        println!(
+            "GC fence upgraded to schema 2. Keep older writers stopped; restart GC with a fresh plan."
+        );
+    } else {
+        println!("GC fence validated; no state changed.");
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct MigrationGitPointer {
     path: String,
