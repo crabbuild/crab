@@ -95,6 +95,10 @@ async fn token(
     let mode = provider.mode.lock().await.clone();
     let mut claims = json!({"iss":provider.issuer,"aud":"crab-browser","exp":now+3600,"iat":now,"sub":"alice-id","preferred_username":"Alice","nonce":flow["nonce"]});
     match mode.as_str() {
+        "member" => {
+            claims["sub"] = json!("bob-id");
+            claims["preferred_username"] = json!("Bob");
+        }
         "nonce" => claims["nonce"] = json!("another-nonce"),
         "issuer" => claims["iss"] = json!("https://other.invalid"),
         "audience" => claims["aud"] = json!("other-client"),
@@ -183,7 +187,7 @@ impl Harness {
                 bucket: "test".into(),
                 prefix: "test".into(),
                 description: "Private project".into(),
-                members: vec!["alice-id".into()],
+                members: vec!["alice-id".into(), "bob-id".into()],
             },
             store: store.clone(),
             layout: StoreLayout::new(store, "test".into()),
@@ -197,6 +201,7 @@ impl Harness {
             cursor_key: [7; 32],
             admission: Semaphore::new(16),
             git_admission: Arc::new(Semaphore::new(4)),
+            app_admission: Semaphore::new(8),
             cancellation: CancellationToken::new(),
             port: address.port(),
             auth: Some(auth),
@@ -664,3 +669,6 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     h.close().await;
 }
+
+#[path = "auth_tests/issues.rs"]
+mod issues;

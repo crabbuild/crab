@@ -3,7 +3,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 export interface Session {
   authenticated: boolean;
   mode: "local" | "oidc";
-  user: { subject: string; name: string } | null;
+  user: { issuer: string; subject: string; name: string } | null;
   csrf: string | null;
 }
 
