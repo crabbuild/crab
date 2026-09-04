@@ -196,6 +196,7 @@ async fn removal_excludes_replacement_registration_until_commit() {
     assert_eq!(CacheCatalog::read_only_stats(&root).unwrap().total_bytes, 4);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn database_replacement_stops_removal_before_filesystem_action() {
     let temp = tempfile::tempdir().unwrap();
@@ -215,6 +216,7 @@ async fn database_replacement_stops_removal_before_filesystem_action() {
     assert_eq!(std::fs::read(path).unwrap(), b"data");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn root_replacement_keeps_deletion_and_accounting_in_original_tree() {
     let temp = tempfile::tempdir().unwrap();
@@ -298,6 +300,7 @@ async fn busy_catalog_stops_before_payload_removal() {
 }
 
 #[cfg(feature = "xet-chunk-cache")]
+#[cfg(unix)]
 #[tokio::test]
 async fn range_parent_and_leaf_remain_paired_after_parent_replacement() {
     let temp = tempfile::tempdir().unwrap();

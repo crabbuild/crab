@@ -77,7 +77,7 @@ fn clean_directory(
     check_cancelled(cancel)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::TemporaryFile;
     use super::*;

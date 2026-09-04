@@ -31,7 +31,7 @@ async fn failed_read(root: &Path) -> (CrabRangeCache, PathBuf, PayloadRead) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_read_cannot_discard_a_later_publication() {
-    for replace_root in [false, true] {
+    for replace_root in std::iter::once(false).chain(cfg!(unix).then_some(true)) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");
         let (cache, relative, entry) = failed_read(&root).await;

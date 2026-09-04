@@ -451,6 +451,7 @@ fn concurrent_reservations_cannot_spend_the_same_capacity() {
     drop(owners);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn maintenance_keeps_catalog_and_inventory_in_the_same_replaced_root() {
     let tmp = tempfile::tempdir().unwrap();
@@ -494,6 +495,7 @@ async fn maintenance_keeps_catalog_and_inventory_in_the_same_replaced_root() {
     assert!(!moved.join(original.strip_prefix(&root).unwrap()).exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_cleanup_releases_only_the_original_root_after_replacement() {
     let tmp = tempfile::tempdir().unwrap();
@@ -525,6 +527,7 @@ async fn owner_cleanup_releases_only_the_original_root_after_replacement() {
     assert_eq!(leases, 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn reserved_fill_publishes_and_registers_in_its_original_root() {
     use tokio::io::AsyncWriteExt as _;
@@ -568,6 +571,7 @@ async fn reserved_fill_publishes_and_registers_in_its_original_root() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn reservation_keeps_database_generation_leased_after_connection_close() {
     let tmp = tempfile::tempdir().unwrap();
@@ -645,6 +649,7 @@ fn windows_pid_liveness_distinguishes_current_and_missing_processes() {
     assert!(!pid_is_alive(u32::MAX));
 }
 
+#[cfg(unix)]
 fn replace_catalog_generation(root: &Path, replace_main: bool) {
     let main = root.join(CATALOG_FILE);
     let retired = root.join("retired.sqlite");
@@ -662,6 +667,7 @@ fn replace_catalog_generation(root: &Path, replace_main: bool) {
     drop(open_catalog(root).unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_cleanup_preserves_copied_rows_after_main_and_owner_replacement() {
     for replace_main in [false, true] {
@@ -692,6 +698,7 @@ async fn owner_cleanup_preserves_copied_rows_after_main_and_owner_replacement() 
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn stale_generation_cannot_publish_or_register_a_fill() {
     use tokio::io::AsyncWriteExt as _;
@@ -733,6 +740,7 @@ async fn stale_generation_cannot_publish_or_register_a_fill() {
 }
 
 #[cfg(feature = "local-cache")]
+#[cfg(unix)]
 #[test]
 fn synchronous_fill_rejects_generation_replacement_before_publication() {
     let tmp = tempfile::tempdir().unwrap();

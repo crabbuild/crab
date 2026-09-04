@@ -1027,6 +1027,26 @@ mod tests {
     }
 
     #[test]
+    fn pinned_database_cannot_be_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let pinned = Directory::root(&root, true).unwrap();
+        let database = open_database_at(
+            &pinned,
+            Path::new("catalog.sqlite"),
+            DatabaseMode::Create,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        let path = root.join("catalog.sqlite");
+        let replacement = root.join("replacement.sqlite");
+
+        assert!(std::fs::rename(&path, &replacement).is_err());
+        drop(database);
+        std::fs::rename(&path, &replacement).unwrap();
+    }
+
+    #[test]
     fn hard_linked_payload_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("cache");

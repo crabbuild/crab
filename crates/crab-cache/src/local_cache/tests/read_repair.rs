@@ -102,7 +102,7 @@ async fn probes_manifest_reads_and_invalid_ranges_do_not_update_recency() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn validated_read_updates_only_original_file_recency() {
-    for replace_root in [false, true] {
+    for replace_root in std::iter::once(false).chain(cfg!(unix).then_some(true)) {
         let (temp, cache) = temp_cache();
         let data = Bytes::from_static(b"data");
         let key = CacheKey::Chunk(compute_data_hash(&data));
@@ -161,7 +161,7 @@ async fn bounded_validation_cannot_remove_a_later_publication() {
         ),
         (CacheKey::Xorb(hash), xorb),
     ] {
-        for replace_root in [false, true] {
+        for replace_root in std::iter::once(false).chain(cfg!(unix).then_some(true)) {
             let (temp, cache) = temp_cache();
             cache.put(&key, &data).await.unwrap();
             let path = cache.hash_path(&key);
