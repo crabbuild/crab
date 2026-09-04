@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
-import { Button, Label, SegmentedControl } from "@primer/react";
+import { Label, SegmentedControl } from "@primer/react";
 import {
   endpoint,
   repoHref,
@@ -46,22 +46,30 @@ export function FileView({ repo, rev, path, name, theme }: Props) {
   return (
     <Result state={state}>
       {(content) => (
-        <section className="panel file-panel">
+        <section className="panel file-panel" aria-label={`File ${name}`}>
           <div className="panel-header">
-            <div className="row">
-              <strong>{name.split("/").pop()}</strong>
-              <span className="muted">
-                {content.size.toLocaleString()} bytes
+            <div className="file-view-controls">
+              <SegmentedControl
+                aria-label="File view"
+                onChange={(index) => setShowBlame(index === 1)}
+              >
+                <SegmentedControl.Button selected={!showBlame}>
+                  Code
+                </SegmentedControl.Button>
+                <SegmentedControl.Button selected={showBlame}>
+                  Blame
+                </SegmentedControl.Button>
+              </SegmentedControl>
+              <span className="file-metadata muted">
+                {content.text === null
+                  ? "Binary"
+                  : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
+                <span aria-hidden="true">·</span>{" "}
+                {content.size.toLocaleString()} bytes{" "}
+                <span aria-hidden="true">·</span> {content.mode}
               </span>
-              <Label>{content.mode}</Label>
             </div>
             <div className="row">
-              <Button
-                aria-pressed={showBlame}
-                onClick={() => setShowBlame((value) => !value)}
-              >
-                Blame
-              </Button>
               <a
                 className="button-link"
                 href={endpoint(repo, "blob", { rev, path_hex: path })}
