@@ -235,3 +235,197 @@ async fn generation_advance_after_captured_read_is_reported_as_superseded() {
     .expect("superseded publisher released its lease");
     lease.release().await.unwrap();
 }
+
+#[tokio::test]
+async fn empty_generation_is_readable_without_visibility_or_local_git_state() {
+    let (store, layout) = storage();
+    let manifest = Manifest::default_for_repo("refs/heads/main");
+    manifest_store::create_manifest(&store, &layout, &manifest)
+        .await
+        .unwrap();
+    let ready = crab_write::generation::make_readable(
+        &store,
+        &layout,
+        TTL,
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ready, manifest);
+    let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+    let repository = crab_remote_git::RemoteGitRepository::open(
+        store,
+        layout,
+        crab_remote_git::RepositoryIdentity::new(
+            "memory".to_owned(),
+            "generation-owner".to_owned(),
+            1,
+        )
+        .unwrap(),
+        Arc::clone(&runtime),
+        crab_remote_git::RepositoryOptions::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repository.generation(), ready.generation);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn missing_visibility_never_reports_ready_or_rolls_back_a_committed_ref() {
+    let (store, layout) = storage();
+    let manifest = Manifest::default_for_repo("refs/heads/main");
+    manifest_store::create_manifest(&store, &layout, &manifest)
+        .await
+        .unwrap();
+    let lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), "refs/heads/main", TTL)
+        .await
+        .unwrap();
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    crab_write::journal::commit_edits(
+        &store,
+        &layout,
+        &snapshot,
+        vec![crab_metadata::ref_journal::RefJournalEdit {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: None,
+            new_oid: Some("a".repeat(40)),
+            peeled_oid: None,
+            lock_holder: Some(lease.holder().to_owned()),
+            visibility_evidence_hash: None,
+        }],
+        None,
+        vec![],
+        vec![],
+    )
+    .await
+    .unwrap();
+    let result = crab_write::generation::make_readable(
+        &store,
+        &layout,
+        TTL,
+        None,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(WriteError::VisibilityUnavailable { generation: 1 })
+    ));
+    let after = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(
+        after.journal.refs.get("refs/heads/main"),
+        Some(&"a".repeat(40))
+    );
+    assert!(after.journal.transactions.is_empty());
+    let retry = crab_write::generation::make_readable(
+        &store,
+        &layout,
+        TTL,
+        None,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        retry,
+        Err(WriteError::VisibilityUnavailable { generation: 1 })
+    ));
+    lease.release().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_readiness_does_not_open_a_catalog_or_change_metadata() {
+    let (store, layout) = storage();
+    let manifest = Manifest::default_for_repo("refs/heads/main");
+    manifest_store::create_manifest(&store, &layout, &manifest)
+        .await
+        .unwrap();
+    let before: Vec<_> = store.inner().list(None).try_collect().await.unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let result = crab_write::generation::make_readable(&store, &layout, TTL, None, &cancel).await;
+    assert!(matches!(result, Err(WriteError::Cancelled)));
+    let after: Vec<_> = store.inner().list(None).try_collect().await.unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_journal_during_catalog_admission_requires_another_readiness_pass() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (store, layout) = storage();
+    let manifest = Manifest::default_for_repo("refs/heads/main");
+    manifest_store::create_manifest(&store, &layout, &manifest)
+        .await
+        .unwrap();
+    let blocker = PushLock::acquire_internal(
+        store.inner(),
+        layout.repo_prefix(),
+        GIT_OBJECT_LOCATOR_RESOURCE,
+        TTL,
+    )
+    .await
+    .unwrap();
+    let captured = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::clone(&captured);
+    let first = AtomicBool::new(true);
+    let owner_store = store.clone().with_read_byte_observer(Arc::new(move |_| {
+        if first.swap(false, Ordering::SeqCst) {
+            observed.notify_one();
+        }
+    }));
+    let owner_layout = layout.clone();
+    let owner = tokio::spawn(async move {
+        crab_write::generation::make_readable(
+            &owner_store,
+            &owner_layout,
+            TTL,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), captured.notified())
+        .await
+        .unwrap();
+    // The old snapshot is captured; our catalog lease prevents it from finishing
+    // before the independent ref writer commits without changing the manifest.
+    let lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), "refs/heads/main", TTL)
+        .await
+        .unwrap();
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    crab_write::journal::commit_edits(
+        &store,
+        &layout,
+        &snapshot,
+        vec![crab_metadata::ref_journal::RefJournalEdit {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: None,
+            new_oid: Some("a".repeat(40)),
+            peeled_oid: None,
+            lock_holder: Some(lease.holder().to_owned()),
+            visibility_evidence_hash: None,
+        }],
+        None,
+        vec![],
+        vec![],
+    )
+    .await
+    .unwrap();
+    blocker.release().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(result.is_none());
+    lease.release().await.unwrap();
+}

@@ -399,9 +399,26 @@ binding visibility to its checkpoint. Repeating maintenance reports no advance.
 The small fixture takes 23 ms for catalog lifecycle and 29 ms for journal
 compaction; cache state is shared and native HTTP push remains unqualified.
 
-The HTTP server still needs a shared generation-owner orchestration path around
-these journal and catalog lifecycle functions, including visibility readiness and restart
-repair, as well as the journal commit.
+`crab-write::generation::make_readable` now composes journal compaction, catalog
+lifecycle and binding of existing verified visibility to the exact catalog.
+It reads coherent snapshots before and after publication: a newer manifest or
+active journal returns a superseded result requiring another pass. Missing
+visibility returns `VisibilityUnavailable`; neither this error nor cancellation
+rolls back committed refs. The caller retains generation-owner election and both
+GC writer fences and awaits internal lease/handle cleanup. This pass does not
+reconstruct absent proofs from unverified objects or publish index receipts.
+
+Four readiness tests cover an empty remotely opened repository, cancellation
+without writes, missing proof without ref rollback, and an independent ref commit
+while catalog admission is blocked. The existing four catalog lifecycle tests
+also pass. A RustFS fixture holds owner/GC leases, removes its local Git repository
+before committing, and uses one readiness pass to compact the journal and make
+all three exact Git objects remotely readable. Repeating the pass keeps the same
+generation. Observed readiness time was 69 ms for that small fixture, with shared
+caches; this is not an HTTP push or production latency benchmark.
+
+The HTTP server still needs generation-owner election and GC fence composition,
+index receipts, restart repair for missing evidence, and receive-to-commit wiring.
 A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
 visibility or coexist correctly with native CLI writers.
 

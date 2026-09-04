@@ -19,6 +19,60 @@ use tracing::warn;
 
 use crate::{Result, WriteError, catalog::publish_inventory};
 
+/// Complete the read path for already committed refs using their verified visibility evidence.
+///
+/// The caller retains generation-owner election and global/repository GC writer
+/// fences. Await completion, including after cancellation, to close catalog handles
+/// and release internal leases. This does not validate or commit incoming refs,
+/// rebuild missing visibility from unverified objects, or publish index receipts.
+/// Returns the ready manifest, or none when concurrent publication requires another
+/// pass. An error cannot imply rollback: refs may already have been committed.
+pub async fn make_readable(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    lock_ttl: Duration,
+    pusher: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<Option<Manifest>> {
+    check_cancelled(cancel)?;
+    crate::journal::compact_for_owner(store, layout, lock_ttl, pusher, cancel).await?;
+    check_cancelled(cancel)?;
+    let snapshot = manifest_store::read_repository_snapshot(store, layout).await?;
+    if !snapshot.journal.transactions.is_empty() {
+        return Ok(None);
+    }
+    let manifest = snapshot.manifest;
+    if maintain_catalog(
+        store,
+        layout,
+        &manifest,
+        &snapshot.journal.packs,
+        lock_ttl,
+        cancel,
+    )
+    .await?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    check_cancelled(cancel)?;
+    let visible = manifest.refs.is_empty()
+        || crab_metadata::git_visibility::ensure_catalog_bound(store, layout, &manifest).await?;
+    check_cancelled(cancel)?;
+    // A ready catalog alone is insufficient. A new active journal can appear
+    // without advancing the manifest and makes remote Git readers wait again.
+    let current = manifest_store::read_repository_snapshot(store, layout).await?;
+    if !same_generation(&current.manifest, &manifest) || !current.journal.transactions.is_empty() {
+        return Ok(None);
+    }
+    if !visible {
+        return Err(WriteError::VisibilityUnavailable {
+            generation: manifest.generation,
+        });
+    }
+    Ok(Some(manifest))
+}
+
 /// Committed index identity shared by publication and generation maintenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommittedManifestAnchor {
