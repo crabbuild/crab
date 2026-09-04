@@ -33,9 +33,11 @@ export function Link({
 export function Result<T>({
   state,
   children,
+  showTiming = true,
 }: {
   state: Loaded<T> & { retry: () => void };
   children: (data: T) => ReactNode;
+  showTiming?: boolean;
 }) {
   if (state.error)
     return (
@@ -54,12 +56,15 @@ export function Result<T>({
   return (
     <>
       {children(state.data)}
-      {state.timing && (
-        <div className="timing" title={state.timing.server ?? undefined}>
-          {state.timing.roundtrip.toFixed(1)} ms round trip{" "}
-          <span aria-hidden="true">·</span>{" "}
-          <span>Object storage → browser</span>
-        </div>
+      {showTiming && state.timing && (
+        <details className="timing">
+          <summary>Request timing</summary>
+          <div title={state.timing.server ?? undefined}>
+            {state.timing.roundtrip.toFixed(1)} ms round trip{" "}
+            <span aria-hidden="true">·</span>{" "}
+            <span>Object storage → browser</span>
+          </div>
+        </details>
       )}
     </>
   );

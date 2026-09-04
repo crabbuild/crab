@@ -8,6 +8,8 @@ import {
   IssueOpenedIcon,
   RepoIcon,
   SunIcon,
+  TagIcon,
+  SidebarExpandIcon,
 } from "@primer/octicons-react";
 import {
   displayHex,
@@ -115,9 +117,7 @@ export function App() {
         </a>
         <header className="global-header">
           <Link className="brand" href="/" aria-label="Crab repositories">
-            <span className="brand-mark" aria-hidden="true">
-              C
-            </span>
+            <span className="brand-mark" aria-hidden="true" />
           </Link>
           <Link href="/">Repositories</Link>
           {repo && (
@@ -289,14 +289,15 @@ function RepositoryPage({
   const rev = selected?.peeled ?? selected?.oid ?? revName;
   const path = url.searchParams.get("path") ?? "";
   const kind = url.searchParams.get("kind") ?? "Tree";
-  const [showTree, setShowTree] = useState(true);
+  const [showTree, setShowTree] = useState(Boolean(path));
+  useEffect(() => setShowTree(Boolean(path)), [path]);
+  const overview = view === "code" && !path && !showTree;
   function selectEntry(entry: Entry) {
     navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
   }
   return (
     <>
       <div className="repo-header">
-        <CloneMenu repo={repo} />
         <div className="repo-title">
           <RepoIcon size={20} />
           <h1>
@@ -304,7 +305,6 @@ function RepositoryPage({
               {repo.owner} / <strong>{repo.name}</strong>
             </Link>
           </h1>
-          <Label>Object storage</Label>
         </div>
         <nav aria-label="Repository">
           <Link
@@ -332,7 +332,7 @@ function RepositoryPage({
           </Link>
         </nav>
       </div>
-      <div className="repo-body">
+      <div className={`repo-body${overview ? " repo-overview" : ""}`}>
         {view === "issues" ? (
           <Suspense
             fallback={
@@ -355,44 +355,70 @@ function RepositoryPage({
                 <>
                   <div className="toolbar">
                     <div className="row">
-                      <GitBranchIcon />
-                      <label className="sr-only" htmlFor="revision">
-                        Branch or tag
-                      </label>
-                      <select
-                        id="revision"
-                        value={selected ? revName : rev}
-                        onChange={(event) =>
-                          navigate(
-                            repoHref(repo, { rev: event.target.value, view }),
-                          )
-                        }
-                      >
-                        {!selected && <option value={rev}>{short(rev)}</option>}
-                        {data.refs.map((ref) => (
-                          <option key={ref.name} value={ref.name}>
-                            {ref.name.replace(/^refs\/(heads|tags)\//, "")}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="muted">
+                      <span className="branch-picker">
+                        <GitBranchIcon />
+                        <label className="sr-only" htmlFor="revision">
+                          Branch or tag
+                        </label>
+                        <select
+                          id="revision"
+                          value={selected ? revName : rev}
+                          onChange={(event) =>
+                            navigate(
+                              repoHref(repo, { rev: event.target.value, view }),
+                            )
+                          }
+                        >
+                          {!selected && (
+                            <option value={rev}>{short(rev)}</option>
+                          )}
+                          {data.refs.map((ref) => (
+                            <option key={ref.name} value={ref.name}>
+                              {ref.name.replace(/^refs\/(heads|tags)\//, "")}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                      <span className="ref-count muted">
+                        <GitBranchIcon />
                         {
                           data.refs.filter((ref) =>
                             ref.name.startsWith("refs/heads/"),
                           ).length
                         }{" "}
-                        branches
+                        {data.refs.filter((ref) =>
+                          ref.name.startsWith("refs/heads/"),
+                        ).length === 1
+                          ? "branch"
+                          : "branches"}
                       </span>
-                      <span className="muted">
+                      <span className="ref-count muted">
+                        <TagIcon />
                         {
                           data.refs.filter((ref) =>
                             ref.name.startsWith("refs/tags/"),
                           ).length
                         }{" "}
-                        tags
+                        {data.refs.filter((ref) =>
+                          ref.name.startsWith("refs/tags/"),
+                        ).length === 1
+                          ? "tag"
+                          : "tags"}
                       </span>
                     </div>
-                    <Button onClick={refs.retry}>Refresh</Button>
+                    <div className="repository-actions">
+                      {view === "code" && (
+                        <Button
+                          leadingVisual={SidebarExpandIcon}
+                          onClick={() => setShowTree((value) => !value)}
+                          aria-expanded={showTree}
+                        >
+                          Browse files
+                        </Button>
+                      )}
+                      <Button onClick={refs.retry}>Refresh</Button>
+                      {view === "code" && <CloneMenu repo={repo} />}
+                    </div>
                   </div>
                   <Suspense
                     fallback={
@@ -413,7 +439,11 @@ function RepositoryPage({
                     ) : (
                       <div
                         className={
-                          showTree ? "code-layout" : "code-layout no-sidebar"
+                          overview
+                            ? "code-layout overview-layout"
+                            : showTree
+                              ? "code-layout"
+                              : "code-layout no-sidebar"
                         }
                       >
                         {showTree && (
@@ -436,36 +466,37 @@ function RepositoryPage({
                           </aside>
                         )}
                         <div className="code-main">
-                          <div className="breadcrumb">
-                            <Button
-                              size="small"
-                              onClick={() => setShowTree((value) => !value)}
-                              aria-expanded={showTree}
-                            >
-                              Files
-                            </Button>
-                            <Link href={repoHref(repo, { rev })}>
-                              {repo.name}
-                            </Link>
-                            {path && (
-                              <>
-                                <span>/</span>
-                                <Link
-                                  href={repoHref(repo, {
-                                    rev,
-                                    path: parentHex(path),
-                                  })}
-                                >
-                                  …
-                                </Link>
-                                <span>/</span>
-                                <strong>
-                                  {displayHex(path).split("/").pop()}
-                                </strong>
-                              </>
-                            )}
-                          </div>
-                          <LatestCommit repo={repo} rev={rev} />
+                          {!overview && (
+                            <div className="breadcrumb">
+                              <Link href={repoHref(repo, { rev })}>
+                                {repo.name}
+                              </Link>
+                              {path && (
+                                <>
+                                  <span>/</span>
+                                  {parentHex(path) && (
+                                    <>
+                                      <Link
+                                        href={repoHref(repo, {
+                                          rev,
+                                          path: parentHex(path),
+                                        })}
+                                      >
+                                        {displayHex(parentHex(path))}
+                                      </Link>
+                                      <span>/</span>
+                                    </>
+                                  )}
+                                  <strong>
+                                    {displayHex(path).split("/").pop()}
+                                  </strong>
+                                </>
+                              )}
+                            </div>
+                          )}
+                          {kind !== "Tree" && (
+                            <LatestCommit repo={repo} rev={rev} />
+                          )}
                           {kind === "Tree" ? (
                             <Directory
                               key={`${rev}:${path}`}
@@ -473,6 +504,7 @@ function RepositoryPage({
                               rev={rev}
                               path={path}
                               onEntry={selectEntry}
+                              header={<LatestCommit repo={repo} rev={rev} />}
                             />
                           ) : kind === "Submodule" ? (
                             <div className="notice">
@@ -489,6 +521,46 @@ function RepositoryPage({
                             />
                           )}
                         </div>
+                        {overview && (
+                          <aside
+                            className="repository-about"
+                            aria-label="About this repository"
+                          >
+                            <h2>About</h2>
+                            <p>
+                              {repo.description || "No description provided."}
+                            </p>
+                            <div className="about-links">
+                              <Link
+                                href={repoHref(repo, { view: "commits", rev })}
+                              >
+                                <HistoryIcon /> Activity
+                              </Link>
+                              <Link href={repoHref(repo, { view: "issues" })}>
+                                <IssueOpenedIcon /> Issues
+                              </Link>
+                            </div>
+                            <div className="about-section">
+                              <h3>Branches</h3>
+                              <div className="about-links">
+                                {data.refs
+                                  .filter((ref) =>
+                                    ref.name.startsWith("refs/heads/"),
+                                  )
+                                  .slice(0, 5)
+                                  .map((ref) => (
+                                    <Link
+                                      key={ref.name}
+                                      href={repoHref(repo, { rev: ref.name })}
+                                    >
+                                      <GitBranchIcon />
+                                      {ref.name.slice("refs/heads/".length)}
+                                    </Link>
+                                  ))}
+                              </div>
+                            </div>
+                          </aside>
+                        )}
                       </div>
                     )}
                   </Suspense>
@@ -503,8 +575,15 @@ function RepositoryPage({
 }
 function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
   const state = useRequest<Commit>(endpoint(repo, "commit", { rev }));
+  if (state.loading || (!state.data && !state.error))
+    return (
+      <div className="latest-commit" role="status">
+        <Spinner size="small" />
+        <span className="muted">Loading latest commit…</span>
+      </div>
+    );
   return (
-    <Result state={state}>
+    <Result state={state} showTiming={false}>
       {(commit) => (
         <div className="latest-commit">
           <span className="avatar" aria-hidden="true">
@@ -523,6 +602,12 @@ function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
           <span className="muted commit-date">
             {date(commit.author_seconds)}
           </span>
+          <Link
+            className="commit-history-link"
+            href={repoHref(repo, { view: "commits", rev })}
+          >
+            <HistoryIcon /> History
+          </Link>
         </div>
       )}
     </Result>

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@primer/react";
+import { CodeIcon, TriangleDownIcon } from "@primer/octicons-react";
 import type { Repository, Session } from "./api";
 
 interface GitToken {
@@ -157,7 +158,9 @@ export function CloneMenu({ repo }: { repo: Repository }) {
   const [error, setError] = useState(false);
   return (
     <details className="clone-menu">
-      <summary>Clone</summary>
+      <summary>
+        <CodeIcon /> Code <TriangleDownIcon size={12} />
+      </summary>
       <div className="panel git-popover">
         <h2>Clone with HTTP</h2>
         <label htmlFor="clone-url">Repository URL</label>
