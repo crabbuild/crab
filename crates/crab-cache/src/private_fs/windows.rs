@@ -10,26 +10,27 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fs4::fs_std::FileExt as _;
-use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, ACL, CreateWellKnownSid,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorDacl,
-    GetTokenInformation, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SDDL_REVISION_1, SetFileSecurityW, TOKEN_QUERY, TOKEN_USER,
-    TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    ACCESS_ALLOWED_ACE, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+    GetLengthSid, GetSecurityDescriptorDacl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SetFileSecurityW, TOKEN_QUERY,
+    TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileDispositionInfoEx, FileIdInfo, FileStandardInfo,
-    GENERIC_READ, GENERIC_WRITE, GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileInformationByHandle,
+    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    SetFileInformationByHandle,
 };
+use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::private_fs::{DatabaseMode, EntryStat, FileStat};
@@ -142,7 +143,7 @@ impl Directory {
         let file = open_file(&path, false, false, SHARE_PAYLOAD)?;
         validate_handle(&file, &path, false)?;
         validate_private_acl(&file, &path)?;
-        if !file.try_lock_shared()? {
+        if !fs4::fs_std::FileExt::try_lock_shared(&file)? {
             return Err(busy("cache entry is being maintained"));
         }
         Ok(file)
@@ -158,7 +159,7 @@ impl Directory {
     }
 
     pub(super) fn remove_read_file(&self, relative: &Path, original: &File) -> Result<Option<u64>> {
-        FileExt::unlock(original)?;
+        fs4::fs_std::FileExt::unlock(original)?;
         let identity = handle_stat(original)?.identity;
         self.remove_relative_if(relative, false, &mut |candidate| {
             Ok(handle_stat(candidate)?.identity == identity)
@@ -188,7 +189,7 @@ impl Directory {
         let stat = handle_stat(&file)?;
         validate_handle(&file, &path, false)?;
         validate_private_acl(&file, &path)?;
-        if !file.try_lock_exclusive()? {
+        if !fs4::fs_std::FileExt::try_lock_exclusive(&file)? {
             return Err(busy("cache entry has an active reader"));
         }
         if !should_remove(&mut file)? {
@@ -416,7 +417,7 @@ fn handle_stat(file: &File) -> Result<HandleStat> {
         allocated: standard.AllocationSize as u64,
         modified_ns: metadata.last_write_time().saturating_mul(100),
         links: standard.NumberOfLinks,
-        directory: standard.Directory != 0,
+        directory: standard.Directory,
         reparse: metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
     })
 }
@@ -477,7 +478,7 @@ impl Drop for OwnedHandle {
 }
 
 fn current_user_sid() -> Result<Vec<u8>> {
-    let mut token = 0;
+    let mut token = ptr::null_mut();
     // SAFETY: output receives one owned process-token handle.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error().into());

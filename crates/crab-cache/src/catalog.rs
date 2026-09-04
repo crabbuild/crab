@@ -2,15 +2,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt as _;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use rusqlite::{Connection, OpenFlags};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 
 use crate::clean::{EntryKind, entry_kind};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::private_fs::open_database;
 use crate::private_fs::{Database, DatabaseLease, DatabaseMode, PinnedRoot};
 use crate::{CacheError, Result};
@@ -22,6 +22,7 @@ pub(crate) use removal::{PayloadRead, PayloadRemoval};
 
 const CATALOG_FILE: &str = ".catalog.sqlite";
 const MAINTENANCE_LOCK: &str = ".maintenance.lock";
+const CATALOG_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const LOW_WATERMARK_PERCENT: u64 = 90;
 static OWNER_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -227,11 +228,10 @@ impl CacheCatalog {
         let root = Arc::clone(&reservation.root);
         let path = self.root.join(&reservation.relative_path);
         let catalog_path = self.root.join(CATALOG_FILE);
-        let connection = reservation.generation.open(
-            &root,
-            Path::new(CATALOG_FILE),
-            std::time::Duration::from_secs(2),
-        )?;
+        let connection =
+            reservation
+                .generation
+                .open(&root, Path::new(CATALOG_FILE), CATALOG_BUSY_TIMEOUT)?;
         let mut connection = configure_catalog(connection, &catalog_path)?;
         self.record_sync(&connection, family, &path, logical_key, size)?;
         drop(reservation);
@@ -707,17 +707,65 @@ fn open_catalog(root: &PinnedRoot, path: &Path) -> Result<Database> {
     let connection = root.open_database(
         Path::new(CATALOG_FILE),
         DatabaseMode::Create,
-        std::time::Duration::from_secs(2),
+        CATALOG_BUSY_TIMEOUT,
     )?;
     configure_catalog(connection, path)
 }
 
-fn configure_catalog(connection: Database, path: &Path) -> Result<Database> {
+fn configure_catalog(mut connection: Database, path: &Path) -> Result<Database> {
     connection
+        .pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|source| index_error(path, source))?;
+    // Schema creation needs the SQLite writer lock. Established catalogs stay
+    // on this read-only fast path so concurrent fills do not reconfigure them.
+    let started = Instant::now();
+    loop {
+        let result = match catalog_schema_ready(&connection, path) {
+            Ok(true) => return Ok(connection),
+            Ok(false) => configure_catalog_schema(&mut connection, path),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => return Ok(connection),
+            Err(error)
+                if retryable_index_error(&error) && started.elapsed() < CATALOG_BUSY_TIMEOUT =>
+            {
+                let remaining = CATALOG_BUSY_TIMEOUT.saturating_sub(started.elapsed());
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn catalog_schema_ready(connection: &Database, path: &Path) -> Result<bool> {
+    let journal_mode = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+        .map_err(|source| index_error(path, source))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT COUNT(*) = 5 FROM sqlite_schema
+             WHERE (type = 'table' AND name IN ('cache_entries', 'reservations', 'leases', 'catalog_meta'))
+                OR (type = 'index' AND name = 'cache_entries_lru')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| index_error(path, source))
+}
+
+fn configure_catalog_schema(connection: &mut Database, path: &Path) -> Result<()> {
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .map_err(|source| index_error(path, source))?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|source| index_error(path, source))?;
+    transaction
         .execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS cache_entries (
+            "CREATE TABLE IF NOT EXISTS cache_entries (
                relative_path TEXT PRIMARY KEY,
                family TEXT NOT NULL,
                logical_key TEXT NOT NULL,
@@ -747,7 +795,9 @@ fn configure_catalog(connection: Database, path: &Path) -> Result<Database> {
              );",
         )
         .map_err(|source| index_error(path, source))?;
-    Ok(connection)
+    transaction
+        .commit()
+        .map_err(|source| index_error(path, source))
 }
 
 fn scan_catalog(
@@ -911,7 +961,34 @@ fn pid_is_alive(pid: u32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: the returned process handle is inspected without mutation and
+    // closed before return.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(code) if code == ERROR_INVALID_PARAMETER as i32 => false,
+            Some(code) if code == ERROR_ACCESS_DENIED as i32 => true,
+            _ => true,
+        };
+    }
+    let mut exit_code = 0;
+    // SAFETY: process is a live query handle and exit_code is valid output.
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    // SAFETY: process was returned by OpenProcess and is closed exactly once.
+    unsafe { CloseHandle(process) };
+    !queried || exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     true
 }
@@ -921,6 +998,20 @@ fn index_error(path: &Path, source: rusqlite::Error) -> CacheError {
         path: path.display().to_string(),
         source,
     }
+}
+
+fn retryable_index_error(error: &CacheError) -> bool {
+    matches!(
+        error,
+        CacheError::Index { source, .. }
+            if matches!(
+                source.sqlite_error_code(),
+                Some(
+                    rusqlite::ffi::ErrorCode::DatabaseBusy
+                        | rusqlite::ffi::ErrorCode::DatabaseLocked
+                )
+            )
+    )
 }
 
 #[cfg(test)]

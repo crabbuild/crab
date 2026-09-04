@@ -617,6 +617,34 @@ fn reopened_generation_connections_exclude_independent_writers() {
     second.execute_batch("BEGIN IMMEDIATE; COMMIT").unwrap();
 }
 
+#[test]
+fn configured_catalog_open_does_not_require_a_writer_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let mut writer = open_catalog(&root).unwrap();
+    let transaction = writer
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let pinned = PinnedRoot::open(&root).unwrap();
+    let reader = pinned
+        .open_database(
+            Path::new(CATALOG_FILE),
+            DatabaseMode::ReadWrite,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+    configure_catalog(reader, &root.join(CATALOG_FILE)).unwrap();
+    transaction.commit().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pid_liveness_distinguishes_current_and_missing_processes() {
+    assert!(pid_is_alive(std::process::id()));
+    assert!(!pid_is_alive(u32::MAX));
+}
+
 fn replace_catalog_generation(root: &Path, replace_main: bool) {
     let main = root.join(CATALOG_FILE);
     let retired = root.join("retired.sqlite");
