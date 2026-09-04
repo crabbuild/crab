@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 const oid = "a".repeat(40);
+const readme =
+  "# Team project\n\nBrowse the [source entry](src/index.ts) without cloning.\n\n" +
+  "![Architecture](docs/architecture.png) ![Vector](docs/vector.svg) " +
+  "![Build status](https://status.example/build.svg)\n";
 const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -72,10 +76,13 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({
         json: {
           oid,
-          size: 12,
+          size: readme.length,
           mode: "100644",
           classification: "OrdinaryGit",
-          text: "Hello, team!",
+          text:
+            url.searchParams.get("path_hex") === pathHex("README.md")
+              ? readme
+              : "Hello, team!",
         },
       });
     if (url.pathname.endsWith("/issues"))
@@ -135,6 +142,39 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(
     panel.getByRole("button", { name: "Next", exact: true }),
   ).toHaveCount(0);
+  const readmePanel = page.getByRole("region", { name: "README.md" });
+  await expect(readmePanel).toBeVisible();
+  await expect(
+    readmePanel.getByRole("heading", { name: "Team project" }),
+  ).toBeVisible();
+  await expect(
+    readmePanel.getByRole("link", { name: "source entry" }),
+  ).toHaveAttribute(
+    "href",
+    `/team/project?rev=${oid}&path=${pathHex("src/index.ts")}&kind=Blob`,
+  );
+  await expect(
+    readmePanel.getByRole("img", { name: "Architecture" }),
+  ).toHaveAttribute(
+    "src",
+    `/api/repos/team/project/asset?rev=${oid}&path_hex=${pathHex("docs/architecture.png")}`,
+  );
+  await expect(
+    readmePanel.getByRole("link", { name: "Vector" }),
+  ).toHaveAttribute(
+    "href",
+    `/api/repos/team/project/blob?rev=${oid}&path_hex=${pathHex("docs/vector.svg")}`,
+  );
+  await expect(
+    readmePanel.getByRole("link", { name: "Build status" }),
+  ).toHaveAttribute("href", "https://status.example/build.svg");
+  await expect(
+    readmePanel.getByRole("img", { name: "Build status" }),
+  ).toHaveCount(0);
+  await expect(readmePanel.locator(".repository-readme-body")).toHaveCSS(
+    "padding",
+    "32px",
+  );
   await panel.getByRole("link", { name: "README.md", exact: true }).click();
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toHaveText("project/README.md");

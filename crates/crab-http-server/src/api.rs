@@ -25,6 +25,7 @@ pub(crate) enum Action {
     Commits,
     Tree,
     Blob,
+    Asset,
     File,
     Changes,
     Diff,
@@ -146,6 +147,7 @@ impl IntoResponse for ApiError {
 enum Payload {
     Json(Value),
     Blob(Blob),
+    Asset(Blob),
 }
 
 pub(crate) async fn read(
@@ -233,6 +235,7 @@ pub(crate) async fn read(
                 blob.bytes,
             )
                 .into_response()),
+            Payload::Asset(blob) => Ok(asset_response(blob)),
         }
     }
     .await;
@@ -305,7 +308,7 @@ async fn execute(
         Action::Commit => OperationKind::Commit,
         Action::Commits => OperationKind::History,
         Action::Tree => OperationKind::Tree,
-        Action::Blob | Action::File => OperationKind::Content,
+        Action::Blob | Action::Asset | Action::File => OperationKind::Content,
         Action::Changes => OperationKind::Compare,
         Action::Diff => OperationKind::Diff,
         Action::Blame => OperationKind::Blame,
@@ -325,6 +328,9 @@ async fn execute(
                 json!({"items":result.items.iter().map(entry_json).collect::<Vec<_>>(), "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
             }
             Action::Blob => return Ok(Payload::Blob(snapshot.read_blob(&path, &operation).await?)),
+            Action::Asset => {
+                return Ok(Payload::Asset(snapshot.read_blob(&path, &operation).await?));
+            }
             Action::File => content_json(&snapshot.read_blob(&path, &operation).await?),
             Action::Changes | Action::Diff => {
                 let base_revision = params.base.as_deref().map(Revision::parse).transpose()?
@@ -394,6 +400,38 @@ fn content_json(blob: &Blob) -> Value {
     json!({"oid":blob.metadata.oid.to_string(),"size":blob.bytes.len(),"mode":format!("{:06o}",blob.metadata.mode.raw()),"classification":format!("{:?}",blob.metadata.classification),"text":text})
 }
 
+fn image_content_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn asset_response(blob: Blob) -> Response {
+    match image_content_type(&blob.bytes) {
+        Some(content_type) => (
+            [
+                ("content-type", content_type.to_owned()),
+                ("x-crab-blob-oid", blob.metadata.oid.to_string()),
+            ],
+            blob.bytes,
+        )
+            .into_response(),
+        None => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(json!({"error":{"code":"unsupported_asset","message":"Only PNG, JPEG, GIF and WebP blobs can be displayed inline"}})),
+        )
+            .into_response(),
+    }
+}
+
 fn entry_json(entry: &TreeEntry) -> Value {
     json!({"path":display_path(entry.path.as_bytes()),"path_hex":encode_hex(entry.path.as_bytes()),"oid":entry.oid.to_string(),"mode":format!("{:06o}",entry.mode.raw()),"kind":format!("{:?}",entry.kind)})
 }
@@ -458,6 +496,23 @@ fn decode_hex(value: &str) -> std::result::Result<Vec<u8>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crab_remote_git::{BlobMetadata, ContentClassification, EntryMode};
+    use http_body_util::BodyExt;
+
+    fn blob(bytes: &[u8]) -> Blob {
+        Blob {
+            metadata: BlobMetadata {
+                oid: gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+                    .unwrap(),
+                git_size: bytes.len() as u64,
+                logical_size: Some(bytes.len() as u64),
+                mode: EntryMode::Regular,
+                kind: EntryKind::Blob,
+                classification: ContentClassification::OrdinaryGit,
+            },
+            bytes: bytes.to_vec().into(),
+        }
+    }
 
     #[test]
     fn cursor_mac_rejects_tampering_and_other_server_keys() {
@@ -479,5 +534,33 @@ mod tests {
         assert_ne!(display_path(b"\xff"), display_path(b"%FF"));
         assert_eq!(display_path(b"dir/\xff"), "dir/%FF");
         assert_eq!(decode_hex(&encode_hex(b"dir/\xff")).unwrap(), b"dir/\xff");
+    }
+
+    #[test]
+    fn inline_assets_require_a_supported_raster_signature() {
+        assert_eq!(
+            image_content_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(image_content_type(b"\xff\xd8\xffrest"), Some("image/jpeg"));
+        assert_eq!(image_content_type(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(image_content_type(b"RIFFsizeWEBPrest"), Some("image/webp"));
+        assert_eq!(image_content_type(b"<svg><script/></svg>"), None);
+        assert_eq!(image_content_type(b"<html>not an image</html>"), None);
+    }
+
+    #[tokio::test]
+    async fn inline_asset_response_sets_safe_representation_headers() {
+        let response = asset_response(blob(b"\x89PNG\r\n\x1a\nrest"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert!(!response.headers().contains_key("content-disposition"));
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            b"\x89PNG\r\n\x1a\nrest".as_slice()
+        );
+
+        let response = asset_response(blob(b"<svg><script/></svg>"));
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 }
