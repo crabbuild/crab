@@ -18,6 +18,55 @@
 
 ## Status
 
+### Merge-readiness follow-up: initialization and Windows, 2026-09-04
+
+PR head `6556cbf` is not merge-ready. Protocol run `33893874223` reports
+222 passing Linux cache tests and one failed concurrent shard-hint writer;
+Windows reports 54 passing and 69 failing cache tests. The native macOS job
+passes. Real-Git compatibility and the released-shape RustFS lifecycle are
+skipped behind the failed prerequisites, not qualified by the green general
+CI aggregate. Historical large-file evidence below does not qualify this head.
+
+The shard-hint writer read `user_version` and table existence in separate
+implicit transactions before acquiring its initialization lock. Another
+initializer's commit between those reads could produce `(0, true)` and a false
+unsupported-schema error. The working-tree fix acquires `BEGIN IMMEDIATE`
+before both reads, initializes and validates inside that transaction, and
+changes journal mode only after committing a supported schema. Busy/locked
+errors retain bounded retry; corrupt/unknown schemas remain errors, not retries.
+The catalog sibling does not make this two-read version/existence decision;
+it uses idempotent schema DDL. No upstream SQLite or Xet patch is needed.
+
+Added regression coverage makes schema admission encounter another live writer
+with an uncommitted schema change: admission must return busy, then succeed
+after rollback. Additional coverage checks unsupported schemas retain their
+version, table definition and journal mode. Existing concurrent thread/process
+tests remain. All **12 shard-hint tests pass** on the local macOS host, and the
+original concurrent-writer test passes **100 consecutive repetitions**.
+Formatting and diff checks pass. The user explicitly approved local Workspace
+storage instead of external volumes; builds now use the isolated
+`crabbuild-target/crab-f410` directory there. Native Windows and Linux CI proof
+remain required; local success does not replace those gates.
+
+Windows implementation remains outstanding. Preserve the same ownership
+contract, rather than suppressing native tests or bypassing filesystem checks:
+
+1. Implement handle-relative directory/file operations, private ACL creation
+   and validation, reparse/hard-link rejection, file-identity checks, and
+   owned temporary publication/removal. Prove swapped ancestors/leaves cannot
+   redirect writes or cleanup, and unknown files remain untouched.
+2. Provide Windows-safe SQLite main/journal/WAL/shared-memory ownership,
+   byte-range locking, generation leases and read-only inspection. Reuse the
+   shared cache/catalog policy; do not substitute unchecked pathname SQLite
+   opens. Prove concurrent threads/processes, crash/reopen, cancellation and
+   active-owner cleanup on a native Windows runner, including range-cache
+   features as well as object-cache features.
+3. Pass the protocol prerequisites and their downstream real-Git/RustFS jobs
+   on the resulting head. Qualify add/commit/push, warm reuse, explicit cache
+   deletion, and cold clone/fetch/hydrate against real RustFS with independent
+   byte hashes and origin-read evidence, including the requested 10/20 GiB
+   matrix. Verify remote artifacts are unchanged by local maintenance.
+
 ### Integration with native Git hardening on main, 2026-09-04
 
 Rebased the cache branch from `42f1739` onto `500bea2` (native Git compatibility

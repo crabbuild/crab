@@ -353,7 +353,7 @@ fn update_once(
         DatabaseMode::Create,
         DATABASE_BUSY_TIMEOUT,
     )?;
-    configure_writer(&database, &path)?;
+    configure_writer(&mut database, &path)?;
     let transaction = database
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|source| index_error(&path, source))?;
@@ -395,31 +395,38 @@ fn update_once(
     Ok(())
 }
 
-fn configure_writer(database: &Database, path: &Path) -> Result<()> {
-    let version = schema_version(database, path)?;
-    let table_exists = table_sql(database, path)?.is_some();
+fn configure_writer(database: &mut Database, path: &Path) -> Result<()> {
+    // Read the version and table under the same writer lock. Separate reads
+    // can straddle another initializer's commit and falsely report corruption.
+    let transaction = database
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|source| index_error(path, source))?;
+    let version = schema_version(&transaction, path)?;
+    let table_exists = table_sql(&transaction, path)?.is_some();
     match (version, table_exists) {
-        (0, false) => database
+        (0, false) => transaction
             .execute_batch(
-                "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             BEGIN IMMEDIATE;
-             CREATE TABLE IF NOT EXISTS shard_hints (
+                "CREATE TABLE shard_hints (
                scope BLOB NOT NULL CHECK(length(scope) = 32),
                file_hash BLOB NOT NULL CHECK(length(file_hash) = 32),
                shard_hash BLOB NOT NULL CHECK(length(shard_hash) = 32),
                PRIMARY KEY(scope, file_hash)
              ) WITHOUT ROWID;
-             PRAGMA user_version = 1;
-             COMMIT;",
+             PRAGMA user_version = 1;",
             )
             .map_err(|source| index_error(path, source))?,
-        (1, true) => database
-            .execute_batch("PRAGMA synchronous = NORMAL;")
-            .map_err(|source| index_error(path, source))?,
+        (1, true) => {}
         _ => return unsupported_schema(path, version),
     }
-    validate_schema(database, path)
+    validate_schema(&transaction, path)?;
+    transaction
+        .commit()
+        .map_err(|source| index_error(path, source))?;
+    // SQLite cannot change journal mode inside a transaction. Do this only
+    // after validation so an unsupported database is never reconfigured.
+    database
+        .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+        .map_err(|source| index_error(path, source))
 }
 
 fn validate_schema(database: &rusqlite::Connection, path: &Path) -> Result<()> {
@@ -707,6 +714,78 @@ mod tests {
         let loaded = ShardHintCache::load_sync(&root, &scope).unwrap();
         assert_eq!(loaded.get(&make_hash(1)), Some(make_hash(11)));
         assert_eq!(loaded.get(&make_hash(2)), Some(make_hash(22)));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn writer_schema_inspection_waits_for_the_other_writer() {
+        let dir = TempDir::new().unwrap();
+        let root_path = cache_root(&dir);
+        let root = PinnedRoot::create(&root_path).unwrap();
+        let path = database_path(&root_path);
+        let open = || {
+            root.open_database(
+                Path::new(SHARD_HINTS_DATABASE),
+                DatabaseMode::Create,
+                Duration::ZERO,
+            )
+            .unwrap()
+        };
+        let mut first = open();
+        configure_writer(&mut first, &path).unwrap();
+        let mut second = open();
+        let transaction = first
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute_batch("PRAGMA user_version = 2;")
+            .unwrap();
+
+        // A read outside the writer transaction sees the previously committed
+        // schema and incorrectly accepts it while initialization is in flight.
+        let error = configure_writer(&mut second, &path).unwrap_err();
+        assert!(retryable_index_error(&error), "{error}");
+
+        transaction.rollback().unwrap();
+        configure_writer(&mut second, &path).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn writer_rejects_unknown_schemas_without_reconfiguring_them() {
+        for sql in [
+            "PRAGMA user_version = 2;",
+            "CREATE TABLE shard_hints(value TEXT);",
+        ] {
+            let dir = TempDir::new().unwrap();
+            let root_path = cache_root(&dir);
+            let root = PinnedRoot::create(&root_path).unwrap();
+            let path = database_path(&root_path);
+            let mut database = root
+                .open_database(
+                    Path::new(SHARD_HINTS_DATABASE),
+                    DatabaseMode::Create,
+                    Duration::ZERO,
+                )
+                .unwrap();
+            database.execute_batch(sql).unwrap();
+            let snapshot = |database: &Database| {
+                (
+                    schema_version(database, &path).unwrap(),
+                    table_sql(database, &path).unwrap(),
+                    database
+                        .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                        .unwrap(),
+                )
+            };
+            let before = snapshot(&database);
+
+            assert!(matches!(
+                configure_writer(&mut database, &path),
+                Err(CacheError::CorruptObject { .. })
+            ));
+            assert_eq!(snapshot(&database), before);
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
