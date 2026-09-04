@@ -2222,6 +2222,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-http-server"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "blake3",
+ "clap",
+ "crab-remote-git",
+ "crab-storage",
+ "http-body-util",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower 0.5.3",
+]
+
+[[package]]
 name = "crab-lfs"
 version = "0.1.0"
 dependencies = [
