@@ -65,14 +65,19 @@ manifest, inventory, negative, blame-result, and pack-index caches are byte
 bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
+Shared base/index reads recheck their caches after admission: a caller that
+missed before a previous producer finished must reuse its verified result.
+Index-size producers publish their cache entry before retiring the shared task.
+Object checksum/size checks and operation budgets still apply to late cache hits;
+parsed indexes are reused only within the caller's source-byte limit.
 Batch scheduling is lazy and its concurrency is the minimum of origin,
 blocking-decode, object-flight, logical-object, storage-request, fetched-byte,
 and inflated-byte limits. Archive traversal produces one entry at a time; its
 pending tree work is bounded by the verified tree-object limit.
-Services may keep a bounded cache of cloned immutable repository handles and
-use `is_current` after a short freshness interval. A changed manifest always
-requires a new complete open handshake; cached state is never refreshed in
-place.
+Services may keep a bounded cache of cloned immutable repository handles.
+`is_current` detects manifest changes only; observing uncompacted journal commits
+requires reopening after the freshness interval. A changed manifest always
+requires a new complete open handshake; cached state is never refreshed in place.
 
 Response packs can be persisted beneath the repository's immutable
 `generated-packs/v1` namespace. Selection-bound keys cover physical repository
