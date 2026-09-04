@@ -475,8 +475,22 @@ server clone. Publication uses temporary index sidecars. A denied temporary writ
 returns 503 and closes the writer; a restarted server with writable temporary
 space repairs that generation. Owner and GC leases are reacquirable afterward.
 
-Index receipts, restart reconstruction of missing evidence, and receive-to-commit
-wiring remain unfinished. A raw manifest PUT or journal-only endpoint cannot
+Native receive-to-commit wiring now has HTTP and RustFS qualification. Four
+injected storage faults cover lost marker replies, rejected marker writes, and
+cancellation before and after the commit boundary. A fresh server instance reads
+the recorded outcome and exact blob bytes; explicit retry replaces uncommitted
+prepared evidence under a new lease. An inconclusive marker attempt retains that
+evidence instead of inventing a rollback. These are cooperative shutdown tests,
+not abrupt process-crash qualification.
+
+GC heartbeats continue renewing until their owner finishes draining and explicitly
+stops or drops them. Operation cancellation alone cannot expire the fence and
+leave a crash quarantine after successful cleanup. Memory and RustFS tests keep a
+cancelled writer alive past its original expiry, admit another writer, release
+both, and acquire a sweep. Renewal failure still cancels the owning operation.
+
+Index receipts and restart reconstruction of missing evidence remain unfinished.
+A raw manifest PUT or journal-only endpoint cannot
 meet immediate read/fetch visibility or coexist correctly with native CLI writers.
 
 ## Evidence required before exposing push
