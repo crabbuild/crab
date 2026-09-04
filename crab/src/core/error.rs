@@ -1935,7 +1935,8 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Internal(message) => Self::Internal(message),
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Worker(_)
-            | crab_write::WriteError::PackIdentity { .. }) => {
+            | crab_write::WriteError::PackIdentity { .. }
+            | crab_write::WriteError::ManifestHash { .. }) => {
                 Self::Io(std::io::Error::other(error))
             }
         }

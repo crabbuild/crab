@@ -440,42 +440,6 @@ async fn run_generation_owner(
     operation
 }
 
-async fn acquire_generation_owner_locator_lock(
-    store: &crate::storage::store::Store,
-    router: &crate::storage::StoreLayout,
-    lock_ttl: std::time::Duration,
-    cancel: &CancellationToken,
-) -> Result<crab_coordination::PushLock> {
-    let mut context = crab_coordination::PushLockAcquireContext::new(Arc::clone(store.inner()));
-    let mut attempt = 0_u32;
-    loop {
-        match context
-            .acquire_internal(
-                router.repo_prefix(),
-                crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
-                lock_ttl,
-            )
-            .await
-            .map_err(CrabError::from)
-        {
-            Ok(lock) => return Ok(lock),
-            Err(CrabError::PushLockHeld { .. }) => {
-                let delay = std::time::Duration::from_millis(
-                    100_u64
-                        .saturating_mul(1_u64.checked_shl(attempt.min(6)).unwrap_or(u64::MAX))
-                        .min(5_000),
-                );
-                attempt = attempt.saturating_add(1);
-                tokio::select! {
-                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                    () = tokio::time::sleep(delay) => {}
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 async fn generation_owner_loop(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
@@ -583,26 +547,11 @@ async fn generation_owner_sample(
     )
     .await?
     {
-        return Ok(GenerationOwnerSample {
+        return Ok(superseded_owner_sample(
             generation,
-            action: "ref_journal_compaction",
-            maintenance_reason: generation_owner_reason("ref_journal_compaction"),
-            next_eligibility_secs: 0,
-            locator_advanced: false,
-            visibility: "deferred",
-            active_packs: 0,
-            active_pack_bytes: 0,
-            geometric_repack_packs: 0,
-            catalog_layers: 0,
-            catalog_bytes: 0,
-            locator_sweep: Default::default(),
-            commit_graph_layers: 0,
-            commit_graph_bytes: 0,
-            maintenance_bytes_read: 0,
-            maintenance_bytes_written: 0,
-            superseded: true,
-            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        });
+            "ref_journal_compaction",
+            started,
+        ));
     }
     let packs = if manifest.pack_index_hash.is_empty() {
         Vec::new()
@@ -615,19 +564,26 @@ async fn generation_owner_sample(
     let geometric_repack_packs =
         u64::try_from(crate::cmd::repack::generation_owner_repack_count(&packs))
             .unwrap_or(u64::MAX);
-    let anchor = crate::git::push::committed_manifest_anchor(&manifest)?;
-    let (locator_advanced, catalog, locator_sweep) =
-        maintain_object_catalog(store, router, anchor, &packs, lock_ttl, cancel)
-            .await
-            .map_err(|error| {
-                warn!(
-                    generation,
-                    %error,
-                    error_debug = ?error,
-                    "Git generation owner catalog maintenance failed"
-                );
-                error
-            })?;
+    let anchor = crab_write::generation::committed_manifest_anchor(&manifest)?;
+    let maintenance = maintain_object_catalog(store, router, &manifest, &packs, lock_ttl, cancel)
+        .await
+        .map_err(|error| {
+            warn!(
+                generation,
+                %error,
+                error_debug = ?error,
+                "Git generation owner catalog maintenance failed"
+            );
+            error
+        })?;
+    let Some(crab_write::generation::CatalogMaintenance {
+        advanced: locator_advanced,
+        stats: catalog,
+        sweep: locator_sweep,
+    }) = maintenance
+    else {
+        return Ok(superseded_owner_sample(generation, "superseded", started));
+    };
     // The owner is also the repair path for imports and Git-only pushes that
     // had no post-CAS MetaDb writer. Once locator coverage is current, publish
     // the receipt so doctor and GC can distinguish complete derived state from
@@ -813,6 +769,33 @@ async fn generation_owner_sample(
     })
 }
 
+fn superseded_owner_sample(
+    generation: u64,
+    action: &'static str,
+    started: std::time::Instant,
+) -> GenerationOwnerSample {
+    GenerationOwnerSample {
+        generation,
+        action,
+        maintenance_reason: generation_owner_reason(action),
+        next_eligibility_secs: 0,
+        locator_advanced: false,
+        visibility: "deferred",
+        active_packs: 0,
+        active_pack_bytes: 0,
+        geometric_repack_packs: 0,
+        catalog_layers: 0,
+        catalog_bytes: 0,
+        locator_sweep: Default::default(),
+        commit_graph_layers: 0,
+        commit_graph_bytes: 0,
+        maintenance_bytes_read: 0,
+        maintenance_bytes_written: 0,
+        superseded: true,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
 fn generation_owner_reason(action: &str) -> &'static str {
     match action {
         "ref_journal_compaction" => "active_ref_journal",
@@ -834,135 +817,26 @@ fn generation_owner_reason(action: &str) -> &'static str {
 async fn maintain_object_catalog(
     store: &crate::storage::store::Store,
     router: &crate::storage::StoreLayout,
-    anchor: Option<crate::git::push::CommittedManifestAnchor>,
+    manifest: &crab_metadata::manifests::Manifest,
     packs: &[crab_metadata::manifests::PackManifestEntry],
     lock_ttl: std::time::Duration,
     cancel: &CancellationToken,
-) -> Result<(
-    bool,
-    crab_metadata::git_object_locator::GitObjectCatalogStats,
-    crab_metadata::git_object_locator::LocatorSweepStats,
-)> {
-    let mut lock = acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
-    let operation = Box::pin(crab_coordination::while_renewing(
-        &mut lock,
-        Some(cancel),
-        async {
-            // Plan under the publication lock. An unlocked snapshot could
-            // miss a concurrent push and incorrectly skip compaction.
-            // Recheck the anchor first so a push that won the race before
-            // lock acquisition cannot trigger a repository-sized stale plan.
-            let (current_manifest, _) =
-                crate::metadata::manifest::read_manifest(store, router).await?;
-            let current_anchor = crate::git::push::committed_manifest_anchor(&current_manifest)?;
-            if current_anchor != anchor {
-                return Ok((
-                    false,
-                    crab_metadata::git_object_locator::GitObjectCatalogStats::default(),
-                    crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                ));
-            }
-            let (coverage, bindings) = {
-                let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
-                    Arc::clone(store.inner()),
-                    router.repo_prefix(),
-                )
-                .await
-                .map_err(CrabError::from)?;
-                let coverage = session.coverage();
-                let bindings = session.pack_bindings().await.map_err(CrabError::from);
-                let close = session.close().await.map_err(CrabError::from);
-                match (bindings, close) {
-                    (Ok(bindings), Ok(())) => (coverage, bindings),
-                    (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
-                    (Err(error), Err(close_error)) => {
-                        warn!(
-                            error = %close_error,
-                            "Git locator session close also failed after reading pack bindings"
-                        );
-                        return Err(error);
-                    }
-                }
-            };
-            let planned_object_rows =
-                crate::git::push::uncovered_locator_object_rows(coverage, &bindings, packs);
-            let pack_inventory_unchanged = anchor.is_some_and(|anchor| {
-                coverage.is_some_and(|coverage| coverage.pack_index_hash == anchor.pack_index_hash)
-            }) && planned_object_rows == 0;
-            let mut writer = if pack_inventory_unchanged {
-                crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_coverage_update(
-                    Arc::clone(store.inner()),
-                    router.repo_prefix(),
-                )
-                .await?
-            } else {
-                crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                    Arc::clone(store.inner()),
-                    router.repo_prefix(),
-                    planned_object_rows,
-                )
-                .await?
-            };
-            let result = async {
-                let current = anchor.is_none_or(|anchor| {
-                    writer.coverage()
-                        == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
-                            generation: anchor.generation,
-                            pack_index_hash: anchor.pack_index_hash,
-                        })
-                });
-                let (advanced, sweep) = if current {
-                    (
-                        false,
-                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                    )
-                } else if let Some(anchor) = anchor {
-                    crate::git::push::publish_pack_locator_inventory_for_owner(
-                        &mut writer,
-                        store,
-                        router,
-                        anchor,
-                        packs,
-                        cancel,
-                    )
-                    .await?
-                } else {
-                    (
-                        false,
-                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                    )
-                };
-                Ok::<_, CrabError>((advanced, writer.catalog_stats().await?, sweep))
-            }
-            .await;
-            let close = writer.close().await.map_err(CrabError::from);
-            match (result, close) {
-                (Ok(result), Ok(_)) => Ok(result),
-                (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-                (Err(error), Err(close_error)) => {
-                    warn!(
-                        error = %close_error,
-                        "Git locator close also failed after owner publication"
-                    );
-                    Err(error)
-                }
-            }
-        },
-    ))
-    .await;
-    let release = lock.release().await.map_err(CrabError::from);
-    match (operation, release) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => {
-            warn!(
-                %error,
-                error_debug = ?error,
-                "Git generation owner locator lock release failed"
-            );
-            Err(error)
-        }
-    }
+) -> Result<Option<crab_write::generation::CatalogMaintenance>> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::generation::maintain_catalog(
+        store.as_storage(),
+        &layout,
+        manifest,
+        packs,
+        lock_ttl,
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 async fn maintain_split_commit_graph(
@@ -4010,7 +3884,7 @@ mod tests {
         });
 
         assert_eq!(
-            crate::git::push::uncovered_locator_object_rows(
+            crab_write::generation::uncovered_locator_object_rows(
                 coverage,
                 &bindings,
                 &[covered_pack, new_pack],
@@ -4136,8 +4010,6 @@ mod tests {
         crate::metadata::manifest::create_manifest_with_etag(&store, &router, &initial)
             .await
             .expect("create initial manifest");
-        let anchor = crate::git::push::committed_manifest_anchor(&initial)
-            .expect("parse initial manifest anchor");
 
         let (mut newer, etag) = crate::metadata::manifest::read_manifest(&store, &router)
             .await
@@ -4154,7 +4026,7 @@ mod tests {
         let result = maintain_object_catalog(
             &store,
             &router,
-            anchor,
+            &initial,
             &[crab_metadata::manifests::PackManifestEntry {
                 pack_id: missing_pack_id.clone(),
                 size: 1,
@@ -4167,15 +4039,10 @@ mod tests {
         )
         .await;
 
-        let (advanced, stats, sweep) = result.expect("stale owner snapshot must be skipped");
-        assert!(!advanced);
-        assert_eq!(
-            stats,
-            crab_metadata::git_object_locator::GitObjectCatalogStats::default()
-        );
-        assert_eq!(
-            sweep,
-            crab_metadata::git_object_locator::LocatorSweepStats::default()
+        assert!(
+            result
+                .expect("stale owner snapshot must be skipped")
+                .is_none()
         );
     }
 

@@ -1,5 +1,6 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
 pub mod catalog;
+pub mod generation;
 pub mod journal;
 
 /// Failure while preparing or publishing canonical Git metadata.
@@ -17,6 +18,12 @@ pub enum WriteError {
     Io(#[from] std::io::Error),
     #[error("publication worker failed")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("invalid manifest {field} hash")]
+    ManifestHash {
+        field: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("invalid pack identity")]
     PackIdentity {
         #[source]

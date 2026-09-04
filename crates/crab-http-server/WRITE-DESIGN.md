@@ -368,8 +368,26 @@ visibility and publishes the catalog. `crab-remote-git` reads all three objects
 byte-identically. Journal compaction takes 28 ms and catalog publication 12 ms
 for that small fixture, without cache isolation. It does not exercise HTTP push.
 
+`crab-write::generation::maintain_catalog` now owns the catalog lease, planning
+reader, writer, checkpoint and close lifecycle. It rechecks the captured manifest
+before planning and after writer close. Superseded work has an explicit result;
+the CLI owner skips receipt publication and later maintenance, reporting the
+superseded sample. Its continuous loop retries immediately; one-shot runs exit. Shared
+index anchors and row planning also serve native push, repack and history recovery.
+The returned future is `Send`, covered by spawning the lifecycle in Tokio. Metadata point
+lookups construct owned keys before their asynchronous batch; this avoids the
+borrowed-iterator lifetime failure exposed by spawning the lifecycle in Tokio.
+Four lifecycle tests cover contention/cancellation, failed-publication cleanup,
+stale planning and a generation change after the captured read. Metadata point
+and scan tests preserve lookup order/missing rows; eleven focused CLI owner and
+commit-graph tests pass. RustFS verifies exact commit/tree/blob reads after
+removing the fixture's local repository, completing the catalog lifecycle and
+binding visibility to its checkpoint. Repeating maintenance reports no advance.
+The small fixture takes 23 ms for catalog lifecycle and 29 ms for journal
+compaction; cache state is shared and native HTTP push remains unqualified.
+
 The HTTP server still needs a shared generation-owner orchestration path around
-these journal and catalog engines, including visibility readiness and restart
+these journal and catalog lifecycle functions, including visibility readiness and restart
 repair, as well as the journal commit.
 A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
 visibility or coexist correctly with native CLI writers.
