@@ -148,7 +148,7 @@ impl Server {
     }
 }
 
-/// Serve configured repositories and compiled React assets until Ctrl-C.
+/// Serve configured repositories and compiled React assets until shutdown.
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
     let auth =
@@ -207,9 +207,7 @@ pub async fn serve(config: Config) -> Result<()> {
     println!("Crab repositories: http://{}", listener.local_addr()?);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            if tokio::signal::ctrl_c().await.is_err() {
-                eprintln!("Unable to listen for shutdown signal");
-            }
+            shutdown_signal().await;
             cancellation.cancel();
         })
         .await;
@@ -221,6 +219,35 @@ pub async fn serve(config: Config) -> Result<()> {
     let maintenance = server.finish_maintenance().await;
     runtime.shutdown().await;
     result.map_err(crate::Error::from).and(maintenance)
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    eprintln!("Unable to listen for SIGTERM: {error}");
+                    if let Err(error) = tokio::signal::ctrl_c().await {
+                        eprintln!("Unable to listen for Ctrl-C: {error}");
+                    }
+                    return;
+                }
+            };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    eprintln!("Unable to listen for Ctrl-C: {error}");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!("Unable to listen for Ctrl-C: {error}");
+    }
 }
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
@@ -244,6 +271,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
             post(lfs::locks_unavailable),
         )
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/readyz", get(readiness))
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
             "/git/{owner}/{name}/git-receive-pack",
@@ -273,6 +301,37 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
+async fn readiness(State(server): State<Arc<Server>>) -> Response {
+    let cancellation = server.cancellation.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    let check = async {
+        for repository in server.repositories.values() {
+            repository.open(&server, &cancellation).await?;
+        }
+        Ok::<(), crate::Error>(())
+    };
+    match tokio::time::timeout(Duration::from_secs(10), check).await {
+        Ok(Ok(())) => Json(json!({"status":"ready"})).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = ?error, "repository readiness check failed");
+            readiness_unavailable()
+        }
+        Err(_) => {
+            tracing::warn!("repository readiness check timed out");
+            readiness_unavailable()
+        }
+    }
+}
+
+fn readiness_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "5")],
+        Json(json!({"status":"unavailable"})),
+    )
+        .into_response()
+}
+
 async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -297,11 +356,14 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
         format!("localhost:{}", server.port),
         format!("[::1]:{}", server.port),
     ];
-    let valid_host = server
-        .auth
-        .as_ref()
-        .map(|auth| auth.allows_host(host))
-        .unwrap_or_else(|| allowed.iter().any(|value| Some(value.as_str()) == host));
+    let local_host = allowed.iter().any(|value| Some(value.as_str()) == host);
+    let health_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
+    let valid_host = (health_probe && local_host)
+        || server
+            .auth
+            .as_ref()
+            .map(|auth| auth.allows_host(host))
+            .unwrap_or(local_host);
     if !valid_host {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -455,6 +517,18 @@ mod tests {
                 Some("no-store"),
             ),
             (
+                "/healthz",
+                "127.0.0.1:8788",
+                StatusCode::OK,
+                Some("no-store"),
+            ),
+            (
+                "/readyz",
+                "127.0.0.1:8788",
+                StatusCode::OK,
+                Some("no-store"),
+            ),
+            (
                 "/team/repo.name",
                 "localhost:8788",
                 StatusCode::OK,
@@ -485,6 +559,13 @@ mod tests {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["error"]["code"], "repository_not_found");
+            } else if path == "/healthz" || path == "/readyz" {
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    value["status"],
+                    if path == "/healthz" { "ok" } else { "ready" }
+                );
             }
         }
         runtime.shutdown().await;

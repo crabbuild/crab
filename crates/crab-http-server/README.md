@@ -45,6 +45,41 @@ trusts the local operator and exposes every configured repository. Team deployme
 must configure OIDC and a canonical HTTPS origin as described below. `/healthz`
 is process liveness, not storage readiness.
 
+## Run the container
+
+The checked-in image builds the locked React application and Rust server, embeds
+the assets in one binary, and runs as UID/GID 10001 with a dedicated temporary
+directory. Build it from the repository root so both workspace and frontend
+inputs are available:
+
+```sh
+docker build \
+  --file crates/crab-http-server/deploy/Dockerfile \
+  --tag crab-http-server:local \
+  .
+```
+
+Copy `crates/crab-http-server/deploy/server.example.toml` outside the checkout,
+replace the identity, repository and bucket values, and keep the OIDC client
+secret in a separate read-only file. Put storage credentials in a private
+environment file. A team deployment can then run behind its HTTPS reverse proxy:
+
+```sh
+docker run --rm --name crab-http-server \
+  --publish 127.0.0.1:8788:8788 \
+  --env-file /secure/crab-storage.env \
+  --mount type=bind,src=/secure/server.toml,dst=/etc/crab/server.toml,readonly \
+  --mount type=bind,src=/secure/oidc-client-secret,dst=/run/secrets/crab-oidc-client-secret,readonly \
+  crab-http-server:local
+```
+
+The container health check calls `/readyz`, so healthy means every configured
+repository can be opened from object storage. `SIGTERM` starts the same graceful
+drain as Ctrl-C. `/var/lib/crab/tmp` holds bounded transient receive/index files;
+mount a larger writable temporary volume there when expected pushes exceed the
+container filesystem budget. Repository and application state remain in the
+configured bucket.
+
 The browser provides repository selection and a searchable branch/tag picker
 with default-branch identification and keyboard navigation, raw-byte path navigation, lazy
 Pierre Trees, paginated directories and first-parent history, highlighted files,
@@ -76,6 +111,13 @@ concurrently. `Server-Timing` reports repository open, read, and total handling
 milliseconds. It excludes HTTP transmission; the browser also measures the
 complete fetch/JSON round trip. Cached reads are not cold-storage measurements.
 Ctrl-C cancels requests, drains publication jobs and shuts down the shared runtime.
+On Unix, `SIGTERM` follows the same drain path for containers and service managers.
+
+`GET /healthz` reports process liveness. `GET /readyz` opens every configured
+repository within one shared ten-second deadline and returns 503 with
+`Retry-After: 5` if object storage or repository metadata is unavailable. Health
+probes accept the listener's loopback Host even when the browser origin uses a
+different canonical hostname; other requests retain strict Host validation.
 
 Unborn default branches are exposed through the refs API and Git protocol v2's
 explicit `unborn` advertisement, including repositories that already contain tags.

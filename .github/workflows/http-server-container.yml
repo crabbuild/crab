@@ -1,0 +1,40 @@
+name: HTTP server container
+
+on:
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/http-server-container.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/**"
+      - "crates/**"
+      - "packages/repository/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: http-server-container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build and inspect image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked server image
+        run: >-
+          docker build
+          --file crates/crab-http-server/deploy/Dockerfile
+          --tag crab-http-server:test
+          .
+      - name: Verify runtime contract
+        run: |
+          test "$(docker image inspect crab-http-server:test --format '{{.Config.User}}')" = "crab:crab"
+          test "$(docker image inspect crab-http-server:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
+          test "$(docker run --rm --entrypoint /usr/bin/id crab-http-server:test -u)" = "10001"
+          docker run --rm crab-http-server:test --help | grep -F -- "--config"
