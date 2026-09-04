@@ -23,6 +23,7 @@ import {
   type Session,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
+import { CloneMenu, GitAccess } from "./git-access";
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
 );
@@ -121,6 +122,7 @@ export function App() {
           )}
           {session.data?.user && (
             <div className="session-control">
+              <GitAccess session={session.data} />
               <span title={session.data.user.subject}>
                 {session.data.user.name}
               </span>
@@ -278,6 +280,7 @@ function RepositoryPage({
   return (
     <>
       <div className="repo-header">
+        <CloneMenu repo={repo} />
         <div className="repo-title">
           <RepoIcon size={20} />
           <h1>

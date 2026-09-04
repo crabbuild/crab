@@ -75,7 +75,7 @@ impl Config {
                     ));
                 }
             }
-            if matches!(repository.owner.as_str(), "api" | "assets" | "auth") {
+            if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
                 return Err(Error::Config(
                     "repository owner conflicts with a server route",
                 ));

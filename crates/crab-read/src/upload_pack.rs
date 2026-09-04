@@ -7,8 +7,9 @@ use bstr::ByteSlice;
 use crab_metadata::git_object_locator::{GitObjectMetadata, GitObjectOrdinal};
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use crab_remote_git::{
-    CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, OperationContext,
-    OperationKind, RemoteGitObject, RemoteGitRepository, RepositoryRef, RepositoryStateError,
+    CorruptionStage, Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits,
+    OperationContext, OperationKind, OperationLimits, RemoteGitObject, RemoteGitRepository,
+    RepositoryOptions, RepositoryRef, RepositoryStateError,
 };
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
@@ -2124,6 +2125,34 @@ fn enqueue(
     queued.insert(key);
     queue.push_back(item);
     Ok(())
+}
+
+/// Maximum lifetime of an explicit Git repository transfer.
+pub const UPLOAD_PACK_MAX_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Return the bounded transfer profile shared by Git transports, separate from interactive reads.
+pub fn upload_pack_repository_options() -> crab_remote_git::Result<RepositoryOptions> {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let object = ObjectLimits {
+        max_packed_entry_bytes: 128 * MIB,
+        max_inflated_entry_bytes: 128 * MIB,
+        max_object_bytes: 128 * MIB,
+        ..ObjectLimits::default()
+    };
+    let operation = OperationLimits {
+        // Upload-pack is an explicit repository transfer. Its bounded profile must cover the
+        // largest supported visibility generation without weakening interactive read defaults.
+        max_duration: UPLOAD_PACK_MAX_DURATION,
+        max_logical_objects: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_storage_requests: crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS,
+        max_fetched_bytes: 64 * GIB,
+        max_inflated_bytes: 128 * GIB,
+        max_response_bytes: 16 * GIB,
+        ..OperationLimits::default()
+    };
+    RepositoryOptions::new(object, operation)
 }
 
 #[cfg(test)]

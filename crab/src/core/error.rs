@@ -1073,6 +1073,16 @@ impl From<crab_cache_store::CacheStoreError> for CrabError {
     }
 }
 
+impl From<crab_read::upload_pack_wire::WireError> for CrabError {
+    fn from(error: crab_read::upload_pack_wire::WireError) -> Self {
+        match error {
+            crab_read::upload_pack_wire::WireError::Protocol(message) => Self::Protocol(message),
+            crab_read::upload_pack_wire::WireError::Io(source) => Self::Io(source),
+            crab_read::upload_pack_wire::WireError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 impl From<crab_read::ReadError> for CrabError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {

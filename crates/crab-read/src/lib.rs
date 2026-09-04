@@ -10,6 +10,7 @@ mod selection;
 mod store_client;
 mod term_resolver;
 mod upload_pack;
+pub mod upload_pack_wire;
 
 pub use error::{ReadError, ReconstructionError, Result};
 pub use fetch_admission::{
@@ -30,7 +31,7 @@ pub use selection::{
 pub use store_client::{ReadMetrics, StoreClient, XorbAvailability};
 pub use term_resolver::TermResolver;
 pub use upload_pack::{
-    PackPlan, UploadPackFilter, UploadPackFilterError, UploadPackObjectType, UploadPackRequest,
-    combine_upload_pack_filters, parse_upload_pack_filter, plan_upload_pack,
-    plan_upload_pack_catalog,
+    PackPlan, UPLOAD_PACK_MAX_DURATION, UploadPackFilter, UploadPackFilterError,
+    UploadPackObjectType, UploadPackRequest, combine_upload_pack_filters, parse_upload_pack_filter,
+    plan_upload_pack, plan_upload_pack_catalog, upload_pack_repository_options,
 };
