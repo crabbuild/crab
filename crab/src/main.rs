@@ -6155,17 +6155,10 @@ mod tests {
     #[test]
     fn root_help_groups_every_user_facing_command_once() {
         with_cli_command(|command| {
-            let internal = [
-                "coordinator",
-                "filter-process",
-                "lfs-transfer-agent",
-                "diff-driver",
-                "help",
-            ];
             let mut expected: Vec<&str> = command
                 .get_subcommands()
+                .filter(|subcommand| !subcommand.is_hide_set())
                 .map(clap::Command::get_name)
-                .filter(|name| !internal.contains(name))
                 .collect();
             expected.sort_unstable();
 
