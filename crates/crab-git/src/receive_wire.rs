@@ -10,7 +10,7 @@ use gix_packetline::{PacketLineRef, blocking_io::encode, decode::PacketLineOrWan
 
 use crate::receive_plan::RefUpdate;
 
-/// Maximum receive command count; pack data has separate intake limits.
+/// Maximum receive command and shallow-declaration count; pack data has separate limits.
 pub const MAX_COMMANDS: usize = 1024;
 /// Maximum combined command bytes, excluding the following pack.
 pub const MAX_COMMAND_BYTES: usize = 1024 * 1024;
@@ -56,21 +56,31 @@ type Result<T> = std::result::Result<T, ReceiveWireError>;
 /// Read one complete command section without consuming any pack bytes.
 ///
 /// Call on a blocking worker with an I/O deadline enforced by the transport.
-/// A lone flush is an empty request/probe. Shallow pushes, certificates and
-/// unadvertised capabilities are rejected. Pack completeness, ref policy and
-/// old-value checks belong to the receiver, not this parser.
+/// A lone flush is an empty request/probe. Shallow declarations are validated
+/// but do not weaken the receiver's authoritative graph validation. Push
+/// certificates and unadvertised capabilities are rejected. Pack completeness,
+/// ref policy and old-value checks belong to the receiver, not this parser.
 pub fn read_request(reader: &mut impl Read) -> Result<ReceiveRequest> {
     let mut request = ReceiveRequest {
         updates: Vec::new(),
         report_status: false,
     };
     let mut total = 0usize;
+    let mut records = 0usize;
+    let mut saw_shallow = false;
     let mut names = std::collections::HashSet::new();
     loop {
         let mut prefix = [0; 4];
         reader.read_exact(&mut prefix)?;
         let len = match gix_packetline::decode::hex_prefix(&prefix)? {
-            PacketLineOrWantedSize::Line(PacketLineRef::Flush) => return Ok(request),
+            PacketLineOrWantedSize::Line(PacketLineRef::Flush) => {
+                if saw_shallow && request.updates.is_empty() {
+                    return Err(ReceiveWireError::Protocol(
+                        "shallow declarations require a receive command",
+                    ));
+                }
+                return Ok(request);
+            }
             PacketLineOrWantedSize::Wanted(len) => usize::from(len),
             _ => {
                 return Err(ReceiveWireError::Protocol(
@@ -79,18 +89,32 @@ pub fn read_request(reader: &mut impl Read) -> Result<ReceiveRequest> {
             }
         };
         total = total.saturating_add(len + 4);
-        if len > MAX_PACKET_DATA
-            || total > MAX_COMMAND_BYTES
-            || request.updates.len() >= MAX_COMMANDS
-        {
+        if len > MAX_PACKET_DATA || total > MAX_COMMAND_BYTES || records >= MAX_COMMANDS {
             return Err(ReceiveWireError::Protocol(
                 "receive command section exceeds its limit",
             ));
         }
+        records += 1;
         let mut packet = vec![0; len];
         reader.read_exact(&mut packet)?;
         let line = std::str::from_utf8(&packet)?;
         let line = line.strip_suffix('\n').unwrap_or(line);
+        if let Some(value) = line.strip_prefix("shallow ") {
+            if !request.updates.is_empty() {
+                return Err(ReceiveWireError::Protocol(
+                    "shallow declarations must precede receive commands",
+                ));
+            }
+            if parse_oid(value)?.is_none() {
+                return Err(ReceiveWireError::Protocol(
+                    "shallow object ID must not be zero",
+                ));
+            }
+            // This is sender inventory only. The receiver still resolves every
+            // omitted parent from the committed graph or rejects the push.
+            saw_shallow = true;
+            continue;
+        }
         let command = if request.updates.is_empty() {
             let (command, capabilities) = line.split_once('\0').ok_or(
                 ReceiveWireError::Protocol("first receive command must include capabilities"),

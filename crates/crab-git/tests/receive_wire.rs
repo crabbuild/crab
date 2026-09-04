@@ -33,6 +33,8 @@ fn fragmented_commands_preserve_exact_ids_order_and_pack_boundary() {
     let zero = "0".repeat(40);
     let a = "a".repeat(40);
     let b = "b".repeat(40);
+    packet(format!("shallow {a}\n").as_bytes(), &mut body);
+    packet(format!("shallow {b}\n").as_bytes(), &mut body);
     packet(
         &command(
             &zero,
@@ -96,7 +98,8 @@ fn malformed_or_unadvertised_commands_are_rejected_before_pack_reads() {
         command(&a, &a, "refs/heads/new", Some("report-status")),
         command("abcd", &a, "refs/heads/new", Some("report-status")),
         command(&"g".repeat(40), &a, "refs/heads/new", Some("report-status")),
-        format!("shallow {a}\n").into_bytes(),
+        format!("shallow {}\n", "0".repeat(40)).into_bytes(),
+        format!("shallow {}\n", "g".repeat(40)).into_bytes(),
         b"push-cert\0report-status".to_vec(),
     ] {
         let mut body = Vec::new();
@@ -105,6 +108,27 @@ fn malformed_or_unadvertised_commands_are_rejected_before_pack_reads() {
         let mut reader = Cursor::new(body);
         assert!(receive_wire::read_request(&mut reader).is_err(), "{line:?}");
         assert!(reader.position() as usize <= reader.get_ref().len() - 8);
+    }
+}
+
+#[test]
+fn shallow_declarations_require_a_command_and_precede_all_commands() {
+    let zero = "0".repeat(40);
+    let a = "a".repeat(40);
+    let b = "b".repeat(40);
+    for lines in [
+        vec![format!("shallow {a}\n").into_bytes()],
+        vec![
+            command(&zero, &a, "refs/heads/new", Some("report-status")),
+            format!("shallow {b}\n").into_bytes(),
+        ],
+    ] {
+        let mut body = Vec::new();
+        for line in lines {
+            packet(&line, &mut body);
+        }
+        encode::flush_to_write(&mut body).unwrap();
+        assert!(receive_wire::read_request(&mut body.as_slice()).is_err());
     }
 }
 
@@ -176,6 +200,28 @@ fn packet_and_aggregate_limits_stop_unbounded_command_sections() {
         ));
         assert!(reader.position() as usize <= receive_wire::MAX_COMMAND_BYTES + 4);
     }
+    let mut shallow = Vec::new();
+    for _ in 0..receive_wire::MAX_COMMANDS {
+        packet(
+            format!("shallow {}\n", "a".repeat(40)).as_bytes(),
+            &mut shallow,
+        );
+    }
+    packet(
+        &command(
+            &"0".repeat(40),
+            &"b".repeat(40),
+            "refs/heads/new",
+            Some("report-status"),
+        ),
+        &mut shallow,
+    );
+    assert!(matches!(
+        receive_wire::read_request(&mut shallow.as_slice()),
+        Err(ReceiveWireError::Protocol(
+            "receive command section exceeds its limit"
+        ))
+    ));
 }
 
 #[test]
