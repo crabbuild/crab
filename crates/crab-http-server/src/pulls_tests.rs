@@ -297,7 +297,10 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
         .get_mut(&("team".into(), "repo".into()))
         .unwrap()
         .config
-        .protected_branches = vec!["main".into()];
+        .protected_branches = vec![crate::BranchProtection {
+        branch: "main".into(),
+        required_approvals: 0,
+    }];
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));
@@ -364,7 +367,10 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(catalog["repositories"][0]["protected_branches"][0], "main");
+    assert_eq!(
+        catalog["repositories"][0]["protected_branches"][0]["branch"],
+        "main"
+    );
 
     let client = reqwest::Client::new();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");

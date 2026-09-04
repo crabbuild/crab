@@ -47,6 +47,15 @@ pub(super) struct PullMerge {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct PullReviewDecision {
+    pub review: u64,
+    pub author: Identity,
+    pub state: ReviewState,
+    pub commit_oid: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PullRequest {
     pub number: u64,
     pub request_id: String,
@@ -62,6 +71,8 @@ pub(super) struct PullRequest {
     pub merge_pending: Option<PullMerge>,
     #[serde(default)]
     pub merge: Option<PullMerge>,
+    #[serde(default)]
+    pub review_decisions: Vec<PullReviewDecision>,
     pub version: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -194,6 +205,7 @@ pub(super) async fn create_pull(repo: &Repository, input: NewPullRequest) -> Res
                     head_oid: input.head_oid.clone(),
                     merge_pending: None,
                     merge: None,
+                    review_decisions: vec![],
                     version: 1,
                     created_at: timestamp,
                     updated_at: timestamp,
@@ -325,6 +337,67 @@ pub(super) async fn create_review(
         return Err(Error::Conflict);
     }
     Ok(current)
+}
+
+pub(super) async fn record_review_decision(
+    repo: &Repository,
+    number: u64,
+    review: &PullReview,
+) -> Result<()> {
+    if review.state == ReviewState::Commented {
+        return Ok(());
+    }
+    let path = pull_path(number);
+    for _ in 0..10 {
+        let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if pull.review_decisions.iter().any(|current| {
+            app_storage::same_author(&current.author, &review.author)
+                && current.review >= review.number
+        }) {
+            return Ok(());
+        }
+        if pull.state != PullState::Open {
+            return Err(Error::Invalid("Closed pull requests cannot be reviewed"));
+        }
+        if pull.merge_pending.is_some() {
+            return Err(Error::MergePending);
+        }
+        let decision = PullReviewDecision {
+            review: review.number,
+            author: review.author.clone(),
+            state: review.state,
+            commit_oid: review.commit_oid.clone(),
+        };
+        match pull
+            .review_decisions
+            .iter()
+            .position(|current| app_storage::same_author(&current.author, &review.author))
+        {
+            Some(index) => pull.review_decisions[index] = decision,
+            None if pull.review_decisions.len() < 1024 => pull.review_decisions.push(decision),
+            None => {
+                return Err(Error::Invalid(
+                    "Pull requests support at most 1,024 review decisions",
+                ));
+            }
+        }
+        // Merge admission compares this version before claiming the pull. A
+        // concurrent review decision must either precede or follow that claim.
+        pull.version = pull
+            .version
+            .checked_add(1)
+            .filter(|value| *value < app_storage::MAX_NUMBER)
+            .ok_or(Error::Conflict)?;
+        pull.updated_at = app_storage::now()?;
+        match app_storage::update(repo, &path, &pull, etag).await {
+            Ok(()) => return Ok(()),
+            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
 }
 
 pub(super) fn merge_matches(left: &PullMerge, input: &NewPullMerge) -> bool {

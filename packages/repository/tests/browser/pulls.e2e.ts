@@ -17,47 +17,59 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   let mergeRequest = "";
   const comments: Array<Record<string, unknown>> = [];
   const reviews: Array<Record<string, unknown>> = [];
-  const pull = () => ({
-    number: created ? 2 : 1,
-    title: created ? "Document the feature" : "Improve the README",
-    body: created ? "This explains the **new behavior**." : "Please review.",
-    state,
-    author: "Alice",
-    base_ref: "refs/heads/main",
-    base_oid: base,
-    head_ref: "refs/heads/feature/docs",
-    head_oid: head,
-    original_base_oid: base,
-    original_head_oid: head,
-    version: state === "open" ? 1 : 2,
-    created_at: 1_700_000_000_000,
-    updated_at: 1_700_000_000_000,
-    can_edit: true,
-    can_manage: !mergePending,
-    can_decide: true,
-    can_merge: state === "open" && (branchesAvailable || mergePending),
-    branches_available: state === "merged" || branchesAvailable,
-    merge:
-      state === "merged"
+  const pull = () => {
+    const approvals = branchesAvailable && reviews.length ? 1 : 0;
+    return {
+      number: created ? 2 : 1,
+      title: created ? "Document the feature" : "Improve the README",
+      body: created ? "This explains the **new behavior**." : "Please review.",
+      state,
+      author: "Alice",
+      base_ref: "refs/heads/main",
+      base_oid: base,
+      head_ref: "refs/heads/feature/docs",
+      head_oid: head,
+      original_base_oid: base,
+      original_head_oid: head,
+      version: state === "open" ? 1 : 2,
+      created_at: 1_700_000_000_000,
+      updated_at: 1_700_000_000_000,
+      can_edit: true,
+      can_manage: !mergePending,
+      can_decide: true,
+      can_merge:
+        state === "open" &&
+        (mergePending || (branchesAvailable && approvals >= 1)),
+      branches_available: state === "merged" || branchesAvailable,
+      merge_requirements: {
+        protected: true,
+        required_approvals: 1,
+        approvals,
+        changes_requested: 0,
+        satisfied: approvals >= 1,
+      },
+      merge:
+        state === "merged"
+          ? {
+              author: "Local operator",
+              method: "fast_forward",
+              commit_oid: head,
+              created_at: 1_700_000_200_000,
+            }
+          : null,
+      merge_pending: mergePending
         ? {
+            request_id: mergeRequest,
             author: "Local operator",
             method: "fast_forward",
-            commit_oid: head,
-            created_at: 1_700_000_200_000,
+            pull_version: 1,
+            base_oid: base,
+            head_oid: head,
+            created_at: 1_700_000_150_000,
           }
         : null,
-    merge_pending: mergePending
-      ? {
-          request_id: mergeRequest,
-          author: "Local operator",
-          method: "fast_forward",
-          pull_version: 1,
-          base_oid: base,
-          head_oid: head,
-          created_at: 1_700_000_150_000,
-        }
-      : null,
-  });
+    };
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -75,7 +87,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
               name: "project",
               description: "A repository for our team.",
               access: "write",
-              protected_branches: ["main"],
+              protected_branches: [{ branch: "main", required_approvals: 1 }],
             },
           ],
         },
@@ -254,6 +266,12 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-merge-note")).toContainText(
     "main is protected",
   );
+  await expect(page.locator(".pull-merge-note")).toContainText(
+    "1 more approving review is required",
+  );
+  await expect(
+    page.getByRole("button", { name: "Merge pull request", exact: true }),
+  ).toHaveCount(0);
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible();
@@ -268,6 +286,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".review-event")).toContainText(
     "Bob approved these changes",
   );
+  await expect(
+    page.getByRole("button", { name: "Merge pull request", exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Comment", exact: true })
     .fill("Verified in the browser.");

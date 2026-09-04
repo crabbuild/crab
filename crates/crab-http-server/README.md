@@ -135,7 +135,9 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
-protected_branches = ["main"]
+protected_branches = [
+  { branch = "main", required_approvals = 1 },
+]
 members = [
   { subject = "provider-subject-for-alice", access = "write" },
   { subject = "provider-subject-for-bob", access = "read" },
@@ -160,11 +162,11 @@ require a configuration update and server restart, which invalidates every sessi
 Organization and membership administration in the application remain future work.
 
 `protected_branches` contains exact branch names without the `refs/heads/`
-prefix. Once a repository has a branch, native Git cannot create, update or
-delete a protected name; an atomic push containing one is rejected in full.
-The first branch can still initialize an empty or tag-only repository. A
-fast-forward pull request merge is the supported publication path for a
-protected branch.
+prefix. `required_approvals` accepts 0–20 and defaults to zero when omitted.
+Once a repository has a branch, native Git cannot create, update or delete a
+protected name; an atomic push containing one is rejected in full. The first
+branch can still initialize an empty or tag-only repository. A fast-forward
+pull request merge is the supported publication path for a protected branch.
 
 Sign-in verifies browser-bound state, PKCE, nonce, signature, issuer, audience,
 authorized party, expiry, issuance time and an access-token hash when supplied.
@@ -380,7 +382,7 @@ Remote objects are compared byte for byte after removing client repositories.
 The deletion flow also exposed and fixed a shared catalog bug: removed tips must
 be looked up even when no surviving ref or new evidence mentions them. These
 small-repository tests are not Kubernetes push throughput or production
-qualification. Required review/check rules, protected-view and active-active
+qualification. Required checks, broader protection rules, protected-view and active-active
 publication coexistence, LFS HTTP locking, and process-crash qualification remain unfinished;
 use this development server with standard Crab repository publication only.
 
@@ -451,7 +453,12 @@ change their state. Reviews use `/pulls/{number}/reviews` and
 can comment but cannot approve or request changes on their own changes. Advancing
 the head leaves prior reviews visible with `current: false`; the state and commit
 of an existing review are immutable while its author can conditionally edit its
-body. Repository writers can `POST /pulls/{number}/merge` with the displayed
+body. For a protected base branch, only each reviewer's latest decision on the
+exact current head counts. Stale approvals do not count, and a current request
+for changes blocks the merge until that reviewer submits a current approval.
+Recording a decision advances the pull version so a concurrent stale merge or
+edit cannot claim the pull after that decision.
+Repository writers can `POST /pulls/{number}/merge` with the displayed
 pull version and exact base/head IDs. The only accepted method is
 `fast_forward`: the server revalidates ancestry, pointer dependencies and Git
 visibility under the base-ref lease and both GC fences, then publishes through
@@ -459,7 +466,8 @@ the same journal path as native Git push. A persisted merge marker blocks
 concurrent pull edits and lets the same request resume after a lost response or
 restart. A completed merge retains its pre-merge comparison even if the source
 branch is deleted. Protected base branches can be updated only through this merge
-path. Merge commits and checks are not implemented.
+path. The configured current-head approval requirement is checked before the
+merge reservation is created. Merge commits and checks are not implemented.
 
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
@@ -476,8 +484,10 @@ allocate numbers, immutable
 updates protect visible issue, comment, review and merge documents. Interrupted
 allocation can leave numbering gaps. A retry completes an existing reservation
 without overwriting a later edit. Comments and reviews have their own counters
-and reservations under their parent discussion. Merge reservations and pending
-state preserve the exact actor, method, pull version and commit IDs.
+and reservations under their parent discussion. Each pull also retains the
+latest decision for at most 1,024 reviewer identities so merge admission does
+not depend on a paginated review list. Merge reservations and pending state
+preserve the exact actor, method, pull version and commit IDs.
 
 The service account needs reads and conditional writes to this app prefix in
 addition to existing Git read permissions. Preserve the entire app prefix,
@@ -502,9 +512,10 @@ pull-list and exact-change reads took 14.2, 1.3, 0.9 and 8.4 ms from the client;
 idempotent pull and comment replays took 552.7 and 581.5 ms. These localhost,
 shared-cache timings expose observed latency rather than production performance.
 An authenticated two-user integration test uses native Git pushes: one member
-opens a pull request, another approves its exact head, self-approval is rejected,
-and a later push makes the first approval outdated before a new decision is
-accepted.
+opens a pull request that cannot merge before approval, another member's exact-head
+approval unlocks it, and self-approval is rejected. A later push makes the first
+approval outdated; a current request for changes blocks merging until that same
+reviewer submits a current approval.
 
 The RustFS qualification also created a commit-bound review, advanced the head,
 and verified that the first review became outdated while a second review bound

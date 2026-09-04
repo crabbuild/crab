@@ -142,6 +142,24 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(created.0, StatusCode::CREATED);
     assert_eq!(created.1["can_decide"], false);
+    assert_eq!(created.1["can_merge"], false);
+    let blocked = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/merge"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000014",
+            "version":created.1["version"],
+            "method":"fast_forward",
+            "base_oid":created.1["base_oid"],
+            "head_oid":created.1["head_oid"]
+        }),
+    )
+    .await;
+    assert_eq!(blocked.0, StatusCode::CONFLICT);
+    assert_eq!(blocked.1["error"]["code"], "merge_blocked");
 
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -164,6 +182,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(approved.0, StatusCode::CREATED);
     assert_eq!(approved.1["commit_oid"], first_head);
     assert_eq!(approved.1["current"], true);
+    let ready = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(ready["version"], 2);
+    assert_eq!(ready["merge_requirements"]["approvals"], 1);
+    assert_eq!(ready["merge_requirements"]["satisfied"], true);
+    assert_eq!(ready["can_merge"], true);
     let edited = mutate(
         &h,
         &bob,
@@ -184,7 +207,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             reqwest::Method::POST,
             &format!("{ROOT}/1/merge"),
             json!({
-                "request_id":"00000000-0000-4000-8000-000000000014",
+                "request_id":"00000000-0000-4000-8000-000000000015",
                 "version":1,
                 "method":"fast_forward",
                 "base_oid":created.1["base_oid"],
@@ -217,6 +240,10 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     crate::server::receive_tests::success(path, &["commit", "-am", "updated"]).await;
     let second_head = crate::server::receive_tests::success(path, &["rev-parse", "HEAD"]).await;
     crate::server::receive_tests::success(path, &["push", git_url.as_str(), "feature"]).await;
+    let stale = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(stale["merge_requirements"]["approvals"], 0);
+    assert_eq!(stale["merge_requirements"]["satisfied"], false);
+    assert_eq!(stale["can_merge"], false);
     let reviews = h.json(&format!("{ROOT}/1/reviews"), &bob).await;
     assert_eq!(reviews["items"][0]["current"], false);
     let requested = mutate(
@@ -235,6 +262,29 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(requested.0, StatusCode::CREATED);
     assert_eq!(requested.1["commit_oid"], second_head);
     assert_eq!(requested.1["current"], true);
+    let blocked = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(blocked["version"], 3);
+    assert_eq!(blocked["merge_requirements"]["changes_requested"], 1);
+    assert_eq!(blocked["merge_requirements"]["satisfied"], false);
+    let approved = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/reviews"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000016",
+            "body":"",
+            "state":"approved"
+        }),
+    )
+    .await;
+    assert_eq!(approved.0, StatusCode::CREATED);
+    let ready = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(ready["version"], 4);
+    assert_eq!(ready["merge_requirements"]["approvals"], 1);
+    assert_eq!(ready["merge_requirements"]["changes_requested"], 0);
+    assert_eq!(ready["merge_requirements"]["satisfied"], true);
     source.close().unwrap();
     h.close().await;
 }

@@ -30,7 +30,16 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub members: Vec<RepositoryMember>,
     #[serde(default)]
-    pub protected_branches: Vec<String>,
+    pub protected_branches: Vec<BranchProtection>,
+}
+
+/// An exact branch whose direct updates are disabled.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchProtection {
+    pub branch: String,
+    #[serde(default)]
+    pub required_approvals: u8,
 }
 
 /// A provider subject's explicit repository permission.
@@ -94,15 +103,16 @@ impl Config {
                 }
             }
             let mut protected = HashSet::new();
-            for branch in &repository.protected_branches {
-                let reference = format!("refs/heads/{branch}");
-                if branch.is_empty()
-                    || branch.starts_with("refs/")
+            for rule in &repository.protected_branches {
+                let reference = format!("refs/heads/{}", rule.branch);
+                if rule.branch.is_empty()
+                    || rule.branch.starts_with("refs/")
                     || crab_git::validate_push_refname(&reference).is_err()
-                    || !protected.insert(branch)
+                    || rule.required_approvals > 20
+                    || !protected.insert(&rule.branch)
                 {
                     return Err(Error::Config(
-                        "protected branches must be unique valid branch names without a refs/heads prefix",
+                        "protected branches must be unique valid names with at most 20 required approvals",
                     ));
                 }
             }
@@ -141,10 +151,11 @@ impl Config {
 }
 
 impl RepositoryConfig {
-    pub(crate) fn protects(&self, reference: &str) -> bool {
-        reference
-            .strip_prefix("refs/heads/")
-            .is_some_and(|branch| self.protected_branches.iter().any(|value| value == branch))
+    pub(crate) fn protection(&self, reference: &str) -> Option<&BranchProtection> {
+        let branch = reference.strip_prefix("refs/heads/")?;
+        self.protected_branches
+            .iter()
+            .find(|rule| rule.branch == branch)
     }
 }
 
@@ -200,24 +211,37 @@ mod tests {
     #[test]
     fn protected_branches_are_exact_valid_branch_names() {
         for branches in [
-            "['']",
-            "['refs/heads/main']",
-            "['release..next']",
-            "['main','main']",
+            "[{branch=''}]",
+            "[{branch='refs/heads/main'}]",
+            "[{branch='release..next'}]",
+            "[{branch='main'},{branch='main'}]",
+            "[{branch='main',required_approvals=21}]",
+            "[{branch='main',unexpected=true}]",
         ] {
             let source = format!(
                 "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches={branches}"
             );
-            let config: Config = toml::from_str(&source).unwrap();
-            assert!(config.validate().is_err(), "{branches}");
+            if let Ok(config) = toml::from_str::<Config>(&source) {
+                assert!(config.validate().is_err(), "{branches}");
+            }
         }
         let config: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=['main','release/v1']",
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=[{branch='main',required_approvals=2},{branch='release/v1'}]",
         )
         .unwrap();
         assert!(config.validate().is_ok());
-        assert!(config.repositories[0].protects("refs/heads/main"));
-        assert!(!config.repositories[0].protects("refs/heads/Main"));
+        assert_eq!(
+            config.repositories[0]
+                .protection("refs/heads/main")
+                .unwrap()
+                .required_approvals,
+            2
+        );
+        assert!(
+            config.repositories[0]
+                .protection("refs/heads/Main")
+                .is_none()
+        );
     }
 
     #[test]
