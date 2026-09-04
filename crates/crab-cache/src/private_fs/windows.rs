@@ -9,10 +9,11 @@ use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -46,6 +47,7 @@ const SHARE_PINNED: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_PAYLOAD: u32 = SHARE_PINNED | FILE_SHARE_DELETE;
 const OPEN_NO_REPARSE: u32 = FILE_FLAG_OPEN_REPARSE_POINT;
 const WINDOWS_TO_UNIX_EPOCH_100NS: u64 = 116_444_736_000_000_000;
+const PUBLICATION_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -944,14 +946,40 @@ impl TemporaryFile {
     }
 
     pub(super) fn commit(mut self) -> Result<()> {
-        rename_handle(&self.file, &self.destination_path)?;
+        let destination = self.destination_path.file_name().ok_or_else(|| {
+            unsafe_path(&self.destination_path, "cache destination has no filename")
+        })?;
+        let started = Instant::now();
+        loop {
+            match rename_handle(&self.file, &self._directory, destination) {
+                Ok(()) => break,
+                Err(CacheError::Io(error))
+                    if publication_busy(&error) && started.elapsed() < PUBLICATION_BUSY_TIMEOUT =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.published = true;
         Ok(())
     }
 }
 
-fn rename_handle(file: &File, destination: &Path) -> Result<()> {
-    let destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
+fn publication_busy(error: &io::Error) -> bool {
+    error.raw_os_error().is_some_and(|code| {
+        [
+            ERROR_ACCESS_DENIED,
+            ERROR_ALREADY_EXISTS,
+            ERROR_FILE_EXISTS,
+            ERROR_SHARING_VIOLATION,
+        ]
+        .contains(&(code as u32))
+    })
+}
+
+fn rename_handle(file: &File, directory: &Directory, destination: &OsStr) -> Result<()> {
+    let destination: Vec<u16> = destination.encode_wide().collect();
     let name_bytes = destination
         .len()
         .checked_mul(size_of::<u16>())
@@ -974,7 +1002,13 @@ fn rename_handle(file: &File, destination: &Path) -> Result<()> {
                 Anonymous: FILE_RENAME_INFO_0 {
                     ReplaceIfExists: true,
                 },
-                RootDirectory: ptr::null_mut(),
+                RootDirectory: directory
+                    .chain
+                    .last()
+                    .ok_or_else(|| {
+                        CacheError::Internal("Windows cache directory lost its handle".into())
+                    })?
+                    .as_raw_handle() as HANDLE,
                 FileNameLength: name_bytes,
                 FileName: [0],
             },

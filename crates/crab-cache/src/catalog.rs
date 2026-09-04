@@ -810,11 +810,14 @@ fn scan_catalog(
     pinned.visit_files(&mut |relative, metadata| {
         // Lossy path conversion could merge distinct unknown entries into one
         // catalog key. Abort reconciliation rather than undercount such state.
-        let relative = relative.to_str().ok_or_else(|| CacheError::UnsafeRoot {
-            path: root.display().to_string(),
-            reason: "cache inventory path is not valid UTF-8".into(),
-        })?;
-        let family = classify_family(relative);
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| CacheError::UnsafeRoot {
+                path: root.display().to_string(),
+                reason: "cache inventory path is not valid UTF-8".into(),
+            })?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let family = classify_family(&relative);
         transaction
             .execute(
                 "INSERT INTO cache_entries(relative_path, family, logical_key, size, last_access_ns, scan_generation)
