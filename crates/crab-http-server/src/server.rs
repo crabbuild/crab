@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git, issues,
+    git, issues, maintenance,
 };
 
 pub(crate) struct Repository {
@@ -30,6 +30,7 @@ pub(crate) struct Repository {
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
+    maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
 }
 
 impl Repository {
@@ -37,31 +38,75 @@ impl Repository {
         &self,
         server: &Server,
         cancellation: &CancellationToken,
-    ) -> crab_remote_git::Result<RemoteGitRepository> {
+    ) -> Result<RemoteGitRepository> {
         let mut pinned = tokio::select! {
-            _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled),
+            _ = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
             pinned = self.pinned.lock() => pinned,
         };
-        if let Some((checked, repository)) = pinned.as_mut() {
-            if checked.elapsed() < Duration::from_secs(2) {
-                return Ok(repository.clone());
-            }
-            if repository.is_current(cancellation).await? {
-                *checked = Instant::now();
-                return Ok(repository.clone());
-            }
+        if let Some((checked, repository)) = pinned.as_ref()
+            && checked.elapsed() < Duration::from_secs(2)
+        {
+            return Ok(repository.clone());
         }
-        let repository = RemoteGitRepository::open(
-            self.store.clone(),
-            self.layout.clone(),
-            self.identity.clone(),
-            Arc::clone(&server.runtime),
-            server.options,
-            cancellation,
-        )
-        .await?;
+        // Journal commits can change refs without changing the manifest ETag.
+        // Reopen after the cache window so pending publication becomes visible.
+        let repository = self
+            .open_current(server, server.options, cancellation)
+            .await?;
         *pinned = Some((Instant::now(), repository.clone()));
         Ok(repository)
+    }
+
+    pub(crate) async fn open_current(
+        &self,
+        server: &Server,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<RemoteGitRepository> {
+        let open = || {
+            RemoteGitRepository::open(
+                self.store.clone(),
+                self.layout.clone(),
+                self.identity.clone(),
+                Arc::clone(&server.runtime),
+                options,
+                cancellation,
+            )
+        };
+        match open().await {
+            Ok(repository) => return Ok(repository),
+            Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut worker = tokio::select! {
+            () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+            worker = self.maintenance.lock() => worker,
+        };
+        if worker.is_none() {
+            // A preceding request may have finished maintenance while this one waited.
+            match open().await {
+                Ok(repository) => return Ok(repository),
+                Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            *worker = Some(tokio::spawn(maintenance::run(
+                self.store.clone(),
+                self.layout.clone(),
+                Arc::clone(&server.maintenance_admission),
+                server.cancellation.clone(),
+            )));
+        }
+        if let Some(task) = worker.as_mut() {
+            // A cancelled reader leaves the handle in this slot. A later reader
+            // or server shutdown must drain publication and its lease cleanup.
+            let result = tokio::select! {
+                () = cancellation.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+                result = task => result,
+            };
+            *worker = None;
+            result??;
+        }
+        open().await.map_err(Into::into)
     }
 }
 
@@ -73,9 +118,27 @@ pub(crate) struct Server {
     pub admission: Semaphore,
     pub git_admission: Arc<Semaphore>,
     pub app_admission: Semaphore,
+    maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     port: u16,
     pub auth: Option<Authentication>,
+}
+
+impl Server {
+    async fn finish_maintenance(&self) -> Result<()> {
+        let mut result = Ok(());
+        for repository in self.repositories.values() {
+            if let Some(task) = repository.maintenance.lock().await.take() {
+                let completed = match task.await {
+                    Ok(Ok(())) | Ok(Err(crab_write::WriteError::Cancelled)) => Ok(()),
+                    Ok(Err(error)) => Err(crate::Error::from(error)),
+                    Err(error) => Err(crate::Error::from(error)),
+                };
+                result = result.and(completed);
+            }
+        }
+        result
+    }
 }
 
 /// Serve configured repositories and compiled React assets until Ctrl-C.
@@ -105,6 +168,7 @@ pub async fn serve(config: Config) -> Result<()> {
             config: entry.clone(),
             store,
             pinned: Mutex::new(None),
+            maintenance: Mutex::new(None),
         };
         repositories.insert((entry.owner, entry.name), repository);
     }
@@ -127,10 +191,11 @@ pub async fn serve(config: Config) -> Result<()> {
         admission: Semaphore::new(16),
         git_admission: Arc::new(Semaphore::new(4)),
         app_admission: Semaphore::new(8),
+        maintenance_admission: Arc::new(Semaphore::new(2)),
         port,
         auth,
     });
-    let app = router(server);
+    let app = router(Arc::clone(&server));
     println!("Crab repositories: http://{}", listener.local_addr()?);
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -140,8 +205,11 @@ pub async fn serve(config: Config) -> Result<()> {
             cancellation.cancel();
         })
         .await;
+    // Listener errors also stop and drain owned publication before the read runtime closes.
+    server.cancellation.cancel();
+    let maintenance = server.finish_maintenance().await;
     runtime.shutdown().await;
-    result.map_err(crate::Error::from)
+    result.map_err(crate::Error::from).and(maintenance)
 }
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
@@ -252,6 +320,10 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
 }
 
 #[cfg(test)]
+#[path = "maintenance_tests.rs"]
+mod maintenance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -269,6 +341,7 @@ mod tests {
             admission: Semaphore::new(1),
             git_admission: Arc::new(Semaphore::new(1)),
             app_admission: Semaphore::new(1),
+            maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
             port: 8788,
             auth: None,
