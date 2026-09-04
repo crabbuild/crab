@@ -22,7 +22,8 @@ use crate::core::output::{JsonlStream, OutputMode};
 use crate::git::fetch::{CommitGraphProvider, FetchConfig, PackInfo, PackStore, run_fetch_batch};
 use crate::git::push::{
     PushConfig, PushRejectReason, PushResult, RefPushOutcome,
-    configure_active_active_push_coordinator, record_push_audit_event,
+    configure_active_active_push_coordinator, duplicate_destination_result,
+    record_push_audit_event,
 };
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
 use crate::git::push_staging::PushStaging;
@@ -286,6 +287,8 @@ pub struct HelperOptions {
     /// partial writes when any ref is rejected. Set by git via
     /// `option atomic true` during smart-HTTP receive-pack.
     pub atomic: bool,
+    /// Preview Git's proposed ref batch without entering the write pipeline.
+    pub dry_run: bool,
     /// Exact old values supplied by Git's `option cas`; `None` requires absence.
     pub expected_refs: BTreeMap<String, Option<String>>,
     /// When `true`, Git asked fetch to include annotated tag objects whose
@@ -303,6 +306,7 @@ impl Default for HelperOptions {
             fetch_options: FetchOptions::default(),
             filter_requested: false,
             atomic: false,
+            dry_run: false,
             expected_refs: BTreeMap::new(),
             followtags: false,
         }
@@ -913,7 +917,7 @@ where
         }
         // Fetch/list never need local staging. Open one reader per push batch
         // so a damaged local index cannot block reads or retain a session lock.
-        let staging = if matches!(batch, Batch::Push(_)) {
+        let staging = if matches!(batch, Batch::Push(_)) && !options.dry_run {
             open_staging_for_push().await?
         } else {
             PushStaging::Missing
@@ -1114,6 +1118,18 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<()> {
     match key {
+        "dry-run" => {
+            options.dry_run = match value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(CrabError::Protocol(format!(
+                        "invalid dry-run value: {value}"
+                    )));
+                }
+            };
+            writer.write_all(b"ok\n").await?;
+        }
         "cas" => {
             let (name, expected) = parse_ref_lease(value)?;
             if options
@@ -1451,6 +1467,42 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             });
                         }
                     }
+                }
+
+                if options.dry_run {
+                    // Git has already checked advertised refs, ancestry, and
+                    // leases. Like send-pack's dry-run, these are previews,
+                    // not receipts: do not prepare auth sessions or acquire locks.
+                    let blocker = pre_rejected.first().filter(|_| options.atomic);
+                    let mut result =
+                        duplicate_destination_result(&ordered_specs).unwrap_or_else(|| {
+                            PushResult::new(
+                                specs
+                                    .iter()
+                                    .map(|spec| {
+                                        let outcome = match blocker {
+                                            Some((dst, _)) => RefPushOutcome::Rejected(
+                                                PushRejectReason::AtomicAbort {
+                                                    blocked_by: dst.clone(),
+                                                },
+                                            ),
+                                            None => RefPushOutcome::Ok,
+                                        };
+                                        (spec.dst.clone(), outcome)
+                                    })
+                                    .collect(),
+                            )
+                        });
+                    for (dst, reason) in pre_rejected {
+                        result
+                            .outcomes
+                            .insert(dst, RefPushOutcome::Rejected(reason));
+                    }
+                    writer
+                        .write_all(format_push_response(&result, &ordered_specs).as_bytes())
+                        .await?;
+                    writer.flush().await?;
+                    return Ok(());
                 }
 
                 let config = cache.config().clone();
@@ -4813,6 +4865,60 @@ mod tests {
         assert!(output.contains("error refs/heads/main atomic-abort"));
         assert!(output.contains("error refs/tags/v1^{} bad-refname"));
         assert!(!output.contains("ok refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_previews_without_remote_state_or_auth_preparation() {
+        let root = tempfile::tempdir().expect("push state tempdir");
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let mut context = test_context(store.clone(), "preview", root.path().to_path_buf());
+        context.cache.config.auth.provider = crate::core::config::AuthProvider::CrabAuth;
+        let (output, result) = run_with_context(
+            "option dry-run true\npush refs/heads/main:refs/heads/main\npush :refs/heads/retired\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        result.expect("preview must not prepare auth or open a remote repository");
+        assert_eq!(output, "ok\nok refs/heads/main\nok refs/heads/retired\n\n");
+        assert!(
+            store
+                .list_prefix(&object_store::path::Path::from(""))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_preserves_atomic_parse_rejection() {
+        let output = run("option dry-run true\noption atomic true\n\
+            push refs/heads/main:refs/heads/main\n\
+            push refs/tags/v1^{}:refs/tags/v1^{}\n\n")
+        .await;
+        assert!(output.contains("error refs/heads/main atomic-abort"));
+        assert!(output.contains("error refs/tags/v1^{} bad-refname"));
+        assert!(!output.contains("ok refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_option_is_reversible_and_rejects_invalid_values() {
+        let mut options = HelperOptions::default();
+        let mut output = Vec::new();
+        handle_option("dry-run", "true", &mut options, &mut output)
+            .await
+            .unwrap();
+        assert!(options.dry_run);
+        handle_option("dry-run", "false", &mut options, &mut output)
+            .await
+            .unwrap();
+        assert!(!options.dry_run);
+        assert!(
+            handle_option("dry-run", "maybe", &mut options, &mut output)
+                .await
+                .is_err()
+        );
     }
 
     // --- format_push_response ---

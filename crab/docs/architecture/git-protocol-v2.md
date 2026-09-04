@@ -21,6 +21,51 @@ The ownership decision is recorded in
 
 ## Implemented profile
 
+### Bucket-only user contract
+
+The deployment target is Git plus the installed `git-remote-crab` helper,
+object-store credentials, and a qualified bucket. No Crab data server is
+required. "S3-compatible" alone is insufficient: the provider must preserve
+the conditional-create/CAS, range-read, listing, and durability contracts in
+the [storage layer](storage-layer.md). Provider and operating-system support
+still follow the evidence matrix above.
+
+Git owns local operations such as commit, merge, rebase, stash, and worktree
+management; Crab owns remote discovery, object transfer, and ref publication.
+The real-Git lifecycle runner additionally exercises independent-client
+`pull --rebase` and `pull --ff-only`, notes round trips, pushes from linked
+worktrees, recursive bucket-backed submodules, and bare mirror clones. These
+checks supplement rather than replace the version/provider qualification gates.
+
+The helper supports `git push --dry-run`, including atomic mixed create,
+force-update, and deletion previews. Git checks its advertised ref snapshot,
+ancestry, and lease expectations before submitting the proposed batch. Crab
+returns preview statuses before opening staging, preparing protected write
+sessions, acquiring write locks, uploading objects, or publishing refs. A
+preview is not a commit receipt or a guarantee of later authorization or
+concurrency outcomes. User-installed client hooks still follow Git's own
+execution rules; this does not promise to undo their side effects.
+
+Recursive submodule operations need explicit trust for a custom transport,
+as required by [Git's protocol policy](https://git-scm.com/docs/git-config#Documentation/git-config.txt-protocolallow).
+For repositories whose submodule URLs have been reviewed, scope that trust to
+the invocation rather than allowing every protocol globally:
+
+```bash
+git -c protocol.crab.allow=always clone --recurse-submodules crab://bucket/team/repo
+```
+
+"All commands" is not a support claim. Date/ref-exclusion shallow selectors
+remain unimplemented; signed push certificates, push options intended for
+server-side hooks, and remote archive service need separate protocol contracts.
+Signed commits/tags are Git objects and are distinct from signed push requests.
+PRs, CI execution, and mandatory server-side hooks cannot execute inside a
+passive bucket. Clients with unrestricted bucket write credentials can bypass
+client-side policy; mandatory branch protection needs a separate trusted
+authorization boundary and is not part of the bucket-only deployment promise.
+
+### Fetch and discovery
+
 The helper advertises `stateless-connect` only after it can open a single
 manifest generation with matching pack-index, locator, and all-object
 visibility coverage. The session supports:

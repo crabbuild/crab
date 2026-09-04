@@ -2240,6 +2240,28 @@ class ProtocolV2PartialCloneSmoke:
         self.run_git(source, ["add", "content.txt"])
         self.run_git(source, ["commit", "-m", "initial ref lifecycle"])
         first = self.git_value(source, ["rev-parse", "HEAD"], name="initial ref lifecycle OID")
+
+        def bucket_identity() -> list[tuple[str, str, int]]:
+            listed = self.run_aws(
+                ["list-objects-v2", "--bucket", self.args.bucket],
+                name="capture bucket identity around push preview",
+            )
+            return sorted(
+                (item["Key"], item["ETag"], int(item["Size"]))
+                for item in json.loads(self.stdout(listed)).get("Contents", [])
+            )
+
+        before_preview = bucket_identity()
+        preview = self.run_git(
+            source, ["push", "--dry-run", "--porcelain", remote, "main:main"],
+            name="preview initial push without publishing",
+        )
+        self.check(
+            "dry-run-creation-preserves-bucket",
+            any(line.startswith("*\trefs/heads/main:refs/heads/main\t")
+                for line in self.stdout(preview).splitlines())
+            and bucket_identity() == before_preview,
+        )
         # A full hexadecimal branch name must remain a ref, never an OID hint.
         hex_ref = "refs/heads/" + "a" * 40
         self.run_git(source, ["update-ref", hex_ref, first])
@@ -2273,6 +2295,32 @@ class ProtocolV2PartialCloneSmoke:
 
         advanced = {"refs/heads/main": second, hex_ref: second}
         self.check("atomic-multi-ref-update", remote_refs() == advanced)
+        before_preview = bucket_identity()
+        self.run_git(
+            source,
+            ["push", "--dry-run", "--atomic", "--force", remote,
+             f"{first}:refs/heads/main", f":{hex_ref}", f"{second}:refs/heads/preview-only"],
+            name="preview mixed force deletion and creation",
+        )
+        # ls-remote may acquire a read-admission lease. Inspect the preview's
+        # complete bucket identity before that separate observation runs.
+        after_preview = bucket_identity()
+        self.check(
+            "dry-run-mixed-batch-preserves-bucket",
+            after_preview == before_preview and remote_refs() == advanced,
+        )
+        before_preview = bucket_identity()
+        stale_preview = self.run_git(
+            source,
+            ["push", "--dry-run", "--atomic", f"--force-with-lease={hex_ref}:{first}",
+             remote, f":{hex_ref}", f"{second}:refs/heads/preview-only"],
+            name="stale lease rejects push preview",
+            check=False,
+        )
+        self.check(
+            "dry-run-stale-lease-refuses-whole-batch",
+            stale_preview["exit_code"] != 0 and bucket_identity() == before_preview,
+        )
         rejected = self.run_git(
             source,
             [
@@ -2297,6 +2345,72 @@ class ProtocolV2PartialCloneSmoke:
             name="approved leased force update and deletion",
         )
         self.check("leased-force-and-branch-deletion", remote_refs() == {"refs/heads/main": first})
+
+    def everyday_git_workflow_checks(self) -> None:
+        """Exercise Git porcelain across independent clients using only bucket remotes."""
+        remote = self.remote_url + "-refs"
+        writer = self.run_root / "workflow-writer"
+        peer = self.run_root / "workflow-peer"
+        for repo in (writer, peer):
+            self.run_git(self.run_root, ["clone", remote, str(repo)])
+        for repo, filename in ((writer, "writer.txt"), (peer, "peer.txt")):
+            (repo / filename).write_text(filename + "\n", encoding="utf-8")
+            self.run_git(repo, ["add", filename])
+            self.run_git(repo, ["commit", "-m", f"add {filename}"])
+        self.run_git(writer, ["push", "origin", "main"])
+        self.run_git(peer, ["pull", "--rebase", "origin", "main"])
+        self.run_git(peer, ["push", "origin", "main"])
+        self.run_git(writer, ["pull", "--ff-only", "origin", "main"])
+        self.check(
+            "everyday-pull-rebase-and-fast-forward",
+            self.git_value(writer, ["rev-parse", "HEAD"], name="writer tip after pulls")
+            == self.git_value(peer, ["rev-parse", "HEAD"], name="peer tip after rebase")
+            and (writer / "peer.txt").read_bytes() == b"peer.txt\n"
+            and (peer / "writer.txt").read_bytes() == b"writer.txt\n",
+        )
+        self.run_git(peer, ["notes", "add", "-m", "bucket-only note", "HEAD"])
+        self.run_git(peer, ["push", "origin", "refs/notes/commits"])
+        self.run_git(writer, ["fetch", "origin", "refs/notes/commits:refs/notes/commits"])
+        self.check(
+            "everyday-notes-round-trip",
+            self.git_value(writer, ["notes", "show", "HEAD"], name="read fetched note") == "bucket-only note",
+        )
+
+        linked = self.run_root / "workflow-linked"
+        self.run_git(writer, ["worktree", "add", "-b", "linked", str(linked)])
+        (linked / "linked.txt").write_bytes(b"linked worktree\n")
+        self.run_git(linked, ["add", "linked.txt"])
+        self.run_git(linked, ["commit", "-m", "commit from linked worktree"])
+        self.run_git(linked, ["push", "-u", "origin", "HEAD"])
+        self.run_git(peer, ["fetch", "origin"])
+        self.check(
+            "everyday-linked-worktree-push",
+            self.git_value(peer, ["show", "origin/linked:linked.txt"], name="read linked-worktree publication")
+            == "linked worktree",
+        )
+
+        # Git intentionally requires explicit trust for custom transports in
+        # recursive submodules. Permit only Crab, only for these invocations.
+        child_remote = self.remote_url
+        trusted = ["-c", "protocol.crab.allow=always"]
+        self.run_git(writer, trusted + ["submodule", "add", child_remote, "modules/child"])
+        child_tip = self.git_value(writer / "modules/child", ["rev-parse", "HEAD"], name="original submodule tip")
+        self.run_git(writer, ["commit", "-am", "add bucket-backed submodule"])
+        self.run_git(writer, ["push", "origin", "main"])
+        recursive = self.run_root / "workflow-recursive"
+        self.run_git(self.run_root, trusted + ["clone", "--recurse-submodules", remote, str(recursive)])
+        self.check(
+            "everyday-recursive-submodule-clone",
+            self.git_value(recursive / "modules/child", ["rev-parse", "HEAD"], name="cloned submodule tip") == child_tip
+            and self.git_value(recursive, ["ls-tree", "HEAD", "modules/child"], name="cloned gitlink").startswith("160000 commit "),
+        )
+        mirror = self.run_root / "workflow-backup.git"
+        self.run_git(self.run_root, ["clone", "--mirror", remote, str(mirror)])
+        expected_refs = self.git_value(writer, ["ls-remote", "--refs", "origin"], name="live backup ref inventory")
+        actual_refs = self.git_value(mirror, ["for-each-ref", "--format=%(objectname)%09%(refname)"], name="bare backup ref inventory")
+        self.check("everyday-bare-mirror-preserves-all-refs", actual_refs == expected_refs)
+        for repo in (writer, peer, recursive, recursive / "modules/child", mirror):
+            self.run_git(repo, ["fsck", "--strict", "--full"])
 
     def mirror_cache_cleanup_checks(
         self, source: Path, remote: str, cache: Path, plan: Path
@@ -3719,6 +3833,9 @@ class ProtocolV2PartialCloneSmoke:
         )
         self.store_snapshot("after-filtered-lifecycle")
         self.filter_matrix(large_oid, small_oid, sparse_oid)
+        # These clones may warm the source's pack cache; preserve the existing
+        # cold full-versus-filtered measurements before running them.
+        self.everyday_git_workflow_checks()
         hidden_oid, dangling_oid = self.create_security_refs()
         self.security_checks(hidden_oid, dangling_oid)
         self.disconnect_check()

@@ -5,9 +5,9 @@ This file is generated from `git-capability-matrix.json`. Run
 
 | Profile | Git | OS | Provider | Operations | Status | Evidence |
 | --- | --- | --- | --- | ---: | --- | --- |
-| linux-rustfs-release | 2.30.9, 2.40.4, 2.45.4, current | linux | rustfs | 19 | supported | `.github/workflows/release.yml` / `protocol-v2-git-compatibility-release-gate` |
-| linux-production-providers | 2.30.9, 2.40.4, 2.45.4, current | linux | aws_s3, gcs, azure_blob | 19 | preview | `.github/workflows/pb-provider-qualification.yml` / `provider-qualification` |
-| non-linux-clients | 2.30.9, 2.40.4, 2.45.4, current | macos, windows | rustfs, aws_s3, gcs, azure_blob | 19 | preview | `.github/workflows/git-protocol-v2-partial-clone.yml` / `cross-platform-contract` |
+| linux-rustfs-release | 2.30.9, 2.40.4, 2.45.4, current | linux | rustfs | 25 | supported | `.github/workflows/release.yml` / `protocol-v2-git-compatibility-release-gate` |
+| linux-production-providers | 2.30.9, 2.40.4, 2.45.4, current | linux | aws_s3, gcs, azure_blob | 25 | preview | `.github/workflows/pb-provider-qualification.yml` / `provider-qualification` |
+| non-linux-clients | 2.30.9, 2.40.4, 2.45.4, current | macos, windows | rustfs, aws_s3, gcs, azure_blob | 25 | preview | `.github/workflows/git-protocol-v2-partial-clone.yml` / `cross-platform-contract` |
 
 ## Protocol boundary
 

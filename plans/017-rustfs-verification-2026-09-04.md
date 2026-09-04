@@ -310,3 +310,63 @@ binary test cannot hide failures in later test executables. This does not
 permit a green result with failures. An isolated two-executable Cargo probe
 ran the second executable after a deliberate failure and still exited 101.
 Workflow lint passes; no test expectations or ignored-test lists were changed.
+
+## Bucket-only Git workflow follow-up
+
+The helper now accepts Git's `dry-run` option and returns preview statuses
+before staging, protected-write preparation, locking, uploads, audit receipts,
+or ref publication. Git retains its client-side ancestry and lease checks;
+previews do not promise future write authorization or race outcomes. The
+existing `crab push --dry-run` policy remains unchanged. No storage format or
+server dependency was added.
+
+The executable matrix now requires 25 operation groups, adding push previews,
+pull/rebase, notes, linked worktrees, recursive submodules, and bare mirror
+clones. Submodule tests permit only the Crab transport, invocation-locally,
+following Git's explicit-trust policy. They run after existing cold-transfer
+measurements so their reads cannot warm the measurement baseline.
+
+Local RustFS proof, using release binary SHA-256
+`f57639f3a75b262709cffef1b07907da2b5b81de1ae2c88b52f9ac1e8358284c`:
+
+| Retained run | Commands | Checks | Result |
+| --- | ---: | ---: | --- |
+| `bucket-workflows-230-20260904-0550` | 495 | 128 | passed |
+| `bucket-workflows-240-20260904-0550` | 530 | 147 | passed |
+| `bucket-workflows-245-20260904-0550` | 530 | 147 | passed |
+| `bucket-workflows-current-20260904-0550` | 530 | 147 | passed |
+
+Reports live beneath the existing workspace qualification root, each at
+`<run>/artifacts/report.json`. All four include the pinned v1.0.1 rollback and
+mirror reconciliation checks: 2,085 commands and 569 checks total. They are
+macOS development-worktree evidence, not clean-source Linux release proof.
+The binary reports parent revision `536134f`; the helper changes were uncommitted
+when it was built, and each report explicitly retains the dirty-source flag.
+
+`k8s-dry-run-20260904-0551` separately previews a new branch from Kubernetes
+tip `160bd16d98b7f688ce4f3b5ab0c5e4c045f36233` (140,777 reachable commits).
+The preview took 254 ms in this observation; all 8,623 bucket objects retained
+their keys, sizes, and ETags. An isolated shared clone kept the input checkout
+unchanged. This is dry-run correctness evidence, not a repeated large-repository
+upload benchmark or a latency SLA.
+
+Additional proof: 134 remote-helper tests pass with CI's existing 8 MiB test
+stack; 24 dry-run-related Rust tests, 12 Python verifier/log tests, release build,
+format checks, and scoped Clippy correctness/suspicious gates pass. Clippy still
+reports existing warning-level findings. A direct test-binary invocation without
+CI's stack setting aborted in an existing large async fixture; its correctly
+configured rerun passes without modifying that test.
+
+Failed exploratory reports remain intact: `dry-run-before-20260904-0535`
+reproduces Git's unsupported-option failure; early `bucket-workflows-*` attempts
+exposed a read-lease observation-order mistake, a missing harness log label, and
+cache warming before the cold-transfer assertion. Only new harness wiring was
+corrected; the bucket identity and existing performance assertions were retained.
+
+At parent `536134f`, all four hosted Git compatibility jobs passed the strict
+clean-source evidence verifier, and macOS/Windows protocol contracts passed.
+Workspace CI completed all test executables and still fails the previously
+identified hidden-command help inventory test. That separate test correction
+remains unapproved. The new operation groups still require fresh hosted evidence;
+neither this follow-up nor the older Kubernetes reports establishes support for
+every Git flag, production provider, platform, or server-side policy feature.
