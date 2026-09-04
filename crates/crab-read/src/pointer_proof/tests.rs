@@ -355,3 +355,58 @@ async fn cancellation_and_deadline_interrupt_pending_origin_reads() {
         Err(PointerProofError::Deadline)
     ));
 }
+
+#[tokio::test]
+async fn proof_deadline_includes_admission_queue_without_origin_reads() {
+    let fixture = Fixture::new(false, false);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observer = Arc::clone(&reads);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_| {
+            observer.fetch_add(1, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "proof".to_owned());
+    let all = Arc::clone(&POINTER_PROOFS)
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
+    let result = fixture
+        .verify(
+            &layout,
+            PointerProofLimits {
+                max_duration: Duration::from_millis(10),
+                ..limits()
+            },
+        )
+        .await;
+    drop(all);
+    assert_eq!(
+        (
+            matches!(result, Err(PointerProofError::Deadline)),
+            reads.load(Ordering::Relaxed)
+        ),
+        (true, 0)
+    );
+}
+
+#[tokio::test]
+async fn detached_proof_worker_retains_request_admission() {
+    let gate = Arc::new(Semaphore::new(1));
+    let permit = Arc::new(Arc::clone(&gate).acquire_owned().await.unwrap());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = spawn_proof(&permit, move || {
+        started_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        Ok(())
+    });
+    started_rx.await.unwrap();
+    drop(worker);
+    drop(permit);
+    let retained = gate.available_permits() == 0;
+    release_tx.send(()).unwrap();
+    let released = tokio::time::timeout(Duration::from_secs(5), gate.acquire_owned())
+        .await
+        .is_ok();
+    assert_eq!((retained, released), (true, true));
+}
