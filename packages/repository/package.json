@@ -1,0 +1,33 @@
+{
+  "name": "@crab/repository",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write src vite.config.ts tsconfig.json package.json index.html",
+    "format:check": "prettier --check src vite.config.ts tsconfig.json package.json index.html"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.4.0",
+    "@pierre/trees": "1.0.0-beta.6",
+    "@primer/octicons-react": "19.22.0",
+    "@primer/primitives": "11.10.0",
+    "@primer/react": "38.38.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-is": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/react-is": "19.2.0",
+    "prettier": "3.8.3",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.6"
+  }
+}

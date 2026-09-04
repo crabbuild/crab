@@ -63,7 +63,7 @@ jobs:
           rust=false
           web=false
           docs=false
-          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
+          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|packages/repository/|\.github/workflows/)' <<< "${files}"; then
             rust=true
           fi
           while IFS= read -r file; do
@@ -109,6 +109,23 @@ jobs:
         with:
           workspaces: ". -> target"
           cache-on-failure: true
+
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+
+      - name: Build and verify embedded repository frontend
+        run: |
+          npm ci --prefix packages/repository
+          npm run format:check --prefix packages/repository
+          npm test --prefix packages/repository
+          npm run build --prefix packages/repository
+
+      - name: Check HTTP server
+        run: cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
