@@ -354,9 +354,23 @@ The native CLI's `commit_ref_journal` makes an immutable transaction visible by
 its active marker; `compact_ref_journal_for_owner` subsequently folds it into a
 generation under the manifest owner lease. `crab-remote-git` deliberately returns
 `RepositoryIndexing` while committed journal transactions remain uncompacted.
-The HTTP server therefore still needs a shared generation-owner orchestration
-path around the extracted catalog engine, including visibility readiness and
-restart repair, as well as the journal commit.
+`crab-write::journal` now owns both generation-owner and reader compaction.
+The CLI delegates to it, preserving bounded handoff waits, non-waiting reader
+admission, metadata CAS/visibility publication and holder-checked ref cleanup.
+It checks cancellation between complete waves and releases the manifest lease
+on success and failure. Shared `crab-coordination::while_renewing` drains stateful
+operations after renewal failure; all existing CLI internal-owner callers use it.
+Callers must await this work to completion, including cancellation cleanup.
+Three shared journal tests, a shared lease-draining test and six existing CLI
+journal/renewal/handoff tests pass. A separate RustFS fixture publishes a native
+commit through the journal, discards the local repository, compacts its exact
+visibility and publishes the catalog. `crab-remote-git` reads all three objects
+byte-identically. Journal compaction takes 28 ms and catalog publication 12 ms
+for that small fixture, without cache isolation. It does not exercise HTTP push.
+
+The HTTP server still needs a shared generation-owner orchestration path around
+these journal and catalog engines, including visibility readiness and restart
+repair, as well as the journal commit.
 A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
 visibility or coexist correctly with native CLI writers.
 

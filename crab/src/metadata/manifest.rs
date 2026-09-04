@@ -1,8 +1,6 @@
 //! Repository manifest composition helpers.
 
-pub use crab_metadata::manifest_store::{
-    ManifestHistoryEntry, RefJournalCompaction, RepositorySnapshot,
-};
+pub use crab_metadata::manifest_store::{ManifestHistoryEntry, RepositorySnapshot};
 pub use crab_metadata::manifests::{BulkData, MANIFEST_VERSION, Manifest, PackManifestEntry};
 pub use crab_metadata::ref_journal::{
     RefJournalCommitResult, RefJournalEdit, RefJournalHeadSnapshot, RefJournalTransaction,
@@ -148,25 +146,6 @@ pub async fn list_active_ref_journal_transactions(
     crab_metadata::ref_journal::list_active_transactions(store.as_storage(), &router)
         .await
         .map_err(CrabError::from)
-}
-
-pub async fn compact_ref_journal(
-    store: &Store,
-    router: &StoreLayout,
-    created_at: String,
-    pusher: Option<String>,
-    session_id: String,
-) -> Result<Option<RefJournalCompaction>> {
-    let router = storage_layout(store, router);
-    crab_metadata::manifest_store::compact_ref_journal(
-        store.as_storage(),
-        &router,
-        created_at,
-        pusher,
-        session_id,
-    )
-    .await
-    .map_err(CrabError::from)
 }
 
 pub async fn list_manifest_history(

@@ -1925,6 +1925,7 @@ impl From<crab_write::WriteError> for CrabError {
     fn from(error: crab_write::WriteError) -> Self {
         match error {
             crab_write::WriteError::Storage(source) => Self::from(source),
+            crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),
             crab_write::WriteError::Git(source) => Self::from(source),
             crab_write::WriteError::Io(source) => Self::Io(source),

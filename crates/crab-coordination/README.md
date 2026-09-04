@@ -33,6 +33,15 @@ Single repository mutation                 Active-active mutation
 It has a default five-minute TTL, holder-checked release, renewal, and
 expired-lease reclamation. Enable it with `object-store-lock`.
 
+`while_renewing` awaits a stateful operation while renewing its borrowed lease.
+Renewal failure signals the optional cancellation token, then drains the
+operation so callers can close writers and finish cleanup before releasing the
+lease. An operation error takes precedence over a renewal error. A completed
+operation can return while a backend renewal retry is pending. Callers must
+await this future to completion and explicitly release the lock afterwards;
+dropping it does not provide asynchronous cleanup. CLI maintenance and shared
+journal compaction use this same renewal path.
+
 `PushAdmissionTicket` bounds expensive single-repository push pipelines with a
 fixed number of reusable CAS lease slots. Waiting writers own no object and
 probe slots in rotating order, so admission work and stored coordination state
