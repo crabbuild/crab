@@ -35,7 +35,7 @@ enum Eviction {
 #[derive(Debug, Clone)]
 pub struct CacheCatalog {
     root: PathBuf,
-    max_bytes: u64,
+    max_bytes: Option<u64>,
 }
 
 /// Read-only catalog totals.
@@ -180,8 +180,11 @@ impl Drop for CacheReservation {
 impl CacheCatalog {
     /// Describe a catalog without creating the cache root or database.
     #[must_use]
-    pub fn new(root: PathBuf, max_bytes: u64) -> Self {
-        Self { root, max_bytes }
+    pub fn new(root: PathBuf, max_bytes: impl Into<Option<u64>>) -> Self {
+        Self {
+            root,
+            max_bytes: max_bytes.into(),
+        }
     }
 
     /// Effective cache root accounted by this catalog.
@@ -192,7 +195,7 @@ impl CacheCatalog {
 
     /// Product-wide byte budget.
     #[must_use]
-    pub fn max_bytes(&self) -> u64 {
+    pub fn max_bytes(&self) -> Option<u64> {
         self.max_bytes
     }
 
@@ -235,7 +238,7 @@ impl CacheCatalog {
         // Keep this bound connection through accounting and eviction. Reopening
         // by name after owner release could maintain an unrelated generation.
         let total = self.total_registered_bytes_sync(&connection)?;
-        if total > self.max_bytes {
+        if self.max_bytes.is_some_and(|max| total > max) {
             self.maintain_at(&root, 0, &mut connection)
         } else {
             Ok(CacheMaintenanceStats {
@@ -248,7 +251,7 @@ impl CacheCatalog {
     #[cfg(feature = "local-cache")]
     pub(crate) fn write_sync(&self, path: &Path, family: &'static str, data: &[u8]) -> Result<()> {
         let size = data.len() as u64;
-        if size > self.max_bytes {
+        if self.max_bytes.is_some_and(|max| size > max) {
             return Ok(());
         }
         let Some(reservation) = self.reserve_sync(path, size)? else {
@@ -282,7 +285,7 @@ impl CacheCatalog {
 
     /// Reserve bytes for an in-progress write, or return `None` when it cannot fit.
     pub async fn reserve(&self, path: &Path, size: u64) -> Result<Option<CacheReservation>> {
-        if size > self.max_bytes {
+        if self.max_bytes.is_some_and(|max| size > max) {
             return Ok(None);
         }
         let catalog = self.clone();
@@ -462,7 +465,10 @@ impl CacheCatalog {
                     |row| row.get(0),
                 )
                 .map_err(|source| index_error(&catalog_path, source))?;
-            if size <= self.max_bytes && total <= self.max_bytes - size {
+            if self
+                .max_bytes
+                .is_none_or(|max| size <= max && total <= max - size)
+            {
                 let id = next_owner("reservation");
                 transaction
                     .execute(
@@ -572,19 +578,24 @@ impl CacheCatalog {
             )
             .map_err(|source| index_error(&catalog_path, source))?;
         result.scanned_bytes = total_bytes;
+        // Unlimited retention still reconciles accounting and stale owners,
+        // but never selects healthy payloads for capacity eviction.
+        let Some(max_bytes) = self.max_bytes else {
+            result.final_bytes = total_bytes;
+            return Ok(result);
+        };
         // Space is needed for the incoming fill even when existing files alone
         // are below the high watermark. Reservations belong to other active
         // fills and cannot be offered to this writer a second time.
-        let available = self
-            .max_bytes
+        let available = max_bytes
             .saturating_sub(reserved_bytes)
             .saturating_sub(incoming_bytes);
         if total_bytes <= available {
             result.final_bytes = total_bytes;
             return Ok(result);
         }
-        let target = (self.max_bytes / 100 * LOW_WATERMARK_PERCENT
-            + self.max_bytes % 100 * LOW_WATERMARK_PERCENT / 100)
+        let target = (max_bytes / 100 * LOW_WATERMARK_PERCENT
+            + max_bytes % 100 * LOW_WATERMARK_PERCENT / 100)
             .min(available);
 
         let mut remaining = total_bytes;

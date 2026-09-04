@@ -5,6 +5,31 @@ use crab_types::storage::{BucketIdentity, StorageProviderKind};
 use crab_xet::xorb::format::MerkleHash;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
+#[tokio::test]
+async fn unlimited_health_keeps_usage_and_unavailable_families_visible() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    fixture(&root, "retained/payload", b"cached bytes");
+    let report = inspect_cache(&root, None, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(report.is_available());
+    assert!(report.observed.logical_bytes > 0);
+    assert_eq!(report.budget_bytes, None);
+    assert_eq!(report.over_budget, Some(false));
+    assert!(serde_json::to_value(&report).unwrap()["budget_bytes"].is_null());
+    std::fs::set_permissions(
+        root.join("retained/payload"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let report = inspect_cache(&root, None, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!report.is_available());
+    assert_eq!(report.over_budget, Some(false));
+}
+
 fn fixture(root: &Path, relative: &str, data: &[u8]) {
     let path = root.join(relative);
     crate::ensure_private_cache_directory(path.parent().unwrap()).unwrap();
@@ -67,7 +92,7 @@ fn tree_snapshot(
 fn non_utf8_root_serializes_as_diagnostic_text_without_changing_identity() {
     use std::os::unix::ffi::OsStringExt as _;
     let root = PathBuf::from(std::ffi::OsString::from_vec(b"cache-\xff".to_vec()));
-    let report = CacheHealthReport::new(root.clone(), 1024);
+    let report = CacheHealthReport::new(root.clone(), Some(1024));
     let data = serde_json::to_value(&report).unwrap();
     assert_eq!(report.root, root);
     assert_eq!(data["root"], "cache-\u{fffd}");

@@ -4,7 +4,7 @@ use crate::catalog::{CacheCatalog, PayloadRead};
 async fn failed_read(root: &Path) -> (CrabRangeCache, PathBuf, PayloadRead) {
     let cache = CrabRangeCache {
         root: root.join("chunks"),
-        capacity: 1024 * 1024,
+        capacity: Some(1024 * 1024),
         catalog: CacheCatalog::new(root.to_owned(), 1024 * 1024),
     };
     cache

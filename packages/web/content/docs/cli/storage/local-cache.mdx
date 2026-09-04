@@ -54,12 +54,41 @@ export CRAB_CACHE_DIR=/mnt/nvme/crab-cache
 
 ## Cache Size Management
 
-The configured cache budget defaults to 10 GiB. Configure it in bytes:
+Local disk retention is **unlimited by default**: Crab does not evict healthy
+payloads merely because the cache has reached a built-in size. Content-addressed
+xorbs and shards, and decoded ranges keyed by xorb identity, can be reused
+across compatible files and branches without a freshness TTL. Integrity checks
+still apply; mutable refs and manifests retain their origin freshness rules.
+
+Set an optional cap in bytes (this example selects 10 GiB):
 
 ```toml
 [cache]
 max_bytes = 10737418240
 ```
+
+Or change the existing setting through the CLI:
+
+```bash
+crab config set cache.max_bytes 10737418240
+crab prune --dry-run
+crab prune
+
+# Remove the cap, including one inherited from user configuration
+crab config set cache.max_bytes unlimited
+```
+
+In TOML, use `max_bytes = "unlimited"` to explicitly override an inherited cap.
+Omitting the setting inherits the lower configuration layer, or unlimited when
+no layer sets a cap. Zero remains a zero-byte payload-admission budget, not an
+alias for unlimited. Existing explicit numeric caps are preserved.
+
+Unlimited retention is not unlimited disk availability, RAM, decode buffers,
+or concurrent downloads. Monitor disk usage or set a cap for constrained drives.
+An optional cache-write failure does not discard successfully verified origin
+bytes. It does not promise every object is cached: selective reads retain the
+decoded ranges they use, without also installing a redundant full-xorb copy.
+Per-object safety bounds and private-cache ownership checks remain active.
 
 Range and object caches receive this budget. Unified admission, all-family
 accounting, and automatic maintenance are still being completed in Plan 017;
@@ -103,8 +132,9 @@ crab cache clean
 crab prune
 ```
 
-`crab prune` is usually preferred when you want to keep the cache but trim it
-back to budget. Use `crab cache clean` to remove eligible payloads.
+With a cap, `crab prune` trims eligible payloads toward that budget. With
+unlimited retention, it removes nothing. Use `crab cache clean` to explicitly
+remove eligible payloads in either mode.
 
 Cleanup preserves unknown subtrees, maintenance workspaces, mirror repositories,
 retained profiles, databases and their side files, and unpublished temporaries.
@@ -136,7 +166,7 @@ cross-command reuse gate is delivered.
 
 | Situation | Action |
 |-----------|--------|
-| Running low on disk space | `crab prune` (LRU eviction to budget) |
+| Running low on disk space | Set `cache.max_bytes`, then `crab prune` |
 | Removing reusable payloads | `crab cache clean` (retained state survives) |
 | Suspected payload corruption | `crab cache clean` (eligible payloads only) |
 | Want to trim cache to budget | `crab prune` |

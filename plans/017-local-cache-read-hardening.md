@@ -18,6 +18,45 @@
 
 ## Status
 
+### Unlimited local retention with an opt-in cap
+
+The user-approved product default is now unlimited local disk retention, not
+the earlier 10 GiB ceiling. Earlier 10/20 GiB reports below retain the exact
+default used by those binaries; do not relabel them as unlimited qualification.
+
+The existing `cache.max_bytes` accepts nonnegative integer bytes or
+`"unlimited"`; omission inherits lower layers, then defaults to unlimited.
+Explicit numeric caps remain effective. Zero retains zero-byte admission
+semantics. Invalid values fail without replacing valid CLI-written config.
+Internally `Option<u64>` distinguishes no cap from an actual byte count.
+
+| Changed surface | Entry point / owner / sibling / contract proof |
+|---|---|
+| Configuration | `Config::default`, layered `CacheOverlay`, and `crab config set` propagate the optional cap to `crab-cache-store::CacheConfig`. Both default constructors agree. Existing public bounded constructor calls remain accepted by `Into<Option<u64>>`; no new configuration key or dependency patch. |
+| Admission and retention | `LocalCache` and `XetChunkCacheHandle` share `CacheCatalog` reservations, generation ownership and publication. Unlimited skips capacity rejection/eviction, not accounting, private file checks or corrupt-entry repair. Explicit maintenance still reconciles stale owners. |
+| Read siblings | `ReadRuntimeBuilder` transfers the object's optional cap to decoded ranges used by fetch/hydrate/smudge/mount. Its 256 MiB reconstruction-buffer limit remains unchanged. Xet 1.6.0's `ChunkCache` trait permits eviction but does not require a cap; Crab owns this implementation. |
+| Maintenance/reporting | Both prune spellings remove nothing without a cap; explicit clean retains its ownership policy. Stats/doctor show unlimited; JSON `budget_bytes=null` denotes no cap. Unavailable families still fail inspection, independently of over-budget status. |
+| Authority boundary | Immutable xorb/shard/chunk identities remain verified. Mutable refs/manifests still use origin freshness; cached dedup candidates still require origin-bound proof. Cached bytes do not prove an object still exists remotely after GC or corruption. Cache-service capacity and in-memory caches are not changed. |
+
+This is disk retention, not a promise to retain every byte ever received.
+Hydration retains decoded ranges without a second compressed full-xorb copy;
+selected object/push paths retain complete verified xorbs. Per-object safety
+limits, failed writes, missing/unsafe roots, explicit cleanup and corruption
+can still cause misses. Unlimited retention can fill a user's disk; no implicit
+free-space reserve, disk-pressure eviction or whole-process resource guarantee
+is introduced. Existing resource-admission slices remain required.
+
+Is this the best fix? An optional cap at the existing shared owner removes the
+three conflicting fixed defaults without weakening integrity, adding a second
+cache path, or using an enormous numeric sentinel. Acceptance: default and
+explicit-unlimited behavior agree across reopen; inherited caps can be cleared;
+bounded/zero admission and LRU remain effective; no-cap prune retains objects
+and ranges; stats retain accurate usage and unavailable-family diagnostics.
+Live gate: fresh 10/20 GiB reader caches exceed the former ceiling, retain exact
+payloads across process exit/prune and hydrate with xorb GETs denied, then
+recover from real RustFS after explicit cleanup. Qualification is pending at
+this implementation checkpoint; prior roadmap/platform/provider gaps remain.
+
 ### Mitigation of the 10/20 GiB findings
 
 This checkpoint changes Crab, not Xet. The fresh installed 10/20 GiB matrix

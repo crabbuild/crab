@@ -506,6 +506,24 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
             let b = parse_bool(value, key, path)?;
             section_table.insert(field.to_owned(), toml::Value::Boolean(b));
         }
+        "cache.max_bytes" => {
+            let budget = if value == "unlimited" {
+                toml::Value::String(value.to_owned())
+            } else {
+                let bytes = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|bytes| *bytes >= 0)
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: format!(
+                            "{key}: expected nonnegative bytes or \"unlimited\", got \"{value}\""
+                        ),
+                        origin: path.display().to_string(),
+                    })?;
+                toml::Value::Integer(bytes)
+            };
+            section_table.insert(field.to_owned(), budget);
+        }
         "push.lock_ttl_secs"
         | "push.lock_heartbeat_interval"
         | "push.lock_wait_secs"
@@ -518,7 +536,6 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         | "staging.segment_hard_cap_bytes"
         | "staging.fd_pool_size"
         | "staging.retention_hours"
-        | "cache.max_bytes"
         | "perf.fastpath_min_size" => {
             let n: i64 = value.parse().map_err(|_| CrabError::Configuration {
                 key: format!("{key}: expected integer, got \"{value}\""),
@@ -793,6 +810,23 @@ mod tests {
 
         let err = set_dotted_key(&mut table, "workflow.lockfile", "many").unwrap_err();
         assert!(matches!(err, CrabError::Configuration { .. }));
+    }
+
+    #[test]
+    fn cache_cap_can_be_removed_without_losing_other_settings() {
+        let dir = setup_dir();
+        let path = internal_config_path(dir.path());
+        run_internal_config_set("checkout.lazy", "true", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "1024", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "unlimited", &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for invalid in ["-1", "invalid", "9223372036854775808"] {
+            assert!(run_internal_config_set("cache.max_bytes", invalid, &path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let table = read_toml(&path).unwrap();
+        assert_eq!(table["cache"]["max_bytes"].as_str(), Some("unlimited"));
+        assert_eq!(table["checkout"]["lazy"].as_bool(), Some(true));
     }
 
     #[test]

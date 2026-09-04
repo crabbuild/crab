@@ -20,6 +20,35 @@ async fn payload(root: &Path, byte: u8, size: usize) -> PathBuf {
 }
 
 #[tokio::test]
+async fn unlimited_admission_and_maintenance_retain_payloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cache");
+    let catalog = CacheCatalog::new(root.clone(), None);
+    let path = payload(&root, 1, 1024).await;
+    let incoming = root.join("xorbs/incoming");
+    // Exercise admission beyond the former default without allocating a
+    // multi-GiB unit-test payload. Real retention is qualified separately.
+    let size = 11 * 1024 * 1024 * 1024;
+    let reservation = catalog.reserve(&incoming, size).await.unwrap().unwrap();
+    assert_eq!(
+        CacheCatalog::read_only_stats(&root)
+            .unwrap()
+            .reservations_bytes,
+        size
+    );
+    let result = catalog.maintain().await.unwrap();
+    assert_eq!(result.evicted_bytes, 0);
+    assert!(path.exists());
+    drop(reservation);
+    assert_eq!(
+        CacheCatalog::read_only_stats(&root)
+            .unwrap()
+            .reservations_bytes,
+        0
+    );
+}
+
+#[tokio::test]
 async fn maintenance_evicts_deterministic_lru_to_low_watermark() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("cache");
@@ -306,8 +335,8 @@ async fn incoming_write_displaces_eligible_bytes_below_high_watermark() {
     let old = payload(&root, 1, 8 * MIB).await;
     let catalog = CacheCatalog::new(root.clone(), 10 * MIB as u64);
     let before = catalog.maintain().await.unwrap();
-    assert!(before.final_bytes <= catalog.max_bytes());
-    assert!(before.final_bytes + 3 * MIB as u64 > catalog.max_bytes());
+    assert!(before.final_bytes <= catalog.max_bytes().unwrap());
+    assert!(before.final_bytes + 3 * MIB as u64 > catalog.max_bytes().unwrap());
 
     let reservation = catalog
         .reserve(&root.join("incoming"), 3 * MIB as u64)
@@ -317,7 +346,7 @@ async fn incoming_write_displaces_eligible_bytes_below_high_watermark() {
 
     assert!(!old.exists());
     let stats = CacheCatalog::read_only_stats(&root).unwrap();
-    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes());
+    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes().unwrap());
     assert_eq!(stats.reservations_bytes, 3 * MIB as u64);
     drop(reservation);
     assert_eq!(
@@ -370,8 +399,11 @@ async fn incoming_space_keeps_other_fills_reserved() {
         .unwrap()
         .unwrap();
     let before = CacheCatalog::read_only_stats(&root).unwrap();
-    assert!(before.total_bytes + 3 * MIB as u64 <= catalog.max_bytes());
-    assert!(before.total_bytes + before.reservations_bytes + 3 * MIB as u64 > catalog.max_bytes());
+    assert!(before.total_bytes + 3 * MIB as u64 <= catalog.max_bytes().unwrap());
+    assert!(
+        before.total_bytes + before.reservations_bytes + 3 * MIB as u64
+            > catalog.max_bytes().unwrap()
+    );
 
     let second = catalog
         .reserve(&root.join("second"), 3 * MIB as u64)
@@ -383,7 +415,7 @@ async fn incoming_space_keeps_other_fills_reserved() {
     assert!(recent.exists());
     let stats = CacheCatalog::read_only_stats(&root).unwrap();
     assert_eq!(stats.reservations_bytes, 5 * MIB as u64);
-    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes());
+    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes().unwrap());
     drop((first, second));
 }
 
@@ -415,7 +447,7 @@ fn concurrent_reservations_cannot_spend_the_same_capacity() {
     assert_eq!(owners.len(), 2);
     let stats = CacheCatalog::read_only_stats(&root).unwrap();
     assert_eq!(stats.reservations_bytes, 8 * MIB);
-    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes());
+    assert!(stats.total_bytes + stats.reservations_bytes <= catalog.max_bytes().unwrap());
     drop(owners);
 }
 
@@ -891,7 +923,7 @@ async fn object_cache_replaces_an_old_working_set_under_pressure() {
     );
     let stats = CacheCatalog::read_only_stats(&root).unwrap();
     assert_eq!(stats.reservations_bytes, 0);
-    assert!(stats.total_bytes <= cache.max_bytes());
+    assert!(stats.total_bytes <= cache.max_bytes().unwrap());
 }
 
 #[tokio::test]

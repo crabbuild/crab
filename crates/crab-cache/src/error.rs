@@ -20,12 +20,14 @@ pub enum CacheError {
 
     /// One live process tried to assign conflicting budgets to the same cache root.
     #[error(
-        "cache budget conflict at {path}: active budget is {active_bytes} bytes, requested {requested_bytes} bytes"
+        "cache budget conflict at {path}: active budget is {active}, requested {requested}",
+        active = active_bytes.map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} bytes")),
+        requested = requested_bytes.map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} bytes"))
     )]
     BudgetConflict {
         path: String,
-        active_bytes: u64,
-        requested_bytes: u64,
+        active_bytes: Option<u64>,
+        requested_bytes: Option<u64>,
     },
 
     /// SQLite cooperatively interrupted an inspection after its query deadline.

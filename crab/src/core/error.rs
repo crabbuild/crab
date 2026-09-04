@@ -3909,8 +3909,8 @@ mod tests {
     fn cache_budget_conflict_is_a_configuration_error() {
         let error = CrabError::from(crab_cache::CacheError::BudgetConflict {
             path: "cache/chunks".into(),
-            active_bytes: 1024,
-            requested_bytes: 512,
+            active_bytes: Some(1024),
+            requested_bytes: Some(512),
         });
         let CrabError::Configuration { key, origin } = error else {
             panic!("cache budget conflicts must retain configuration attribution");

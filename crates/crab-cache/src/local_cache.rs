@@ -35,8 +35,6 @@ mod maintenance;
 mod xorb_file;
 use xorb_file::{read_xorb_file_metadata, verify_xorb_file_identity, verify_xorb_file_payload};
 
-/// Default chunk cache ceiling: 10 GiB.
-const DEFAULT_CHUNK_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 /// Maximum metadata-shard body retained in or read from the local cache.
 pub const MAX_CACHE_SHARD_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum uncompressed chunk body retained in or read from the local cache.
@@ -168,19 +166,19 @@ pub struct LocalCache {
     root: PathBuf,
     catalog: crate::catalog::CacheCatalog,
     /// Shared byte ceiling for large data objects: chunk fragments and xorbs.
-    chunk_max_bytes: u64,
+    chunk_max_bytes: Option<u64>,
     shard_max_bytes: Option<u64>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
 }
 
 impl LocalCache {
-    /// Create a cache rooted at `root` with default limits.
+    /// Create a cache rooted at `root` without a disk-retention cap.
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
         Self {
-            catalog: crate::catalog::CacheCatalog::new(root.clone(), DEFAULT_CHUNK_MAX_BYTES),
+            catalog: crate::catalog::CacheCatalog::new(root.clone(), None),
             root,
-            chunk_max_bytes: DEFAULT_CHUNK_MAX_BYTES,
+            chunk_max_bytes: None,
             shard_max_bytes: None,
             fill_locks: new_fill_locks(),
         }
@@ -188,9 +186,14 @@ impl LocalCache {
 
     /// Create a cache with explicit byte budgets.
     ///
-    /// `chunk_max` is the shared ceiling for chunk fragments and xorbs.
+    /// `chunk_max` is the shared ceiling for chunk fragments and xorbs; `None` is unlimited.
     #[must_use]
-    pub fn with_limits(root: PathBuf, chunk_max: u64, shard_max: Option<u64>) -> Self {
+    pub fn with_limits(
+        root: PathBuf,
+        chunk_max: impl Into<Option<u64>>,
+        shard_max: Option<u64>,
+    ) -> Self {
+        let chunk_max = chunk_max.into();
         Self {
             catalog: crate::catalog::CacheCatalog::new(root.clone(), chunk_max),
             root,
@@ -208,7 +211,7 @@ impl LocalCache {
 
     /// Product byte budget shared by object and decoded-range caches.
     #[must_use]
-    pub fn max_bytes(&self) -> u64 {
+    pub fn max_bytes(&self) -> Option<u64> {
         self.catalog.max_bytes()
     }
 
@@ -467,7 +470,11 @@ impl LocalCache {
         source: &Path,
         expected_len: u64,
     ) -> Result<()> {
-        if expected_len > self.catalog.max_bytes() {
+        if self
+            .catalog
+            .max_bytes()
+            .is_some_and(|max| expected_len > max)
+        {
             return Ok(());
         }
 
@@ -498,7 +505,11 @@ impl LocalCache {
         expected_len: u64,
         expected_blake3: [u8; 32],
     ) -> Result<()> {
-        if expected_len > self.catalog.max_bytes() {
+        if self
+            .catalog
+            .max_bytes()
+            .is_some_and(|max| expected_len > max)
+        {
             return Ok(());
         }
 
@@ -895,7 +906,11 @@ impl LocalCache {
     /// losers' tempfiles are cleaned up (best-effort) and the file on
     /// disk reflects the last successful rename.
     async fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
-        if data.len() as u64 > self.catalog.max_bytes() {
+        if self
+            .catalog
+            .max_bytes()
+            .is_some_and(|max| data.len() as u64 > max)
+        {
             debug!(
                 family = cache_family_for_path(&self.root, path),
                 bytes = data.len(),
@@ -2052,7 +2067,7 @@ mod tests {
     #[tokio::test]
     async fn shard_lru_eviction() {
         let (_dir, cache) = temp_cache();
-        let cache = LocalCache::with_limits(cache.root.clone(), DEFAULT_CHUNK_MAX_BYTES, Some(80));
+        let cache = LocalCache::with_limits(cache.root.clone(), None, Some(80));
 
         for i in 0u8..4 {
             let data = vec![i; 40]; // 40 bytes each = 160 total

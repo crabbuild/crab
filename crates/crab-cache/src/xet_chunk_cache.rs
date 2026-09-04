@@ -32,7 +32,7 @@ pub const CHUNK_HASH_PREFIX: &str = "crab-chunk";
 
 struct CrabRangeCache {
     root: PathBuf,
-    capacity: u64,
+    capacity: Option<u64>,
     catalog: crate::catalog::CacheCatalog,
 }
 
@@ -58,7 +58,8 @@ impl CrabRangeCache {
         if item_start >= item_end
             || requested.start < item_start
             || requested.end > item_end
-            || expected_len > self.capacity.min(MAX_DECODED_RANGE_BYTES)
+            || expected_len > MAX_DECODED_RANGE_BYTES
+            || self.capacity.is_some_and(|max| expected_len > max)
         {
             return Err(ChunkCacheError::InvalidArguments);
         }
@@ -231,7 +232,7 @@ impl ChunkCache for CrabRangeCache {
             .and_then(|len| len.checked_add(4))
             .and_then(|len| len.checked_add(data.len() as u64))
             .ok_or(ChunkCacheError::InvalidArguments)?;
-        if body_len > self.capacity.min(MAX_DECODED_RANGE_BYTES) {
+        if body_len > MAX_DECODED_RANGE_BYTES || self.capacity.is_some_and(|max| body_len > max) {
             return Ok(());
         }
         if self.get(key, range).await?.is_some() {
@@ -337,8 +338,8 @@ pub struct XetChunkCacheHandle {
     pub cache: Arc<dyn ChunkCache>,
     /// Directory backing the `DiskCache`.
     pub directory: PathBuf,
-    /// Configured capacity in bytes.
-    pub size_bytes: u64,
+    /// Configured disk capacity in bytes, or `None` for unlimited retention.
+    pub size_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for XetChunkCacheHandle {
@@ -387,7 +388,8 @@ impl XetChunkCacheHandle {
     /// Returns [`CacheError::Io`] when the directory cannot be created, or
     /// [`CacheError::BudgetConflict`] when a live handle already owns the same
     /// canonical directory with a different byte budget.
-    pub fn open(directory: impl Into<PathBuf>, size_bytes: u64) -> Result<Self> {
+    pub fn open(directory: impl Into<PathBuf>, size_bytes: impl Into<Option<u64>>) -> Result<Self> {
+        let size_bytes = size_bytes.into();
         let directory = directory.into();
         if let Some(cache_root) = directory.parent() {
             crate::root::ensure_private_cache_directory(cache_root)?;
@@ -422,7 +424,7 @@ impl XetChunkCacheHandle {
 
         debug!(
             directory = %directory.display(),
-            size_bytes,
+            size_bytes = ?size_bytes,
             "opened Crab decoded-range cache"
         );
 
@@ -483,7 +485,7 @@ pub async fn xet_chunk_cache_stats_with_cancel(
 /// Evict eligible oldest range files toward `max_bytes`, skipping busy entries.
 pub async fn prune_xet_chunk_cache(
     directory: &Path,
-    max_bytes: u64,
+    max_bytes: impl Into<Option<u64>>,
     dry_run: bool,
     record_paths: bool,
 ) -> Result<XetChunkCachePruneStats> {
@@ -500,11 +502,15 @@ pub async fn prune_xet_chunk_cache(
 /// Evict xet-core range files while honoring a caller cancellation.
 pub async fn prune_xet_chunk_cache_with_cancel(
     directory: &Path,
-    max_bytes: u64,
+    max_bytes: impl Into<Option<u64>>,
     dry_run: bool,
     record_paths: bool,
     cancel: &CancellationToken,
 ) -> Result<XetChunkCachePruneStats> {
+    check_cancelled(cancel)?;
+    let Some(max_bytes) = max_bytes.into() else {
+        return Ok(XetChunkCachePruneStats::default());
+    };
     let report_directory = directory.to_owned();
     let parent = directory.parent().ok_or_else(|| CacheError::UnsafeRoot {
         path: directory.display().to_string(),
@@ -868,6 +874,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unlimited_ranges_survive_reopen_and_prune_until_a_cap_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("cache/chunks");
+        let handle = XetChunkCacheHandle::open(&directory, None).unwrap();
+        let key = Key {
+            prefix: CHUNK_HASH_PREFIX.into(),
+            hash: (*blake3::hash(b"data").as_bytes()).into(),
+        };
+        handle
+            .cache
+            .put(&key, &ChunkRange::new(0, 1), &[0, 4], b"data")
+            .await
+            .unwrap();
+        assert!(matches!(
+            XetChunkCacheHandle::open(&directory, 1),
+            Err(CacheError::BudgetConflict {
+                active_bytes: None,
+                requested_bytes: Some(1),
+                ..
+            })
+        ));
+        drop(handle);
+        let reopened = XetChunkCacheHandle::open(&directory, None).unwrap();
+        for dry_run in [true, false] {
+            assert_eq!(
+                prune_xet_chunk_cache(&directory, None, dry_run, true)
+                    .await
+                    .unwrap()
+                    .entries_evicted,
+                0
+            );
+            assert_eq!(
+                reopened
+                    .cache
+                    .get(&key, &ChunkRange::new(0, 1))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .data,
+                b"data"
+            );
+        }
+        drop(reopened);
+        assert_eq!(
+            prune_xet_chunk_cache(&directory, 0, false, true)
+                .await
+                .unwrap()
+                .entries_evicted,
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn open_reads_empty_cache_stats() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("cache").join("chunks");
@@ -875,7 +934,7 @@ mod tests {
             XetChunkCacheHandle::open(cache_dir.clone(), 64 * 1024).expect("should open cache");
 
         assert_eq!(handle.directory, std::fs::canonicalize(cache_dir).unwrap());
-        assert_eq!(handle.size_bytes, 64 * 1024);
+        assert_eq!(handle.size_bytes, Some(64 * 1024));
 
         let stats = handle.stats().await.unwrap();
         assert_eq!(stats.entries, 0);
@@ -1027,7 +1086,7 @@ mod tests {
         crate::root::ensure_private_cache_directory(&range_root).unwrap();
         let cache = CrabRangeCache {
             root: range_root,
-            capacity: 64 * 1024,
+            capacity: Some(64 * 1024),
             catalog: crate::catalog::CacheCatalog::new(root.clone(), 64 * 1024),
         };
         let range = ChunkRange::new(0, u32::MAX);
@@ -1136,8 +1195,8 @@ mod tests {
             error,
             CacheError::BudgetConflict {
                 path,
-                active_bytes: 65_536,
-                requested_bytes: 32_768,
+                active_bytes: Some(65_536),
+                requested_bytes: Some(32_768),
             } if path == cache_dir.canonicalize().unwrap().display().to_string()
         ));
         drop(first);
@@ -1152,7 +1211,7 @@ mod tests {
 
         let reopened = XetChunkCacheHandle::open(cache_dir, 32 * 1024).unwrap();
 
-        assert_eq!(reopened.size_bytes, 32 * 1024);
+        assert_eq!(reopened.size_bytes, Some(32 * 1024));
     }
 
     #[tokio::test]

@@ -40,7 +40,10 @@ fn print_cache_stats(report: &CacheHealthReport) {
         report.root.display(),
         report.root_state
     );
-    println!("  budget: {} bytes", report.budget_bytes);
+    match report.budget_bytes {
+        Some(bytes) => println!("  budget: {bytes} bytes"),
+        None => println!("  budget: unlimited"),
+    }
     println!(
         "  observed: {} logical bytes, {} allocated bytes ({})",
         report.observed.logical_bytes,

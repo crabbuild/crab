@@ -133,7 +133,8 @@ pub struct CacheHealthReport {
     #[serde(serialize_with = "serialize_path")]
     pub root: PathBuf,
     pub root_state: CacheRootState,
-    pub budget_bytes: u64,
+    /// Configured disk-retention cap; `None` means unlimited, not unknown.
+    pub budget_bytes: Option<u64>,
     pub observed: CacheUsage,
     pub scan_complete: bool,
     pub over_budget: Option<bool>,
@@ -144,7 +145,7 @@ pub struct CacheHealthReport {
 }
 
 impl CacheHealthReport {
-    fn new(root: PathBuf, budget_bytes: u64) -> Self {
+    fn new(root: PathBuf, budget_bytes: Option<u64>) -> Self {
         Self {
             root,
             root_state: CacheRootState::Missing,
@@ -242,18 +243,20 @@ impl CacheHealthReport {
 /// and the shard-hint database receives bounded-detail schema and SQLite checks.
 pub async fn inspect_cache(
     root: &Path,
-    budget_bytes: u64,
+    budget_bytes: impl Into<Option<u64>>,
     cancel: &CancellationToken,
 ) -> Result<CacheHealthReport> {
     let root = root.to_owned();
+    let budget_bytes = budget_bytes.into();
     run_blocking(cancel, move |cancel| inspect(&root, budget_bytes, cancel)).await
 }
 
 fn inspect(
     root: &Path,
-    budget_bytes: u64,
+    budget_bytes: impl Into<Option<u64>>,
     cancel: &CancellationToken,
 ) -> Result<CacheHealthReport> {
+    let budget_bytes = budget_bytes.into();
     let mut report = CacheHealthReport::new(root.to_owned(), budget_bytes);
     let pinned = match PinnedRoot::open(root) {
         Ok(pinned) => pinned,
@@ -264,7 +267,7 @@ fn inspect(
             report.root_state = CacheRootState::Unavailable;
             report.catalog = CacheCatalogHealth::Unavailable;
             report.issue(Path::new(""), None, error, true)?;
-            report.over_budget = None;
+            report.over_budget = budget_bytes.is_none().then_some(false);
             return Ok(report);
         }
     };
@@ -317,9 +320,9 @@ fn inspect(
         )?;
     }
     check_cancelled(cancel)?;
-    report.over_budget = if report.observed.allocated_bytes > budget_bytes {
+    report.over_budget = if budget_bytes.is_some_and(|max| report.observed.allocated_bytes > max) {
         Some(true)
-    } else if report.scan_complete {
+    } else if budget_bytes.is_none() || report.scan_complete {
         Some(false)
     } else {
         None

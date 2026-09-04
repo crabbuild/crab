@@ -1025,11 +1025,13 @@ fn cache_checks(report: &CacheHealthReport) -> Vec<CheckResult> {
         )];
     }
     let summary = format!(
-        "{}: {} allocated bytes, {} logical bytes, {} byte budget; {} (not full integrity verification)",
+        "{}: {} allocated bytes, {} logical bytes, {} budget; {} (not full integrity verification)",
         report.root.display(),
         report.observed.allocated_bytes,
         report.observed.logical_bytes,
-        report.budget_bytes,
+        report
+            .budget_bytes
+            .map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} byte")),
         if report.scan_complete {
             "complete scan"
         } else {

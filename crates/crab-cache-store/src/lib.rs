@@ -52,7 +52,6 @@ pub type Result<T> = std::result::Result<T, CacheStoreError>;
 
 #[cfg(feature = "remote-client")]
 const DEDUP_QUERY_MAX_UNIQUE_HASHES: usize = 50_000;
-const DEFAULT_LOCAL_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Errors raised by the read-through cache/storage adapter.
 #[derive(Debug, thiserror::Error)]
@@ -77,8 +76,8 @@ pub enum CacheStoreError {
 /// Cache-service options needed by [`CachingStore`].
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
-    /// Product-wide byte budget for disposable local cache state.
-    pub max_bytes: u64,
+    /// Product-wide disk-retention budget; `None` is unlimited.
+    pub max_bytes: Option<u64>,
     /// Cache service URL.
     pub service_url: Option<String>,
     /// Service mode: cache, dedup, or both.
@@ -98,7 +97,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: None,
             service_url: None,
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,
@@ -159,7 +158,7 @@ impl CachingStore {
             Arc::new(LocalCache::with_limits(
                 default_cache_root(),
                 cache_config.max_bytes,
-                Some(cache_config.max_bytes),
+                cache_config.max_bytes,
             )),
         )
     }
@@ -1735,7 +1734,7 @@ mod tests {
 
     fn no_cache_config() -> CacheConfig {
         CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: None,
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,
@@ -2048,7 +2047,7 @@ mod tests {
     #[cfg(feature = "remote-client")]
     fn cache_service_config(addr: SocketAddr) -> CacheConfig {
         CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -2932,7 +2931,7 @@ mod tests {
         });
 
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -3113,7 +3112,7 @@ mod tests {
         });
 
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -4084,7 +4083,7 @@ mod tests {
     async fn dedup_query_caps_unique_hashes_per_request() {
         let mut server = start_batched_dedup_server(None).await;
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::Dedup,
             push_warming: false,
@@ -4114,7 +4113,7 @@ mod tests {
     async fn dedup_query_preserves_successful_batches_and_duplicate_order() {
         let mut server = start_batched_dedup_server(Some(1)).await;
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::Dedup,
             push_warming: false,
@@ -4199,7 +4198,7 @@ mod tests {
     async fn query_known_chunks_ignores_out_of_range_service_indexes() {
         let server = start_malformed_dedup_server().await;
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{}", server.addr)),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: false,
@@ -4255,7 +4254,7 @@ mod tests {
         });
 
         let config = CacheConfig {
-            max_bytes: DEFAULT_LOCAL_CACHE_MAX_BYTES,
+            max_bytes: Some(10 * 1024 * 1024 * 1024),
             service_url: Some(format!("http://{addr}")),
             service_mode: CacheServiceMode::CacheAndDedup,
             push_warming: true,

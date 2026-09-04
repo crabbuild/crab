@@ -63,10 +63,15 @@ defaults. Over-budget usage is reported but is not itself an inspection error.
 in `data` with a nonzero exit; failures before inspection use the normal `error`
 envelope. `crab optimize cache stats` uses the same report and option.
 
+Retention is unlimited by default. Text reports show `budget: unlimited`;
+JSON uses `budget_bytes: null` for no configured cap, not unknown usage.
+Numeric caps remain byte counts. Unlimited reports are not over budget, but
+unsafe paths and incomplete inspections still produce diagnostics and failure.
+
 The streaming walk is not an atomic snapshot or a full integrity verification.
 Allocation covers linked entries, not unlinked open files; reservations are
 separate and shared filesystem extents may be counted more than once. An
-incomplete scan reports unknown over-budget state unless observed allocation
+incomplete scan with a configured cap reports unknown over-budget state unless observed allocation
 already exceeds the budget. Physical reporting is not proof of all-family
 budget enforcement. No persistent cache hit rate is recorded. Cancellation is
 checked during traversal; SQLite waits/aggregation still have separate bounds.
@@ -116,7 +121,7 @@ The `crab cache` command manages your **local** disk cache — a per-machine sto
 | **Scope** | Single machine | Entire team / org |
 | **Storage** | Your local disk (`~/.cache/crab/`) | Dedicated server with NVMe |
 | **Population** | Filled on fetch/hydrate | Filled on fetch + push warming |
-| **Eviction** | Range-cache write eviction plus explicit `crab prune` | Background evictor with high/low watermarks |
+| **Eviction** | Unlimited by default; optional cap and explicit cleanup | Background evictor with high/low watermarks |
 | **Setup** | Zero config (automatic) | Requires server deployment |
 
 When both are configured, Crab checks the local cache first. On a local miss, it queries the remote cache service before falling back to cloud storage. This means the first developer to fetch a file warms the remote cache, and every subsequent fetch across the team is served at network-local speed.

@@ -88,6 +88,9 @@ impl LocalCache {
         let root_path = self.root.clone();
         let large_max = self.chunk_max_bytes;
         let shard_max = self.shard_max_bytes;
+        if large_max.is_none() && shard_max.is_none() {
+            return Ok(PruneStats::default());
+        }
         with_pinned_root(
             &self.root,
             &CancellationToken::new(),
@@ -105,7 +108,9 @@ impl LocalCache {
                 let (large, shards) = entries.split_at(boundary);
                 let mut removal =
                     crate::catalog::PayloadRemoval::open(Some(root), &root_path, options.dry_run)?;
-                let target = total_bytes(large)?.saturating_sub(large_max);
+                let target = large_max.map_or(Ok(0), |max| {
+                    total_bytes(large).map(|total| total.saturating_sub(max))
+                })?;
                 let mut stats = evict_oldest(
                     root,
                     &mut removal,

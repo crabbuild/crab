@@ -31,6 +31,14 @@ and inspection resource/native-platform qualification are not complete.
 
 ## Authority boundary
 
+Local-retention update (2026-09-04): CLI and shared object-cache defaults are
+unlimited. `[cache].max_bytes` accepts a nonnegative byte cap or `"unlimited"`;
+omission inherits other layers. Catalog and decoded-range owners use an optional
+cap, not a sentinel integer. Explicit prune is a no-op without a cap, while clean
+and corrupt-entry repair remain available. Per-object read/allocation limits,
+mutable-ref freshness, and cache-service capacity are unchanged. The baseline
+capacity table below is historical, not the current default.
+
 Cloud object storage is the durable authority for committed xorbs, shards,
 metadata, packs, and refs. Local cache bodies, indexes, bloom filters, and hints
 are rebuildable accelerators. Push revalidates cached dedup candidates against

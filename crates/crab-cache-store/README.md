@@ -6,6 +6,11 @@ It gives fetch, hydrate, VFS, and service code one store-shaped interface with
 local disk caching, optional remote cache-service access, range reads, and
 origin fallback.
 
+Local disk retention defaults to unlimited (`CacheConfig::max_bytes = None`).
+An explicit cap is propagated to both the local object cache and the shared
+hydrator's decoded-range cache. This does not remove per-request memory limits,
+change immutable/mutable path classification, or alter remote service capacity.
+
 ## Why it exists
 
 Caching policy should not be reimplemented at every call site. Immutable

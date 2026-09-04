@@ -621,8 +621,8 @@ pub(crate) const CACHE_SERVICE_URL_ENV: &str = "CRAB_CACHE_SERVICE_URL";
 ///
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
-    /// Product-wide byte budget for disposable local cache state.
-    pub max_bytes: u64,
+    /// Product-wide disk-retention budget; `None` is unlimited.
+    pub max_bytes: Option<u64>,
     /// Cache service URL (e.g., `"https://crab-cache.internal:8443"`).
     pub service_url: Option<String>,
     /// Service mode: cache, dedup, or both.
@@ -643,7 +643,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_bytes: DEFAULT_CACHE_BYTES,
+            max_bytes: None,
             service_url: None,
             service_mode: ServiceMode::CacheAndDedup,
             push_warming: true,
@@ -905,9 +905,6 @@ const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Default max retries for transient failures.
 const DEFAULT_MAX_RETRIES: u32 = 5;
-
-/// Default chunk cache size: 256 MiB.
-const DEFAULT_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Default maximum size of each pack generated on push: 2 GiB.
 ///
@@ -1651,11 +1648,35 @@ pub struct RemoteOverlay {
     pub region: Option<String>,
 }
 
+fn deserialize_cache_budget<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Budget {
+        Bytes(u64),
+        Name(String),
+    }
+    // The outer option distinguishes an omitted overlay from an explicit
+    // unlimited override of a cap inherited from another config layer.
+    match Budget::deserialize(deserializer)? {
+        Budget::Bytes(bytes) => Ok(Some(Some(bytes))),
+        Budget::Name(name) if name == "unlimited" => Ok(Some(None)),
+        Budget::Name(_) => Err(serde::de::Error::custom(
+            "cache.max_bytes must be nonnegative bytes or \"unlimited\"",
+        )),
+    }
+}
+
 /// Partial cache service configuration overlay.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheOverlay {
-    pub max_bytes: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_cache_budget")]
+    pub max_bytes: Option<Option<u64>>,
     pub service_url: Option<String>,
     pub service_mode: Option<String>,
     pub push_warming: Option<bool>,
@@ -2957,7 +2978,7 @@ mod tests {
         assert_eq!(cfg.download_concurrency, 8);
         assert_eq!(cfg.operation_timeout, Duration::from_secs(300));
         assert_eq!(cfg.max_retries, 5);
-        assert_eq!(cfg.cache.max_bytes, 10 * 1024 * 1024 * 1024);
+        assert_eq!(cfg.cache.max_bytes, None);
         assert_eq!(cfg.shard_chunk_index_table_max_size, 64 * 1024 * 1024);
         assert_eq!(cfg.gc_grace_period, Duration::from_secs(24 * 60 * 60));
         assert_eq!(cfg.gc_delete_concurrency, 64);
@@ -3753,6 +3774,35 @@ storage_provider = "gcs"
     }
 
     #[test]
+    fn cache_budget_overlays_distinguish_inheritance_unlimited_and_zero() {
+        let mut config = Config::default();
+        assert_eq!(config.cache.max_bytes, None);
+        for (overlay, expected) in [
+            ("max_bytes = 1024", Some(1024)),
+            ("", Some(1024)),
+            ("max_bytes = \"unlimited\"", None),
+            ("max_bytes = 0", Some(0)),
+        ] {
+            config.apply_cache_overlay(toml::from_str(overlay).unwrap());
+            assert_eq!(config.cache.max_bytes, expected, "{overlay}");
+            assert_eq!(
+                crab_cache_store::CacheConfig::from(&config.cache).max_bytes,
+                expected
+            );
+        }
+        for invalid in [
+            "max_bytes = -1",
+            "max_bytes = \"invalid\"",
+            "max_bytes = true",
+        ] {
+            assert!(
+                toml::from_str::<CacheOverlay>(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn overlay_cache_max_bytes_sets_product_budget() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.toml");
@@ -3760,7 +3810,7 @@ storage_provider = "gcs"
 
         let cfg = Config::resolve_local_from(Some(p), PathBuf::from("/nonexistent"))
             .expect("should parse cache.max_bytes");
-        assert_eq!(cfg.cache.max_bytes, 536_870_912);
+        assert_eq!(cfg.cache.max_bytes, Some(536_870_912));
     }
 
     #[test]

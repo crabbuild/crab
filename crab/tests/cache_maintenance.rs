@@ -45,6 +45,58 @@ fn command(directory: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
 }
 
 #[test]
+fn unlimited_config_reports_no_cap_and_explicit_cap_can_be_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("missing-cache");
+    for setting in [None, Some("1048576"), Some("unlimited"), Some("0")] {
+        if let Some(value) = setting {
+            command(
+                temp.path(),
+                &root,
+                &["config", "set", "cache.max_bytes", value],
+            );
+        }
+        let output = command(temp.path(), &root, &["cache", "stats", "--json"]);
+        let data = stats_data(&output);
+        match setting {
+            Some("1048576") => assert_eq!(data["budget_bytes"], 1_048_576),
+            Some("0") => assert_eq!(data["budget_bytes"], 0),
+            _ => assert!(data["budget_bytes"].is_null()),
+        }
+        assert!(!root.exists());
+    }
+}
+
+#[tokio::test]
+async fn unlimited_prune_retains_objects_until_user_sets_a_cap() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("cache");
+    let cache = LocalCache::new(root.clone());
+    let key = CacheKey::Chunk(compute_data_hash(b"data"));
+    cache.put(&key, b"data").await.unwrap();
+    assert_eq!(cache.max_bytes(), None);
+    for args in [&["prune"][..], &["optimize", "cache", "prune"][..]] {
+        command(temp.path(), &root, args);
+        let hit = cache
+            .get_or_fetch(&key, || async {
+                Err(crab_cache::CacheError::Internal(
+                    "unexpected cache miss".into(),
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(hit.as_ref(), b"data");
+    }
+    command(
+        temp.path(),
+        &root,
+        &["config", "set", "cache.max_bytes", "0"],
+    );
+    command(temp.path(), &root, &["prune"]);
+    assert_eq!(cache.stats().await.unwrap().chunk_count, 0);
+}
+
+#[test]
 fn filter_process_creates_a_private_cache_under_public_umask() {
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
@@ -391,7 +443,7 @@ async fn stats_commands_do_not_inspect_ranges_through_an_aliased_cache_root() {
             assert_eq!(data["root_state"], "unavailable");
             assert_eq!(data["observed"]["logical_bytes"], 0);
             assert_eq!(data["scan_complete"], false);
-            assert!(data["over_budget"].is_null());
+            assert_eq!(data["over_budget"], false);
         } else {
             let stdout = String::from_utf8(output.stdout).unwrap();
             assert!(stdout.contains("(Unavailable)"), "{stdout}");

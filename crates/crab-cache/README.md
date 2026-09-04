@@ -25,6 +25,11 @@ origin object store
 ```
 
 `CacheKey` distinguishes chunks, shards, xorbs, manifests, and stage entries.
+`LocalCache::new` retains payloads without a disk cap. Optional budgets use
+`None` for unlimited and `Some(bytes)` for bounded retention, including zero.
+Unlimited catalog maintenance still reconciles accounting and stale owners,
+but does not evict for capacity. Per-object validation/allocation limits,
+explicit cleanup, and corrupt-entry repair are unchanged.
 `LocalCache::get_or_fetch` coalesces fills, verifies content-addressed data
 on read and write, and atomically renames completed files. Manifest entries
 use ETags rather than a content hash.

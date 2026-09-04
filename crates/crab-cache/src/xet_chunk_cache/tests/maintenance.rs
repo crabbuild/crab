@@ -11,7 +11,7 @@ async fn case_distinct_keys_keep_separate_accounting_and_maintenance_owners() {
         let root = temp.path().join("cache");
         let cache = CrabRangeCache {
             root: root.join("chunks"),
-            capacity: 1024 * 1024,
+            capacity: Some(1024 * 1024),
             catalog: CacheCatalog::new(root.clone(), 1024 * 1024),
         };
         let range = ChunkRange::new(0, 1);
