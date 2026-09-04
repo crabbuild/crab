@@ -304,3 +304,9 @@ effective branch rules on `main`; the repository's `Main` ruleset is disabled.
 No protection settings were changed. The exact-candidate merge-rejection
 criterion requires explicit host/branch/check authorization and a controlled
 missing-data candidate; passing local mirror CI does not prove host enforcement.
+
+The workspace CI test command now uses Cargo's `--no-fail-fast` so a failing
+binary test cannot hide failures in later test executables. This does not
+permit a green result with failures. An isolated two-executable Cargo probe
+ran the second executable after a deliberate failure and still exited 101.
+Workflow lint passes; no test expectations or ignored-test lists were changed.
