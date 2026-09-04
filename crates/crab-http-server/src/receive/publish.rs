@@ -282,7 +282,14 @@ async fn publish(
     {
         None
     } else {
-        prepared.plan.refs().keys().next().cloned()
+        // Tags can exist before the first branch. Keep HEAD unborn until a
+        // branch is available instead of turning an arbitrary tag into HEAD.
+        prepared
+            .plan
+            .refs()
+            .keys()
+            .find(|name| name.starts_with("refs/heads/"))
+            .cloned()
     };
     crab_write::journal::commit_edits(
         &entry.store,

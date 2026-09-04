@@ -7264,13 +7264,18 @@ impl PushPipeline {
             // covers every spec by construction in `evaluate_decisions`.
         }
 
-        // Retarget HEAD if the previous value no longer resolves —
-        // otherwise `git clone` emits "remote HEAD refers to
-        // nonexistent ref" and leaves the working tree bare.
+        // Choose a live branch when available. A tag-only push must preserve
+        // the unborn branch rather than making a tag the clone checkout target.
         if !new_manifest.refs.is_empty() && !new_manifest.refs.contains_key(&new_manifest.head) {
             let preferred_head = local_head
-                .filter(|h| new_manifest.refs.contains_key(h))
-                .or_else(|| new_manifest.refs.keys().next().cloned());
+                .filter(|h| h.starts_with("refs/heads/") && new_manifest.refs.contains_key(h))
+                .or_else(|| {
+                    new_manifest
+                        .refs
+                        .keys()
+                        .find(|name| name.starts_with("refs/heads/"))
+                        .cloned()
+                });
             if let Some(head) = preferred_head {
                 debug!(
                     old_head = %new_manifest.head,
@@ -35276,6 +35281,33 @@ mod tests {
             matches!(error, CrabError::CorruptObject { ref reason, .. } if reason.contains("crab init"))
         );
         assert!(pipeline.base_manifest.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_manifest_preserves_unborn_head_alongside_tags() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use object_store::memory::InMemory;
+        let store = crate::storage::store::Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut base = Manifest::default_for_repo("refs/heads/unborn");
+        base.refs.insert("refs/tags/v1".into(), "a".repeat(40));
+        base.seal_git_validation();
+        create_manifest(&store, &router, &base).await.unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store),
+            None,
+            None,
+            "org/repo".to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let (manifest, _) = pipeline.build_manifest().await.unwrap();
+        assert_eq!(manifest.head, "refs/heads/unborn");
     }
 
     #[tokio::test]

@@ -603,7 +603,8 @@ pub async fn materialize_ref_journal(
         }
         shards.extend(transaction.shards.iter().cloned());
     }
-    if !refs.is_empty() && !refs.contains_key(&head) {
+    // Journal replay preserves unborn branch HEADs just like manifest validation.
+    if !refs.is_empty() && !refs.contains_key(&head) && !head.starts_with("refs/heads/") {
         return Err(corrupt_object(
             router.ref_journal_heads_prefix().as_ref(),
             "materialized ref journal HEAD does not resolve",
@@ -1191,7 +1192,8 @@ mod tests {
             .await
             .unwrap();
 
-        cleanup_compacted_transactions(&store, &layout, &[transaction_id.clone()]).await;
+        cleanup_compacted_transactions(&store, &layout, std::slice::from_ref(&transaction_id))
+            .await;
 
         let head = read_ref_head(&store, &layout, "refs/heads/main")
             .await

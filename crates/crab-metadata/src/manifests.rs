@@ -120,7 +120,11 @@ pub fn validate_manifest_payload(manifest: &Manifest) -> Result<()> {
     for oid in manifest.peeled_refs.values() {
         validate_sha1(oid, "manifest peeled ref oid", "manifest")?;
     }
-    if !manifest.refs.is_empty() && !manifest.refs.contains_key(&manifest.head) {
+    // An unborn branch remains valid when tags or other branches already exist.
+    if !manifest.refs.is_empty()
+        && !manifest.refs.contains_key(&manifest.head)
+        && !manifest.head.starts_with("refs/heads/")
+    {
         return Err(corrupt_object(
             "manifest",
             "manifest HEAD does not resolve to a ref",
@@ -653,12 +657,23 @@ mod tests {
         assert!(validate_manifest_payload(&bad_ref).is_err());
 
         let mut bad_head = manifest.clone();
-        bad_head.head = "refs/heads/missing".into();
+        bad_head.head = "refs/tags/missing".into();
+        bad_head.seal_git_validation();
         assert!(validate_manifest_payload(&bad_head).is_err());
 
         let mut bad_index_hash = manifest;
         bad_index_hash.pack_index_hash = "bad-index".into();
         assert!(validate_manifest_payload(&bad_index_hash).is_err());
+    }
+
+    #[test]
+    fn sealed_manifests_allow_unborn_branches_with_existing_refs() {
+        for name in ["refs/tags/v1", "refs/heads/other"] {
+            let mut manifest = Manifest::default_for_repo("refs/heads/unborn");
+            manifest.refs.insert(name.into(), "a".repeat(40));
+            manifest.seal_git_validation();
+            validate_manifest_payload(&manifest).unwrap();
+        }
     }
 
     #[test]
@@ -722,7 +737,7 @@ mod tests {
     #[test]
     fn pack_segment_parser_validates_count_and_entries() {
         let valid = valid_pack_entry();
-        let bytes = segmented::to_jsonl(&[valid.clone()]).unwrap();
+        let bytes = segmented::to_jsonl(std::slice::from_ref(&valid)).unwrap();
         let parsed =
             parse_pack_segment_entries(&segment_ref(SegmentKind::Pack, 1), &bytes, "pack").unwrap();
         assert_eq!(parsed, vec![valid]);

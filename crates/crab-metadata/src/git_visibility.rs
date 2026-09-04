@@ -4513,8 +4513,8 @@ mod tests {
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
         let index = GitVisibilityIndex::new(
             7,
-            &"a".repeat(64),
-            &"b".repeat(64),
+            "a".repeat(64),
+            "b".repeat(64),
             BTreeMap::from([("refs/heads/main".to_owned(), vec!["1".repeat(40)])]),
         )
         .expect("valid visibility index");

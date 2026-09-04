@@ -279,3 +279,9 @@ Git blobs, Crab pointers, and Git LFS pointers but never materializes pointer
 targets. Logical Crab content belongs to `crab-read`; verified LFS content
 belongs to `crab-lfs`. Service composition decides whether those representations
 are enabled.
+
+An unborn default branch does not imply an empty repository: `RepositoryRefs.head`
+is `None` and `unborn_head` carries the symbolic branch name even when tags or other
+branches exist. Explicit ref reads still resolve normally; a missing HEAD does not
+silently resolve to another ref. Call `RepositoryRefs::is_empty()` to test whether
+there are any refs.
