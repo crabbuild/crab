@@ -45,7 +45,8 @@ trusts the local operator and exposes every configured repository. Team deployme
 must configure OIDC and a canonical HTTPS origin as described below. `/healthz`
 is process liveness, not storage readiness.
 
-The browser provides repository/ref selection, raw-byte path navigation, lazy
+The browser provides repository selection and a searchable branch/tag picker
+with default-branch identification and keyboard navigation, raw-byte path navigation, lazy
 Pierre Trees, paginated directories and first-parent history, highlighted files,
 exact Git blob downloads, commit changes, Pierre split/unified diffs and first-parent blame.
 The root view groups the selected commit and file table beside repository details.
