@@ -72,7 +72,6 @@ pub(super) async fn run(
     directory: tempfile::TempDir,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
-    let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
     let path = directory.path().join("receive");
     let (request, input) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut input = BufReader::new(std::fs::File::open(path)?);
@@ -86,6 +85,45 @@ pub(super) async fn run(
     if request.updates.is_empty() {
         return Ok(vec![]);
     }
+    run_request(
+        server,
+        principal,
+        key,
+        directory,
+        request,
+        Some(input),
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn update_existing_ref(
+    server: &Server,
+    principal: &Principal,
+    key: &(String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+    let request = receive_wire::ReceiveRequest {
+        updates: vec![update],
+        report_status: false,
+    };
+    run_request(server, principal, key, directory, request, None, cancel)
+        .await
+        .map(drop)
+}
+
+async fn run_request(
+    server: &Server,
+    principal: &Principal,
+    key: &(String, String),
+    directory: tempfile::TempDir,
+    request: receive_wire::ReceiveRequest,
+    input: Option<BufReader<std::fs::File>>,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>> {
+    let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
     let mut leases = Vec::new();
     let mut fences = Vec::new();
     let result = async {
@@ -137,7 +175,7 @@ async fn publish(
     principal: &Principal,
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
-    input: BufReader<std::fs::File>,
+    input: Option<BufReader<std::fs::File>>,
     directory: &std::path::Path,
     leases: &[RefLease],
     cancel: &CancellationToken,

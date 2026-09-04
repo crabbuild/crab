@@ -20,6 +20,7 @@ use crate::{
     server::Server,
 };
 
+mod merge;
 mod reviews;
 mod storage;
 use storage::{NewPullRequest, PullComment, PullRequest, PullState};
@@ -40,6 +41,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(comment_detail).patch(edit_comment),
         )
         .merge(reviews::routes())
+        .merge(merge::routes())
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -50,6 +52,15 @@ fn pull_view(
     can_write: bool,
     current: Option<&(String, String)>,
 ) -> Value {
+    let base_oid = pull.merge.as_ref().map_or_else(
+        || current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
+        |merge| merge.base_oid.as_str(),
+    );
+    let head_oid = pull.merge.as_ref().map_or_else(
+        || current.map_or(pull.head_oid.as_str(), |value| value.1.as_str()),
+        |merge| merge.head_oid.as_str(),
+    );
+    let branches_available = pull.merge.is_some() || current.is_some();
     json!({
         "number": pull.number,
         "title": pull.title,
@@ -57,20 +68,40 @@ fn pull_view(
         "state": pull.state,
         "author": pull.author.name,
         "base_ref": pull.base_ref,
-        "base_oid": current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
+        "base_oid": base_oid,
         "head_ref": pull.head_ref,
-        "head_oid": current.map_or(pull.head_oid.as_str(), |value| value.1.as_str()),
+        "head_oid": head_oid,
         "original_base_oid": pull.base_oid,
         "original_head_oid": pull.head_oid,
         "version": pull.version,
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
         "can_edit": app_storage::same_author(&pull.author, actor),
-        "can_manage": can_write || app_storage::same_author(&pull.author, actor),
+        "can_manage": pull.state != PullState::Merged
+            && pull.merge_pending.is_none()
+            && (can_write || app_storage::same_author(&pull.author, actor)),
         "can_decide": pull.state == PullState::Open
             && current.is_some()
             && !app_storage::same_author(&pull.author, actor),
-        "branches_available": current.is_some(),
+        "can_merge": pull.state == PullState::Open
+            && can_write
+            && (current.is_some() || pull.merge_pending.is_some()),
+        "branches_available": branches_available,
+        "merge": pull.merge.as_ref().map(|merge| json!({
+            "author": merge.author.name,
+            "method": merge.method,
+            "commit_oid": merge.commit_oid,
+            "created_at": merge.created_at,
+        })),
+        "merge_pending": pull.merge_pending.as_ref().map(|merge| json!({
+            "request_id": merge.request_id,
+            "author": merge.author.name,
+            "method": merge.method,
+            "pull_version": merge.pull_version,
+            "base_oid": merge.base_oid,
+            "head_oid": merge.head_oid,
+            "created_at": merge.created_at,
+        })),
     })
 }
 
@@ -120,14 +151,30 @@ impl ListParameters {
         Ok(limit)
     }
 
-    fn state(&self) -> Result<Option<PullState>> {
+    fn state(&self) -> Result<ListState> {
         match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(Some(PullState::Open)),
-            "closed" => Ok(Some(PullState::Closed)),
-            "all" => Ok(None),
+            "open" => Ok(ListState::Open),
+            "closed" => Ok(ListState::Closed),
+            "all" => Ok(ListState::All),
             _ => Err(Error::Invalid(
                 "Pull request state must be open, closed or all",
             )),
+        }
+    }
+}
+
+enum ListState {
+    Open,
+    Closed,
+    All,
+}
+
+impl ListState {
+    fn matches(&self, state: PullState) -> bool {
+        match self {
+            Self::Open => state == PullState::Open,
+            Self::Closed => state != PullState::Open,
+            Self::All => true,
         }
     }
 }
@@ -158,7 +205,7 @@ async fn list(
             next -= 1;
             scanned += 1;
             if let Some((pull, _)) = entry
-                && state.is_none_or(|state| state == pull.state)
+                && state.matches(pull.state)
             {
                 items.push(pull_list_view(&pull));
             }
@@ -337,11 +384,17 @@ async fn edit(
         .await?
         .ok_or(Error::NotFound)?;
     let author = app_storage::same_author(&pull.author, &actor);
+    if pull.merge_pending.is_some() {
+        return Err(Error::MergePending);
+    }
     if (input.title.is_some() || input.body.is_some()) && !author {
         return Err(Error::Forbidden);
     }
     if input.state.is_some() && !(author || principal.can_write(&repo.config)) {
         return Err(Error::Forbidden);
+    }
+    if input.state == Some(PullState::Merged) || (pull.merge.is_some() && input.state.is_some()) {
+        return Err(Error::Invalid("Merged pull requests cannot change state"));
     }
     if input.version != pull.version {
         return Err(Error::Conflict);

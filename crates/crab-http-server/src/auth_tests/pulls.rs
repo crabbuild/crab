@@ -179,6 +179,25 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(
         mutate(
             &h,
+            &bob,
+            bob_csrf,
+            reqwest::Method::POST,
+            &format!("{ROOT}/1/merge"),
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000014",
+                "version":1,
+                "method":"fast_forward",
+                "base_oid":created.1["base_oid"],
+                "head_oid":created.1["head_oid"]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        mutate(
+            &h,
             &alice,
             alice_csrf,
             reqwest::Method::POST,
