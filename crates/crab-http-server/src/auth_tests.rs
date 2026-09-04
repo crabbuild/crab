@@ -441,7 +441,7 @@ async fn non_members_cannot_trigger_repository_publication() {
         .unwrap();
     let git = h
         .http
-        .post(format!("{}/git/team/private/git-upload-pack", h.origin))
+        .post(format!("{}/git/team/private.git/git-upload-pack", h.origin))
         .basic_auth("crab", Some("denied-token"))
         .header("git-protocol", "version=2")
         .header(

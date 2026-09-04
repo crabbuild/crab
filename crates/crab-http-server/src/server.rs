@@ -21,8 +21,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git, issues, maintenance, receive,
+    git, issues, lfs, maintenance, receive,
 };
+
+pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) struct Repository {
     pub config: RepositoryConfig,
@@ -224,6 +226,18 @@ pub async fn serve(config: Config) -> Result<()> {
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .merge(issues::routes(Arc::clone(&server)))
+        .route(
+            "/git/{owner}/{name}/info/lfs/objects/batch",
+            post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/git/{owner}/{name}/info/lfs/objects/{oid}",
+            get(lfs::download).put(lfs::upload),
+        )
+        .route(
+            "/git/{owner}/{name}/info/lfs/locks/verify",
+            post(lfs::locks_unavailable),
+        )
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
@@ -424,3 +438,7 @@ mod receive_tests;
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod auth_tests;
+
+#[cfg(test)]
+#[path = "lfs_tests.rs"]
+mod lfs_tests;

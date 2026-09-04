@@ -140,6 +140,10 @@ pub(crate) async fn advertise(
     Query(query): Query<Discovery>,
     headers: HeaderMap,
 ) -> Result<Response, GitError> {
+    let name = name
+        .strip_suffix(".git")
+        .ok_or(GitError::NotFound)?
+        .to_owned();
     if query.service == "git-receive-pack" {
         return crate::receive::advertise(&server, &principal, &owner, &name)
             .await
@@ -184,6 +188,10 @@ pub(crate) async fn upload_pack(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, GitError> {
+    let name = name
+        .strip_suffix(".git")
+        .ok_or(GitError::NotFound)?
+        .to_owned();
     let entry = server
         .repositories
         .get(&(owner, name))

@@ -52,7 +52,7 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
     let server = maintenance_tests::fixture().await;
     let request = Request::builder()
         .method("POST")
-        .uri("/git/team/repo/git-receive-pack")
+        .uri("/git/team/repo.git/git-receive-pack")
         .header("host", "localhost:8788")
         .header("content-type", "application/x-git-receive-pack-request")
         .body(Body::from_stream(futures_util::stream::pending::<
@@ -139,7 +139,7 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     });
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path();
-    let url = format!("http://127.0.0.1:{port}/git/team/repo");
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
     success(
         path,
         &[
