@@ -14,6 +14,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   let created = false;
   let branchesAvailable = true;
   const comments: Array<Record<string, unknown>> = [];
+  const reviews: Array<Record<string, unknown>> = [];
   const pull = () => ({
     number: created ? 2 : 1,
     title: created ? "Document the feature" : "Improve the README",
@@ -31,6 +32,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     updated_at: 1_700_000_000_000,
     can_edit: true,
     can_manage: true,
+    can_decide: true,
     branches_available: branchesAvailable,
   });
   await page.route("**/api/**", async (route) => {
@@ -145,6 +147,32 @@ test("pull request creation, discussion, and files follow the GitHub review flow
       }
       return route.fulfill({ json: { items: comments, next: null } });
     }
+    if (/\/pulls\/\d+\/reviews$/.test(path)) {
+      if (request.method() === "POST") {
+        reviews.push({
+          number: 1,
+          author: "Bob",
+          body: "Ready to merge.",
+          state: "approved",
+          commit_oid: head,
+          current: branchesAvailable,
+          version: 1,
+          created_at: 1_700_000_050_000,
+          updated_at: 1_700_000_050_000,
+          can_edit: true,
+        });
+        return route.fulfill({ status: 201, json: reviews[0] });
+      }
+      return route.fulfill({
+        json: {
+          items: reviews.map((review) => ({
+            ...review,
+            current: branchesAvailable,
+          })),
+          next: null,
+        },
+      });
+    }
     return route.fulfill({
       status: 404,
       json: { error: { message: "Fixture route unavailable" } },
@@ -185,7 +213,14 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await page.getByRole("button", { name: /Modified README.md/ }).click();
   await expect(page.locator(".diff-panel")).toContainText("New content");
 
-  await page.getByRole("link", { name: /Conversation/ }).click();
+  await page
+    .getByRole("textbox", { name: "Review summary", exact: true })
+    .fill("Ready to merge.");
+  await page.getByLabel("Approve").check();
+  await page.getByRole("button", { name: "Submit review" }).click();
+  await expect(page.locator(".review-event")).toContainText(
+    "Bob approved these changes",
+  );
   await page
     .getByRole("textbox", { name: "Comment", exact: true })
     .fill("Verified in the browser.");
@@ -206,6 +241,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-conversation")).toContainText(
     "Verified in the browser.",
   );
+  await expect(page.locator(".review-event")).toContainText("Outdated");
 
   await page.setViewportSize({ width: 360, height: 800 });
   expect(

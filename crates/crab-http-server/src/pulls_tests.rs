@@ -77,6 +77,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     assert_eq!(pull["number"], 1);
     assert_eq!(pull["head_oid"], first_head);
     assert_eq!(pull["branches_available"], true);
+    assert_eq!(pull["can_decide"], false);
     let pull_url = format!("{root}/1");
     let compare = client
         .get(format!(
@@ -118,6 +119,33 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
         1
     );
 
+    let review = json!({
+        "request_id":"00000000-0000-4000-8000-000000000003",
+        "body":"I left notes without deciding on my own change.",
+        "state":"commented"
+    });
+    let review_url = format!("{pull_url}/reviews");
+    let created_review =
+        json_request(&client, reqwest::Method::POST, &review_url, review.clone()).await;
+    assert_eq!(created_review.0, StatusCode::CREATED);
+    assert_eq!(created_review.1["commit_oid"], first_head);
+    assert_eq!(created_review.1["current"], true);
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::POST,
+            &review_url,
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000004",
+                "body":"Self approval is forbidden.",
+                "state":"approved"
+            }),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
     std::fs::write(path.join("README.md"), "base\nfeature one\nfeature two\n").unwrap();
     receive_tests::success(path, &["commit", "-am", "feature two"]).await;
     let second_head = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
@@ -127,6 +155,19 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     assert_eq!(replay.1["number"], 1);
     assert_eq!(replay.1["original_head_oid"], first_head);
     assert_eq!(replay.1["head_oid"], second_head);
+    let reviews: Value = serde_json::from_slice(
+        &client
+            .get(&review_url)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reviews["items"][0]["commit_oid"], first_head);
+    assert_eq!(reviews["items"][0]["current"], false);
 
     assert_eq!(
         json_request(
@@ -148,6 +189,10 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .await;
     assert_eq!(closed.0, StatusCode::OK);
     assert_eq!(closed.1["state"], "closed");
+    let recovered_review = json_request(&client, reqwest::Method::POST, &review_url, review).await;
+    assert_eq!(recovered_review.0, StatusCode::CREATED);
+    assert_eq!(recovered_review.1["number"], 1);
+    assert_eq!(recovered_review.1["current"], false);
     let closed_list: Value = serde_json::from_slice(
         &client
             .get(format!("{root}?state=closed"))
