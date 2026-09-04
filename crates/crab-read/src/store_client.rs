@@ -582,36 +582,4 @@ impl Client for StoreClient {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crab_xet::hash::MerkleHash;
-
-    fn hash_from_seed(seed: u64) -> MerkleHash {
-        MerkleHash::from([
-            seed,
-            seed.wrapping_mul(31),
-            seed.wrapping_mul(97),
-            seed.wrapping_mul(127),
-        ])
-    }
-
-    #[test]
-    fn xorb_url_round_trips_multi_range() {
-        let hash = hash_from_seed(7);
-        let ranges = vec![
-            ChunkRange::new(0, 5),
-            ChunkRange::new(8, 12),
-            ChunkRange::new(20, 21),
-        ];
-        let url = xorb_url(&hash, &ranges);
-        let (parsed_hash, parsed_ranges) = parse_xorb_url(&url).expect("parse");
-        assert_eq!(parsed_hash, hash);
-        assert_eq!(parsed_ranges, ranges);
-    }
-
-    #[test]
-    fn xorb_url_rejects_foreign_prefix() {
-        let err = parse_xorb_url("https://example.com/xorb").expect_err("reject non-crab url");
-        assert!(matches!(err, ClientError::Other(_)));
-    }
-}
+mod tests;

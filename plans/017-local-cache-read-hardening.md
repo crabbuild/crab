@@ -18,6 +18,58 @@
 
 ## Status
 
+### StoreClient consolidation regression coverage, 2026-09-03
+
+PR #147 removed `crab/src/git/store_client.rs` in favor of the existing
+`crates/crab-read/src/store_client.rs`. The initial deletion also removed
+useful behavior tests, not just duplicate implementation. That coverage is
+now restored beside the shared owner in `store_client/tests.rs`: 18 migrated
+tests plus one byte-range boundary table. No second production adapter was
+reintroduced.
+
+| Evidence-map surface | Owner, caller/callee, and retained proof |
+|---|---|
+| Baseline | `origin/main` has both CLI and shared adapters; the CLI adapter had 18 direct tests, the shared adapter had two URL tests. |
+| Entry points | `HydrationRuntime::with_config` builds the shared runtime; delayed smudge calls it through `PrefetchQueue::submit`. |
+| Owner and dependency boundary | `crab-read::ShardHydrator` builds `StoreClient`; its Xet `Client` implementation delegates shard/xorb access to `CachingStore` and lookup to `FileIndexLookupSession`. CLI metrics implement `ReadMetrics`; restore policy enters through `XorbAvailability`. |
+| Sibling consumers | VFS uses `crab_read::ShardHydrator` through `HydrationService`; auth-view repacking calls its cancellable writer API. Shared unit tests cover the adapter they all use, not native mount or auth-service E2E acceptance. |
+| Lookup and reconstruction | Restored unknown-file versus EOF distinction, shard-hint resolution and hit/miss callbacks, empty/mixed batch results, every-segment coverage, and empty files. Added partial-range, exact-boundary, and past-EOF cases. |
+| Cache and Xet contract | Restored cache-owner identity and chunk-offset checks. The offset test additionally writes and reads those actual decoded bytes through `XetChunkCacheHandle`. Corrupt local xorb bytes recover from origin with byte/offset assertions. |
+| Read-only boundary | Restored download-permit and unsupported-upload tests; push/deduplication remains outside this adapter. |
+
+The old corruption test also expected hydration to reinstall a complete xorb.
+That expectation contradicts this plan's explicit ordinary-hydration
+non-installation contract. Its replacement retains corruption recovery and
+exact-byte assertions, and asserts that the invalid complete-xorb copy is
+absent afterward. This is an intentional policy distinction, not full parity
+with that obsolete cache-population assertion.
+
+Tests use private cache children rather than treating `TempDir` permissions
+as cache policy. Batch lookup uses real committed records and a real SlateDB
+writer, closed before assertions. `slatedb = 0.15.0` is a test-only direct
+dependency matching the existing metadata reader's exact version/features;
+the lockfile adds only the dependency edge, with no version/checksum change.
+
+Focused proof passed: `cargo test -p crab-read --lib store_client::tests
+--locked` (19 tests), the same filter with `--no-default-features` (19 tests),
+`cargo clippy -p crab-read --all-targets --all-features --locked -- -D warnings`,
+`cargo fmt --check -p crab-read`, and `git diff --check`. Compiling commands
+used the checkout-specific external Cargo target. These are focused local
+checks; the known failing broad gates have not been relabeled as passing.
+
+Review question: is this the best fix, not merely plausible? Keeping one
+adapter and restoring behavioral tests at its owner avoids duplicate runtime
+policy. This closes the direct-test deletion gap, not the full merge gate.
+
+Latest hosted checkpoint `51f571a` still fails protocol/split-crate tests on
+lost Xet error sources, Rust quality/tests on nine CLI cases (including seven
+private-cache fixtures, 503 warming, and hydration diagnostics), and protected
+architecture inventories. Cache-service tests, binary/integration contracts,
+NFS feature checks, and Linux/macOS/Windows workflow tests passed. Native mount,
+provider, and installed-command acceptance must not be inferred from those
+checks. The PR stays draft pending the source-error repair, reviewed fixture
+and inventory reconciliation, and successful required CI on the final SHA.
+
 ### Required local RustFS qualification
 
 User-requested delivery gate: qualify the actual Crab executable against a

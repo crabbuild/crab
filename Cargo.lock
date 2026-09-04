@@ -2284,6 +2284,7 @@ dependencies = [
  "gix-object",
  "globset",
  "object_store",
+ "slatedb",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
