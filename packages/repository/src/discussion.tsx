@@ -15,6 +15,17 @@ export function useReturnFocus<T extends HTMLElement>(active: boolean) {
   return target;
 }
 
+// Retain the key for an unchanged submission so an ambiguous retry cannot duplicate it.
+export function useSubmission() {
+  const current = useRef({ body: "", id: crypto.randomUUID() });
+  return (input: object) => {
+    const body = JSON.stringify(input);
+    if (body !== current.current.body)
+      current.current = { body, id: crypto.randomUUID() };
+    return current.current.id;
+  };
+}
+
 export function DiscussionMarkdown({ children }: { children: string }) {
   return (
     <div className="discussion-markdown">
