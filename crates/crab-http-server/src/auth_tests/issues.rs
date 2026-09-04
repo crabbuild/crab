@@ -108,6 +108,18 @@ async fn issues_comments_edits_and_replays_preserve_durable_state() {
         id
     );
     assert_eq!(
+        h.json(&format!("{ROOT}?state=closed&q=REVIEWED"), &cookie)
+            .await["items"][0]["number"],
+        id
+    );
+    assert!(
+        h.json(&format!("{ROOT}?state=closed&q=missing"), &cookie)
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
         write(
             &h,
             &cookie,
@@ -308,6 +320,14 @@ async fn unknown_storage_schema_and_invalid_inputs_fail_without_creating_content
             .unwrap()
             .is_empty()
     );
+    let response = h
+        .http
+        .get(format!("{}{ROOT}?q={}", h.origin, "x".repeat(257)))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     repo.store
         .put_overwrite(
             &repo.layout.repo_path("app/v1/issues/sequence.json"),

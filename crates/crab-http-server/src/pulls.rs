@@ -243,6 +243,7 @@ struct ListParameters {
     before: Option<u64>,
     limit: Option<usize>,
     state: Option<String>,
+    q: Option<String>,
 }
 
 impl ListParameters {
@@ -296,6 +297,7 @@ async fn list(
     app::actor(&principal)?;
     let limit = params.limit()?;
     let state = params.state()?;
+    let query = app::search_query(params.q.as_deref())?;
     let last = app_storage::last_number(repo, storage::ROOT).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));
     let mut items = Vec::new();
@@ -313,6 +315,10 @@ async fn list(
             scanned += 1;
             if let Some((pull, _)) = entry
                 && state.matches(pull.state)
+                && app::matches_query(
+                    query.as_deref(),
+                    &[&pull.title, &pull.body, &pull.author.name],
+                )
             {
                 items.push(pull_list_view(&pull));
             }
@@ -571,8 +577,8 @@ async fn comments(
     {
         return Err(Error::NotFound);
     }
-    if params.state.is_some() {
-        return Err(Error::Invalid("Comments do not have a state filter"));
+    if params.state.is_some() || params.q.is_some() {
+        return Err(Error::Invalid("Comments do not support list filters"));
     }
     let actor = app::actor(&principal)?;
     let limit = params.limit()?;

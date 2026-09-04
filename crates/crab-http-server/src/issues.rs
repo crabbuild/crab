@@ -55,6 +55,7 @@ struct ListParameters {
     before: Option<u64>,
     limit: Option<usize>,
     state: Option<String>,
+    q: Option<String>,
 }
 impl ListParameters {
     fn limit(&self) -> Result<usize> {
@@ -90,6 +91,7 @@ async fn list(
     let author = actor(&principal)?;
     let limit = params.limit()?;
     let state = params.state()?;
+    let query = crate::app::search_query(params.q.as_deref())?;
     let last = app_storage::last_number(repo, storage::ROOT).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));
     let mut items = Vec::new();
@@ -109,6 +111,10 @@ async fn list(
             scanned += 1;
             if let Some((issue, _)) = entry
                 && state.is_none_or(|state| state == issue.state)
+                && crate::app::matches_query(
+                    query.as_deref(),
+                    &[&issue.title, &issue.body, &issue.author.name],
+                )
             {
                 items.push(issue_view(&issue, &author, false));
             }
@@ -222,8 +228,8 @@ async fn comments(
     }
     let author = actor(&principal)?;
     let limit = params.limit()?;
-    if params.state.is_some() {
-        return Err(Error::Invalid("Comments do not have a state filter"));
+    if params.state.is_some() || params.q.is_some() {
+        return Err(Error::Invalid("Comments do not support list filters"));
     }
     let last = app_storage::last_number(repo, &storage::comments_root(id)).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));

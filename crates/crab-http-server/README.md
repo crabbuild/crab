@@ -501,12 +501,14 @@ Merge admission uses one latest-status snapshot; an update that completes after
 admission applies to later merge attempts, while an existing merge reservation
 remains recoverable.
 
-Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
-issues also accept `state=open|closed|all`. Results are newest first. Each page
-scans at most 200 allocated numbers; an empty filtered page can still have `next`.
-Clients must follow that cursor. Titles allow 1–256 characters; bodies allow
-64 KiB. Eight discussion operations run concurrently, with a 30-second deadline
-and an 80-KiB HTTP body limit. `Server-Timing: app` reports handling latency.
+Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor.
+Issue and pull lists accept `state=open|closed|all` plus an optional case-insensitive
+`q` search across title, description and author. Queries are limited to 256
+characters. Results are newest first. Each page scans at most 200 allocated
+numbers; an empty filtered page can still have `next`. Clients must follow that
+cursor. Titles allow 1–256 characters; bodies allow 64 KiB. Eight discussion
+operations run concurrently, with a 30-second deadline and an 80-KiB HTTP body
+limit. `Server-Timing: app` reports handling latency.
 
 Data lives under `<repository-prefix>/app/v1/issues`, `app/v1/pulls` and
 `app/v1/statuses`,
@@ -589,6 +591,15 @@ and native ref discovery took 45.8, 42.4, 21.1 and 42.7 ms from the client. The
 check panel was also inspected in light, dark and 390-pixel layouts without
 horizontal overflow. These shared-cache localhost timings are functional
 observations rather than production latency guarantees.
+
+The rebuilt server also searched that persisted pull collection without an
+index or local checkout. A case-insensitive title/description query returned
+pulls 6 and 5 in 8.4 ms, an uppercase author query returned all six records in
+2.0 ms, and a missing query returned an empty page in 1.5 ms from the client.
+Light, dark and 390-pixel pull-list screenshots were compared with the saved
+GitHub issue-list reference; the search input, state controls and results had no
+horizontal overflow. These small shared-cache reads validate behavior and
+layout, not production search throughput.
 
 ## Current verification
 
