@@ -1,6 +1,19 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+export function useReturnFocus<T extends HTMLElement>(active: boolean) {
+  const target = useRef<T>(null);
+  const previous = useRef(active);
+  useEffect(() => {
+    // Removed/disabled controls leave focus on the body. Preserve any deliberate
+    // move elsewhere while an edit or request was in progress.
+    if (previous.current && !active && document.activeElement === document.body)
+      target.current?.focus();
+    previous.current = active;
+  }, [active]);
+  return target;
+}
 
 export function DiscussionMarkdown({ children }: { children: string }) {
   return (
@@ -37,6 +50,8 @@ export function Editor({
   onChange,
   disabled,
   required = false,
+  autoFocus = false,
+  ref,
 }: {
   id: string;
   label: string;
@@ -44,6 +59,8 @@ export function Editor({
   onChange: (value: string) => void;
   disabled: boolean;
   required?: boolean;
+  autoFocus?: boolean;
+  ref?: Ref<HTMLTextAreaElement>;
 }) {
   const [preview, setPreview] = useState(false);
   return (
@@ -91,36 +108,38 @@ export function Editor({
           Preview
         </button>
       </div>
-      {preview ? (
-        <div
-          id={`${id}-preview`}
-          role="tabpanel"
-          aria-labelledby={`${id}-preview-tab`}
-          className="editor-preview"
-        >
-          <DiscussionMarkdown>{value}</DiscussionMarkdown>
-        </div>
-      ) : (
-        <div
-          id={`${id}-write`}
-          role="tabpanel"
-          aria-labelledby={`${id}-write-tab`}
-        >
-          <label className="sr-only" htmlFor={id}>
-            {label}
-          </label>
-          <textarea
-            id={id}
-            value={value}
-            onChange={(event) => onChange(event.target.value)}
-            disabled={disabled}
-            required={required}
-            maxLength={65_536}
-            rows={8}
-            placeholder="Add context, ask a question, or share an update…"
-          />
-        </div>
-      )}
+      <div
+        id={`${id}-preview`}
+        role="tabpanel"
+        aria-labelledby={`${id}-preview-tab`}
+        className="editor-preview"
+        hidden={!preview}
+        tabIndex={0}
+      >
+        {preview && <DiscussionMarkdown>{value}</DiscussionMarkdown>}
+      </div>
+      <div
+        id={`${id}-write`}
+        role="tabpanel"
+        aria-labelledby={`${id}-write-tab`}
+        hidden={preview}
+      >
+        <label className="sr-only" htmlFor={id}>
+          {label}
+        </label>
+        <textarea
+          ref={ref}
+          autoFocus={autoFocus}
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
+          required={required}
+          maxLength={65_536}
+          rows={8}
+          placeholder="Add context, ask a question, or share an update…"
+        />
+      </div>
       <p className="editor-help muted">
         Markdown is supported. External images appear as links.
       </p>
