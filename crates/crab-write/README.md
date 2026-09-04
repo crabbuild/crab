@@ -22,6 +22,22 @@ they enter publication. Their files must remain unchanged until the call ends.
 The remote path validates the same checksums/counts and uses the same writer.
 Storage, metadata, Git, worker and file errors retain their sources.
 
+`generation::maintain_catalog` owns the catalog lease, renewal, planning reader,
+writer, checkpoint and close lifecycle. Supply a captured manifest and its complete
+pack inventory. The function checks the generation/index/visibility identity before
+planning and again after closing the writer. A superseded sample returns `None`;
+a current sample returns advancement and catalog/sweep statistics. The CLI owner
+reports superseded samples before writing a generation receipt or running later
+maintenance. Its continuous loop retries immediately; a one-shot run reports the
+superseded sample and exits. The shared anchor parser also serves native push, repack and history
+recovery; malformed index hashes retain their source errors.
+
+The lifecycle returns a `Send` future suitable for an owned Tokio task. Metadata
+point lookups capture owned keys before constructing their concurrent batch, so
+borrowed iterator entries do not make publication unspawnable. This retains the
+existing concurrency bound and request ordering; the extra key storage is linear
+in the caller's bounded batch, with 21 bytes per key.
+
 `journal::compact_for_owner` folds already committed ref transactions into the
 manifest under its renewable lease. It waits up to two lease lifetimes for
 handoff, then drains at most five waves before releasing ownership.
@@ -41,18 +57,19 @@ transactions that were already committed.
 
 ## Caller responsibilities
 
-The caller must supply the complete inventory for its anchor and hold the
-locator writer lease and required GC fences. It owns cancellation, lease renewal,
+For the lower-level `catalog::publish_inventory`, the caller must supply the
+complete inventory for its anchor and hold the locator writer lease and required
+GC fences. It owns cancellation, lease renewal,
 writer close on every outcome, and any checkpoint needed after publication. The
 shared function neither changes refs nor closes the supplied writer. Keep the
 writer alive while awaiting the operation; cancellation must still close it.
 
-Await journal operations to completion; do not abort their task or drop their
+Await journal and catalog lifecycle operations to completion; do not abort their task or drop their
 future to enforce a deadline. They own stateful writes and lease cleanup. The
 caller still owns the generation-owner election and any required GC fences.
 
 This crate does not yet own the complete generation service: journal commit,
-catalog/visibility readiness, index receipts and restart repair still need a
+catalog/visibility readiness composition, index receipts and restart repair still need a
 shared composing path before HTTP push can acknowledge a fully readable generation.
 
 ## Verification
@@ -82,3 +99,16 @@ visibility from the transaction's evidence; all three Git objects subsequently
 match the native oracle through `crab-remote-git`. Journal compaction took 28 ms
 and catalog publication 12 ms for that small fixture. This does not qualify
 HTTP receive or production latency.
+
+Catalog lifecycle tests cover cancellation behind a writer, failed-publication
+cleanup/retry, stale samples before planning and a manifest change after the
+captured read. The latter runs the lifecycle in a spawned Tokio task. Metadata
+point and scan lookup tests preserve request order and missing rows. Eleven
+focused CLI owner/planning/commit-graph tests pass through the shared code.
+
+A separate RustFS fixture removes its local repository before the shared
+lifecycle publishes the catalog. It binds visibility to the published checkpoint,
+verifies exact commit/tree/blob bytes through `crab-remote-git`, and repeats the
+lifecycle without a second advance. Full catalog lifecycle took 23 ms and journal
+compaction 29 ms for that small fixture. These shared-cache observations do not
+qualify native HTTP receive or production latency.

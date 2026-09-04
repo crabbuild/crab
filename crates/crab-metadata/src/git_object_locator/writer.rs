@@ -711,10 +711,16 @@ impl GitObjectLocatorWriter {
                 "compact Git locator scan exceeded its row bound"
             );
         }
-        let fetched = stream::iter(entries.iter().enumerate().map(|(index, entry)| {
+        // Move owned keys into each async lookup. Borrowing iterator entries
+        // here prevents the writer future from satisfying Tokio's Send bound.
+        let keys = entries
+            .iter()
+            .map(|entry| object_key(&entry.oid))
+            .collect::<Vec<_>>();
+        let fetched = stream::iter(keys.into_iter().enumerate().map(|(index, key)| {
             let db = &self.db;
             async move {
-                db.get(object_key(&entry.oid))
+                db.get(key)
                     .await
                     .map(|value| (index, value))
                     .map_err(read_error)
@@ -2177,6 +2183,34 @@ mod tests {
         ));
         assert!(!should_scan_existing_objects(12, 52, 3));
         assert!(!should_scan_existing_objects(64, 100_000, 22));
+    }
+
+    #[tokio::test]
+    async fn spawned_point_lookup_preserves_request_order_and_missing_rows() {
+        let ordinals = tokio::spawn(async {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let mut writer =
+                GitObjectLocatorWriter::open_for_incremental_publication(store, "org/repo")
+                    .await
+                    .expect("open writer");
+            let binding = writer.bind_packs(&[pack(1)]).await.expect("bind pack")[0];
+            writer
+                .write_locations(binding, &[entry(1), entry(2)])
+                .await
+                .expect("write objects");
+            let existing = writer
+                .lookup_existing_objects(&[entry(2), entry(3), entry(1)])
+                .await;
+            writer.close().await.expect("close writer");
+            existing
+                .expect("point lookup")
+                .into_iter()
+                .map(|row| row.map(|object| object.ordinal))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .expect("spawned writer completes");
+        assert_eq!(ordinals, vec![Some(1), None, Some(0)]);
     }
 
     #[tokio::test]

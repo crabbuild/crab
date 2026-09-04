@@ -1,5 +1,6 @@
 //! File-backed consolidation of the Git packs selected by a repository manifest.
 
+use crab_write::generation::CommittedManifestAnchor;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,9 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::git::push::{
-    CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
-};
+use crate::git::push::{CommittedPackIndex, publish_committed_pack_locators};
 use crate::metadata::manifest::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, read_manifest,
     upload_segmented_bulk, write_manifest_cas,
