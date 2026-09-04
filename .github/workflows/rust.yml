@@ -92,7 +92,9 @@ jobs:
   rust:
     name: Rust quality and tests
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # Full workspace proof can consume 35 minutes before the build cache's
+    # post-job upload; leave cleanup headroom without dropping any checks.
+    timeout-minutes: 45
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     steps:
@@ -133,7 +135,8 @@ jobs:
           # the largest async protocol fixtures; keep the test harness from
           # converting valid coverage into a stack-overflow false negative.
           RUST_MIN_STACK: "8388608"
-        run: cargo test --workspace --locked
+        # Report later executable failures too; Cargo still fails the job if any test fails.
+        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Check managed OpenAPI contract
         run: cargo run -p crab-auth --example generate_managed_openapi --locked -- --check

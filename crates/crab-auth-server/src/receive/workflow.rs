@@ -259,6 +259,11 @@ async fn commit_receive_inner(
     let active_active = parse_active_active_receive_config(active_active_json, repo_url)?;
     let plan = ctx.read_plan().await?;
     validate_push_plan_shape(&plan, ctx.repo_prefix(), ctx.push_id())?;
+    if plan.mirror_plan_id.is_some() && active_active.is_some() {
+        return Err(invalid(
+            "mirror plan receipts are not supported by active-active finalize",
+        ));
+    }
     validate_protected_dependency_receipt(&plan)?;
     let base = ctx.read_base_state().await?;
     let source_plan_digest = ctx.verified_plan_digest(&plan, &base)?;
@@ -568,6 +573,7 @@ mod tests {
             dependency_receipt(0, None, &candidate_manifest, std::slice::from_ref(&update));
         ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: PUSH_ID.to_owned(),
             upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),
@@ -1116,6 +1122,7 @@ mod tests {
             dependency_receipt(4, None, &candidate, std::slice::from_ref(&update));
         let plan = ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: PUSH_ID.to_owned(),
             upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),

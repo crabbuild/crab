@@ -1292,6 +1292,9 @@ mod tests {
     #[tokio::test]
     async fn post_fetch_sync_does_not_hide_journal_shards_behind_manifest_generation_cache() {
         let (router, _cache, dir) = setup();
+        crate::core::remote_layout::initialize(router.store(), &router)
+            .await
+            .unwrap();
         let manifest = Manifest::default_for_repo("refs/heads/main");
         create_manifest(router.store(), &router, &manifest)
             .await

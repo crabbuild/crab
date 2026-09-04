@@ -388,6 +388,7 @@ mod tests {
 
         ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: PUSH_ID.to_owned(),
             upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),

@@ -234,7 +234,7 @@ where
 
     // Read lines from stdin synchronously in a blocking task so we don't
     // block the tokio runtime.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<std::result::Result<InboundEvent, String>>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
     let reader_handle = tokio::task::spawn_blocking(move || {
         for line_result in input.lines() {
@@ -253,11 +253,14 @@ where
             match serde_json::from_str::<InboundEvent>(&line) {
                 Ok(event) => {
                     let terminate = matches!(&event, InboundEvent::Terminate);
-                    if tx.blocking_send(Ok(event)).is_err() || terminate {
-                        // Do not attempt another blocking read after the
-                        // protocol's terminal event. This is what lets a
-                        // real stdin pipe remain open without leaking a
-                        // blocked reader thread during shutdown.
+                    let (next_read, resume) = tokio::sync::oneshot::channel();
+                    if tx.blocking_send(Ok((event, next_read))).is_err() || terminate {
+                        break;
+                    }
+                    // A fatal protocol decision must finish before another
+                    // blocking read starts: abort cannot interrupt stdin.
+                    // Dropping the permission lets this worker exit and join.
+                    if resume.blocking_recv().is_err() {
                         break;
                     }
                 }
@@ -272,21 +275,29 @@ where
     let mut coordinator: Option<Arc<TransferCoordinator>> = None;
     let mut join_set = JoinSet::new();
     let mut loop_error = None;
+    let mut next_read: Option<tokio::sync::oneshot::Sender<()>> = None;
 
-    while let Some(event) = rx.recv().await {
+    loop {
+        if let Some(resume) = next_read.take() {
+            let _ = resume.send(());
+        }
+        let Some(event) = rx.recv().await else {
+            break;
+        };
         while let Some(join_result) = join_set.try_join_next() {
             if let Err(error) = join_result {
                 tracing::error!(error = %error, "transfer task failed");
             }
         }
 
-        let event = match event {
+        let (event, resume) = match event {
             Ok(event) => event,
             Err(error) => {
                 loop_error = Some(CrabError::LfsTransferProtocol(error));
                 break;
             }
         };
+        next_read = Some(resume);
         match event {
             InboundEvent::Init {
                 operation,
@@ -350,7 +361,12 @@ where
                 store = Some(Arc::new(resolved_store));
                 let policy = resolved_config.transfer_policy();
                 config = Some(Arc::new(resolved_config));
-                coordinator = Some(Arc::new(TransferCoordinator::new(policy)));
+                // This protocol session has no caller token. Terminate/EOF
+                // still drains admitted transfers before returning.
+                coordinator = Some(Arc::new(TransferCoordinator::new(
+                    policy,
+                    &tokio_util::sync::CancellationToken::new(),
+                )));
 
                 tracing::debug!(
                     %operation,
@@ -359,7 +375,10 @@ where
                 );
 
                 // Respond with empty JSON object.
-                write_json_line(&output, &InitResponse { error: None }).await?;
+                if let Err(error) = write_json_line(&output, &InitResponse { error: None }).await {
+                    loop_error = Some(error);
+                    break;
+                }
             }
 
             InboundEvent::Upload { oid, size, path } => {
@@ -531,6 +550,9 @@ where
         }
     }
 
+    drop(next_read);
+    drop(rx);
+
     // Wait for all in-flight transfers to complete.
     while let Some(result) = join_set.join_next().await {
         if let Err(error) = result {
@@ -538,8 +560,7 @@ where
         }
     }
 
-    // Drop the reader task.
-    reader_handle.abort();
+    // No further read was authorized after a terminal protocol decision.
     let _ = reader_handle.await;
 
     match loop_error {
@@ -1376,6 +1397,79 @@ mod tests {
         assert!(
             matches!(error, CrabError::LfsTransferProtocol(message) if message.contains("malformed transfer event"))
         );
+    }
+
+    async fn protocol_result_with_open_input(
+        input: &str,
+        output: impl Write + Send + 'static,
+    ) -> Result<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (reader, _) = listener.accept().unwrap();
+        peer.write_all(input.as_bytes()).unwrap();
+        let mut agent = tokio::spawn(run_transfer_agent(
+            BufReader::new(reader),
+            output,
+            test_store(),
+        ));
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), &mut agent).await;
+        let reader_closed = if completed.is_ok() {
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            matches!(std::io::Read::read(&mut peer, &mut [0_u8; 1]), Ok(0))
+        } else {
+            false
+        };
+        // Always unblock and join a regressed reader before failing the test;
+        // aborting its async owner cannot stop an already-started blocking read.
+        drop(peer);
+        let result = match completed {
+            Ok(result) => result.unwrap(),
+            Err(error) => {
+                let _ = agent.await;
+                panic!("protocol termination waited for input EOF: {error}");
+            }
+        };
+        assert!(
+            reader_closed,
+            "protocol returned without closing its reader"
+        );
+        result
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fatal_protocol_decisions_do_not_wait_for_input_eof() {
+        for input in [
+            "{\"event\":\"init\",\"operation\":\"invalid\"}\n",
+            "{\"event\":\"init\",\"operation\":\"download\"}\n{\"event\":\"init\",\"operation\":\"download\"}\n",
+            "{\"event\":\"upload\",\"oid\":\"invalid\",\"size\":0,\"path\":\"unused\"}\n",
+        ] {
+            assert!(matches!(
+                protocol_result_with_open_input(input, SharedOutput::new()).await,
+                Err(CrabError::LfsTransferProtocol(_))
+            ));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_init_response_joins_reader_without_input_eof() {
+        let input = "{\"event\":\"init\",\"operation\":\"download\"}\n";
+        let output = Cursor::new([0_u8; 0]);
+        assert!(matches!(
+            protocol_result_with_open_input(input, output).await,
+            Err(CrabError::Io(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_terminate_joins_reader_without_input_eof() {
+        let input = concat!(
+            "{\"event\":\"init\",\"operation\":\"download\"}\n",
+            "{\"event\":\"terminate\"}\n",
+        );
+        protocol_result_with_open_input(input, SharedOutput::new())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

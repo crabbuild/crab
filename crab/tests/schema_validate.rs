@@ -32,6 +32,11 @@ use crab::cmd::fetch::FetchSummary;
 use crab::cmd::fsck::FsckSummary;
 use crab::cmd::gc::GcSummary;
 use crab::cmd::hydrate::HydrateSummaryPayload;
+use crab::cmd::mirror::{
+    MirrorApplySummary, MirrorCheckSummary, MirrorDriftState, MirrorHookState, MirrorHookStatus,
+    MirrorPlanAction, MirrorPlanActionKind, MirrorPointerState, MirrorPointerStatus,
+    MirrorReconciliationPlan,
+};
 use crab::cmd::optimize::xorbs::{
     OptimizeXorbsControlEvent, OptimizeXorbsControlEventKind, OptimizeXorbsCounts,
     OptimizeXorbsEventPayload, OptimizeXorbsSummary,
@@ -511,6 +516,106 @@ fn validate_hydrate() {
             bytes_recovered: 0,
             cow_cloned: 0,
             bytes_cow_cloned: 0,
+        },
+    );
+}
+
+#[test]
+fn validate_mirror_check() {
+    validate(
+        "mirror.check",
+        &MirrorCheckSummary {
+            source: "https://example.com/org/repo.git".into(),
+            destination: "crab://bucket/org/repo".into(),
+            cache_dir: "/tmp/cache.git".into(),
+            state: MirrorDriftState::Equal,
+            refs: Vec::new(),
+            destination_snapshot: Some("d".repeat(64)),
+            destination_identity: Some("e".repeat(64)),
+            pointers: MirrorPointerStatus {
+                discovered: 0,
+                verified: 0,
+                recipe_digest: Some("c".repeat(64)),
+                state: MirrorPointerState::Verified,
+                issues: Vec::new(),
+            },
+            hook: MirrorHookStatus {
+                state: MirrorHookState::NotApplicable,
+                path: None,
+                detail: None,
+            },
+            ci_passed: true,
+            issues: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn validate_mirror_apply() {
+    validate(
+        "mirror.apply",
+        &MirrorApplySummary {
+            plan_id: "a".repeat(64),
+            source: "https://example.com/org/repo.git".into(),
+            destination: "crab://bucket/org/repo".into(),
+            actions_planned: 1,
+            actions_applied: 1,
+            already_applied: false,
+            transaction_id: Some("f".repeat(64)),
+            manifest_digest: None,
+            final_state: MirrorDriftState::Equal,
+            current: Box::new(MirrorCheckSummary {
+                source: "https://example.com/org/repo.git".into(),
+                destination: "crab://bucket/org/repo".into(),
+                cache_dir: "/tmp/cache.git".into(),
+                state: MirrorDriftState::Equal,
+                refs: Vec::new(),
+                destination_snapshot: Some("d".repeat(64)),
+                destination_identity: Some("e".repeat(64)),
+                pointers: MirrorPointerStatus {
+                    discovered: 0,
+                    verified: 0,
+                    recipe_digest: Some("c".repeat(64)),
+                    state: MirrorPointerState::Verified,
+                    issues: Vec::new(),
+                },
+                hook: MirrorHookStatus {
+                    state: MirrorHookState::NotApplicable,
+                    path: None,
+                    detail: None,
+                },
+                ci_passed: true,
+                issues: Vec::new(),
+            }),
+        },
+    );
+}
+
+#[test]
+fn validate_mirror_reconciliation_plan() {
+    let oid = "a".repeat(40);
+    validate(
+        "mirror.reconciliation_plan",
+        &MirrorReconciliationPlan {
+            format_version: 1,
+            plan_id: "b".repeat(64),
+            source: "https://example.com/org/repo.git".into(),
+            destination: "crab://bucket/org/repo".into(),
+            source_refs: BTreeMap::from([("refs/heads/main".into(), oid.clone())]),
+            crab_refs: BTreeMap::new(),
+            destination_snapshot: Some("d".repeat(64)),
+            destination_identity: Some("e".repeat(64)),
+            recipe_digest: Some("c".repeat(64)),
+            pointer_count: 0,
+            allow_delete_refs: false,
+            blocked: false,
+            blockers: Vec::new(),
+            actions: vec![MirrorPlanAction {
+                kind: MirrorPlanActionKind::UpdateCrabRef,
+                ref_name: "refs/heads/main".into(),
+                expected_source_oid: Some(oid),
+                expected_crab_oid: None,
+            }],
         },
     );
 }

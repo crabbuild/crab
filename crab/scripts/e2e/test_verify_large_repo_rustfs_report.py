@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import sys
 import tempfile
+import threading
 import unittest
+import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -48,6 +54,87 @@ DIGEST = "c" * 64
 
 
 class QualificationHarnessTests(unittest.TestCase):
+    def harness(self, root: Path) -> Any:
+        qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+            QUALIFICATION.LargeRepositoryQualification
+        )
+        qualification.args = SimpleNamespace(
+            timeout=5, sample_interval=0.01,
+            access_key="", secret_key="test-secret", session_token="",
+        )
+        qualification.logs = root / "logs"
+        qualification.artifacts = root / "artifacts"
+        qualification.temp_root = root / "tmp"
+        qualification.temp_root.mkdir()
+        qualification.report_lock = threading.RLock()
+        qualification.command_index = 0
+        qualification.env = {
+            **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        qualification.git_bin = Path(shutil.which("git") or "git")
+        qualification.report = {"commands": [], "artifacts": {}}
+        return qualification
+
+    def test_binary_stdout_is_hashed_without_retaining_or_decoding_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            payload = b"\x00\xfftest-secret\r\n" * 100_000
+            record = qualification.run_cmd(
+                "binary stdout", [sys.executable, "-c",
+                                  "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+                root, input_data=payload, hash_stdout=True,
+            )
+            self.assertEqual(
+                (json.loads(qualification.stdout(record)), list(qualification.temp_root.iterdir())),
+                ({"sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}, []),
+            )
+
+    def test_binary_stdout_timeout_is_not_success_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            with self.assertRaisesRegex(QUALIFICATION.QualificationError, "exit 124"):
+                qualification.run_cmd(
+                    "timed out binary", [sys.executable, "-c", "import time; time.sleep(30)"],
+                    root, timeout=1, hash_stdout=True,
+                )
+
+    def test_missing_object_is_rejected_even_when_git_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            qualification.run_git(root, ["init", "--bare", "repo.git"], "init")
+            with self.assertRaisesRegex(QUALIFICATION.QualificationError, "missing or invalid"):
+                qualification.batch_check(root / "repo.git", [OID], "missing sample")
+
+    def test_raw_digest_detects_bytes_that_metadata_comparison_misses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            qualification = self.harness(root)
+            qualification.run_git(root, ["init", "--bare", "repo.git"], "init")
+            repo = root / "repo.git"
+            payload = b"\xff\x00original"
+            record = qualification.run_git(
+                repo, ["hash-object", "-w", "--stdin"], "store", input_data=payload,
+            )
+            oid = qualification.stdout(record).strip()
+            before_rows = qualification.batch_check(repo, [oid], "original metadata")
+            before = qualification.batch_contents_digest(repo, [oid], "original bytes")
+            # A corrupt loose object can keep the requested filename and size;
+            # cat-file metadata alone does not verify its body against that ID.
+            loose = repo / "objects" / oid[:2] / oid[2:]
+            loose.chmod(0o600)
+            loose.write_bytes(zlib.compress(b"blob 10\x00\xff\x00modified"))
+            after_rows = qualification.batch_check(repo, [oid], "corrupt metadata")
+            after = qualification.batch_contents_digest(repo, [oid], "corrupt bytes")
+            expected_stream = f"{oid} blob 10\n".encode() + payload + b"\n"
+            self.assertEqual(
+                (before_rows == after_rows, before == after, before),
+                (True, False, {"sha256": hashlib.sha256(expected_stream).hexdigest(),
+                               "bytes": len(expected_stream)}),
+            )
+
     def test_snapshot_executable_is_immune_to_source_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

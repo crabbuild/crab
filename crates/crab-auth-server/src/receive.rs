@@ -101,6 +101,8 @@ pub struct ActiveActiveReceiveConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProtectedPushPlan {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_plan_id: Option<String>,
     pub repo_prefix: String,
     pub push_id: String,
     pub upload_prefix: String,
@@ -324,8 +326,15 @@ pub fn validate_push_plan_shape(
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    if plan.schema_version != 1 {
-        return Err(invalid("unsupported push-plan schema_version"));
+    match (plan.schema_version, plan.mirror_plan_id.as_deref()) {
+        (1, None) => {}
+        (2, Some(plan_id)) => validate_hash_component(plan_id, "mirror plan id")?,
+        (1, Some(_)) | (2, None) => {
+            return Err(invalid(
+                "push-plan schema_version does not match its mirror plan identity",
+            ));
+        }
+        _ => return Err(invalid("unsupported push-plan schema_version")),
     }
     if plan.repo_prefix != repo_prefix {
         return Err(invalid("push-plan repo_prefix does not match repo_url"));
@@ -1213,8 +1222,10 @@ pub async fn commit_service_metadata(
         router.repo_prefix(),
         router.global_prefix(),
     );
-    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
+    // Prepare fallible local resources before opening writers so an I/O error
+    // cannot bypass the explicit close boundary below.
     let workspace = tempfile::tempdir()?;
+    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
     let operation = async {
         for segment in index.segments {
             let segment_path = router.repo_path(&segment.path);
@@ -2735,6 +2746,7 @@ mod tests {
     fn push_plan() -> ProtectedPushPlan {
         ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -2750,6 +2762,74 @@ mod tests {
                 )),
                 staged_object(format!("org/repo/metadata/pack/indexes/{}.json", hash('d'))),
             ],
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_git_objects_cannot_publish_visibility() {
+        let dir = tempfile::tempdir().expect("Git fixture");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(dir.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .expect("Git fixture command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("Git output")
+                .trim()
+                .to_owned()
+        };
+        git(&["init"]);
+        std::fs::write(dir.path().join("file"), b"small blob").expect("fixture blob");
+        git(&["add", "file"]);
+        git(&["commit", "-m", "fixture"]);
+        let blob = git(&["rev-parse", "HEAD:file"]);
+        let git_dir = dir.path().join(".git");
+        let blob_path = git_dir.join("objects").join(&blob[..2]).join(&blob[2..]);
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), git(&["rev-parse", "HEAD"]));
+        manifest.seal_git_validation();
+        let refs = manifest
+            .refs
+            .iter()
+            .map(|(name, oid)| (name.clone(), oid.clone()))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            build_git_visibility_from_git_dir(&git_dir, &refs, &BTreeMap::new()).await,
+            Ok(MaterializedGitVisibility::Exact(_))
+        ));
+
+        std::fs::remove_file(&blob_path).expect("remove only fixture blob");
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(&blob_path, b"invalid object").expect("corrupt fixture blob");
+            }
+            let store = store();
+            let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            assert!(matches!(
+                publish_git_visibility_index_from_git_dir(&store, &router, &manifest, &git_dir)
+                    .await,
+                Err(AuthServerError::GitVisibilityWalk { .. })
+            ));
+            assert!(matches!(
+                store
+                    .head(&router.git_visibility_path(&manifest.git_validation_digest))
+                    .await,
+                Err(StorageError::NotFound { .. })
+            ));
         }
     }
 
@@ -2945,6 +3025,28 @@ mod tests {
             err.to_string().contains("too many ref updates"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn push_plan_shape_accepts_version_two_with_a_mirror_plan_identity() {
+        let mut plan = push_plan();
+        plan.schema_version = 2;
+        plan.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(
+            validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_ok()
+        );
+    }
+
+    #[test]
+    fn push_plan_shape_rejects_mirror_identity_in_version_one() {
+        let mut plan = push_plan();
+        plan.mirror_plan_id = Some("a".repeat(64));
+
+        let error = validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("schema_version"));
     }
 
     #[test]
@@ -3441,6 +3543,7 @@ mod tests {
 
         let plan = ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -3465,6 +3568,7 @@ mod tests {
     async fn commit_service_metadata_publishes_file_and_chunk_indexes() -> Result<()> {
         let store = store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &router).await?;
         let (file_hash, shard_hash, shard_bytes, xorb_hash, xorb_bytes, expected_chunks) =
             test_file_shard_reference()?;
         let shard_entry = ShardSegmentEntry {
@@ -3510,6 +3614,7 @@ mod tests {
         candidate.seal_git_validation();
         let plan = ProtectedPushPlan {
             schema_version: 1,
+            mirror_plan_id: None,
             repo_prefix: "org/repo".to_owned(),
             push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
@@ -3552,6 +3657,35 @@ mod tests {
         assert_eq!(stored.xorb_hash, xorb_hash);
         assert_eq!(stored.chunk_index, first_chunk.index);
         assert_eq!(stored.uncompressed_size, first_chunk.uncompressed_size);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_workspace_failure_precedes_metadata_writes() -> Result<()> {
+        if !crate::test_support::unavailable_workspace_child(
+            "receive::tests::service_workspace_failure_precedes_metadata_writes",
+        ) {
+            return Ok(());
+        }
+        let store = store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let index = segmented::build_index_object(SegmentKind::Shard, SegmentIndex::default())?;
+        let index_key = router
+            .repo_path(&segmented::index_relative_path(
+                SegmentKind::Shard,
+                &index.hash,
+            ))
+            .to_string();
+        let object = staged_object_for_bytes(index_key, &index.bytes);
+        put_staged(&store, &object, Bytes::from(index.bytes)).await?;
+        let mut plan = push_plan();
+        plan.candidate_manifest.shard_index_hash = index.hash;
+        plan.staged_objects = vec![object];
+        let before = store.list_prefix(&ObjectPath::from("")).await?;
+        let result =
+            commit_service_metadata(&store, &router, &plan, &plan.candidate_manifest, 1).await;
+        assert!(matches!(result, Err(AuthServerError::Io(_))), "{result:?}");
+        assert_eq!(store.list_prefix(&ObjectPath::from("")).await?, before);
         Ok(())
     }
 

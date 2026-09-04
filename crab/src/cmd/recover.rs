@@ -2593,7 +2593,8 @@ async fn repair_remote_from_plan(
         });
     }
 
-    crate::cmd::push::run_push_repair_refspecs(args.remote.as_deref(), &refspecs, cancel).await?;
+    crate::cmd::push::run_push_prepared_refspecs(args.remote.as_deref(), &refspecs, None, cancel)
+        .await?;
     staged.refspecs = refspecs;
     Ok(staged)
 }

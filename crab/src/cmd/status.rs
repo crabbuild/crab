@@ -1079,7 +1079,9 @@ fn print_mirror_status(root: &Path) -> Result<()> {
     println!();
     println!("Mirror:");
 
-    // Check crab remote reachability by verifying the remote URL is configured.
+    // Local status cannot prove provider reachability without turning a fast
+    // working-tree command into a network operation. Report configuration and
+    // the pre-push guard honestly; `crab mirror --check` owns remote integrity.
     let crab_url = std::process::Command::new("git")
         .args(["remote", "get-url", &mirror.crab_remote])
         .current_dir(root)
@@ -1105,14 +1107,18 @@ fn print_mirror_status(root: &Path) -> Result<()> {
                 println!("  Pending:  {pending} files pending push to crab remote");
             }
 
-            format!("reachable ({url})")
+            let hook = crate::cmd::mirror::mirror_hook_status(root);
+            format!("configured ({url}) | pre-push hook: {}", hook.state)
         }
-        None => "unreachable (crab remote not configured)".to_owned(),
+        None => "unconfigured (crab remote not configured)".to_owned(),
     };
 
-    eprintln!(
-        "Mirror: {} ↔ {} | {}",
+    println!(
+        "  {} ↔ {} | {}",
         mirror.origin_remote, mirror.crab_remote, status
+    );
+    println!(
+        "  Run `crab mirror <source> <destination> --check` for remote drift and pointer proof."
     );
     Ok(())
 }

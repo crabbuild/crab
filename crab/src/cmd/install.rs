@@ -574,16 +574,15 @@ fn uninstall_completions() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mirror-mode hooks (Task 19)
-// ---------------------------------------------------------------------------
-
 /// Marker comment for mirror-mode hook lines. Used for idempotent
 /// append detection.
 const MIRROR_HOOK_MARKER: &str = "# Crab mirror:";
 
-pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh\n# Crab mirror: push published pointer recipes before refs go to origin\ncrab push --remote crab --quiet 2>/dev/null\n";
-
+pub(crate) const OBSOLETE_MIRROR_PRE_PUSH_BODY: &str = "# Crab mirror: push published pointer recipes before refs go to origin\ncrab push --remote crab --quiet 2>/dev/null\n";
+pub(crate) const MIRROR_PRE_PUSH_HOOK: &str = "#!/bin/sh
+# Crab mirror: publish the exact pre-push ref batch
+crab mirror-pre-push \"$@\" || exit $?
+";
 /// Hook definitions for mirror mode: (hook_name, content_lines).
 const MIRROR_HOOKS: &[(&str, &str)] = &[
     ("pre-push", MIRROR_PRE_PUSH_HOOK),
@@ -599,9 +598,8 @@ const MIRROR_HOOKS: &[(&str, &str)] = &[
 
 /// Install mirror-mode git hooks (pre-push, post-checkout, post-merge).
 ///
-/// If a hook file already exists, checks whether crab mirror lines are
-/// already present (idempotent). If not present, appends the crab lines
-/// after existing content. If the hook doesn't exist, creates it fresh.
+/// Composes recognized pre-push hooks around one stdin owner; custom pre-push
+/// commands require a manual merge and are never overwritten.
 pub fn install_mirror_hooks(root: &Path) -> Result<()> {
     let hooks_dir = resolve_hooks_dir(root)?;
     std::fs::create_dir_all(&hooks_dir)?;
@@ -609,25 +607,41 @@ pub fn install_mirror_hooks(root: &Path) -> Result<()> {
     for &(hook_name, full_content) in MIRROR_HOOKS {
         let hook_path = hooks_dir.join(hook_name);
 
-        // Extract just the crab-specific lines (everything after the shebang).
-        let crab_lines: String = full_content
-            .lines()
-            .filter(|line| line.contains(MIRROR_HOOK_MARKER) || line.starts_with("crab "))
-            .fold(String::new(), |mut lines, line| {
-                lines.push_str(line);
-                lines.push('\n');
-                lines
-            });
+        let crab_lines = full_content
+            .strip_prefix("#!/bin/sh\n")
+            .unwrap_or(full_content);
 
         if hook_path.exists() {
             let existing = std::fs::read_to_string(&hook_path)?;
 
-            // Already has mirror lines — skip (idempotent).
+            if hook_name == "pre-push" {
+                let updated = if existing == MIRROR_PRE_PUSH_HOOK
+                    || existing == format!("#!/bin/sh\n{OBSOLETE_MIRROR_PRE_PUSH_BODY}")
+                {
+                    MIRROR_PRE_PUSH_HOOK.to_owned()
+                } else {
+                    crate::cmd::lfs::install::with_mirror_hook(&existing).ok_or_else(|| CrabError::Configuration {
+                        key: "custom pre-push hook".to_owned(),
+                        origin: "preserve the existing hook and manually compose its stdin with `crab mirror-pre-push`; automatic append would lose the ref batch".to_owned(),
+                    })?
+                };
+                if updated != existing {
+                    std::fs::write(&hook_path, updated)?;
+                }
+                make_executable(&hook_path)?;
+                continue;
+            }
+
             if existing.contains(MIRROR_HOOK_MARKER) {
-                tracing::debug!(
-                    hook = hook_name,
-                    "mirror hook lines already present, skipping"
-                );
+                if !existing.contains(crab_lines) {
+                    return Err(CrabError::Configuration {
+                        key: "modified mirror hook block".to_owned(),
+                        origin: "preserve your custom hook and merge the current Crab mirror block manually"
+                            .to_owned(),
+                    });
+                }
+                tracing::debug!(hook = hook_name, "mirror hook lines already current");
+                make_executable(&hook_path)?;
                 continue;
             }
 
@@ -637,7 +651,7 @@ pub fn install_mirror_hooks(root: &Path) -> Result<()> {
                 content.push('\n');
             }
             content.push('\n');
-            content.push_str(&crab_lines);
+            content.push_str(crab_lines);
             std::fs::write(&hook_path, content)?;
             make_executable(&hook_path)?;
             tracing::debug!(
@@ -904,5 +918,68 @@ mod tests {
             .unwrap();
         let val = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         assert_eq!(val, "cat");
+    }
+
+    #[test]
+    fn mirror_hook_install_preserves_custom_input_consumers_for_manual_merge() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho before\n{}crab status\necho after\n",
+                OBSOLETE_MIRROR_PRE_PUSH_BODY
+            ),
+        )
+        .unwrap();
+
+        let before = std::fs::read_to_string(&hook).unwrap();
+        assert!(install_mirror_hooks(dir.path()).is_err());
+        assert_eq!(std::fs::read_to_string(hook).unwrap(), before);
+    }
+
+    #[test]
+    fn mirror_hook_install_upgrades_exact_released_block_idempotently() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git/hooks/pre-push");
+        std::fs::write(&hook, format!("#!/bin/sh\n{OBSOLETE_MIRROR_PRE_PUSH_BODY}")).unwrap();
+        install_mirror_hooks(dir.path()).unwrap();
+        install_mirror_hooks(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(hook).unwrap(), MIRROR_PRE_PUSH_HOOK);
+    }
+
+    #[test]
+    fn mirror_hook_install_rejects_edited_block_without_overwriting_it() {
+        let dir = temp_git_repo();
+        let hook = dir.path().join(".git/hooks/pre-push");
+        let content = "#!/bin/sh\n# Crab mirror: customized\ncrab push special\n";
+        std::fs::write(&hook, content).unwrap();
+        assert!(install_mirror_hooks(dir.path()).is_err());
+        assert_eq!(std::fs::read_to_string(hook).unwrap(), content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mirror_hook_passes_destination_and_propagates_guard_failure() {
+        let dir = temp_git_repo();
+        install_mirror_hooks(dir.path()).unwrap();
+        let bin = dir.path().join("test-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let crab = bin.join("crab");
+        std::fs::write(&crab, "#!/bin/sh\n[ \"$#\" = 3 ] && [ \"$1\" = mirror-pre-push ] && [ \"$2\" = origin ] || exit 99\nexit 23\n").unwrap();
+        make_executable(&crab).unwrap();
+        for (url, expected_exit) in [
+            ("crab://bucket/repo", 23),
+            ("https://example.com/repo.git", 23),
+        ] {
+            let result = Command::new("/bin/sh")
+                .arg(dir.path().join(".git/hooks/pre-push"))
+                .args(["origin", url])
+                .env("PATH", &bin)
+                .current_dir(dir.path())
+                .status()
+                .unwrap();
+            assert_eq!(result.code(), Some(expected_exit));
+        }
     }
 }

@@ -8,6 +8,7 @@ on:
       - "crab/scripts/verify-provider-qualification-report.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -20,6 +21,7 @@ on:
       - "crab/scripts/verify-provider-qualification-report.py"
       - "crab/scripts/e2e/test_verify_provider_qualification_report.py"
       - "crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py"
+      - "crab/scripts/e2e/test_add_commit_push_source.py"
       - "crates/crab-storage/**"
       - "crates/crab-metadata/src/pack_origin.rs"
       - "crates/crab-metadata/src/receipts.rs"
@@ -61,6 +63,7 @@ jobs:
       - name: Verify evidence schema tests
         run: |
           python3 -m unittest crab/scripts/e2e/test_verify_provider_qualification_report.py
+          python3 -m unittest discover -s crab/scripts/e2e -p test_add_commit_push_source.py
           python3 -m py_compile \
             crab/scripts/verify-provider-qualification-report.py \
             crab/scripts/e2e/test_verify_provider_qualification_report.py
@@ -129,6 +132,7 @@ jobs:
         run: cargo build -p crab --release --locked
 
       - name: Run canonical v1 cutover and add-push-clone canary
+        id: canary
         run: |
           python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
             --bucket "$CRAB_PROVIDER_QUALIFICATION_BUCKET" \
@@ -161,6 +165,19 @@ jobs:
         with:
           name: provider-qualification-s3-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/.ci/provider-qualification/s3/**
+          if-no-files-found: error
+          retention-days: 90
+
+      # The canary writes under runner.temp, outside the provider report tree.
+      # Keep failure diagnostics without changing the existing artifact layout.
+      - name: Upload canary diagnostics
+        if: always() && (steps.canary.outcome == 'success' || steps.canary.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-canary-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/report.json
+            ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/logs/*.log
           if-no-files-found: error
           retention-days: 90
 

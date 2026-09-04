@@ -3402,6 +3402,12 @@ mod storage {
                     .as_deref()
                     .map(super::decode_oid)
                     .transpose()?;
+                // A deleted tip may occur in neither the target refs nor an
+                // update delta. Resolve it explicitly so deletion can prove
+                // membership in the old closure before removing that ref.
+                if let Some(oid) = old_oid {
+                    required.insert(oid, ());
+                }
                 let new_oid = pending_edit
                     .new_oid
                     .as_deref()
@@ -5077,6 +5083,164 @@ mod tests {
             lazy.index.incremental_ordinals("refs/heads/main", 4, &[0]),
             Some(vec![2, 3, 4, 5])
         );
+    }
+
+    #[cfg(all(feature = "storage", feature = "remote-index"))]
+    #[tokio::test]
+    async fn catalog_deletion_resolves_tip_absent_from_surviving_refs() {
+        use std::sync::Arc;
+
+        use crab_storage::{Store, StoreLayout};
+        use crab_xet::hash::MerkleHash;
+        use object_store::memory::InMemory;
+
+        use crate::git_object_locator::{
+            GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitObjectLocatorWriter,
+            GitPackLocatorRecord,
+        };
+        use crate::manifests::{BulkData, PackManifestEntry, compact_pack_index};
+        use crate::ref_journal::RefJournalEdit;
+
+        for deleted_ref in ["refs/heads/retired", "refs/tags/released"] {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            let pack_id = MerkleHash::from([3; 32]);
+            let packs = [PackManifestEntry {
+                pack_id: pack_id.to_string(),
+                size: 256,
+                content_hash: pack_id.to_string(),
+                ref_tips: vec!["1".repeat(40), "2".repeat(40)],
+                object_count: 2,
+            }];
+            let (pack_hash, _, pack_index) = compact_pack_index(4, &packs).unwrap();
+            crate::manifest_store::upload_segmented_bulk(
+                &store,
+                &router,
+                &BulkData {
+                    shard_index: Default::default(),
+                    pack_index,
+                },
+            )
+            .await
+            .unwrap();
+            let mut base = Manifest::default_for_repo("refs/heads/main");
+            base.generation = 4;
+            base.pack_index_hash = pack_hash.clone();
+            base.refs = BTreeMap::from([
+                ("refs/heads/main".to_owned(), "1".repeat(40)),
+                (deleted_ref.to_owned(), "2".repeat(40)),
+            ]);
+            base.seal_git_validation();
+            let base_index = GitVisibilityIndex::new(
+                base.generation,
+                &base.pack_index_hash,
+                &base.git_validation_digest,
+                BTreeMap::from([
+                    ("refs/heads/main".to_owned(), vec!["1".repeat(40)]),
+                    (deleted_ref.to_owned(), vec!["1".repeat(40), "2".repeat(40)]),
+                ]),
+            )
+            .unwrap();
+            let pack_index_hash = MerkleHash::from_hex(&pack_hash).unwrap();
+            let mut writer =
+                GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                    .await
+                    .unwrap();
+            let binding = writer
+                .bind_packs(&[GitPackLocatorRecord {
+                    pack_id,
+                    committed_generation: 4,
+                    pack_index_hash,
+                    object_count: 2,
+                    pack_size: 256,
+                }])
+                .await
+                .unwrap()[0];
+            let entries = [0x11, 0x22]
+                .into_iter()
+                .enumerate()
+                .map(|(index, byte)| GitObjectLocatorEntry {
+                    oid: [byte; 20],
+                    location: GitObjectLocation {
+                        pack_offset: 12 + index as u64 * 64,
+                        entry_len: 64,
+                        crc32: index as u32 + 1,
+                    },
+                    metadata: Default::default(),
+                })
+                .collect::<Vec<_>>();
+            writer.write_locations(binding, &entries).await.unwrap();
+            writer
+                .set_coverage(GitLocatorCoverage {
+                    generation: 4,
+                    pack_index_hash,
+                })
+                .await
+                .unwrap();
+            writer.close().await.unwrap();
+            upload_if_absent(&store, &router, &base_index)
+                .await
+                .unwrap();
+
+            let mut target = base.clone();
+            target.generation = 5;
+            target.refs.remove(deleted_ref);
+            target.seal_git_validation();
+            let mut writer =
+                GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                    .await
+                    .unwrap();
+            writer
+                .set_coverage(GitLocatorCoverage {
+                    generation: 5,
+                    pack_index_hash,
+                })
+                .await
+                .unwrap();
+            writer.close().await.unwrap();
+            let edits = [RefJournalEdit {
+                ref_name: deleted_ref.to_owned(),
+                old_oid: Some("2".repeat(40)),
+                new_oid: None,
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }];
+            assert!(
+                prepare_catalog_journal_edits(
+                    &store,
+                    &router,
+                    &base,
+                    &edits,
+                    &target.refs,
+                    target.generation,
+                    &target.pack_index_hash,
+                    &target.git_validation_digest,
+                )
+                .await
+                .unwrap()
+            );
+            assert!(
+                ensure_catalog_bound(&store, &router, &target)
+                    .await
+                    .unwrap()
+            );
+            let proof = read_catalog_with_format(
+                &store,
+                &router,
+                target.generation,
+                &target.pack_index_hash,
+                &target.git_validation_digest,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                proof
+                    .index
+                    .ordinals_for_refs(["refs/heads/main", deleted_ref]),
+                vec![0]
+            );
+        }
     }
 
     #[cfg(feature = "storage")]

@@ -2870,7 +2870,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
         {
             "default": [],
             "active-probe": ["dep:reqwest"],
-            "local-cache": ["dep:filetime", "dep:rusqlite", "dep:tokio"],
+            "local-cache": ["dep:filetime", "dep:fs4", "dep:rusqlite", "dep:tokio", "dep:tokio-util"],
             "remote-client": ["active-probe", "dep:futures-util", "dep:tokio"],
             "xet-chunk-cache": [
                 "dep:base64",
@@ -2887,6 +2887,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
         "base64",
         "crc32fast",
         "filetime",
+        "fs4",
         "reqwest",
         "rusqlite",
         "tokio",
@@ -2922,7 +2923,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
                 "--depth",
                 "2",
             ],
-            required={"filetime", "rusqlite", "tokio"},
+            required={"filetime", "fs4", "rusqlite", "tokio", "tokio-util"},
             forbidden={"crab-cache-server", "crab-storage", "object_store", "reqwest", "xet-client"},
         ),
         check_tree_packages(

@@ -889,6 +889,9 @@ mod tests {
         let source_xorbs = builder.finalize().unwrap();
         let source_xorb_hash = source_xorbs[0].hash;
         let source_router = StoreLayout::new(store.clone(), source_repo.to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &source_router)
+            .await
+            .unwrap();
         let source_objects = upload_view_crab_objects(
             &store,
             &source_router,

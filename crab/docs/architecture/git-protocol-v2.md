@@ -9,13 +9,62 @@ receive-pack service, HTTP smart endpoint, callback, queue, or protocol
 gateway.
 
 This document describes the implemented profile on the current development
-line. RustFS qualification is green, but provider and release qualification
-remain before this becomes a released support claim.
+line. The machine-readable support authority is
+[`git-capability-matrix.json`](git-capability-matrix.json), with the generated
+human view in
+[`git-capability-matrix.md`](git-capability-matrix.md). Only matrix cells marked
+`supported` are compatibility promises; provider and platform rows marked
+`preview` remain qualification work rather than inferred support.
 
 The ownership decision is recorded in
 [ADR: Keep Git protocol v2 inside the local helper](../design/adr-git-protocol-v2-local-helper.md).
 
 ## Implemented profile
+
+### Bucket-only user contract
+
+The deployment target is Git plus the installed `git-remote-crab` helper,
+object-store credentials, and a qualified bucket. No Crab data server is
+required. "S3-compatible" alone is insufficient: the provider must preserve
+the conditional-create/CAS, range-read, listing, and durability contracts in
+the [storage layer](storage-layer.md). Provider and operating-system support
+still follow the evidence matrix above.
+
+Git owns local operations such as commit, merge, rebase, stash, and worktree
+management; Crab owns remote discovery, object transfer, and ref publication.
+The real-Git lifecycle runner additionally exercises independent-client
+`pull --rebase` and `pull --ff-only`, notes round trips, pushes from linked
+worktrees, recursive bucket-backed submodules, and bare mirror clones. These
+checks supplement rather than replace the version/provider qualification gates.
+
+The helper supports `git push --dry-run`, including atomic mixed create,
+force-update, and deletion previews. Git checks its advertised ref snapshot,
+ancestry, and lease expectations before submitting the proposed batch. Crab
+returns preview statuses before opening staging, preparing protected write
+sessions, acquiring write locks, uploading objects, or publishing refs. A
+preview is not a commit receipt or a guarantee of later authorization or
+concurrency outcomes. User-installed client hooks still follow Git's own
+execution rules; this does not promise to undo their side effects.
+
+Recursive submodule operations need explicit trust for a custom transport,
+as required by [Git's protocol policy](https://git-scm.com/docs/git-config#Documentation/git-config.txt-protocolallow).
+For repositories whose submodule URLs have been reviewed, scope that trust to
+the invocation rather than allowing every protocol globally:
+
+```bash
+git -c protocol.crab.allow=always clone --recurse-submodules crab://bucket/team/repo
+```
+
+"All commands" is not a support claim. Date/ref-exclusion shallow selectors
+remain unimplemented; signed push certificates, push options intended for
+server-side hooks, and remote archive service need separate protocol contracts.
+Signed commits/tags are Git objects and are distinct from signed push requests.
+PRs, CI execution, and mandatory server-side hooks cannot execute inside a
+passive bucket. Clients with unrestricted bucket write credentials can bypass
+client-side policy; mandatory branch protection needs a separate trusted
+authorization boundary and is not part of the bucket-only deployment promise.
+
+### Fetch and discovery
 
 The helper advertises `stateless-connect` only after it can open a single
 manifest generation with matching pack-index, locator, and all-object
@@ -33,6 +82,11 @@ visibility coverage. The session supports:
   producer emits a self-contained, non-delta pack because no external base is
   required or assumed;
 - standard local Git pack installation on the v2 path.
+
+An empty manifest is a valid ref snapshot without a catalog. Empty clones and
+`ls-remote` complete through v2; clients requesting `unborn` receive the
+configured HEAD target unless hidden. Object wants against that empty snapshot
+are rejected before pack production, without inventing locator coverage.
 
 The filter forms are parsed and planned before object bytes are read.
 `blob:limit` uses Git's binary `k`, `m`, and `g` suffixes and retains blobs
@@ -164,6 +218,15 @@ checkout: `crab clone` does not request a Git partial clone, while ordinary Git
 can request one of the supported filter forms directly.
 
 ## Operations and repair
+
+The protocol qualification separates post-push read admission from steady-state
+filter reads. A fresh blobless clone of the pushed branch exercises journal
+compaction and derived-index repair before the filter matrix captures its
+canonical-object inventory. Fetching back into the writer is insufficient:
+Git may skip object transfer when the tip is already present locally. Subsequent
+filter reads must leave canonical object counts and bytes unchanged; generated
+response-pack cache and coordination objects are accounted for separately. This
+is not a claim that first-read repair works with read-only object-store credentials.
 
 Direct pushes and protected/service publication paths publish visibility
 before the corresponding ref or manifest commit. Protected receive extracts

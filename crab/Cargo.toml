@@ -178,6 +178,7 @@ xet-runtime = { workspace = true }
 # Async runtime.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs", "time", "signal", "process"] }
 tokio-util = { workspace = true, features = ["rt", "io"] }
+process-wrap = { version = "10.0.0", default-features = false, features = ["std", "process-group", "job-object"] }
 
 # Object storage abstraction.
 object_store = { workspace = true, features = [
@@ -257,7 +258,7 @@ unicode-normalization = "0.1"
 sha1 = "0.10"
 
 # SHA-256 for LFS object integrity verification.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Base64 encoding/decoding for JWT parsing and PKCE challenges.
 base64 = "0.22"
@@ -285,6 +286,7 @@ gix-packetline = { workspace = true, features = ["blocking-io"] }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-validate = { workspace = true }
 gix-object = { workspace = true }
+gix-quote = { workspace = true }
 gix-traverse = { workspace = true }
 gix-fsck = { workspace = true, features = ["sha1"] }
 gix-discover = { workspace = true }

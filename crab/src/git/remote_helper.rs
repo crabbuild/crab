@@ -4,6 +4,7 @@
 //! communicate with remote helpers. Commands are read line-by-line,
 //! batched until a blank line, then dispatched.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
@@ -21,9 +22,11 @@ use crate::core::output::{JsonlStream, OutputMode};
 use crate::git::fetch::{CommitGraphProvider, FetchConfig, PackInfo, PackStore, run_fetch_batch};
 use crate::git::push::{
     PushConfig, PushRejectReason, PushResult, RefPushOutcome,
-    configure_active_active_push_coordinator, record_push_audit_event,
+    configure_active_active_push_coordinator, duplicate_destination_result,
+    record_push_audit_event,
 };
 use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
+use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
@@ -284,6 +287,10 @@ pub struct HelperOptions {
     /// partial writes when any ref is rejected. Set by git via
     /// `option atomic true` during smart-HTTP receive-pack.
     pub atomic: bool,
+    /// Preview Git's proposed ref batch without entering the write pipeline.
+    pub dry_run: bool,
+    /// Exact old values supplied by Git's `option cas`; `None` requires absence.
+    pub expected_refs: BTreeMap<String, Option<String>>,
     /// When `true`, Git asked fetch to include annotated tag objects whose
     /// targets are transferred. Crab fetches complete packs, so accepting this
     /// hint requires no separate object-transfer path.
@@ -299,6 +306,8 @@ impl Default for HelperOptions {
             fetch_options: FetchOptions::default(),
             filter_requested: false,
             atomic: false,
+            dry_run: false,
+            expected_refs: BTreeMap::new(),
             followtags: false,
         }
     }
@@ -674,7 +683,7 @@ pub async fn run_remote_helper(
             &options,
             &mut writer,
             None,
-            None,
+            &PushStaging::Missing,
             "",
             &mut preflight_cache,
             remote_name,
@@ -723,14 +732,10 @@ pub async fn run_remote_helper(
             }
         };
 
-    // Open the staging area for the push pipeline.
-    let staging = open_staging_for_push().await;
-
     // Load push state for incremental walk (used by native push pipeline).
     let repo_root = push_state_repo_root();
     let context = RemoteHelperContext {
         store: resolved.store,
-        staging,
         prefix: resolved.repository_prefix,
         cache: SessionCache::new(config),
         push_state: PushState::load(&repo_root),
@@ -758,7 +763,6 @@ pub async fn run_remote_helper(
 
 struct RemoteHelperContext {
     store: crate::storage::store::Store,
-    staging: Option<std::sync::Arc<crab_staging::StagingAreaReadOnly>>,
     prefix: String,
     cache: SessionCache,
     push_state: PushState,
@@ -808,7 +812,6 @@ where
 {
     let RemoteHelperContext {
         store,
-        staging,
         prefix,
         mut cache,
         mut push_state,
@@ -912,12 +915,19 @@ where
                 .await?;
             continue;
         }
+        // Fetch/list never need local staging. Open one reader per push batch
+        // so a damaged local index cannot block reads or retain a session lock.
+        let staging = if matches!(batch, Batch::Push(_)) && !options.dry_run {
+            open_staging_for_push().await?
+        } else {
+            PushStaging::Missing
+        };
         Box::pin(dispatch_batch(
             &batch,
             &options,
             &mut writer,
             Some(&store),
-            staging.as_ref(),
+            &staging,
             &prefix,
             &mut cache,
             remote_name,
@@ -971,36 +981,11 @@ async fn load_replica_discovery_for_session(
     Ok(())
 }
 
-/// Open the staging area for the push pipeline (read-only).
-///
-/// Uses a shared lock so the push can read staged chunks without
-/// blocking concurrent filter-process writers.
-///
-/// A failure to acquire the read lock (e.g. because another process
-/// holds an exclusive write lock) collapses to `None`. The push
-/// pipeline's step 2 (`lookup_staging`) is responsible for refusing
-/// the push when `None` is combined with a non-empty pointer set
-/// discovered in step 1 — otherwise we'd silently advance the ref to
-/// commits whose pointer blobs reference never-uploaded xorbs.
-async fn open_staging_for_push() -> Option<std::sync::Arc<crab_staging::StagingAreaReadOnly>> {
-    let staging_root = push_staging_root()?;
-
-    if !staging_root.exists() {
-        return None;
-    }
-
-    match crab_staging::StagingAreaReadOnly::open_blocking_default(staging_root).await {
-        Ok(sa) => Some(std::sync::Arc::new(sa)),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "staging area unavailable for push; pipeline will refuse to \
-                 upload any new pointer blobs discovered in this push. \
-                 Resolve the lock holder and retry."
-            );
-            None
-        }
-    }
+async fn open_staging_for_push() -> Result<PushStaging> {
+    let Some(root) = push_staging_root() else {
+        return Ok(PushStaging::Missing);
+    };
+    PushStaging::open(root).await
 }
 
 fn push_staging_root() -> Option<std::path::PathBuf> {
@@ -1133,6 +1118,32 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
 ) -> Result<()> {
     match key {
+        "dry-run" => {
+            options.dry_run = match value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(CrabError::Protocol(format!(
+                        "invalid dry-run value: {value}"
+                    )));
+                }
+            };
+            writer.write_all(b"ok\n").await?;
+        }
+        "cas" => {
+            let (name, expected) = parse_ref_lease(value)?;
+            if options
+                .expected_refs
+                .get(&name)
+                .is_some_and(|old| old != &expected)
+            {
+                return Err(CrabError::Protocol(
+                    "conflicting ref lease expectations".to_owned(),
+                ));
+            }
+            options.expected_refs.insert(name, expected);
+            writer.write_all(b"ok\n").await?;
+        }
         "progress" => {
             options.progress = value == "true";
             writer.write_all(b"ok\n").await?;
@@ -1285,6 +1296,35 @@ async fn handle_option<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
+fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
+    if value.starts_with('"') && !value.ends_with('"') {
+        return Err(CrabError::Protocol(
+            "unterminated quoted ref lease".to_owned(),
+        ));
+    }
+    let (decoded, consumed) = gix_quote::ansi_c::undo(value.as_bytes().into())
+        .map_err(|error| CrabError::Protocol(format!("invalid quoted ref lease: {error}")))?;
+    if consumed != value.len() {
+        return Err(CrabError::Protocol("trailing data in ref lease".to_owned()));
+    }
+    let decoded = std::str::from_utf8(decoded.as_ref())
+        .map_err(|error| CrabError::Protocol(format!("ref lease is not UTF-8: {error}")))?;
+    let (name, oid) = decoded
+        .rsplit_once(':')
+        .ok_or_else(|| CrabError::Protocol("ref lease requires ref:oid".to_owned()))?;
+    if !name.starts_with("refs/")
+        || crate::git::refname::validate_push_refname(name).is_err()
+        || oid.len() != 40
+        || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CrabError::Protocol(
+            "invalid ref lease name or SHA-1".to_owned(),
+        ));
+    }
+    let expected = (!oid.bytes().all(|byte| byte == b'0')).then(|| oid.to_ascii_lowercase());
+    Ok((name.to_owned(), expected))
+}
+
 async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     store: &crate::storage::store::Store,
@@ -1324,7 +1364,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     options: &HelperOptions,
     writer: &mut W,
     store: Option<&crate::storage::store::Store>,
-    staging: Option<&std::sync::Arc<crab_staging::StagingAreaReadOnly>>,
+    staging: &PushStaging,
     prefix: &str,
     cache: &mut SessionCache,
     remote_name: &str,
@@ -1429,6 +1469,42 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     }
                 }
 
+                if options.dry_run {
+                    // Git has already checked advertised refs, ancestry, and
+                    // leases. Like send-pack's dry-run, these are previews,
+                    // not receipts: do not prepare auth sessions or acquire locks.
+                    let blocker = pre_rejected.first().filter(|_| options.atomic);
+                    let mut result =
+                        duplicate_destination_result(&ordered_specs).unwrap_or_else(|| {
+                            PushResult::new(
+                                specs
+                                    .iter()
+                                    .map(|spec| {
+                                        let outcome = match blocker {
+                                            Some((dst, _)) => RefPushOutcome::Rejected(
+                                                PushRejectReason::AtomicAbort {
+                                                    blocked_by: dst.clone(),
+                                                },
+                                            ),
+                                            None => RefPushOutcome::Ok,
+                                        };
+                                        (spec.dst.clone(), outcome)
+                                    })
+                                    .collect(),
+                            )
+                        });
+                    for (dst, reason) in pre_rejected {
+                        result
+                            .outcomes
+                            .insert(dst, RefPushOutcome::Rejected(reason));
+                    }
+                    writer
+                        .write_all(format_push_response(&result, &ordered_specs).as_bytes())
+                        .await?;
+                    writer.flush().await?;
+                    return Ok(());
+                }
+
                 let config = cache.config().clone();
                 let mut base_config = PushConfig::from_config(&config);
                 let mut push_setup_error = if specs.is_empty() {
@@ -1455,7 +1531,12 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         match store {
                             Some(read_store) => {
                                 match crate::git::protected_push::prepare_managed_push(
-                                    &config, repository, read_store, prefix, &specs, staging,
+                                    &config,
+                                    repository,
+                                    read_store,
+                                    prefix,
+                                    &specs,
+                                    staging.reader(),
                                     cancel,
                                 )
                                 .await
@@ -1561,7 +1642,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         NativePushInputs::new(
                             push_store,
                             caching_store,
-                            staging.cloned(),
+                            staging.clone(),
                             router,
                             push_state,
                             remote_name,
@@ -1664,6 +1745,10 @@ fn native_push_config_for_helper(
     native_config.color = options.progress && crate::git::progress::is_tty();
     native_config.emit_summary = false;
     native_config.push.atomic = options.atomic;
+    native_config
+        .push
+        .expected_refs
+        .clone_from(&options.expected_refs);
 
     // Git owns stdout for remote helpers. Human-readable phase progress
     // can go to stderr, but the final stdout summary would be parsed as
@@ -1674,6 +1759,10 @@ fn native_push_config_for_helper(
     }
     native_config.mirror_git_only =
         std::env::var_os(crate::git::push_native::MIRROR_GIT_ONLY_ENV).is_some();
+    if native_config.mirror_git_only {
+        native_config.push.mirror_plan_id =
+            std::env::var(crate::git::push_native::MIRROR_PLAN_ID_ENV).ok();
+    }
 
     native_config
 }
@@ -2676,8 +2765,10 @@ async fn fetch_promisor_objects(
             cancel,
         )
         .await?;
-    let visible_refs =
-        crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
+    let visible_refs = crate::git::upload_pack_wire::visible_ref_names(
+        repository.refs(),
+        &config.transfer_hide_refs,
+    )?;
     let visible_tips = repository
         .refs()
         .entries
@@ -3105,7 +3196,6 @@ mod tests {
     ) -> RemoteHelperContext {
         RemoteHelperContext {
             store,
-            staging: None,
             prefix: prefix.to_owned(),
             cache: SessionCache::new(crate::core::config::Config::default()),
             push_state: PushState::default(),
@@ -3209,6 +3299,33 @@ mod tests {
     async fn list_for_push_returns_empty_stub() {
         let output = run("list for-push\n").await;
         assert_eq!(output, "\n");
+    }
+
+    #[tokio::test]
+    async fn list_session_does_not_open_a_damaged_staging_index() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let repo = temporary.path();
+        run_git(repo, &["init", "-q"]);
+        let staging = repo.join(".crab/staging");
+        std::fs::create_dir_all(&staging).expect("create staging directory");
+        std::fs::write(staging.join("index.db"), b"not a SQLite database")
+            .expect("write damaged index");
+        let _git_guard = GitEnvCwdGuard::set(repo, &repo.join(".git"), repo);
+        assert!(open_staging_for_push().await.is_err());
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "damaged-staging-read").await;
+        let context = test_context(store, "damaged-staging-read", repo.to_path_buf());
+
+        let (output, result) = run_with_context(
+            "list\nlist for-push\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        result.expect("read-only sessions must ignore local staging damage");
+        assert_eq!(output, "\n\n");
     }
 
     #[test]
@@ -3612,6 +3729,9 @@ mod tests {
             ref_registry_hash: None,
         };
         manifest.seal_git_validation();
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest)
             .await
             .expect("write manifest");
@@ -4008,7 +4128,7 @@ mod tests {
             &HelperOptions::default(),
             &mut writer,
             Some(&store),
-            None,
+            &PushStaging::Missing,
             "remote-helper-cancel",
             &mut cache,
             "origin",
@@ -4141,7 +4261,7 @@ mod tests {
             &HelperOptions::default(),
             &mut writer,
             Some(&store),
-            Some(&staging),
+            &PushStaging::Ready(staging),
             "remote-helper-dispatch",
             &mut cache,
             "origin",
@@ -4427,6 +4547,64 @@ mod tests {
     }
 
     #[test]
+    fn ref_lease_parses_absence_existing_and_git_quoted_names() {
+        for (value, name, oid) in [
+            (
+                format!("refs/heads/main:{}", "0".repeat(40)),
+                "refs/heads/main",
+                None,
+            ),
+            (
+                format!("refs/heads/main:{}", "A".repeat(40)),
+                "refs/heads/main",
+                Some("a".repeat(40)),
+            ),
+            (
+                format!(r#""refs/heads/\303\251:{}""#, "b".repeat(40)),
+                "refs/heads/é",
+                Some("b".repeat(40)),
+            ),
+        ] {
+            assert_eq!(parse_ref_lease(&value).unwrap(), (name.to_owned(), oid));
+        }
+    }
+
+    #[test]
+    fn ref_lease_rejects_malformed_values() {
+        for value in [
+            "refs/heads/main",
+            "refs/heads/main:bad",
+            "HEAD:0000000000000000000000000000000000000000",
+            "\"refs/heads/main:0000000000000000000000000000000000000000",
+            "\"refs/heads/main:0000000000000000000000000000000000000000\" trailing",
+        ] {
+            assert!(parse_ref_lease(value).is_err(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ref_lease_option_reaches_native_push_and_rejects_conflicting_repeat() {
+        let mut options = HelperOptions::default();
+        let mut writer = Vec::new();
+        let value = format!("refs/heads/main:{}", "a".repeat(40));
+        handle_option("cas", &value, &mut options, &mut writer)
+            .await
+            .unwrap();
+        let native =
+            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        assert_eq!(
+            native.push.expected_refs.get("refs/heads/main"),
+            Some(&Some("a".repeat(40)))
+        );
+        let conflicting = format!("refs/heads/main:{}", "b".repeat(40));
+        assert!(
+            handle_option("cas", &conflicting, &mut options, &mut writer)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
     fn helper_native_push_config_does_not_treat_fetch_followtags_as_push_mode() {
         let options = HelperOptions {
             atomic: true,
@@ -4687,6 +4865,60 @@ mod tests {
         assert!(output.contains("error refs/heads/main atomic-abort"));
         assert!(output.contains("error refs/tags/v1^{} bad-refname"));
         assert!(!output.contains("ok refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_previews_without_remote_state_or_auth_preparation() {
+        let root = tempfile::tempdir().expect("push state tempdir");
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let mut context = test_context(store.clone(), "preview", root.path().to_path_buf());
+        context.cache.config.auth.provider = crate::core::config::AuthProvider::CrabAuth;
+        let (output, result) = run_with_context(
+            "option dry-run true\npush refs/heads/main:refs/heads/main\npush :refs/heads/retired\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        result.expect("preview must not prepare auth or open a remote repository");
+        assert_eq!(output, "ok\nok refs/heads/main\nok refs/heads/retired\n\n");
+        assert!(
+            store
+                .list_prefix(&object_store::path::Path::from(""))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_preserves_atomic_parse_rejection() {
+        let output = run("option dry-run true\noption atomic true\n\
+            push refs/heads/main:refs/heads/main\n\
+            push refs/tags/v1^{}:refs/tags/v1^{}\n\n")
+        .await;
+        assert!(output.contains("error refs/heads/main atomic-abort"));
+        assert!(output.contains("error refs/tags/v1^{} bad-refname"));
+        assert!(!output.contains("ok refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn dry_run_option_is_reversible_and_rejects_invalid_values() {
+        let mut options = HelperOptions::default();
+        let mut output = Vec::new();
+        handle_option("dry-run", "true", &mut options, &mut output)
+            .await
+            .unwrap();
+        assert!(options.dry_run);
+        handle_option("dry-run", "false", &mut options, &mut output)
+            .await
+            .unwrap();
+        assert!(!options.dry_run);
+        assert!(
+            handle_option("dry-run", "maybe", &mut options, &mut output)
+                .await
+                .is_err()
+        );
     }
 
     // --- format_push_response ---
@@ -5522,6 +5754,9 @@ mod tests {
         };
         manifest.seal_git_validation();
 
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &manifest).await.unwrap();
 
         let output = read_remote_refs_for_advertisement(&store, &router, &[])

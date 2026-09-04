@@ -10,11 +10,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gix_hash::ObjectId;
-use gix_object::{Find, FindExt};
+use gix_object::{Find, FindExt, FindHeader};
 use tracing::{debug, warn};
 
 use crab_types::pointer::Pointer;
 use thiserror::Error;
+
+mod scan;
+pub use scan::{PointerScan, PointerScanLimits, scan_pointers};
 
 /// Errors returned while traversing a local Git object database.
 #[derive(Debug, Error)]
@@ -25,6 +28,10 @@ pub enum WalkError {
     BeyondShallowBoundary { oid: String },
     #[error("reachable walk exceeded {maximum} objects (observed at least {actual})")]
     LimitExceeded { actual: usize, maximum: usize },
+    #[error("Git pointer scan cancelled")]
+    Cancelled,
+    #[error("Git pointer scan exceeded {maximum} object lookups")]
+    LookupLimitExceeded { maximum: usize },
     #[error("{operation}")]
     Git {
         operation: String,
@@ -38,12 +45,10 @@ pub type Result<T> = std::result::Result<T, WalkError>;
 
 fn commit_walk_error(tip: &str, err: gix_traverse::commit::simple::Error) -> WalkError {
     match err {
-        gix_traverse::commit::simple::Error::Find(source) => {
-            debug!(
-                error = %source,
-                tip,
-                "reachable walk crossed missing local history"
-            );
+        gix_traverse::commit::simple::Error::Find(
+            gix_object::find::existing_iter::Error::NotFound { .. },
+        ) => {
+            debug!(tip, "reachable walk crossed missing local history");
             WalkError::BeyondShallowBoundary {
                 oid: tip.to_owned(),
             }
@@ -151,6 +156,14 @@ fn walk_reachable_with_limit(
         source: Box::new(source),
     })?;
 
+    walk_commits(&odb, refs, maximum)
+}
+
+fn walk_commits(
+    odb: &(impl Find + FindHeader),
+    refs: &[(String, String)],
+    maximum: Option<usize>,
+) -> Result<ReachableSet> {
     let mut result = ReachableSet::new();
 
     // Parse ref SHAs into ObjectIds and use them as tips for the commit walk.
@@ -177,7 +190,7 @@ fn walk_reachable_with_limit(
         .unwrap_or("(unknown)");
 
     // Walk commits using gix-traverse's Simple iterator.
-    let commit_walk = gix_traverse::commit::Simple::new(tips, &odb);
+    let commit_walk = gix_traverse::commit::Simple::new(tips, odb);
 
     for info_result in commit_walk {
         let info = info_result.map_err(|e| commit_walk_error(error_tip, e))?;
@@ -202,7 +215,7 @@ fn walk_reachable_with_limit(
         };
 
         // Walk the tree breadth-first, collecting trees and blobs.
-        walk_tree(&odb, &tree_id, &mut result, maximum)?;
+        walk_tree(odb, &tree_id, &mut result, maximum)?;
     }
 
     debug!(
@@ -257,65 +270,38 @@ fn walk_reachable_by_ref_with_limit(
         source: Box::new(source),
     })?;
 
-    // A push client may not have tips concurrently published by another
-    // writer. Prove every root is locally available before walking any large
-    // closure so an incomplete ODB fails in O(refs), not O(repository size).
-    for (_, oid) in refs {
-        let root = ObjectId::from_hex(oid.as_bytes()).map_err(|source| WalkError::Git {
-            operation: format!("invalid ref object {oid}"),
-            source: Box::new(source),
-        })?;
-        let mut buf = Vec::new();
-        if odb
-            .try_find(&root, &mut buf)
-            .map_err(|source| WalkError::Git {
-                operation: format!("failed to read ref object {root}"),
-                source,
-            })?
-            .is_none()
-        {
-            return Err(WalkError::BeyondShallowBoundary { oid: oid.clone() });
-        }
-    }
-
     let mut closures = BTreeMap::new();
+    visit_reachable_by_ref(&odb, refs, peeled_refs, maximum, |name, closure| {
+        closures.insert(name.to_owned(), closure);
+        Ok(())
+    })?;
+    Ok(closures)
+}
+
+fn visit_reachable_by_ref(
+    odb: &(impl Find + FindHeader),
+    refs: &[(String, String)],
+    peeled_refs: &BTreeMap<String, String>,
+    maximum: Option<usize>,
+    mut visit: impl FnMut(&str, ReachableSet) -> Result<()>,
+) -> Result<()> {
+    validate_ref_roots(odb, refs)?;
+
     let mut seen_objects = maximum.map(|_| HashSet::new());
     for (name, oid) in refs {
         let mut closure = ReachableSet::new();
-        let traversal_tip = if peeled_refs.contains_key(name) {
-            collect_annotated_tag_chain(git_dir, oid, &mut closure, maximum)?
-                .to_hex()
-                .to_string()
-        } else {
-            oid.clone()
-        };
-        check_reachable_limit(&closure, maximum)?;
-        let root =
-            ObjectId::from_hex(traversal_tip.as_bytes()).map_err(|source| WalkError::Git {
-                operation: format!("invalid ref object {traversal_tip}"),
-                source: Box::new(source),
-            })?;
-        let mut buf = Vec::new();
-        let data = odb
-            .try_find(&root, &mut buf)
-            .map_err(|source| WalkError::Git {
-                operation: format!("failed to read ref object {root}"),
-                source,
-            })?
-            .ok_or_else(|| WalkError::BeyondShallowBoundary {
-                oid: traversal_tip.clone(),
-            })?;
-        match data.kind {
+        let (root, kind) = ref_target(odb, name, oid, peeled_refs, &mut closure, maximum)?;
+        match kind {
             gix_object::Kind::Commit => {
                 merge_reachable(
                     &mut closure,
-                    walk_reachable_with_limit(git_dir, &[(name.clone(), traversal_tip)], maximum)?,
+                    walk_commits(odb, &[(name.clone(), root.to_string())], maximum)?,
                 );
             }
-            gix_object::Kind::Tree => walk_tree(&odb, &root, &mut closure, maximum)?,
+            gix_object::Kind::Tree => walk_tree(odb, &root, &mut closure, maximum)?,
             gix_object::Kind::Blob => {
                 closure.blobs.insert(oid_to_bytes(&root));
-                check_blob_for_pointer(&odb, &root, &mut closure);
+                check_blob_for_pointer(odb, &root, &mut closure)?;
                 check_reachable_limit(&closure, maximum)?;
             }
             gix_object::Kind::Tag => {
@@ -334,9 +320,119 @@ fn walk_reachable_by_ref_with_limit(
                 });
             }
         }
-        closures.insert(name.clone(), closure);
+        visit(name, closure)?;
     }
-    Ok(closures)
+    Ok(())
+}
+
+fn validate_ref_roots(odb: &impl FindHeader, refs: &[(String, String)]) -> Result<()> {
+    // A push client may not have tips concurrently published by another
+    // writer. Prove every root is locally available before walking any large
+    // closure so an incomplete ODB fails in O(refs), not O(repository size).
+    for (_, oid) in refs {
+        let root = ObjectId::from_hex(oid.as_bytes()).map_err(|source| WalkError::Git {
+            operation: format!("invalid ref object {oid}"),
+            source: Box::new(source),
+        })?;
+        if odb
+            .try_header(&root)
+            .map_err(|source| WalkError::Git {
+                operation: format!("failed to read ref object {root}"),
+                source,
+            })?
+            .is_none()
+        {
+            return Err(WalkError::BeyondShallowBoundary { oid: oid.clone() });
+        }
+    }
+
+    Ok(())
+}
+
+fn ref_target(
+    odb: &(impl Find + FindHeader),
+    name: &str,
+    oid: &str,
+    peeled_refs: &BTreeMap<String, String>,
+    closure: &mut ReachableSet,
+    maximum: Option<usize>,
+) -> Result<(ObjectId, gix_object::Kind)> {
+    let object = ObjectId::from_hex(oid.as_bytes()).map_err(|source| WalkError::Git {
+        operation: format!("invalid ref object {oid}"),
+        source: Box::new(source),
+    })?;
+    let annotated = odb
+        .try_header(&object)
+        .map_err(|source| WalkError::Git {
+            operation: format!("failed to read ref object {object}"),
+            source,
+        })?
+        .is_some_and(|header| header.kind == gix_object::Kind::Tag);
+    let traversal_tip = if annotated || peeled_refs.contains_key(name) {
+        collect_annotated_tag_chain(odb, oid, closure, maximum)?
+            .to_hex()
+            .to_string()
+    } else {
+        oid.to_owned()
+    };
+    check_reachable_limit(closure, maximum)?;
+    let root = ObjectId::from_hex(traversal_tip.as_bytes()).map_err(|source| WalkError::Git {
+        operation: format!("invalid ref object {traversal_tip}"),
+        source: Box::new(source),
+    })?;
+    let data = odb
+        .try_header(&root)
+        .map_err(|source| WalkError::Git {
+            operation: format!("failed to read ref object {root}"),
+            source,
+        })?
+        .ok_or_else(|| WalkError::BeyondShallowBoundary {
+            oid: traversal_tip.clone(),
+        })?;
+    if data.kind == gix_object::Kind::Tag {
+        return Err(WalkError::Git {
+            operation: format!("annotated tag {root} did not resolve"),
+            source: Box::new(std::io::Error::other("tag chain did not resolve")),
+        });
+    }
+    Ok((root, data.kind))
+}
+
+fn walk_ref_union(
+    odb: &(impl Find + FindHeader),
+    refs: &[(String, String)],
+    maximum: usize,
+) -> Result<ReachableSet> {
+    validate_ref_roots(odb, refs)?;
+    let mut result = ReachableSet::new();
+    let mut commits = Vec::new();
+    let mut other_roots = Vec::new();
+    for (name, oid) in refs {
+        let (root, kind) =
+            ref_target(odb, name, oid, &BTreeMap::new(), &mut result, Some(maximum))?;
+        if kind == gix_object::Kind::Commit {
+            commits.push((name.clone(), root.to_string()));
+        } else {
+            other_roots.push((root, kind));
+        }
+    }
+    // Pointer discovery needs a union, unlike per-ref publication closures.
+    // One multi-tip commit walk shares both ancestry and tree visitation;
+    // tag objects have already consumed their disjoint part of the budget.
+    let commit_limit = maximum.saturating_sub(result.tags.len());
+    merge_reachable(
+        &mut result,
+        walk_commits(odb, &commits, Some(commit_limit))?,
+    );
+    for (root, kind) in other_roots {
+        if kind == gix_object::Kind::Tree {
+            walk_tree(odb, &root, &mut result, Some(maximum))?;
+        } else if result.blobs.insert(oid_to_bytes(&root)) {
+            check_blob_for_pointer(odb, &root, &mut result)?;
+            check_reachable_limit(&result, Some(maximum))?;
+        }
+    }
+    Ok(result)
 }
 
 fn record_reachable_objects(seen: &mut HashSet<[u8; 20]>, closure: &ReachableSet) {
@@ -355,16 +451,11 @@ fn merge_reachable(target: &mut ReachableSet, source: ReachableSet) {
 }
 
 fn collect_annotated_tag_chain(
-    git_dir: &Path,
+    odb: &impl Find,
     start: &str,
     result: &mut ReachableSet,
     maximum: Option<usize>,
 ) -> Result<ObjectId> {
-    let objects_dir = git_dir.join("objects");
-    let odb = gix_odb::at(&objects_dir).map_err(|source| WalkError::Git {
-        operation: format!("failed to open git ODB at {}", objects_dir.display()),
-        source: Box::new(source),
-    })?;
     let mut current = ObjectId::from_hex(start.as_bytes()).map_err(|source| WalkError::Git {
         operation: format!("invalid annotated tag object {start}"),
         source: Box::new(source),
@@ -411,7 +502,7 @@ fn collect_annotated_tag_chain(
 
 /// Walk a single tree and all its descendants, collecting tree and blob OIDs.
 fn walk_tree(
-    odb: &impl gix_object::Find,
+    odb: &(impl Find + FindHeader),
     tree_id: &gix_hash::oid,
     result: &mut ReachableSet,
     maximum: Option<usize>,
@@ -450,7 +541,7 @@ fn walk_tree(
 
     // Now read each newly discovered blob to check for pointers.
     for blob_oid in &visitor.pending_blobs {
-        check_blob_for_pointer(odb, blob_oid, result);
+        check_blob_for_pointer(odb, blob_oid, result)?;
     }
 
     Ok(())
@@ -458,23 +549,45 @@ fn walk_tree(
 
 /// Check whether a blob is a crab pointer and record it if so.
 fn check_blob_for_pointer(
-    odb: &impl gix_object::Find,
+    odb: &(impl Find + FindHeader),
     blob_id: &ObjectId,
     result: &mut ReachableSet,
-) {
+) -> Result<()> {
+    // Ordinary file bodies need not be decoded to classify pointer candidates.
+    // Missing or unreadable headers are incomplete history, never non-pointers.
+    let header = odb
+        .try_header(blob_id)
+        .map_err(|source| WalkError::Git {
+            operation: format!("failed to read blob header {blob_id}"),
+            source,
+        })?
+        .ok_or_else(|| WalkError::BeyondShallowBoundary {
+            oid: blob_id.to_string(),
+        })?;
+    if header.kind != gix_object::Kind::Blob {
+        return Err(WalkError::Git {
+            operation: format!("tree references non-blob object {blob_id} as a blob"),
+            source: Box::new(std::io::Error::other("Git object kind mismatch")),
+        });
+    }
+    if header.size > crab_types::pointer::MAX_POINTER_SIZE as u64 {
+        return Ok(());
+    }
     let mut buf = Vec::new();
-    let data = match odb.try_find(blob_id, &mut buf) {
-        Ok(Some(data)) if data.kind == gix_object::Kind::Blob => data,
-        Ok(Some(_)) => return, // not a blob — skip
-        Ok(None) => {
-            warn!(oid = %blob_id, "blob referenced in tree but not found in ODB");
-            return;
-        }
-        Err(e) => {
-            warn!(oid = %blob_id, error = %e, "failed to read blob");
-            return;
-        }
-    };
+    let data = odb
+        .try_find(blob_id, &mut buf)
+        .map_err(|source| WalkError::Git {
+            operation: format!("failed to read pointer candidate {blob_id}"),
+            source,
+        })?
+        .ok_or_else(|| WalkError::BeyondShallowBoundary {
+            oid: blob_id.to_string(),
+        })?;
+    data.verify_checksum(blob_id)
+        .map_err(|source| WalkError::Git {
+            operation: format!("pointer candidate checksum differs from {blob_id}"),
+            source: Box::new(source),
+        })?;
 
     // Only attempt pointer parse on small blobs (pointers are ≤256 bytes).
     if data.data.len() <= crab_types::pointer::MAX_POINTER_SIZE
@@ -486,6 +599,7 @@ fn check_blob_for_pointer(
             size: ptr.size,
         });
     }
+    Ok(())
 }
 
 /// A [`gix_traverse::tree::Visit`] implementation that collects tree and blob

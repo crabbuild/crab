@@ -231,7 +231,7 @@ async fn native_push_main_follow_tags_to_memory(
         NativePushInputs::new(
             Some(store.clone()),
             None,
-            Some(Arc::new(staging)),
+            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
             router.clone(),
             &mut push_state,
             "origin",

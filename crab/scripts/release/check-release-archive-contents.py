@@ -198,6 +198,24 @@ def check_release_workflow(root: Path) -> list[str]:
     text = read_text(path)
     errors: list[str] = []
 
+    # Rollback reads are qualified against a tagged artifact, never a mutable
+    # rebuilt checkout. Keep its identity and verification part of this gate.
+    try:
+        rollback_step = workflow_step_run(text, "Fetch pinned previous release for rollback qualification")
+    except ValueError as error:
+        errors.append(f"release.yml: {error}")
+    else:
+        for needle in (
+            "https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz",
+            "d36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f",
+            "sha256sum --check --strict",
+        ):
+            if needle not in rollback_step:
+                errors.append(f"release.yml rollback artifact: expected {needle!r}")
+    for needle in ('--rollback-crab-bin "$RUNNER_TEMP/protocol-v2-rollback/crab"', '--rollback-crab-tag v1.0.1'):
+        if needle not in text:
+            errors.append(f"release.yml rollback qualification: expected {needle!r}")
+
     downstream_conditions = {
         "protocol-v2-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' }}",
         "protocol-v2-git-compatibility-release-gate": "if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' }}",
@@ -379,7 +397,6 @@ def check_release_workflow(root: Path) -> list[str]:
         "--clobber",
         "GITHUB_SHA: ${{ needs.prepare.outputs.source_sha }}",
         "protocol-v2-rollback-release-gate",
-        "--rollback-crab-bin",
         "Build the immediately prior tagged Crab binary",
     ):
         if forbidden in text:

@@ -49,26 +49,38 @@ pub fn detect_hydration_state(path: &Path, pointer: &Pointer) -> Result<Hydratio
 
 /// Check if a working-tree file is an unhydrated crab pointer.
 ///
-/// Reads at most 256 bytes from the file. Returns `true` when the file
+/// Reads at most 257 bytes from the file. Returns `true` when the file
 /// size is within the pointer budget and `Pointer::parse` succeeds on
 /// the contents.
 ///
 /// Returns `Ok(false)` for empty files or files larger than
 /// [`MAX_POINTER_SIZE`]. Propagates I/O errors from open/read.
 pub fn is_working_tree_pointer(path: &Path) -> Result<bool> {
+    Ok(working_tree_pointer(path)?.is_some())
+}
+
+pub(crate) fn working_tree_pointer(path: &Path) -> Result<Option<Pointer>> {
     let meta = std::fs::metadata(path)?;
     if meta.len() > MAX_POINTER_SIZE as u64 {
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut file = std::fs::File::open(path)?;
-    let mut buf = [0u8; MAX_POINTER_SIZE];
-    let n = file.read(&mut buf)?;
-    if n == 0 {
-        return Ok(false);
+    let mut buf = [0u8; MAX_POINTER_SIZE + 1];
+    let mut used = 0;
+    // A short read is not EOF. The spare byte detects an oversized body
+    // even when the file grew after its initial metadata check.
+    loop {
+        match file.read(&mut buf[used..]) {
+            Ok(0) => return Ok(Pointer::parse(&buf[..used]).ok()),
+            Ok(count) => used += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+        if used > MAX_POINTER_SIZE {
+            return Ok(None);
+        }
     }
-
-    Ok(Pointer::parse(&buf[..n]).is_ok())
 }
 
 #[cfg(test)]
@@ -89,6 +101,15 @@ mod tests {
             size: 1_048_576,
             shard_hint: None,
         }
+    }
+
+    #[test]
+    fn working_tree_pointer_returns_the_complete_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data[1].bin");
+        let pointer = sample_pointer();
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        assert_eq!(working_tree_pointer(&path).unwrap(), Some(pointer));
     }
 
     #[test]

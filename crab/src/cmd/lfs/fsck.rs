@@ -215,8 +215,8 @@ fn verify_object_file(path: &Path, expected_oid_hex: &str) -> Result<bool> {
 
     let mut hasher = Sha256::new();
     hasher.update(&content);
-    let computed = hasher.finalize();
-    let computed_hex = format!("{computed:064x}");
+    let computed: [u8; 32] = hasher.finalize().into();
+    let computed_hex = hex_encode(&computed);
 
     if computed_hex != expected_oid_hex {
         return Ok(false);
@@ -479,6 +479,25 @@ fn read_dir_sorted(dir: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_verification_requires_the_exact_sha256_hex_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("object");
+        std::fs::write(&path, b"abc").unwrap();
+        for (oid, valid) in [
+            (
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                true,
+            ),
+            (
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                false,
+            ),
+        ] {
+            assert_eq!(verify_object_file(&path, oid).unwrap(), valid);
+        }
+    }
 
     #[test]
     fn parse_ls_tree_output_extracts_blob_entries() {

@@ -1334,4 +1334,60 @@ mod tests {
         reader.close().await.expect("reader close");
         writer.close().await.expect("writer close");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_takeover_rejects_stale_durable_batches() {
+        for label in ["file_index_db", "chunk_index_db"] {
+            let store = stub_store();
+            let path = ObjectPath::from(format!("takeover/{label}"));
+            let first = Db::open(Arc::clone(&store), path.clone(), label)
+                .await
+                .expect("first writer");
+            let mut committed = slatedb::WriteBatch::new();
+            committed.put(b"committed".as_slice(), b"before takeover".as_slice());
+            first.write(committed).await.expect("durable first batch");
+
+            let second = Db::open(Arc::clone(&store), path.clone(), label)
+                .await
+                .expect("replacement writer");
+            let mut stale = slatedb::WriteBatch::new();
+            stale.put(b"stale".as_slice(), b"must not be acknowledged".as_slice());
+            let stale_result =
+                tokio::time::timeout(std::time::Duration::from_secs(10), first.write(stale)).await;
+            let mut replacement = slatedb::WriteBatch::new();
+            replacement.put(b"replacement".as_slice(), b"after takeover".as_slice());
+            let replacement_result = second.write(replacement).await;
+            // Drain both owners before asserting: takeover can make close return
+            // the same terminal error, but it must not leave background work live.
+            let (_, second_close) = tokio::join!(first.close(), second.close());
+            let error = stale_result.expect("bounded stale write").unwrap_err();
+            assert!(matches!(
+                error,
+                CrabError::MetaDb(MetaDbError::Write { source, .. })
+                    if matches!(source.kind(), slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced))
+            ));
+            replacement_result.expect("replacement remains writable");
+            second_close.expect("replacement closes cleanly");
+
+            let reader = Db::open_readonly(store, path, label)
+                .await
+                .expect("durable readback");
+            let observed = reader
+                .get_batch(&[
+                    Bytes::from_static(b"committed"),
+                    Bytes::from_static(b"stale"),
+                    Bytes::from_static(b"replacement"),
+                ])
+                .await;
+            reader.close().await.expect("reader close");
+            assert_eq!(
+                observed.expect("readback"),
+                vec![
+                    Some(Bytes::from_static(b"before takeover")),
+                    None,
+                    Some(Bytes::from_static(b"after takeover")),
+                ]
+            );
+        }
+    }
 }

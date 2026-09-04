@@ -39,6 +39,16 @@ repository prefix. `Store` adds conditional create/update, optional staged
 writes, bounded reads, byte/request observers, and provider-neutral
 `StorageError` values.
 
+Provider builders also bind `Store::target_identity` to credential-free
+transport configuration: provider, bucket/container, effective endpoint and
+addressing context. Endpoint URL host/port normalization preserves path case;
+credentials, query strings and fragments are rejected in endpoint URLs. GCS
+service-account endpoint selection is pinned before the provider loads the
+credentials, so file rotation cannot redirect an already identified target.
+This digest is separate from the established `BucketIdentity` used for logical
+cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
+identity; integrity callers must not infer one from their display text.
+
 ## Usage
 
 ```rust

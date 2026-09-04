@@ -275,17 +275,37 @@ pub(super) fn install_pre_push_hook_at(hooks_dir: &Path, force: bool) -> Result<
             origin: format!("failed to read {}: {e}", hook_path.display()),
         })?;
 
-        if managed_hook_remainder(&existing).is_some() {
+        if existing == crate::cmd::install::MIRROR_PRE_PUSH_HOOK {
             make_pre_push_hook_executable(&hook_path)?;
-            tracing::debug!(path = %hook_path.display(), "LFS pre-push hook already installed");
+            tracing::debug!(path = %hook_path.display(), "mirror pre-push hook already owns LFS publication");
             return Ok(());
         }
-        if let Some(remainder) = legacy_hook_remainder(&existing) {
+        if existing
+            == format!(
+                "#!/bin/sh\n{}",
+                crate::cmd::install::OBSOLETE_MIRROR_PRE_PUSH_BODY
+            )
+        {
+            crate::cmd::install::MIRROR_PRE_PUSH_HOOK.to_owned()
+        } else if let Some(composed) = with_mirror_hook(&existing) {
+            // Only a known mirror remainder is combined. A standalone LFS
+            // install must not enable mirror mode merely because it owns stdin.
+            if existing.contains("# Crab mirror:") {
+                composed
+            } else {
+                pre_push_hook_content()
+            }
+        } else if managed_hook_remainder(&existing).is_some()
+            && !existing.contains("# Crab mirror:")
+        {
+            make_pre_push_hook_executable(&hook_path)?;
+            return Ok(());
+        } else if let Some(remainder) =
+            legacy_hook_remainder(&existing).filter(|rest| !rest.contains("# Crab mirror:"))
+        {
             let mut upgraded = pre_push_hook_content();
             upgraded.push_str(remainder);
             upgraded
-        } else if existing == crate::cmd::install::MIRROR_PRE_PUSH_HOOK {
-            compose_with_mirror_hook(&existing)
         } else {
             return Err(CrabError::Configuration {
                 key: "pre-push hook".to_owned(),
@@ -373,12 +393,18 @@ fn legacy_hook_remainder(content: &str) -> Option<&str> {
     content.strip_prefix(LEGACY_PRE_PUSH_HOOK)
 }
 
-fn compose_with_mirror_hook(mirror: &str) -> String {
-    let mirror_body = mirror.strip_prefix("#!/bin/sh\n").unwrap_or(mirror);
-    let mut content = pre_push_hook_content();
-    content.push('\n');
-    content.push_str(mirror_body);
-    content
+pub(crate) fn with_mirror_hook(existing: &str) -> Option<String> {
+    use crate::cmd::install::{MIRROR_PRE_PUSH_HOOK, OBSOLETE_MIRROR_PRE_PUSH_BODY};
+    let remainder = managed_hook_remainder(existing).or_else(|| legacy_hook_remainder(existing))?;
+    let remainder = remainder.trim();
+    let current_mirror = MIRROR_PRE_PUSH_HOOK.strip_prefix("#!/bin/sh\n")?;
+    if remainder.is_empty()
+        || remainder == current_mirror.trim()
+        || remainder == OBSOLETE_MIRROR_PRE_PUSH_BODY.trim()
+    {
+        return Some(MIRROR_PRE_PUSH_HOOK.to_owned());
+    }
+    None
 }
 
 fn make_pre_push_hook_executable(path: &Path) -> Result<()> {
@@ -859,11 +885,7 @@ mod tests {
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
 
         let content = fs::read_to_string(&hook).unwrap();
-        assert!(content.contains("|| exit $?"));
-        assert!(content.contains("# Crab mirror:"));
-        assert!(
-            content.find("crab lfs pre-push").unwrap() < content.find("# Crab mirror:").unwrap()
-        );
+        assert_eq!(content, crate::cmd::install::MIRROR_PRE_PUSH_HOOK);
     }
 
     #[test]
@@ -880,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn install_composes_with_crab_mirror_pre_push_hook() {
+    fn install_preserves_mirror_publication_owner() {
         let dir = temp_git_repo();
         let hook = dir.path().join(".git").join("hooks").join("pre-push");
         let mirror = crate::cmd::install::MIRROR_PRE_PUSH_HOOK;
@@ -889,14 +911,23 @@ mod tests {
         run_lfs_install_in(dir.path(), local_options(false)).unwrap();
 
         let content = fs::read_to_string(&hook).unwrap();
-        let lfs = content.find("crab lfs pre-push").unwrap();
-        let mirror = content.find("# Crab mirror:").unwrap();
-        assert!(lfs < mirror, "LFS objects must publish before mirror refs");
+        assert_eq!(content, mirror);
+    }
+
+    #[test]
+    fn mirror_install_after_lfs_uses_the_same_batch_owner() {
+        let dir = temp_git_repo();
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+        crate::cmd::install::install_mirror_hooks(dir.path()).unwrap();
+        run_lfs_install_in(dir.path(), local_options(false)).unwrap();
+        crate::cmd::install::install_mirror_hooks(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".git/hooks/pre-push")).unwrap();
+        assert_eq!(content, crate::cmd::install::MIRROR_PRE_PUSH_HOOK);
     }
 
     #[cfg(unix)]
     #[test]
-    fn composed_hook_propagates_lfs_failure_before_mirror_push() {
+    fn composed_hook_invokes_one_batch_owner_and_propagates_failure() {
         let dir = temp_git_repo();
         let hook = dir.path().join(".git").join("hooks").join("pre-push");
         fs::write(&hook, crate::cmd::install::MIRROR_PRE_PUSH_HOOK).unwrap();
@@ -906,7 +937,7 @@ mod tests {
         let crab = bin_dir.path().join("crab");
         fs::write(
             &crab,
-            "#!/bin/sh\nif [ \"$1\" = lfs ]; then exit 23; fi\nexit 0\n",
+            "#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = mirror-pre-push ] || exit 99\nexit 23\n",
         )
         .unwrap();
 

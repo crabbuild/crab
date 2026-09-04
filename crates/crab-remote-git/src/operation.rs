@@ -219,6 +219,11 @@ impl OperationContext {
                 });
             }
             Some(session)
+        } else if state.reader.is_some() {
+            Some(TrackedLocatorSession::new(
+                GitObjectLocatorSession::without_catalog(),
+                Arc::clone(&state.runtime),
+            ))
         } else {
             None
         };

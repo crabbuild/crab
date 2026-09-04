@@ -33,6 +33,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use tokio::io::{BufReader, Stdin, Stdout};
 use tokio_util::sync::CancellationToken;
 
+use crab::cmd::hydrate::resolve_hydrate_remote_url;
 use crab::core::config::Config;
 use crab::core::context::AppContext;
 use crab::core::error::{CrabError, Result};
@@ -238,6 +239,9 @@ enum Cmd {
     },
     /// Mirror a Git remote into a Crab remote.
     Mirror(crab::cmd::mirror::MirrorArgs),
+    /// Publish the frozen ref batch supplied by Git's mirror-mode hook.
+    #[command(hide = true)]
+    MirrorPrePush(crab::cmd::mirror::MirrorPrePushArgs),
     /// Download selected files from a Crab repository without cloning it.
     #[command(visible_alias = "get")]
     Download {
@@ -1977,6 +1981,21 @@ enum LogsCmd {
 
 #[derive(Subcommand)]
 enum MigrateCmd {
+    /// Upgrade one explicitly selected, quiesced GC coordination domain.
+    GcFence {
+        /// Direct Crab repository URL used to resolve the backing store.
+        #[arg(long)]
+        remote: String,
+        /// Exact coordination domain (repository prefix or global data domain).
+        #[arg(long)]
+        domain: String,
+        /// Apply the validated migration; otherwise inspect without writes.
+        #[arg(long, requires = "quiesced")]
+        apply: bool,
+        /// Confirm all writers/sweepers sharing the domain are stopped.
+        #[arg(long, requires = "apply")]
+        quiesced: bool,
+    },
     /// Show which file types would benefit from crab tracking.
     Info {
         /// Only consider files above this size in bytes (default: 1MB).
@@ -2085,6 +2104,7 @@ impl Cmd {
             | Self::Clone { json, jsonl, .. }
             | Self::Download { json, jsonl, .. }
             | Self::Hydrate { json, jsonl, .. }
+            | Self::Pull { json, jsonl, .. }
             | Self::Dehydrate { json, jsonl, .. }
             | Self::Fetch { json, jsonl, .. }
             | Self::Gc { json, jsonl, .. }
@@ -2271,6 +2291,7 @@ impl Cmd {
             Self::Reset { .. } => "reset",
             Self::Clone { .. } => "clone",
             Self::Mirror(_) => "mirror",
+            Self::MirrorPrePush(_) => "mirror.pre-push",
             Self::Download { .. } => "download",
             Self::Worktree {
                 command: crab::cmd::worktree::WorktreeCommand::Add(_),
@@ -3347,8 +3368,10 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                     mode: crab::core::output::OutputMode::Text,
                                 };
                                 let _ = crab::cmd::hydrate::run_hydrate(
+                                    &cwd,
                                     &hydrate_args,
                                     &rt_config,
+                                    &crab::cmd::hydrate_restore::RestoreFlags::default(),
                                     &cancel,
                                 )
                                 .await;
@@ -3492,9 +3515,26 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             Ok(ExitCode::SUCCESS)
         }
+        Some(Cmd::MirrorPrePush(ref args)) => {
+            crab::cmd::mirror::run_mirror_pre_push(args, &cancel).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Mirror(ref args)) => {
             let _span = tracing::info_span!("mirror", source = %args.source).entered();
             let mode = args.output_mode();
+            if args.is_integrity_operation() {
+                let outcome = crab::cmd::mirror::run_mirror_integrity(args, &cancel).await?;
+                match mode {
+                    OutputMode::Json => outcome.emit_json(),
+                    OutputMode::Jsonl => outcome.emit_jsonl(),
+                    OutputMode::Text => {}
+                }
+                if args.ci && !outcome.ci_passed() {
+                    return Ok(ExitCode::from(1));
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+
             let summary = crab::cmd::mirror::run_mirror(args, &cancel)?;
 
             match mode {
@@ -4098,7 +4138,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Optimize(sub)) => run_optimize_command(sub, &cancel).await,
         Some(Cmd::Tier(sub)) => run_tier_command(sub, &cancel).await,
         Some(Cmd::Metadb(sub)) => run_metadb_command(sub, &cancel).await,
-        Some(Cmd::Cache(sub)) => run_cache_command(sub).await,
+        Some(Cmd::Cache(sub)) => run_cache_command(sub, &cancel).await,
         Some(Cmd::Config(sub)) => {
             let _span = tracing::info_span!("config").entered();
             match sub {
@@ -4229,71 +4269,14 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             };
             let config = Config::resolve_local()?;
 
-            // Try to create a cloud-backed hydrator from crab.toml.
-            // Falls back to the SmudgeSession hydrator only when the remote is
-            // absent. Configured remotes fail closed so forced replica policies
-            // cannot silently hydrate from another source.
-            if let Some(parsed) = resolve_hydrate_remote_url(&config)? {
-                let selection =
-                    crab::replication::select_read_store(&config, &parsed, "hydrate", &cancel)
-                        .await?;
-                if let crab::replication::ReadSource::Replica { name } = &selection.source {
-                    tracing::debug!(replica = %name, "selected read replica for hydrate");
-                }
-                let router = selection.router;
-                let caching_store =
-                    crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-                // Bulk hydrate is a one-pass stream already backed by the full-xorb cache.
-                // A bounded decoded-range cache only adds writes and eviction churn here.
-                let mut hydrator = crab::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-                    caching_store,
-                    router,
-                    &config,
-                )?;
-                let restore_flags = crab::cmd::hydrate_restore::RestoreFlags {
-                    restore,
-                    no_restore,
-                    restore_tier: restore_tier.clone(),
-                    restore_duration_days,
-                };
-                let requested_restore =
-                    restore_flags.resolve_auto_restore(config.hydrate.auto_restore);
-                if restore && !config.tier.enabled {
-                    return Err(crab::core::error::CrabError::Configuration {
-                        key: "tier.enabled is false; cannot restore archived xorbs".into(),
-                        origin: "hydrate --restore".into(),
-                    });
-                }
-                if requested_restore && config.tier.enabled {
-                    let mut options = crab::tier::runtime::restore_options_from_config(&config)?;
-                    if let Some(tier) = &restore_flags.restore_tier {
-                        options.tier = crab::tier::runtime::parse_restore_tier(tier)?;
-                    }
-                    if let Some(days) = restore_flags.restore_duration_days {
-                        options.duration = std::time::Duration::from_secs(u64::from(days) * 86_400);
-                    }
-                    let backend =
-                        crab::tier::runtime::build_restore_backend(&config, &parsed).await?;
-                    let orchestrator = std::sync::Arc::new(
-                        crab::tier::restore::RestoreOrchestrator::with_options(
-                            backend,
-                            config.tier.restore_max_concurrency,
-                            std::time::Duration::from_secs(config.tier.restore_timeout_secs),
-                            options,
-                        ),
-                    );
-                    hydrator = hydrator.with_restore(Some(orchestrator), true);
-                } else {
-                    hydrator = hydrator.with_restore(None, false);
-                }
-                let cwd = std::env::current_dir()?;
-                crab::cmd::hydrate::run_hydrate_in(&cwd, &args, &config, &hydrator, &cancel)
-                    .await?;
-                return Ok(ExitCode::SUCCESS);
-            }
-
-            // Fallback to default hydrator.
-            crab::cmd::hydrate::run_hydrate(&args, &config, &cancel).await?;
+            let restore_flags = crab::cmd::hydrate_restore::RestoreFlags {
+                restore,
+                no_restore,
+                restore_tier,
+                restore_duration_days,
+            };
+            let cwd = std::env::current_dir()?;
+            crab::cmd::hydrate::run_hydrate(&cwd, &args, &config, &restore_flags, &cancel).await?;
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::Diff {
@@ -4519,6 +4502,15 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         Some(Cmd::Migrate(sub)) => {
             let _span = tracing::info_span!("migrate").entered();
             match sub {
+                MigrateCmd::GcFence {
+                    remote,
+                    domain,
+                    apply,
+                    ..
+                } => {
+                    crab::cmd::migrate::run_gc_fence_upgrade(&remote, &domain, apply, &cancel)
+                        .await?;
+                }
                 MigrateCmd::Info { above, top } => {
                     let args = crab::cmd::migrate::MigrateInfoArgs { above, top };
                     crab::cmd::migrate::run_migrate_info(&args)?;
@@ -4813,7 +4805,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let mut cmd = Cli::command();
                 return crab::cmd::lfs::completion::run_lfs_completion(shell, &mut cmd);
             }
-            let exit = crab::cmd::lfs::run_lfs(&sub)?;
+            let exit = crab::cmd::lfs::run_lfs_with_cancel(&sub, &cancel)?;
             Ok(exit)
         }
         Some(Cmd::LfsTransferAgent) => {
@@ -5291,9 +5283,9 @@ async fn run_optimize_command(
         } => run_compact_command(repo, bucket, dry_run, max_shard_size, cancel).await,
         OptimizeCmd::Tiers { command } => run_tier_command(command, cancel).await,
         OptimizeCmd::Cache(command) => match command {
-            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats).await,
-            OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify).await,
-            OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean).await,
+            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats, cancel).await,
+            OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
+            OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean, cancel).await,
             OptimizeCacheCmd::Prune {
                 dry_run,
                 verbose,
@@ -5701,17 +5693,17 @@ async fn run_metadb_command(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_cache_command(sub: CacheCmd) -> Result<ExitCode> {
+async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<ExitCode> {
     let _span = tracing::info_span!("cache").entered();
     match sub {
         CacheCmd::Stats => run_cache_stats().await?,
         CacheCmd::Verify => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_verify(mode).await?;
+            crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
         }
         CacheCmd::Clean => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_clean(false, mode)?;
+            crab::cmd::cache::run_cache_clean_with_cancel(false, mode, cancel)?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -6053,19 +6045,6 @@ fn format_bytes_size(bytes: u64) -> String {
     }
 }
 
-fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crab::git::url::CrabUrl>> {
-    let Some(url) = config.remote_url.as_deref() else {
-        return Ok(None);
-    };
-    if url.trim().is_empty() {
-        return Err(CrabError::Configuration {
-            key: "remote.url".into(),
-            origin: "crab.toml contains an empty [remote].url".into(),
-        });
-    }
-    crab::git::url::CrabUrl::parse(url).map(Some)
-}
-
 /// Implementation of `crab cache stats`. Reports both cache families:
 /// xet-core's range cache for reconstruction reads, and Crab's object
 /// cache for shards, xorbs, manifests, and stages.
@@ -6176,17 +6155,10 @@ mod tests {
     #[test]
     fn root_help_groups_every_user_facing_command_once() {
         with_cli_command(|command| {
-            let internal = [
-                "coordinator",
-                "filter-process",
-                "lfs-transfer-agent",
-                "diff-driver",
-                "help",
-            ];
             let mut expected: Vec<&str> = command
                 .get_subcommands()
+                .filter(|subcommand| !subcommand.is_hide_set())
                 .map(clap::Command::get_name)
-                .filter(|name| !internal.contains(name))
                 .collect();
             expected.sort_unstable();
 
@@ -6200,6 +6172,24 @@ mod tests {
 
             assert_eq!(categorized.len(), categorized_count);
             assert_eq!(categorized, expected);
+        });
+    }
+
+    #[test]
+    fn gc_fence_migration_requires_explicit_quiescence_to_apply() {
+        parse_cli_on_large_stack(|| {
+            let args = [
+                "crab",
+                "migrate",
+                "gc-fence",
+                "--remote",
+                "crab://bucket/org/repo",
+                "--domain",
+                "org/repo",
+            ];
+            assert!(Cli::try_parse_from(args).is_ok());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply"])).is_err());
+            assert!(Cli::try_parse_from(args.into_iter().chain(["--apply", "--quiesced"])).is_ok());
         });
     }
 
@@ -6633,6 +6623,20 @@ mod tests {
                     assert_eq!(paths, vec!["file.txt"]);
                 }
                 _ => unreachable!("get should parse as download"),
+            }
+        });
+    }
+
+    #[test]
+    fn pull_machine_errors_keep_the_selected_mode_and_schema() {
+        parse_cli_on_large_stack(|| {
+            for (flag, mode) in [("--json", OutputMode::Json), ("--jsonl", OutputMode::Jsonl)] {
+                let cli = Cli::try_parse_from(["crab", "pull", flag]).unwrap();
+                let command = cli.cmd.as_ref().unwrap();
+                assert_eq!(
+                    (command.output_mode(), command.schema_name()),
+                    (mode, "pull")
+                );
             }
         });
     }

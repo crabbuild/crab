@@ -1220,6 +1220,12 @@ Without conditional delete support, release marks the holder expired and the
 next acquirer reuses the same object via CAS. This prevents a stale owner from
 deleting a fresh holder's lock after TTL expiry.
 
+Ref-journal prepare rollback follows the same ownership rule. It restores
+the original head only with the version returned by that prepare write. A
+new head rolls back to the version-1 empty-head representation, not an
+unconditional delete. The empty head publishes no ref and is reusable by the
+next writer; a successor's changed version makes stale rollback fail its CAS.
+
 If the active marker is already visible, its immutable edit binds the exact
 lock holder that crossed the final ref-critical boundary. A contender may
 release that holder immediately with a holder-checked CAS. Prepared
@@ -1254,11 +1260,19 @@ When configured, a background task renews the lock at regular intervals:
 ```
 Heartbeat interval: clamped to [10s, TTL - 10s]
 
-Every interval:
-  1. GET lock → verify holder matches
+Every interval (through the shared PushLock renewal owner):
+  1. GET lock → verify holder matches and claim is not released
   2. PUT lock with new expires_at (CAS via etag)
-  3. If holder mismatch → lock stolen → cancel push
+  3. Lost/released claim or exhausted bounded retries → cancel push
 ```
+
+The released tombstone retains the old holder for diagnostics, not renewal
+authority. Both cached-version renewal and heartbeat renewal reject it without
+rewriting it. Heartbeats use the same retry count/deadline as `PushLock::renew`
+instead of maintaining a second retry/serialization implementation. Stopping
+a heartbeat joins the current bounded attempt before releasing the lock.
+This revocation rule does not itself fence a later multi-object ref commit
+against lease expiry; that publication boundary needs separate proof.
 
 ### CAS (Compare-and-Swap) for Manifests
 

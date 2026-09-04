@@ -159,7 +159,7 @@ impl GcSweepLease {
         self.fence.release().await.map_err(CrabError::from)
     }
 
-    pub(crate) fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> crab_coordination::GcWriterEpoch {
         self.fence.writer_epoch()
     }
 }

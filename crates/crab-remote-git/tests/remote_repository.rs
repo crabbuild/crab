@@ -76,6 +76,7 @@ struct PackFixture {
 #[derive(Debug)]
 struct CountingStore {
     inner: Arc<InMemory>,
+    mutations: AtomicUsize,
     pack_gets: AtomicUsize,
     generated_pack_descriptor_gets: AtomicUsize,
     generated_pack_descriptor_puts: AtomicUsize,
@@ -93,6 +94,7 @@ impl CountingStore {
     fn new() -> Self {
         Self {
             inner: Arc::new(InMemory::new()),
+            mutations: AtomicUsize::new(0),
             pack_gets: AtomicUsize::new(0),
             generated_pack_descriptor_gets: AtomicUsize::new(0),
             generated_pack_descriptor_puts: AtomicUsize::new(0),
@@ -182,6 +184,7 @@ impl ObjectStore for CountingStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
         if location.as_ref().contains("/generated-packs/v1/requests/") {
             self.generated_pack_descriptor_puts
                 .fetch_add(1, Ordering::SeqCst);
@@ -194,6 +197,7 @@ impl ObjectStore for CountingStore {
         location: &ObjectPath,
         options: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, options).await
     }
 
@@ -261,6 +265,7 @@ impl ObjectStore for CountingStore {
         &self,
         locations: BoxStream<'static, object_store::Result<ObjectPath>>,
     ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
         self.inner.delete_stream(locations)
     }
 
@@ -284,6 +289,7 @@ impl ObjectStore for CountingStore {
         to: &ObjectPath,
         options: CopyOptions,
     ) -> object_store::Result<()> {
+        self.mutations.fetch_add(1, Ordering::SeqCst);
         self.inner.copy_opts(from, to, options).await
     }
 }
@@ -1001,6 +1007,134 @@ async fn reopen_fixture(
     .await
     .expect("reopen fixture");
     (repository, runtime)
+}
+
+#[tokio::test]
+async fn canonical_snapshot_reads_deltas_without_catalog_or_remote_mutation() {
+    for kind in [DeltaKind::Ref, DeltaKind::Ofs, DeltaKind::RefShared] {
+        let fixture = publish(kind, false, RepositoryOptions::default()).await;
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+            .await
+            .expect("canonical descriptor");
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &fixture.store,
+            &fixture.layout,
+        )
+        .await
+        .expect("pinned snapshot");
+        let catalog = ObjectPath::from(crab_metadata::git_object_locator::git_object_locator_path(
+            fixture.layout.repo_prefix(),
+        ));
+        let entries = fixture
+            .backend
+            .inner
+            .list(Some(&catalog))
+            .collect::<Vec<_>>()
+            .await;
+        for entry in entries {
+            fixture
+                .backend
+                .inner
+                .delete(&entry.expect("catalog entry").location)
+                .await
+                .expect("remove test catalog");
+        }
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        fixture.backend.mutations.store(0, Ordering::SeqCst);
+        let operation = crab_remote_git::OperationContext::from_snapshot(
+            fixture.layout.clone(),
+            &snapshot,
+            fixture.repository.identity().clone(),
+            Arc::clone(&runtime),
+            RepositoryOptions::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("open without catalog");
+        let result = operation.read_object(fixture.target).await;
+        let object = operation
+            .finish(result)
+            .await
+            .expect("canonical delta read");
+        runtime.shutdown().await;
+        assert_eq!(
+            (
+                object.data.as_ref(),
+                fixture.backend.mutations.load(Ordering::SeqCst)
+            ),
+            (fixture.expected.as_slice(), 0)
+        );
+        fixture.runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn canonical_snapshot_does_not_reuse_misses_from_another_inventory() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+        .await
+        .expect("canonical descriptor");
+    let current =
+        crab_metadata::manifest_store::read_repository_snapshot(&fixture.store, &fixture.layout)
+            .await
+            .expect("current snapshot");
+    let mut empty = Manifest::default_for_repo("refs/heads/main");
+    empty.generation = current.manifest.generation;
+    empty.seal_git_validation();
+    let journal = crab_metadata::ref_journal::materialize_ref_journal(
+        &fixture.store,
+        &fixture.layout,
+        &empty,
+        &[],
+        &[],
+        &BTreeSet::new(),
+    )
+    .await
+    .expect("empty journal projection");
+    let before = crab_metadata::manifest_store::RepositorySnapshot {
+        layout: current.layout.clone(),
+        manifest: empty,
+        manifest_etag: current.manifest_etag.clone(),
+        journal,
+    };
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancellation = CancellationToken::new();
+    let old = crab_remote_git::OperationContext::from_snapshot(
+        fixture.layout.clone(),
+        &before,
+        fixture.repository.identity().clone(),
+        Arc::clone(&runtime),
+        RepositoryOptions::default(),
+        &cancellation,
+    )
+    .await
+    .expect("old snapshot");
+    let missing = old.read_object(fixture.target).await;
+    assert!(matches!(
+        old.finish(missing).await,
+        Err(Error::ObjectNotFound { .. })
+    ));
+    let new = crab_remote_git::OperationContext::from_snapshot(
+        fixture.layout.clone(),
+        &current,
+        fixture.repository.identity().clone(),
+        Arc::clone(&runtime),
+        RepositoryOptions::default(),
+        &cancellation,
+    )
+    .await
+    .expect("new snapshot with the same base generation");
+    let found = new.read_object(fixture.target).await;
+    assert_eq!(
+        new.finish(found)
+            .await
+            .expect("new inventory object")
+            .data
+            .as_ref(),
+        fixture.expected
+    );
+    runtime.shutdown().await;
+    fixture.runtime.shutdown().await;
 }
 
 fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {

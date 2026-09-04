@@ -715,7 +715,7 @@ async fn push_ref_from_git_dir(
         NativePushInputs::new(
             Some(store),
             None,
-            Some(Arc::new(staging)),
+            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
             router,
             push_state,
             "origin",
@@ -796,7 +796,7 @@ async fn linked_worktree_push_uploads_staged_xorbs_before_pack() {
         NativePushInputs::new(
             Some(store),
             None,
-            Some(Arc::new(staging)),
+            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
             router,
             &mut push_state,
             "origin",
@@ -872,7 +872,7 @@ async fn linked_worktree_push_lock_contention_is_per_destination_ref() {
         NativePushInputs::new(
             Some(store.clone()),
             None,
-            Some(Arc::new(staging)),
+            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
             router,
             &mut push_state,
             "origin",
@@ -1282,7 +1282,7 @@ async fn second_push_discovers_only_modified_pointers() {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",
@@ -1395,7 +1395,7 @@ async fn prepopulated_walk_receives_tree_diff_pointer_set() {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",

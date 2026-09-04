@@ -30,6 +30,7 @@ pub struct RepositoryIdentity {
     provider_namespace: Arc<str>,
     repository_namespace: Arc<str>,
     placement_generation: u64,
+    snapshot_digest: Option<Arc<str>>,
 }
 
 impl RepositoryIdentity {
@@ -55,6 +56,7 @@ impl RepositoryIdentity {
             provider_namespace,
             repository_namespace,
             placement_generation,
+            snapshot_digest: None,
         })
     }
 
@@ -73,6 +75,9 @@ impl RepositoryIdentity {
             hash.update(component);
         }
         hash.update(&self.placement_generation.to_be_bytes());
+        if let Some(digest) = &self.snapshot_digest {
+            hash.update(digest.as_bytes());
+        }
     }
 }
 
@@ -277,6 +282,71 @@ impl fmt::Debug for RemoteGitRepository {
     }
 }
 
+impl OperationContext {
+    /// Read canonical immutable packs from a caller-pinned repository snapshot.
+    ///
+    /// No locator, lease, repair, or generated-pack publication is opened. The
+    /// caller must authorize this store and snapshot together, arrange object
+    /// retention, and revalidate snapshot freshness before using its result.
+    /// Finish the returned operation on both success and failure.
+    pub async fn from_snapshot(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        mut identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime.background_cancellation())?;
+        let entries = snapshot
+            .journal
+            .packs
+            .len()
+            .saturating_add(snapshot.journal.refs.len()) as u64;
+        if entries > options.operation_limits().max_entries {
+            return Err(Error::LimitExceeded {
+                limit: "snapshot entries",
+                actual: entries,
+                maximum: options.operation_limits().max_entries,
+            });
+        }
+        // Journal commits can change inventory without incrementing the base
+        // generation. In particular, an old cached miss must not hide a new pack.
+        identity.snapshot_digest = Some(Arc::from(snapshot.digest()?));
+        let manifest = snapshot.materialized_manifest();
+        let refs = RepositoryRefs::try_from(&manifest)?;
+        let inventory = parse_inventory(&snapshot.journal.packs)?;
+        let reader = RemoteGitReader::from_pinned(
+            layout.store().clone(),
+            layout.repo_prefix(),
+            inventory.values().copied(),
+            ReaderLimits::from_options(options),
+            Arc::clone(&runtime),
+            identity.clone(),
+            manifest.generation,
+        )?;
+        let state = RepositoryState {
+            store: layout.store().clone(),
+            layout,
+            runtime,
+            identity,
+            options,
+            generation: manifest.generation,
+            git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+            manifest_etag: snapshot.manifest_etag.clone(),
+            coverage: None,
+            inventory,
+            refs,
+            reader: Some(Arc::new(reader)),
+            commit_graph: None,
+            shallow_closure: None,
+        };
+        Self::open(Arc::new(state), OperationKind::Repository, cancellation).await
+    }
+}
+
 impl RemoteGitRepository {
     /// Open one consistent repository generation from an authenticated store.
     ///
@@ -342,7 +412,7 @@ impl RemoteGitRepository {
             }
             check_cancelled(cancellation)?;
             check_cancelled(&runtime_cancellation)?;
-            let refs = parse_refs(&manifest)?;
+            let refs = RepositoryRefs::try_from(&manifest)?;
             if refs.is_empty() {
                 let state = RepositoryState {
                     store,
@@ -372,7 +442,7 @@ impl RemoteGitRepository {
                 None => {
                     check_cancelled(cancellation)?;
                     check_cancelled(&runtime_cancellation)?;
-                    let inventory = parse_inventory(journal.packs.clone())?;
+                    let inventory = parse_inventory(&journal.packs)?;
                     runtime
                         .insert_inventory(
                             identity.clone(),
@@ -533,6 +603,17 @@ impl RemoteGitRepository {
     #[must_use]
     pub fn refs(&self) -> &RepositoryRefs {
         &self.state.refs
+    }
+
+    /// Compare the pinned immutable packs with a captured metadata inventory.
+    ///
+    /// Ordering and metadata-generation changes do not change pack identity.
+    /// Malformed identities or duplicate packs return an error.
+    pub fn matches_pack_inventory(
+        &self,
+        packs: &[crab_metadata::manifests::PackManifestEntry],
+    ) -> Result<bool> {
+        Ok(self.state.inventory == parse_inventory(packs)?)
     }
 
     /// Return the redaction-safe physical identity used by runtime caches.
@@ -971,77 +1052,85 @@ async fn finish_locator_validation<T>(
     finish_with_close(operation, session.close().await)
 }
 
-fn parse_refs(manifest: &crab_metadata::manifests::Manifest) -> Result<RepositoryRefs> {
-    if crab_git::validate_push_refname(&manifest.head).is_err()
-        || !manifest.head.starts_with("refs/")
-    {
-        return Err(Error::RepositoryState {
-            reason: RepositoryStateError::InvalidReference,
-        });
-    }
-    if manifest
-        .peeled_refs
-        .keys()
-        .any(|name| !manifest.refs.contains_key(name))
-    {
-        return Err(Error::RepositoryState {
-            reason: RepositoryStateError::OrphanPeeledReference,
-        });
-    }
-    let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(manifest.refs.len())
-        .map_err(|source| Error::Allocation {
-            requested: manifest
-                .refs
-                .len()
-                .saturating_mul(std::mem::size_of::<RepositoryRef>()),
-            source,
-        })?;
-    for (name, value) in &manifest.refs {
-        if !name.starts_with("refs/") || crab_git::validate_push_refname(name).is_err() {
+/// Parse references from a validated manifest without opening object storage.
+///
+/// The caller validates the manifest envelope and Git-state digest. This
+/// conversion checks ref names, targets, peeling associations and HEAD.
+impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
+    type Error = Error;
+
+    fn try_from(manifest: &crab_metadata::manifests::Manifest) -> Result<Self> {
+        if crab_git::validate_push_refname(&manifest.head).is_err()
+            || !manifest.head.starts_with("refs/")
+        {
             return Err(Error::RepositoryState {
                 reason: RepositoryStateError::InvalidReference,
             });
         }
-        let target = parse_oid(value)?;
-        let peeled = manifest
+        if manifest
             .peeled_refs
-            .get(name)
-            .map(|value| parse_oid(value))
-            .transpose()?;
-        entries.push(RepositoryRef {
-            name: name.clone(),
-            target,
-            peeled,
-        });
-    }
-    let (head, unborn_head) = if entries.is_empty() {
-        (None, Some(manifest.head.clone()))
-    } else {
-        let target = manifest
-            .refs
-            .get(&manifest.head)
-            .ok_or(Error::RepositoryState {
-                reason: RepositoryStateError::HeadDoesNotResolve,
+            .keys()
+            .any(|name| !manifest.refs.contains_key(name))
+        {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::OrphanPeeledReference,
+            });
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(manifest.refs.len())
+            .map_err(|source| Error::Allocation {
+                requested: manifest
+                    .refs
+                    .len()
+                    .saturating_mul(std::mem::size_of::<RepositoryRef>()),
+                source,
             })?;
-        (
-            Some(HeadReference {
-                name: manifest.head.clone(),
-                target: parse_oid(target)?,
-            }),
-            None,
-        )
-    };
-    Ok(RepositoryRefs {
-        head,
-        unborn_head,
-        entries,
-    })
+        for (name, value) in &manifest.refs {
+            if !name.starts_with("refs/") || crab_git::validate_push_refname(name).is_err() {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InvalidReference,
+                });
+            }
+            let target = parse_oid(value)?;
+            let peeled = manifest
+                .peeled_refs
+                .get(name)
+                .map(|value| parse_oid(value))
+                .transpose()?;
+            entries.push(RepositoryRef {
+                name: name.clone(),
+                target,
+                peeled,
+            });
+        }
+        let (head, unborn_head) = if entries.is_empty() {
+            (None, Some(manifest.head.clone()))
+        } else {
+            let target = manifest
+                .refs
+                .get(&manifest.head)
+                .ok_or(Error::RepositoryState {
+                    reason: RepositoryStateError::HeadDoesNotResolve,
+                })?;
+            (
+                Some(HeadReference {
+                    name: manifest.head.clone(),
+                    target: parse_oid(target)?,
+                }),
+                None,
+            )
+        };
+        Ok(RepositoryRefs {
+            head,
+            unborn_head,
+            entries,
+        })
+    }
 }
 
 fn parse_inventory(
-    packs: Vec<crab_metadata::manifests::PackManifestEntry>,
+    packs: &[crab_metadata::manifests::PackManifestEntry],
 ) -> Result<std::collections::HashMap<MerkleHash, GitPackInventoryEntry>> {
     let mut inventory = std::collections::HashMap::new();
     inventory
@@ -1885,7 +1974,7 @@ mod tests {
             "1111111111111111111111111111111111111111".to_owned(),
         );
         assert!(matches!(
-            parse_refs(&invalid),
+            RepositoryRefs::try_from(&invalid),
             Err(Error::RepositoryState {
                 reason: RepositoryStateError::InvalidReference
             })
@@ -1897,9 +1986,40 @@ mod tests {
             "1111111111111111111111111111111111111111".to_owned(),
         );
         assert!(matches!(
-            parse_refs(&orphan),
+            RepositoryRefs::try_from(&orphan),
             Err(Error::RepositoryState {
                 reason: RepositoryStateError::OrphanPeeledReference
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn pinned_inventory_comparison_rejects_changed_or_duplicate_packs() {
+        let fixture = open_fixture(1, Some(1)).await;
+        let repository = open(&fixture).await.unwrap();
+        let packs = read_bulk_pack_list(
+            &fixture.store,
+            &fixture.layout,
+            &fixture.manifest.pack_index_hash,
+        )
+        .await
+        .unwrap();
+        assert!(repository.matches_pack_inventory(&packs).unwrap());
+        let mut changed = packs.clone();
+        changed[0].size += 1;
+        assert!(!repository.matches_pack_inventory(&changed).unwrap());
+        changed = packs.clone();
+        changed[0].object_count += 1;
+        assert!(!repository.matches_pack_inventory(&changed).unwrap());
+        changed = packs.clone();
+        changed[0].pack_id = "f".repeat(64);
+        assert!(!repository.matches_pack_inventory(&changed).unwrap());
+        assert!(!repository.matches_pack_inventory(&[]).unwrap());
+        let duplicated = [packs[0].clone(), packs[0].clone()];
+        assert!(matches!(
+            repository.matches_pack_inventory(&duplicated),
+            Err(Error::RepositoryState {
+                reason: RepositoryStateError::DuplicatePack
             })
         ));
     }

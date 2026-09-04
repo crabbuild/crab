@@ -11,8 +11,9 @@ use std::sync::Arc;
 #[cfg(not(feature = "gix-pathmatch"))]
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::lfs::config::LfsConfig;
 use crate::lfs::coordinator::{
     TransferCoordinator, TransferDirection, TransferOutcome, TransferRequest,
@@ -29,6 +30,7 @@ pub struct BatchResolver {
     remote_store: Arc<LfsObjectStore>,
     local_lfs_dir: PathBuf,
     config: LfsConfig,
+    cancellation: CancellationToken,
 }
 
 impl BatchResolver {
@@ -38,27 +40,28 @@ impl BatchResolver {
     /// - `local_lfs_dir`: path to the local `.git/lfs` directory where
     ///   objects are cached on disk.
     /// - `config`: LFS configuration controlling concurrency and behavior.
+    /// - `cancel`: caller cancellation, observed by every batch operation.
     pub fn new(
         remote_store: Arc<LfsObjectStore>,
         local_lfs_dir: PathBuf,
         config: LfsConfig,
+        cancel: &CancellationToken,
     ) -> Self {
         Self {
             remote_store,
             local_lfs_dir,
             config,
+            cancellation: cancel.clone(),
         }
     }
 
     /// Identifies LFS pointers whose objects are missing from the remote store.
     ///
-    /// In a full implementation this walks the commits being pushed to
-    /// collect LFS pointers. For now it accepts pre-collected pointers
-    /// (the git object walking will be wired up via gitoxide later).
-    ///
-    /// Returns only the pointers whose OIDs are absent from the remote.
+    /// Accepts pointers collected by the caller's Git discovery operation.
+    /// Returns pointers whose remote objects are missing or corrupt.
     /// Existence checks run concurrently, bounded by `config.concurrent_transfers`.
     pub async fn find_missing_for_push(&self, pointers: &[LfsPointer]) -> Result<Vec<LfsPointer>> {
+        check_cancelled(&self.cancellation)?;
         if pointers.is_empty() {
             return Ok(Vec::new());
         }
@@ -66,6 +69,7 @@ impl BatchResolver {
         let mut pointer_by_oid: HashMap<[u8; 32], LfsPointer> =
             HashMap::with_capacity(pointers.len());
         for pointer in pointers {
+            check_cancelled(&self.cancellation)?;
             if let Some(existing) = pointer_by_oid.get(&pointer.oid)
                 && existing.size != pointer.size
             {
@@ -78,7 +82,7 @@ impl BatchResolver {
                 .or_insert_with(|| pointer.clone());
         }
 
-        let coordinator = TransferCoordinator::new((&self.config).into());
+        let coordinator = TransferCoordinator::new((&self.config).into(), &self.cancellation);
         let missing = Arc::new(Mutex::new(Vec::new()));
         let missing_for_operation = Arc::clone(&missing);
         let store = Arc::clone(&self.remote_store);
@@ -121,9 +125,8 @@ impl BatchResolver {
     /// Identifies LFS pointers whose objects are missing locally.
     ///
     /// Applies optional include/exclude glob filters to the associated
-    /// file paths before checking local presence. In a full implementation
-    /// this walks reachable commits to collect pointers; for now it accepts
-    /// pre-collected `(path, pointer)` pairs.
+    /// file paths before checking local presence. The caller supplies
+    /// `(path, pointer)` pairs from its Git discovery operation.
     ///
     /// Returns only the pointers whose OIDs are absent from local storage.
     pub fn find_missing_for_fetch(
@@ -132,9 +135,11 @@ impl BatchResolver {
         include: Option<&PatternFilter>,
         exclude: Option<&PatternFilter>,
     ) -> Result<Vec<LfsPointer>> {
+        check_cancelled(&self.cancellation)?;
         let mut missing = Vec::new();
         let mut seen_sizes = HashMap::new();
         for (path, pointer) in entries {
+            check_cancelled(&self.cancellation)?;
             if let Some(inc) = include
                 && !inc.matches(path)
             {
@@ -158,6 +163,7 @@ impl BatchResolver {
                 missing.push(pointer.clone());
             }
         }
+        check_cancelled(&self.cancellation)?;
         Ok(missing)
     }
 
@@ -173,11 +179,12 @@ impl BatchResolver {
     /// Returns the first upload error encountered after admitted transfers
     /// have drained; subsequent errors are not returned individually.
     pub async fn upload_missing(&self, pointers: &[LfsPointer]) -> Result<()> {
+        check_cancelled(&self.cancellation)?;
         if pointers.is_empty() {
             return Ok(());
         }
 
-        let coordinator = TransferCoordinator::new((&self.config).into());
+        let coordinator = TransferCoordinator::new((&self.config).into(), &self.cancellation);
         let store = Arc::clone(&self.remote_store);
         let local_dir = self.local_lfs_dir.clone();
         coordinator
@@ -224,11 +231,12 @@ impl BatchResolver {
     /// When `force` is true, existing local objects are downloaded again and
     /// overwritten after remote integrity verification.
     pub async fn download_objects(&self, pointers: &[LfsPointer], force: bool) -> Result<()> {
+        check_cancelled(&self.cancellation)?;
         if pointers.is_empty() {
             return Ok(());
         }
 
-        let coordinator = TransferCoordinator::new((&self.config).into());
+        let coordinator = TransferCoordinator::new((&self.config).into(), &self.cancellation);
         let store = Arc::clone(&self.remote_store);
         let local_dir = self.local_lfs_dir.clone();
         coordinator
@@ -258,6 +266,7 @@ impl BatchResolver {
                             .download_to_file(&request.oid, request.size, &temp_path)
                             .await
                             .map_err(CrabError::from)?;
+                        check_cancelled(&cancel)?;
                         crate::lfs::cache::install_verified_temp_path(
                             &local_dir,
                             &request.oid,
@@ -364,359 +373,4 @@ fn local_object_path_for(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
     clippy::panic,
     reason = "test assertions"
 )]
-mod tests {
-    use std::sync::Arc;
-
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use sha2::{Digest, Sha256};
-
-    use super::*;
-    use crab_storage::{RetryPolicy, Store};
-
-    fn test_lfs_store() -> LfsObjectStore {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-        let store = Store::with_retry(inner, policy);
-        LfsObjectStore::new(store, "repo")
-    }
-
-    fn sha256_oid(data: &[u8]) -> [u8; 32] {
-        let hash = Sha256::digest(data);
-        let mut oid = [0u8; 32];
-        oid.copy_from_slice(&hash);
-        oid
-    }
-
-    fn make_pointer(data: &[u8]) -> LfsPointer {
-        LfsPointer {
-            oid: sha256_oid(data),
-            size: data.len() as u64,
-            extensions: Vec::new(),
-        }
-    }
-
-    fn test_config() -> LfsConfig {
-        LfsConfig {
-            concurrent_transfers: 4,
-            ..LfsConfig::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn find_missing_for_push_returns_absent_objects() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data_a = b"object-a";
-        let data_b = b"object-b";
-        let ptr_a = make_pointer(data_a);
-        let ptr_b = make_pointer(data_b);
-
-        // Upload object A to remote so it's present.
-        store
-            .put(&ptr_a.oid, Bytes::from(data_a.to_vec()))
-            .await
-            .unwrap();
-
-        let missing = resolver
-            .find_missing_for_push(&[ptr_a.clone(), ptr_b.clone()])
-            .await
-            .unwrap();
-
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].oid, ptr_b.oid);
-    }
-
-    #[tokio::test]
-    async fn find_missing_for_fetch_applies_include_filter() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let ptr = make_pointer(b"some-data");
-        let entries = vec![
-            ("models/large.bin".to_string(), ptr.clone()),
-            ("docs/readme.md".to_string(), ptr.clone()),
-        ];
-
-        let include = PatternFilter::new("*.bin").unwrap();
-        let missing = resolver
-            .find_missing_for_fetch(&entries, Some(&include), None)
-            .unwrap();
-
-        assert_eq!(missing.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn find_missing_for_fetch_applies_exclude_filter() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let ptr = make_pointer(b"some-data");
-        let entries = vec![
-            ("models/large.bin".to_string(), ptr.clone()),
-            ("docs/readme.md".to_string(), ptr.clone()),
-        ];
-
-        let exclude = PatternFilter::new("*.md").unwrap();
-        let missing = resolver
-            .find_missing_for_fetch(&entries, None, Some(&exclude))
-            .unwrap();
-
-        // Both point to the same OID, but readme.md is excluded.
-        // Since the OID is the same and not local, only the .bin entry passes.
-        assert_eq!(missing.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn find_missing_for_fetch_skips_locally_present() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"local-object";
-        let ptr = make_pointer(data);
-
-        // Write the object to local storage.
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        std::fs::write(&local_path, data).unwrap();
-
-        let entries = vec![("file.bin".to_string(), ptr)];
-        let missing = resolver
-            .find_missing_for_fetch(&entries, None, None)
-            .unwrap();
-
-        assert!(missing.is_empty());
-    }
-
-    #[tokio::test]
-    async fn find_missing_for_fetch_refetches_corrupt_local_object() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-        let ptr = make_pointer(b"valid-content");
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        std::fs::write(local_path, b"corrupt").unwrap();
-
-        let missing = resolver
-            .find_missing_for_fetch(&[("file.bin".to_owned(), ptr.clone())], None, None)
-            .unwrap();
-
-        assert_eq!(missing, vec![ptr]);
-    }
-
-    #[tokio::test]
-    async fn upload_missing_transfers_objects() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"upload-me";
-        let ptr = make_pointer(data);
-
-        // Write the object to local storage so upload can read it.
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        std::fs::write(&local_path, data).unwrap();
-
-        resolver.upload_missing(&[ptr.clone()]).await.unwrap();
-
-        // Verify it's now on the remote.
-        assert!(store.exists(&ptr.oid).await.unwrap());
-        let downloaded = store.get(&ptr.oid).await.unwrap();
-        assert_eq!(&downloaded[..], data);
-    }
-
-    #[tokio::test]
-    async fn upload_missing_skips_already_present() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"already-there";
-        let ptr = make_pointer(data);
-
-        // Pre-upload to remote.
-        store
-            .put(&ptr.oid, Bytes::from(data.to_vec()))
-            .await
-            .unwrap();
-
-        // No local file needed — the upload should be skipped entirely.
-        resolver.upload_missing(&[ptr]).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn download_missing_transfers_objects() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"download-me";
-        let ptr = make_pointer(data);
-
-        // Upload to remote so download can fetch it.
-        store
-            .put(&ptr.oid, Bytes::from(data.to_vec()))
-            .await
-            .unwrap();
-
-        resolver.download_missing(&[ptr.clone()]).await.unwrap();
-
-        // Verify it's now in local storage.
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        assert!(local_path.is_file());
-        let content = std::fs::read(&local_path).unwrap();
-        assert_eq!(&content[..], data);
-    }
-
-    #[tokio::test]
-    async fn download_missing_skips_already_present() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"already-local";
-        let ptr = make_pointer(data);
-
-        // Write to local storage.
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        std::fs::write(&local_path, data).unwrap();
-
-        // No remote object needed — the download should be skipped.
-        resolver.download_missing(&[ptr]).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn download_objects_refetch_overwrites_present_object() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        let data = b"remote-content";
-        let ptr = make_pointer(data);
-        store
-            .put(&ptr.oid, Bytes::from(data.to_vec()))
-            .await
-            .unwrap();
-
-        let local_path = local_object_path_for(dir.path(), &ptr.oid);
-        std::fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        std::fs::write(&local_path, b"stale").unwrap();
-
-        resolver
-            .download_objects(&[ptr.clone()], true)
-            .await
-            .unwrap();
-
-        let content = std::fs::read(&local_path).unwrap();
-        assert_eq!(&content[..], data);
-    }
-
-    #[tokio::test]
-    async fn upload_missing_empty_list_is_noop() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        resolver.upload_missing(&[]).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn download_missing_empty_list_is_noop() {
-        let store = Arc::new(test_lfs_store());
-        let dir = tempfile::tempdir().unwrap();
-        let resolver =
-            BatchResolver::new(Arc::clone(&store), dir.path().to_path_buf(), test_config());
-
-        resolver.download_missing(&[]).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn pattern_filter_comma_separated() {
-        let filter = PatternFilter::new("*.bin, *.dat").unwrap();
-        assert!(filter.matches("model.bin"));
-        assert!(filter.matches("data.dat"));
-        assert!(!filter.matches("readme.md"));
-    }
-
-    #[tokio::test]
-    async fn upload_download_round_trip() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let policy = RetryPolicy {
-            max_attempts: 2,
-            base: std::time::Duration::from_millis(1),
-            cap: std::time::Duration::from_millis(5),
-        };
-
-        let store = Arc::new(LfsObjectStore::new(
-            Store::with_retry(Arc::clone(&inner), policy.clone()),
-            "repo",
-        ));
-
-        let upload_dir = tempfile::tempdir().unwrap();
-        let download_dir = tempfile::tempdir().unwrap();
-
-        let data = b"round-trip-content";
-        let ptr = make_pointer(data);
-
-        // Write to upload-side local storage.
-        let upload_path = local_object_path_for(upload_dir.path(), &ptr.oid);
-        std::fs::create_dir_all(upload_path.parent().unwrap()).unwrap();
-        std::fs::write(&upload_path, data).unwrap();
-
-        // Upload.
-        let uploader = BatchResolver::new(
-            Arc::clone(&store),
-            upload_dir.path().to_path_buf(),
-            test_config(),
-        );
-        uploader.upload_missing(&[ptr.clone()]).await.unwrap();
-
-        // Download to a different local dir.
-        let downloader = BatchResolver::new(
-            Arc::clone(&store),
-            download_dir.path().to_path_buf(),
-            test_config(),
-        );
-        downloader.download_missing(&[ptr.clone()]).await.unwrap();
-
-        let downloaded_path = local_object_path_for(download_dir.path(), &ptr.oid);
-        let content = std::fs::read(&downloaded_path).unwrap();
-        assert_eq!(&content[..], data);
-    }
-
-    #[test]
-    fn local_object_path_format() {
-        let dir = PathBuf::from("/tmp/lfs");
-        let mut oid = [0u8; 32];
-        oid[0] = 0xab;
-        oid[1] = 0xcd;
-        let path = local_object_path_for(&dir, &oid);
-        let path_str = path.to_string_lossy();
-        let hex = hex_encode(&oid);
-        assert!(path_str.contains("/objects/ab/cd/"));
-        assert!(path_str.ends_with(&hex));
-    }
-}
+mod tests;

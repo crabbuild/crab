@@ -3,7 +3,7 @@
 //! Wraps the real `Store`, ref store, and manifest state to perform
 //! actual storage queries and repairs for `crab fsck`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,7 +17,7 @@ use crate::core::error::{CrabError, Result};
 #[cfg(test)]
 use crate::metadata::manifest::PackManifestEntry;
 use crate::metadata::manifest::{
-    Manifest, read_bulk_pack_list, read_manifest, read_repository_snapshot,
+    Manifest, RepositorySnapshot, read_bulk_pack_list, read_manifest, read_repository_snapshot,
 };
 use crate::storage::StoreLayout;
 use crate::storage::store::{MultipartJournal, Store};
@@ -26,12 +26,50 @@ use crab_coordination::push_lock_path;
 use crab_coordination::{PushLock, PushLockPayload};
 use crab_metadata::manifests::{PackEntry, PackList, ShardList};
 use crab_storage::repo_pack_path;
+use crab_types::pointer::Pointer;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 
 const MAX_FSCK_SHARD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
+
+/// Result of proving source-reachable Crab pointer recipes against remote data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerDataVerification {
+    pub verified: u64,
+    pub issues: Vec<PointerDataIssue>,
+    pub recipe_digest: Option<String>,
+}
+
+/// One pointer whose recipe, index binding, or immutable data is incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerDataIssue {
+    pub file_hash: String,
+    pub expected_size: u64,
+    pub kind: PointerDataIssueKind,
+    pub detail: String,
+}
+
+/// Whether a dependency is proven absent, corrupt, or could not be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerDataIssueKind {
+    Missing,
+    Corrupt,
+    Unverifiable,
+}
+
+impl PointerDataIssueKind {
+    fn from_error(error: &CrabError) -> Self {
+        match error {
+            CrabError::NotFound { .. } => Self::Missing,
+            CrabError::CorruptObject { .. }
+            | CrabError::HashMismatch { .. }
+            | CrabError::IncompleteShardReconstruction { .. } => Self::Corrupt,
+            _ => Self::Unverifiable,
+        }
+    }
+}
 
 /// Store-backed fsck checker that queries real object storage.
 pub struct StoreChecker {
@@ -56,6 +94,213 @@ impl StoreChecker {
     pub fn with_multipart_journal(mut self, journal: Option<Arc<MultipartJournal>>) -> Self {
         self.multipart_journal = journal;
         self
+    }
+
+    /// Prove that every pointer resolves through the captured shard inventory to a
+    /// hash-valid shard recipe and byte-identical origin reconstruction.
+    pub async fn verify_pointer_data(
+        &self,
+        snapshot: &RepositorySnapshot,
+        pointers: &[Pointer],
+        cancel: &CancellationToken,
+    ) -> Result<PointerDataVerification> {
+        crate::core::error::check_cancelled(cancel)?;
+        let mut expected = BTreeMap::new();
+        for pointer in pointers {
+            let hash = MerkleHash::from(pointer.file_hash);
+            if expected
+                .insert(hash, pointer.size)
+                .is_some_and(|size| size != pointer.size)
+            {
+                return Err(CrabError::CorruptObject {
+                    path: hash.hex(),
+                    reason: "source pointers declare conflicting sizes for the same file hash"
+                        .to_owned(),
+                });
+            }
+        }
+        let hashes = expected.keys().copied().collect::<Vec<_>>();
+        let origin_layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::from_snapshot(
+            origin_layout.clone(),
+            snapshot,
+        )?;
+        // Integrity checks must not maintain SlateDB checkpoints or mistake
+        // missing acceleration for missing canonical data. Preserve scope and
+        // use only recipes rooted in the captured repository inventory.
+        let lookups = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = session.lookup_batch(&hashes) => result?,
+        };
+        session.close().await?;
+        let mut issues = Vec::new();
+        let mut verified = 0u64;
+        let mut recipes = blake3::Hasher::new_derive_key("crab verified pointer recipes v1");
+        for (file_hash, shard_hash) in hashes.iter().zip(lookups) {
+            crate::core::error::check_cancelled(cancel)?;
+            let expected_size = expected[file_hash];
+            let Some(shard_hash) = shard_hash else {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Missing,
+                    detail: format!(
+                        "pointer {} has no recipe in the captured shard inventory",
+                        file_hash.hex()
+                    ),
+                });
+                continue;
+            };
+
+            let shard_path = self.router.shard_path(&shard_hash);
+            let read = self
+                .store
+                .get_with_etag_bounded(&shard_path, MAX_FSCK_SHARD_BYTES);
+            let result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                result = read => result,
+            };
+            let (body, _) = match result {
+                Ok(body) => body,
+                Err(error) => {
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: PointerDataIssueKind::from_error(&error),
+                        detail: format!(
+                            "pointer {} shard {} is unavailable: {error}",
+                            file_hash.hex(),
+                            shard_hash.hex()
+                        ),
+                    });
+                    continue;
+                }
+            };
+            let actual_shard_hash = crab_xet::hash::compute_data_hash(&body);
+            if actual_shard_hash != shard_hash {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} shard content hash is {}, expected {}",
+                        file_hash.hex(),
+                        actual_shard_hash.hex(),
+                        shard_hash.hex()
+                    ),
+                });
+                continue;
+            }
+            let reader = ShardReader::from_bytes(body, shard_hash);
+            let file_info = match reader.get_file_info(file_hash) {
+                Ok(info) => info,
+                Err(error) => {
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind: PointerDataIssueKind::Corrupt,
+                        detail: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let Some(file_info) = file_info else {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} selected shard {} lacks its recipe",
+                        file_hash.hex(),
+                        shard_hash.hex()
+                    ),
+                });
+                continue;
+            };
+            if file_info.file_size() != expected_size {
+                issues.push(PointerDataIssue {
+                    file_hash: file_hash.hex(),
+                    expected_size,
+                    kind: PointerDataIssueKind::Corrupt,
+                    detail: format!(
+                        "pointer {} declares {expected_size} bytes but its recipe declares {}",
+                        file_hash.hex(),
+                        file_info.file_size()
+                    ),
+                });
+                continue;
+            }
+
+            let pointer = Pointer {
+                file_hash: (*file_hash).into(),
+                size: expected_size,
+                shard_hint: None,
+            };
+            match crab_read::verify_origin_recipe(&origin_layout, &pointer, &file_info, cancel)
+                .await
+            {
+                Ok(_) => {
+                    verified += 1;
+                    recipes.update(&pointer.file_hash);
+                    recipes.update(&pointer.size.to_le_bytes());
+                    recipes.update(shard_hash.as_bytes());
+                    // A fixed-width digest delimits each variable-length recipe.
+                    // Its serialized header, ordered terms and verification data
+                    // bind the exact immutable reconstruction that was checked.
+                    let mut recipe = blake3::Hasher::new_derive_key("crab shard file recipe v1");
+                    file_info.serialize(&mut recipe)?;
+                    recipes.update(recipe.finalize().as_bytes());
+                }
+                Err(crab_read::ReadError::Cancelled) => return Err(CrabError::Cancelled),
+                Err(error) => {
+                    // Decoder failures here concern bytes read directly from origin,
+                    // whereas provider failures do not establish absence/corruption.
+                    let kind = match &error {
+                        crab_read::ReadError::Xet(_) => PointerDataIssueKind::Corrupt,
+                        _ => PointerDataIssueKind::Unverifiable,
+                    };
+                    let error = CrabError::from(error);
+                    let kind = if kind == PointerDataIssueKind::Corrupt {
+                        kind
+                    } else {
+                        PointerDataIssueKind::from_error(&error)
+                    };
+                    issues.push(PointerDataIssue {
+                        file_hash: file_hash.hex(),
+                        expected_size,
+                        kind,
+                        detail: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        crate::core::error::check_cancelled(cancel)?;
+        let current = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = read_repository_snapshot(&self.store, &self.router) => result?,
+        };
+        crate::core::error::check_cancelled(cancel)?;
+        if &current != snapshot {
+            return Err(CrabError::Protocol(
+                "pointer verification snapshot changed; retry verification".to_owned(),
+            ));
+        }
+        let recipe_digest = issues
+            .is_empty()
+            .then(|| recipes.finalize().to_hex().to_string());
+        Ok(PointerDataVerification {
+            verified,
+            issues,
+            recipe_digest,
+        })
     }
 
     /// Load the current pack list from the compacted manifest and journal.
@@ -838,6 +1083,9 @@ fn unix_now() -> i64 {
 }
 
 #[cfg(test)]
+mod verification_tests;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::BTreeMap;
@@ -856,7 +1104,7 @@ mod tests {
     use object_store::multipart::MultipartStore as _;
     use std::sync::Arc;
 
-    fn test_store() -> (Store, String) {
+    pub(super) fn test_store() -> (Store, String) {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         (store, "test-repo".to_string())
@@ -866,7 +1114,10 @@ mod tests {
         MerkleHash::from([seed, seed, seed, seed])
     }
 
-    fn shard_with_file(file_hash: MerkleHash, xorb_hash: MerkleHash) -> (Vec<u8>, MerkleHash) {
+    pub(super) fn shard_with_file(
+        file_hash: MerkleHash,
+        xorb_hash: MerkleHash,
+    ) -> (Vec<u8>, MerkleHash) {
         let mut shard = crab_xet::shard::ShardWriter::new();
         shard
             .add_xorb(Arc::new(MDBXorbInfo {
@@ -885,7 +1136,7 @@ mod tests {
         shard.finalize().expect("finalize shard")
     }
 
-    fn test_xorb(data: &[u8]) -> (MerkleHash, Bytes) {
+    pub(super) fn test_xorb(data: &[u8]) -> (MerkleHash, Bytes) {
         use crab_xet::xorb::builder::{RunId, XorbBuilder};
         use crab_xet::xorb::format::Chunk;
 
@@ -900,7 +1151,7 @@ mod tests {
         (xorb.hash, xorb.bytes)
     }
 
-    async fn upload_shard(
+    pub(super) async fn upload_shard(
         store: &Store,
         router: &StoreLayout,
         shard_hash: &MerkleHash,
@@ -959,7 +1210,7 @@ mod tests {
         }
     }
 
-    async fn write_manifest(
+    pub(super) async fn write_manifest(
         store: &Store,
         prefix: &str,
         shard_hashes: &[&str],
@@ -971,6 +1222,9 @@ mod tests {
         };
 
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        crate::core::remote_layout::initialize(store, &router)
+            .await
+            .unwrap();
         let shards = shard_hashes
             .iter()
             .map(|hash| (*hash).to_owned())
@@ -1183,6 +1437,368 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue.kind, crate::cmd::fsck::IssueKind::MissingXorb { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn pointer_data_verification_accepts_complete_recipe() {
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let content = [0x11; 1024];
+        let file_bytes = blake3::hash(&content).into();
+        let file_hash = MerkleHash::from(file_bytes);
+        let (xorb_hash, xorb_bytes) = test_xorb(&content);
+        let (shard_bytes, shard_hash) = shard_with_file(file_hash, xorb_hash);
+        upload_shard(&store, &router, &shard_hash, shard_bytes).await;
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+            .await
+            .unwrap();
+        let shard_hex = shard_hash.hex();
+        write_manifest(&store, &prefix, &[shard_hex.as_str()], &[]).await;
+        seed_file_index(&store, &prefix, &[(file_hash, shard_hash)]).await;
+
+        let result = StoreChecker::new(store, prefix)
+            .verify_pointer_data(
+                &read_repository_snapshot(router.store(), &router)
+                    .await
+                    .unwrap(),
+                &[Pointer {
+                    file_hash: file_bytes,
+                    size: 1024,
+                    shard_hint: None,
+                }],
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.verified, 1);
+        assert!(result.issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pointer_verification_preserves_scope_without_acceleration() {
+        use futures_util::TryStreamExt;
+
+        for scoped in [false, true] {
+            let (mut store, prefix) = test_store();
+            if scoped {
+                store = store.with_storage_scope(crab_types::storage::StorageScope {
+                    repo_prefix: "physical/repo".to_owned(),
+                    global_prefix: "physical/data".to_owned(),
+                    source_repo: prefix.clone(),
+                    scope_hash: "test-scope".to_owned(),
+                });
+            }
+            let router = StoreLayout::new(store.clone(), prefix.clone());
+            let content = [0x24; 1024];
+            let file_bytes = blake3::hash(&content).into();
+            let file_hash = MerkleHash::from(file_bytes);
+            let (xorb_hash, xorb_bytes) = test_xorb(&content);
+            let (shard_bytes, shard_hash) = shard_with_file(file_hash, xorb_hash);
+            upload_shard(&store, &router, &shard_hash, shard_bytes).await;
+            store
+                .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+                .await
+                .unwrap();
+            write_manifest(&store, &prefix, &[shard_hash.hex().as_str()], &[]).await;
+            let before = store
+                .inner()
+                .list(None)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let result = StoreChecker::new(store.clone(), prefix)
+                .verify_pointer_data(
+                    &read_repository_snapshot(&store, &router).await.unwrap(),
+                    &[Pointer {
+                        file_hash: file_bytes,
+                        size: 1024,
+                        shard_hint: None,
+                    }],
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let after = store
+                .inner()
+                .list(None)
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                (result.verified, result.issues, after),
+                (1, Vec::new(), before),
+                "scoped={scoped}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recipe_digest_is_independent_of_pointer_order_and_duplicates() {
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let mut pointers = Vec::new();
+        let mut shards = Vec::new();
+        for seed in [0x31, 0x32] {
+            let content = [seed; 1024];
+            let file_bytes = blake3::hash(&content).into();
+            let (xorb_hash, xorb_bytes) = test_xorb(&content);
+            let (body, shard_hash) = shard_with_file(MerkleHash::from(file_bytes), xorb_hash);
+            upload_shard(&store, &router, &shard_hash, body).await;
+            store
+                .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+                .await
+                .unwrap();
+            shards.push(shard_hash.hex());
+            pointers.push(Pointer {
+                file_hash: file_bytes,
+                size: 1024,
+                shard_hint: None,
+            });
+        }
+        write_manifest(
+            &store,
+            &prefix,
+            &shards.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        )
+        .await;
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+        let checker = StoreChecker::new(store, prefix);
+        let mut results = Vec::new();
+        for input in [
+            pointers.clone(),
+            vec![pointers[1].clone(), pointers[0].clone()],
+            vec![
+                pointers[0].clone(),
+                pointers[1].clone(),
+                pointers[0].clone(),
+            ],
+        ] {
+            let result = checker
+                .verify_pointer_data(&snapshot, &input, &CancellationToken::new())
+                .await
+                .unwrap();
+            results.push((result.verified, result.recipe_digest.unwrap()));
+        }
+        assert_eq!(results, vec![results[0].clone(); 3]);
+    }
+
+    #[tokio::test]
+    async fn recipe_digest_changes_when_equivalent_bytes_use_a_different_shard() {
+        let content = [0x33; 1024];
+        let file_bytes = blake3::hash(&content).into();
+        let file_hash = MerkleHash::from(file_bytes);
+        let mut proofs = Vec::new();
+        for add_metadata in [false, true] {
+            let (store, prefix) = test_store();
+            let router = StoreLayout::new(store.clone(), prefix.clone());
+            let (xorb_hash, xorb_bytes) = test_xorb(&content);
+            let (mut body, mut shard_hash) = shard_with_file(file_hash, xorb_hash);
+            if add_metadata {
+                let reader = ShardReader::from_bytes(Bytes::from(body), shard_hash);
+                let mut file = reader.get_file_info(&file_hash).unwrap().unwrap();
+                // Optional file metadata changes the immutable recipe
+                // without changing its file bytes or reconstruction terms.
+                use sha2::Digest as _;
+                let sha256: [u8; 32] = sha2::Sha256::digest(content).into();
+                file.metadata_ext
+                    .get_or_insert_with(Default::default)
+                    .sha256 = MerkleHash::from(sha256);
+                file.metadata =
+                    crab_xet::shard::FileDataSequenceHeader::new(file_hash, 1, false, true);
+                let mut writer = crab_xet::shard::ShardWriter::new();
+                writer
+                    .add_xorb(Arc::new(reader.get_xorb_info(&xorb_hash).unwrap().unwrap()))
+                    .unwrap();
+                writer.add_file(file).unwrap();
+                (body, shard_hash) = writer.finalize().unwrap();
+            }
+            upload_shard(&store, &router, &shard_hash, body).await;
+            store
+                .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+                .await
+                .unwrap();
+            write_manifest(&store, &prefix, &[shard_hash.hex().as_str()], &[]).await;
+            let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+            let result = StoreChecker::new(store, prefix)
+                .verify_pointer_data(
+                    &snapshot,
+                    &[Pointer {
+                        file_hash: file_bytes,
+                        size: 1024,
+                        shard_hint: None,
+                    }],
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.verified, 1);
+            proofs.push(result.recipe_digest.unwrap());
+        }
+        assert_ne!(proofs[0], proofs[1]);
+    }
+
+    #[tokio::test]
+    async fn pointer_data_verification_reports_missing_xorb() {
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let file_bytes = [0x12; 32];
+        let file_hash = MerkleHash::from(file_bytes);
+        let missing_xorb = hash_from_seed(81);
+        let (shard_bytes, shard_hash) = shard_with_file(file_hash, missing_xorb);
+        upload_shard(&store, &router, &shard_hash, shard_bytes).await;
+        let shard_hex = shard_hash.hex();
+        write_manifest(&store, &prefix, &[shard_hex.as_str()], &[]).await;
+        seed_file_index(&store, &prefix, &[(file_hash, shard_hash)]).await;
+
+        let result = StoreChecker::new(store, prefix)
+            .verify_pointer_data(
+                &read_repository_snapshot(router.store(), &router)
+                    .await
+                    .unwrap(),
+                &[Pointer {
+                    file_hash: file_bytes,
+                    size: 1024,
+                    shard_hint: None,
+                }],
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.verified, 0);
+        assert_eq!(result.issues[0].kind, PointerDataIssueKind::Missing);
+        assert!(result.issues[0].detail.contains("xorb"));
+    }
+
+    #[tokio::test]
+    async fn pointer_data_verification_reports_size_mismatch() {
+        let (store, prefix) = test_store();
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let file_bytes = [0x13; 32];
+        let file_hash = MerkleHash::from(file_bytes);
+        let (xorb_hash, xorb_bytes) = test_xorb(b"mirror pointer size");
+        let (shard_bytes, shard_hash) = shard_with_file(file_hash, xorb_hash);
+        upload_shard(&store, &router, &shard_hash, shard_bytes).await;
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+            .await
+            .unwrap();
+        let shard_hex = shard_hash.hex();
+        write_manifest(&store, &prefix, &[shard_hex.as_str()], &[]).await;
+        seed_file_index(&store, &prefix, &[(file_hash, shard_hash)]).await;
+
+        let result = StoreChecker::new(store, prefix)
+            .verify_pointer_data(
+                &read_repository_snapshot(router.store(), &router)
+                    .await
+                    .unwrap(),
+                &[Pointer {
+                    file_hash: file_bytes,
+                    size: 7,
+                    shard_hint: None,
+                }],
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.verified, 0);
+        assert_eq!(result.issues[0].kind, PointerDataIssueKind::Corrupt);
+        assert!(result.issues[0].detail.contains("declares 7 bytes"));
+    }
+
+    #[tokio::test]
+    async fn pointer_data_verification_rejects_present_but_invalid_bytes() {
+        for corrupt_xorb in [false, true] {
+            let (store, prefix) = test_store();
+            let router = StoreLayout::new(store.clone(), prefix.clone());
+            let content = [0x14; 1024];
+            let file_bytes = if corrupt_xorb {
+                blake3::hash(&content).into()
+            } else {
+                [0x14; 32]
+            };
+            let file_hash = MerkleHash::from(file_bytes);
+            let (xorb_hash, mut body) = test_xorb(&content);
+            if corrupt_xorb {
+                let mut bytes = body.to_vec();
+                bytes[0] ^= 1;
+                body = Bytes::from(bytes);
+            }
+            let (shard_body, shard_hash) = shard_with_file(file_hash, xorb_hash);
+            upload_shard(&store, &router, &shard_hash, shard_body).await;
+            store
+                .put(&router.xorb_path(&xorb_hash), body)
+                .await
+                .unwrap();
+            write_manifest(&store, &prefix, &[shard_hash.hex().as_str()], &[]).await;
+            seed_file_index(&store, &prefix, &[(file_hash, shard_hash)]).await;
+            let result = StoreChecker::new(store, prefix)
+                .verify_pointer_data(
+                    &read_repository_snapshot(router.store(), &router)
+                        .await
+                        .unwrap(),
+                    &[Pointer {
+                        file_hash: file_bytes,
+                        size: 1024,
+                        shard_hint: None,
+                    }],
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result
+                    .issues
+                    .iter()
+                    .map(|issue| issue.kind)
+                    .collect::<Vec<_>>(),
+                vec![PointerDataIssueKind::Corrupt],
+                "corrupt_xorb={corrupt_xorb}"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_data_verification_distinguishes_unavailable_from_missing() {
+        for error in [
+            CrabError::Forbidden {
+                path: "xorb".to_owned(),
+            },
+            CrabError::AuthExpired {
+                path: "xorb".to_owned(),
+            },
+            CrabError::Throttled { retry_after: None },
+            CrabError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            CrabError::Cancelled,
+        ] {
+            assert_eq!(
+                PointerDataIssueKind::from_error(&error),
+                PointerDataIssueKind::Unverifiable
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pointer_data_verification_rejects_conflicting_pointer_sizes() {
+        let (store, prefix) = test_store();
+        write_manifest(&store, &prefix, &[], &[]).await;
+        let router = StoreLayout::new(store.clone(), prefix.clone());
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+        let pointers = [1, 2].map(|size| Pointer {
+            file_hash: [42; 32],
+            size,
+            shard_hint: None,
+        });
+        assert!(matches!(
+            StoreChecker::new(store, prefix)
+                .verify_pointer_data(&snapshot, &pointers, &CancellationToken::new())
+                .await,
+            Err(CrabError::CorruptObject { .. })
+        ));
     }
 
     #[tokio::test]

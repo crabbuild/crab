@@ -433,10 +433,14 @@ Output reconstructed content
 
 ### 6. `crab hydrate`
 
-Two hydration paths exist:
+CLI hydrate, eager/selective clone, clone profiles, post-pull hydration and
+init auto-patterns share `cmd::hydrate::run_hydrate`, with an explicit root,
+resolved configuration, restore flags and caller cancellation. Configured
+repositories use `ShardHydrator`; only an absent remote selects local staging.
 
-**SmudgeSessionHydrator** — delegates to the smudge pipeline above. Uses
-`ChunkCache` when provided via `with_chunk_cache()`.
+**SmudgeSessionHydrator** — retains local unpublished-staging reconstruction
+for unconfigured repositories. Its low-level chunk-cache constructor does not
+wire cloud dependencies and is not the CLI cloud hydration entry point.
 
 **ShardHydrator** — direct shard-based reconstruction:
 

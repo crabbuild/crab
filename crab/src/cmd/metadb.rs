@@ -4061,6 +4061,9 @@ mod tests {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let store = crate::storage::store::Store::new(inner);
         let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .expect("initialize layout");
         crate::metadata::manifest::create_manifest_with_etag(
             &store,
             &router,

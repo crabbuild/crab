@@ -362,6 +362,15 @@ Git LFS still sends that process one object at a time, so this mode is useful
 only when a future transfer implementation owns parallelism inside one
 request.
 
+### Shutdown
+
+The protocol loop authorizes each subsequent stdin read only after accepting
+the previous event. A fatal init/protocol decision or failed init response
+therefore stops and joins the reader even when the client keeps its pipe open.
+Normal termination still drains admitted transfers. This is not cancellation
+of an idle input read or a stalled transfer; those remain separate lifecycle
+boundaries.
+
 ### Resume for Large Objects
 
 Uploads stream through 8 MiB multipart parts with at most four parts in flight,
@@ -648,7 +657,7 @@ All LFS commands live under `crab lfs <subcommand>`:
 |-----|---------|-------------|
 | `lfs.concurrenttransfers` | 8 | Max concurrent uploads/downloads (range 1–100) |
 | `lfs.fetchrecentrefsdays` | 7 | Days of recent refs to include in `--recent` fetch |
-| `lfs.fetchrecentcommitsdays` | 0 | Days of commits within recent refs to fetch |
+| `lfs.fetchrecentcommitsdays` | 0 | History window measured backward from each selected ref's commit time; zero disables it |
 | `lfs.pruneoffsetdays` | 3 | Grace period before pruning unreferenced objects |
 | `lfs.fetchinclude` | (none) | Glob pattern for paths to include in fetch |
 | `lfs.fetchexclude` | (none) | Glob pattern for paths to exclude from fetch |
@@ -660,6 +669,80 @@ All LFS commands live under `crab lfs <subcommand>`:
 | `lfs.lfsdir` | `.git/lfs` | Legacy Crab alias for `lfs.storage` |
 | `lfs.pruneverifyremotealways` | false | Verify prune candidates remotely unless the CLI overrides it |
 | `lfs.pruneverifyunreachablealways` | false | Also verify unreachable prune candidates unless the CLI overrides it |
+
+### Complete History Transfers
+
+`crab lfs fetch --all <remote> [refs...]` inventories all objects reachable
+from the selected refs, including versions replaced or deleted before their
+tips. With no explicit refs, Git's `--all` also covers tags and detached HEAD.
+Each explicit operand resolves to one object ID before an owned stdin stream
+feeds the traversal; invalid operands cannot turn into revision options or
+silently widen the selected graph.
+
+One `rev-list --objects` traversal feeds the same bounded, checksum-verifying
+batch reader as other LFS discovery. Historical promised blobs may be fetched;
+publication and mirror inspection retain local-only access. Git's reported
+object name is only a display hint (possibly empty or newline-normalized),
+not a canonical path or complete alias list. Unnamed reachable pointer blobs
+are included. Bulk fetch has no path filtering: explicit include/exclude and
+recent flags conflict with `--all`, and configured include/exclude paths do
+not narrow it. Default/recent fetch and pull retain path-preserving tree scans.
+Malformed/truncated records, missing or corrupt objects, exhausted inventory
+budgets and conflicting pointer sizes fail before LFS payload transfers.
+
+`crab lfs push --all <remote> [refs...]` shares the history traversal and
+verified batch reader, with local-only Git object access. With no explicit
+refs, upload roots are local branches and tags (`--branches --tags`), not
+fetch's broader `--all` scope. Remote-only and detached histories require
+explicit operands. Replaced and deleted versions are included; missing
+promised blobs fail without fetching from a source remote. The operation
+owns both root selection and access policy, preventing upload from inheriting
+fetch's transport permission. A bounded OID/size inventory rejects conflicting
+payload declarations before upload. No new discovery parser or fallback.
+
+This does not certify normal (non-`--all`) standalone push's introduced-history
+selection, object-ID/stdin admission or pre-push path-alias lock coverage.
+Those remain separate qualification gaps.
+
+### Recent Commit Selection
+
+Ordinary fetch honors Git's typed `lfs.fetchrecentalways` boolean through the
+same supervised Git-config reader as recent-ref selection. Explicit `--recent`
+also enables this selection; `--all` bypasses configured recent and path
+defaults. Pull does not fetch historical versions solely because recent-always
+is enabled.
+
+Fetch and pull resolve include/exclude overrides independently against their
+LFS configuration, then use the shared LFS pattern compiler. Empty patterns
+clear a restriction rather than constructing an empty generic path matcher.
+The same empty-pattern contract applies to standalone and process smudge.
+The real-Git RustFS LFS selection qualification compares cold-cache inventories
+and checked-out bytes with native Git LFS for these settings and overrides.
+
+Recent commit selection resolves each requested revision to one commit before
+walking its history. Each tip supplies its own cutoff; prune adds
+`lfs.pruneoffsetdays` only when the commit window is enabled. One streamed
+topological walk visits shared ancestry once, propagating the widest applicable
+cutoff to each parent. Pending graph entries and deduplicated results share
+the existing scan budget; each input record is bounded separately. Missing selected
+revisions, malformed timestamped commit records and cancelled Git queries
+fail rather than returning an incomplete successful selection.
+
+Fetch scans current selected trees, then the old sides of changes in the
+selected recent commits. The previous blob is included even when its parent
+commit predates the cutoff. A non-recursive raw Git log emits NUL-framed old
+object IDs and paths; the shared bounded batch reader verifies the actual
+blob bytes before interpreting pointers. No patch-text pointer parser or
+whole-parent-tree scan is used. Each merge parent is compared separately;
+rename heuristics and content transforms are disabled. Display settings cannot
+silently suppress merge parents. Historical aliases remain distinct until
+path filtering and transfer deduplication. Malformed/truncated records,
+missing or corrupt old blobs, and conflicting declared sizes fail the entire
+inventory before any LFS transfers begin.
+
+Prune still uses its separate all-ancestry inventory. Its error handling,
+retention scope, staged-index/stash coverage and flag contracts need further
+qualification; fetch's previous-object proof does not certify prune safety.
 
 ### Configuration Precedence
 

@@ -1,7 +1,7 @@
 //! Git protocol-v2 upload-pack over the helper's already-authenticated stdio.
 //!
 //! This module owns wire framing, command semantics, and the product-level
-//! admission repair before a session starts. Generation pinning, object
+//! admission repair before a fetch starts. Generation pinning, object
 //! traversal, and pack production stay in the shared read and remote-git crates.
 
 use std::collections::HashSet;
@@ -19,7 +19,7 @@ use crab_read::{
 };
 use crab_remote_git::{
     Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits, OperationLimits,
-    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
+    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions, RepositoryRefs,
 };
 use gix_hash::ObjectId;
 use gix_packetline::{PacketLineRef, decode::PacketLineOrWantedSize};
@@ -343,8 +343,8 @@ async fn capability_snapshot_is_stable(
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<bool> {
     // Capability discovery proves that terminal admission can establish an
-    // exact snapshot. `serve_admitted` performs any bounded repair before its
-    // positive handoff, so requiring derived catalogs here would strand v2.
+    // exact snapshot. `serve_admitted` performs bounded repair before fetch,
+    // so requiring derived catalogs here would strand v2.
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
     let (manifest, _) = tokio::select! {
         biased;
@@ -658,14 +658,21 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (repository, proof) = open_repository_with_visibility_requirement(
-        store,
-        prefix,
-        cancellation,
-        VisibilityRequirement::Catalog,
-    )
-    .await?;
-    let visible_ref_names = visible_ref_names(&repository, hidden_ref_patterns)?;
+    let (refs, mut discovery_packs) = {
+        let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
+        let snapshot = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(CrabError::Cancelled),
+            result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
+        };
+        let manifest = snapshot.materialized_manifest();
+        let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
+        (refs, snapshot.journal.packs)
+    };
+    let visible_ref_names = visible_ref_names(&refs, hidden_ref_patterns)?;
+    // Discovery reads canonical metadata, even if payloads or derived indexes
+    // are damaged. Fetch still requires its complete verified admission path.
+    let mut fetch_snapshot = None;
 
     // The remote-helper positive response is one raw blank line. Only after
     // this acknowledgement does the stdio stream become protocol-v2 bytes.
@@ -700,7 +707,7 @@ where
                 };
                 write_ls_refs(
                     writer,
-                    &repository,
+                    &refs,
                     &visible_ref_names,
                     hidden_ref_patterns,
                     &args,
@@ -716,8 +723,54 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
+                if fetch_snapshot.is_none() {
+                    let admitted = match open_repository_with_visibility_requirement(
+                        store,
+                        prefix,
+                        cancellation,
+                        VisibilityRequirement::Catalog,
+                    )
+                    .await
+                    {
+                        Ok(admitted) => admitted,
+                        Err(error) => {
+                            return reject_protocol_request(writer, error, cancellation).await;
+                        }
+                    };
+                    // Compaction can change the generation without changing
+                    // the advertised Git view. Require exact refs and immutable
+                    // inventory so admission cannot silently switch authority.
+                    if admitted.0.refs() != &refs
+                        || !admitted
+                            .0
+                            .matches_pack_inventory(&discovery_packs)
+                            .map_err(remote_error)?
+                    {
+                        return reject_protocol_request(
+                            writer,
+                            protocol("repository changed after ref discovery; retry fetch"),
+                            cancellation,
+                        )
+                        .await;
+                    }
+                    discovery_packs = Vec::new();
+                    fetch_snapshot = Some(admitted);
+                }
+                let (repository, proof) = fetch_snapshot.as_ref().ok_or_else(|| {
+                    CrabError::Internal("upload-pack did not retain fetch admission".to_owned())
+                })?;
+                let Some(proof) = proof.as_ref() else {
+                    // Empty manifests have no catalog or reachable objects. Ref
+                    // discovery is valid, but no want may start pack production.
+                    return reject_protocol_request(
+                        writer,
+                        protocol("fetch requested an object from an empty repository"),
+                        cancellation,
+                    )
+                    .await;
+                };
                 if let Err(error) = validate_fetch_admission_catalog(
-                    &repository,
+                    repository,
                     proof.as_catalog().ok_or_else(|| {
                         CrabError::Internal("upload-pack did not retain catalog proof".to_owned())
                     })?,
@@ -732,7 +785,7 @@ where
                 }
                 if !fetch.done {
                     let common_haves = common_haves_catalog(
-                        &repository,
+                        repository,
                         proof.as_catalog().ok_or_else(|| {
                             CrabError::Internal(
                                 "upload-pack did not retain catalog proof".to_owned(),
@@ -748,8 +801,8 @@ where
                     } else {
                         write_fetch_response(
                             writer,
-                            &repository,
-                            &proof,
+                            repository,
+                            proof,
                             &visible_ref_names,
                             &fetch,
                             negotiation_rounds,
@@ -764,8 +817,8 @@ where
                 }
                 write_fetch_response(
                     writer,
-                    &repository,
-                    &proof,
+                    repository,
+                    proof,
                     &visible_ref_names,
                     &fetch,
                     negotiation_rounds,
@@ -883,7 +936,7 @@ async fn open_repository_with_visibility_requirement(
     prefix: &str,
     cancellation: &CancellationToken,
     requirement: VisibilityRequirement,
-) -> Result<(RemoteGitRepository, UploadPackVisibilityProof)> {
+) -> Result<(RemoteGitRepository, Option<UploadPackVisibilityProof>)> {
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
     let mut last_indexing = None;
@@ -955,6 +1008,13 @@ async fn open_repository_with_visibility_requirement(
         let mut visibility_error = None;
         let (observed_generation, required_generation) = match open {
             Ok(repository) => {
+                // The validated empty manifest is the complete ref snapshot;
+                // inventing a catalog would create a nonexistent object authority.
+                if matches!(requirement, VisibilityRequirement::Catalog)
+                    && repository.refs().is_empty()
+                {
+                    return Ok((repository, None));
+                }
                 let visibility = match requirement {
                     #[cfg(test)]
                     VisibilityRequirement::Materialized => repository
@@ -967,7 +1027,7 @@ async fn open_repository_with_visibility_requirement(
                         .map(UploadPackVisibilityProof::Catalog),
                 };
                 match visibility {
-                    Ok(visibility) => return Ok((repository, visibility)),
+                    Ok(visibility) => return Ok((repository, Some(visibility))),
                     Err(error) if visibility_index_needs_repair(&error) => {
                         let generation = repository.generation();
                         visibility_error = Some(error);
@@ -1076,6 +1136,7 @@ pub(crate) async fn open_repository_with_catalog_visibility(
         VisibilityRequirement::Catalog,
     )
     .await?;
+    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
     Ok((repository, proof.into_catalog()?))
 }
 
@@ -1092,7 +1153,7 @@ pub(crate) async fn open_repository_with_visibility(
         VisibilityRequirement::Materialized,
     )
     .await?;
-    let UploadPackVisibilityProof::Materialized(visibility) = proof else {
+    let Some(UploadPackVisibilityProof::Materialized(visibility)) = proof else {
         return Err(CrabError::Internal(
             "materialized upload-pack proof was not returned".to_owned(),
         ));
@@ -1184,12 +1245,11 @@ async fn wait_for_locator_read_retry(
 }
 
 pub(crate) fn visible_ref_names(
-    repository: &RemoteGitRepository,
+    refs: &RepositoryRefs,
     hidden_ref_patterns: &[String],
 ) -> Result<Vec<String>> {
     let hidden = compile_hidden_refs(hidden_ref_patterns)?;
-    Ok(repository
-        .refs()
+    Ok(refs
         .entries
         .iter()
         .filter(|entry| !hidden.is_match(&entry.name))
@@ -1455,7 +1515,7 @@ fn parse_fetch(args: &[String]) -> Result<FetchRequest> {
 
 async fn write_ls_refs<W: AsyncWrite + Unpin>(
     writer: &mut W,
-    repository: &RemoteGitRepository,
+    refs: &RepositoryRefs,
     visible_ref_names: &[String],
     hidden_ref_patterns: &[String],
     request: &LsRefsRequest,
@@ -1469,29 +1529,25 @@ async fn write_ls_refs<W: AsyncWrite + Unpin>(
                 .any(|prefix| name.starts_with(prefix))
     };
     if request.symrefs
-        && repository.refs().head.as_ref().is_some_and(|head| {
+        && refs.head.as_ref().is_some_and(|head| {
             visible_ref_names.iter().any(|name| name == &head.name)
                 && (matches_prefix("HEAD") || matches_prefix(&head.name))
         })
     {
-        let head = repository
-            .refs()
-            .head
-            .as_ref()
-            .ok_or_else(|| protocol("missing HEAD"))?;
+        let head = refs.head.as_ref().ok_or_else(|| protocol("missing HEAD"))?;
         let line = format!("{} HEAD symref-target:{}\n", head.target, head.name);
         write_data(writer, line.as_bytes(), cancellation).await?;
     }
     let hidden = compile_hidden_refs(hidden_ref_patterns)?;
     if request.unborn
-        && let Some(target) = repository.refs().unborn_head.as_deref()
+        && let Some(target) = refs.unborn_head.as_deref()
         && !hidden.is_match(target)
         && (matches_prefix("HEAD") || matches_prefix(target))
     {
         let line = format!("unborn HEAD symref-target:{target}\n");
         write_data(writer, line.as_bytes(), cancellation).await?;
     }
-    for reference in &repository.refs().entries {
+    for reference in &refs.entries {
         if !visible_ref_names.iter().any(|name| name == &reference.name)
             || !matches_prefix(&reference.name)
         {
@@ -2545,6 +2601,236 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_repository_serves_unborn_refs_but_rejects_object_wants() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/empty".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .unwrap();
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .unwrap();
+        for (command, arguments, hidden_refs, expected, succeeds) in [
+            ("ls-refs", vec!["symrefs"], vec![], "00000002", true),
+            (
+                "ls-refs",
+                vec!["symrefs", "unborn"],
+                vec![],
+                "unborn HEAD symref-target:refs/heads/main\n",
+                true,
+            ),
+            (
+                "ls-refs",
+                vec!["unborn"],
+                vec!["refs/heads/main".to_owned()],
+                "00000002",
+                true,
+            ),
+            (
+                "fetch",
+                vec!["want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "done"],
+                vec![],
+                "fetch requested an object from an empty repository",
+                false,
+            ),
+        ] {
+            let mut request = packet(format!("command={command}\n").as_bytes());
+            request.extend_from_slice(b"0001");
+            for argument in arguments {
+                request.extend(packet(format!("{argument}\n").as_bytes()));
+            }
+            request.extend_from_slice(b"0000");
+            let mut reader = BufReader::new(Cursor::new(request));
+            let mut output = Vec::new();
+            let result = serve(
+                &mut reader,
+                &mut output,
+                &store,
+                "org/empty",
+                &hidden_refs,
+                &FetchAdmissionPolicy::default(),
+                false,
+                &CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), succeeds, "{command}: {result:?}");
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(expected), "{output}");
+            if !succeeds {
+                assert!(output.contains("ERR "));
+            }
+            assert!(!output.contains("packfile\n") && !output.contains("fallback\n"));
+            if !hidden_refs.is_empty() {
+                assert!(!output.contains("symref-target:refs/heads/main"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ref_discovery_does_not_require_pack_payloads_or_locator_indexes() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/discovery".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .unwrap();
+        let tip = "a".repeat(40);
+        let tag = "b".repeat(40);
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest
+            .refs
+            .insert("refs/heads/main".to_owned(), tip.clone());
+        manifest
+            .refs
+            .insert("refs/heads/secret".to_owned(), tip.clone());
+        manifest.refs.insert("refs/tags/v1".to_owned(), tag.clone());
+        manifest
+            .peeled_refs
+            .insert("refs/tags/v1".to_owned(), tip.clone());
+        let pack_id = "c".repeat(64);
+        let (hash, _, pack_index) = crab_metadata::manifests::compact_pack_index(
+            1,
+            &[crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                content_hash: pack_id,
+                size: 128,
+                object_count: 2,
+                ref_tips: vec![tip.clone(), tag.clone()],
+            }],
+        )
+        .unwrap();
+        let (_, _, shard_index) = crab_metadata::manifests::compact_shard_index(1, &[]).unwrap();
+        crab_metadata::manifest_store::upload_segmented_bulk(
+            &store,
+            &layout,
+            &crab_metadata::manifests::BulkData {
+                pack_index,
+                shard_index,
+            },
+        )
+        .await
+        .unwrap();
+        manifest.pack_index_hash = hash;
+        manifest.seal_git_validation();
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .unwrap();
+        let mut request = packet(b"command=ls-refs\n");
+        request.extend_from_slice(b"0001");
+        request.extend(packet(b"symrefs\n"));
+        request.extend(packet(b"peel\n"));
+        request.extend_from_slice(b"0000");
+        let mut reader = BufReader::new(Cursor::new(request));
+        let mut output = Vec::new();
+        serve(
+            &mut reader,
+            &mut output,
+            &store,
+            "org/discovery",
+            &["refs/heads/secret".to_owned()],
+            &FetchAdmissionPolicy::default(),
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let mut expected = packet(format!("{tip} HEAD symref-target:refs/heads/main\n").as_bytes());
+        expected.extend(packet(format!("{tip} refs/heads/main\n").as_bytes()));
+        expected.extend(packet(
+            format!("{tag} refs/tags/v1 peeled:{tip}\n").as_bytes(),
+        ));
+        expected.extend_from_slice(b"00000002");
+        let advertisement_end = output
+            .windows(4)
+            .position(|bytes| bytes == b"0000")
+            .unwrap()
+            + 4;
+        assert_eq!(&output[advertisement_end..], expected);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_git_state_changed_after_discovery() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "org/pinned".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .unwrap();
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
+            .await
+            .unwrap();
+        let (client, server) = tokio::io::duplex(8192);
+        let server_store = store.clone();
+        let server = Box::pin(async move {
+            let (input, mut output) = tokio::io::split(server);
+            Box::pin(serve(
+                &mut BufReader::new(input),
+                &mut output,
+                &server_store,
+                "org/pinned",
+                &[],
+                &FetchAdmissionPolicy::default(),
+                false,
+                &CancellationToken::new(),
+            ))
+            .await
+        });
+        let client = async move {
+            let (input, mut output) = tokio::io::split(client);
+            let mut input = BufReader::new(input);
+            let cancellation = CancellationToken::new();
+            assert_eq!(input.read_u8().await.unwrap(), b'\n');
+            while !matches!(
+                read_packet(&mut input, &cancellation).await.unwrap(),
+                Packet::Flush
+            ) {}
+            let mut discovery = packet(b"command=ls-refs\n");
+            discovery.extend_from_slice(b"0001");
+            discovery.extend(packet(b"symrefs\n"));
+            discovery.extend(packet(b"unborn\n"));
+            discovery.extend_from_slice(b"0000");
+            output.write_all(&discovery).await.unwrap();
+            while !matches!(
+                read_packet(&mut input, &cancellation).await.unwrap(),
+                Packet::ResponseEnd
+            ) {}
+            let (_, etag) = crab_metadata::manifest_store::read_manifest(&store, &layout)
+                .await
+                .unwrap();
+            manifest.generation += 1;
+            manifest.head = "refs/heads/other".to_owned();
+            manifest.seal_git_validation();
+            crab_metadata::manifest_store::write_manifest_cas(&store, &layout, &manifest, &etag)
+                .await
+                .unwrap();
+            let mut fetch = packet(b"command=fetch\n");
+            fetch.extend_from_slice(b"0001");
+            fetch.extend(packet(b"want aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"));
+            fetch.extend(packet(b"done\n"));
+            fetch.extend_from_slice(b"0000");
+            output.write_all(&fetch).await.unwrap();
+            let mut response = Vec::new();
+            input.read_to_end(&mut response).await.unwrap();
+            response
+        };
+        let (result, response) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, client)
+        })
+        .await
+        .unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(
+            response,
+            packet(&protocol_error_payload(&error.to_string()))
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("repository changed after ref discovery")
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_capability_rejects_refs_without_a_visibility_proof() {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
@@ -2664,6 +2950,25 @@ mod tests {
         ])
         .expect_err("unsupported filters must fail in the wire parser");
         assert!(error.to_string().contains("unsupported filter"));
+    }
+
+    #[test]
+    fn rejects_every_unadvertised_fetch_argument_before_planning() {
+        for argument in [
+            "deepen-since 1",
+            "deepen-not refs/heads/main",
+            "want-ref refs/heads/main",
+            "packfile-uris https",
+            "wait-for-done",
+            "server-option trace=1",
+        ] {
+            let error = parse_fetch(&[format!("want {}", "a".repeat(40)), argument.to_owned()])
+                .expect_err("unadvertised fetch arguments must fail in the wire parser");
+            assert!(
+                error.to_string().contains("unsupported fetch argument"),
+                "{argument} unexpectedly produced {error}"
+            );
+        }
     }
 
     #[test]

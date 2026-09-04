@@ -1,6 +1,6 @@
 use super::*;
 
-fn base_args(cache_dir: PathBuf) -> MirrorArgs {
+pub(super) fn base_args(cache_dir: PathBuf) -> MirrorArgs {
     MirrorArgs {
         source: "https://example.com/org/repo.git".to_owned(),
         destination: "crab://bucket/org/repo".to_owned(),
@@ -8,12 +8,17 @@ fn base_args(cache_dir: PathBuf) -> MirrorArgs {
         no_atomic: false,
         skip_lfs: false,
         force_lfs_check: false,
+        check: false,
+        write_plan: None,
+        apply_plan: None,
+        allow_delete_refs: false,
+        ci: false,
         json: false,
         jsonl: false,
     }
 }
 
-fn test_options() -> MirrorExecution {
+pub(super) fn test_options() -> MirrorExecution {
     test_options_with_collector(fake_lfs_object_ids)
 }
 
@@ -24,6 +29,7 @@ fn test_options_with_collector(collector: LfsObjectIdCollector) -> MirrorExecuti
         helper_path: None,
         crab_binary: "crab".to_owned(),
         lfs_object_id_collector: collector,
+        initialize_destination: |_, _, _| Ok(()),
     }
 }
 
@@ -31,6 +37,7 @@ fn fake_lfs_object_ids(
     _repo_dir: &Path,
     _local_shas: &[String],
     _remote_shas: &[String],
+    _cancel: &CancellationToken,
 ) -> Result<Vec<String>> {
     Ok(vec![lfs_oid(0xab)])
 }
@@ -39,6 +46,7 @@ fn no_lfs_object_ids(
     _repo_dir: &Path,
     _local_shas: &[String],
     _remote_shas: &[String],
+    _cancel: &CancellationToken,
 ) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
@@ -49,6 +57,24 @@ fn oid(byte: u8) -> String {
 
 fn lfs_oid(byte: u8) -> String {
     format!("{byte:02x}").repeat(32)
+}
+
+#[test]
+fn integrity_flags_parse_as_a_plan_first_invocation() {
+    let args = MirrorArgs::try_parse_from([
+        "mirror",
+        "source",
+        "crab://bucket/repo",
+        "--check",
+        "--write-plan",
+        "plan.json",
+        "--allow-delete-refs",
+        "--ci",
+    ])
+    .unwrap();
+
+    assert!(args.is_integrity_operation());
+    assert_eq!(args.write_plan, Some(PathBuf::from("plan.json")));
 }
 
 #[derive(Default)]
@@ -153,6 +179,14 @@ fn action_commands(runner: &RecordingRunner) -> Vec<&ProcessCommand> {
         .collect()
 }
 
+fn destination_commands(runner: &RecordingRunner) -> Vec<&ProcessCommand> {
+    runner
+        .commands
+        .iter()
+        .skip_while(|command| command.args != ["remote", "get-url", CRAB_REMOTE])
+        .collect()
+}
+
 #[test]
 fn cache_key_changes_with_source_and_destination() {
     let first = mirror_cache_key("https://example.com/a.git", "crab://bucket/a");
@@ -189,16 +223,47 @@ fn remote_source_url_is_not_rewritten() -> std::result::Result<(), Box<dyn std::
 }
 
 #[test]
-fn ref_parser_ignores_local_crab_tracking_and_remote_pseudo_refs() {
+fn relative_cache_resolves_before_git_changes_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = base_args(PathBuf::from("nested/cache.git"));
+    assert_eq!(
+        resolve_cache_dir(&args, dir.path()),
+        dir.path().join("nested/cache.git")
+    );
+}
+
+#[test]
+fn legacy_mirror_refuses_an_owned_cache_before_any_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cache.git");
+    let _owner = CacheUseGuard::acquire(&path, &CancellationToken::new()).unwrap();
+    let mut runner = changed_ref_runner();
+    let result = run_mirror_with_runner(
+        &base_args(path),
+        &CancellationToken::new(),
+        test_options(),
+        &mut runner,
+    );
+    assert!(
+        matches!(result, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(action_commands(&runner).is_empty());
+}
+
+#[test]
+fn ref_parser_preserves_source_tracking_refs_and_ignores_pseudo_refs() {
     let parsed = parse_ref_lines(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main\n\
          bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/remotes/crab/main\n\
          cccccccccccccccccccccccccccccccccccccccc HEAD\n\
          dddddddddddddddddddddddddddddddddddddddd refs/tags/v1^{}\n",
-        true,
     );
 
-    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(
+        parsed.get("refs/remotes/crab/main"),
+        Some(&"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned())
+    );
     assert_eq!(
         parsed.get("refs/heads/main"),
         Some(&"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())
@@ -226,10 +291,10 @@ fn invalid_destination_fails_before_subprocess()
 }
 
 #[test]
-fn missing_cache_clones_then_mirrors_lfs_and_git_refs()
+fn missing_cache_initializes_then_mirrors_lfs_and_git_refs()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let cache = temp.path().join("cache.git");
+    let cache = temp.path().canonicalize()?.join("cache.git");
     let args = base_args(cache.clone());
     let mut runner = RecordingRunner {
         local_refs: vec![("refs/heads/main".to_owned(), oid(0xaa))],
@@ -244,24 +309,36 @@ fn missing_cache_clones_then_mirrors_lfs_and_git_refs()
     )?;
 
     assert!(summary.created_cache);
-    let commands = action_commands(&runner);
-    assert_eq!(commands.len(), 8);
+    let init = runner
+        .commands
+        .iter()
+        .find(|command| command.args.first().is_some_and(|arg| arg == "init"))
+        .unwrap();
     assert_command(
-        commands[0],
+        init,
         "git",
-        &[
-            "clone",
-            "--mirror",
-            "--",
-            "https://example.com/org/repo.git",
-            &cache.display().to_string(),
-        ],
+        &["init", "--bare", "--object-format=sha1", "--", "."],
     );
-    assert_command(commands[1], "git", &["remote", "get-url", CRAB_REMOTE]);
+    assert_eq!(init.current_dir.as_deref(), Some(cache.as_path()));
+    assert!(runner.commands.iter().any(|command| command.args
+        == [
+            "config",
+            "--replace-all",
+            "remote.origin.url",
+            args.source.as_str()
+        ]));
+    let commands = destination_commands(&runner);
+    assert_eq!(commands.len(), 8);
+    assert_command(commands[0], "git", &["remote", "get-url", CRAB_REMOTE]);
+    assert_command(
+        commands[1],
+        "git",
+        &["remote", "add", CRAB_REMOTE, "crab://bucket/org/repo"],
+    );
     assert_command(
         commands[2],
         "git",
-        &["remote", "add", CRAB_REMOTE, "crab://bucket/org/repo"],
+        &["config", "--unset-all", "remote.crab.fetch"],
     );
     assert_command(commands[3], "git", &["show-ref"]);
     assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
@@ -291,6 +368,7 @@ fn existing_cache_updates_origin_and_existing_crab_remote()
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
     std::fs::create_dir_all(&cache)?;
+    std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let args = base_args(cache);
     let mut runner = RecordingRunner {
         crab_remote_exists: true,
@@ -307,44 +385,33 @@ fn existing_cache_updates_origin_and_existing_crab_remote()
     )?;
 
     assert!(!summary.created_cache);
-    let commands = action_commands(&runner);
-    assert_eq!(commands.len(), 10);
-    assert_command(commands[0], "git", &["rev-parse", "--is-bare-repository"]);
+    let commands = destination_commands(&runner);
+    assert_eq!(commands.len(), 8);
+    assert_command(commands[0], "git", &["remote", "get-url", CRAB_REMOTE]);
     assert_command(
         commands[1],
         "git",
-        &[
-            "remote",
-            "set-url",
-            ORIGIN_REMOTE,
-            "https://example.com/org/repo.git",
-        ],
+        &["remote", "set-url", CRAB_REMOTE, "crab://bucket/org/repo"],
     );
     assert_command(
         commands[2],
         "git",
-        &["remote", "update", "--prune", ORIGIN_REMOTE],
+        &["config", "--unset-all", "remote.crab.fetch"],
     );
-    assert_command(commands[3], "git", &["remote", "get-url", CRAB_REMOTE]);
+    assert_command(commands[3], "git", &["show-ref"]);
+    assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
     assert_command(
-        commands[4],
-        "git",
-        &["remote", "set-url", CRAB_REMOTE, "crab://bucket/org/repo"],
-    );
-    assert_command(commands[5], "git", &["show-ref"]);
-    assert_command(commands[6], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
-    assert_command(
-        commands[7],
+        commands[5],
         "git",
         &["lfs", "fetch", "--all", ORIGIN_REMOTE, &oid(0xaa)],
     );
     assert_command(
-        commands[8],
+        commands[6],
         "crab",
         &["lfs", "push", CRAB_REMOTE, "--object-id", "--stdin"],
     );
     assert_command(
-        commands[9],
+        commands[7],
         "git",
         &["push", "--mirror", "--atomic", CRAB_REMOTE],
     );
@@ -389,6 +456,7 @@ fn matching_refs_skip_lfs_scan_and_git_push_by_default()
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
     std::fs::create_dir_all(&cache)?;
+    std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let args = base_args(cache);
     let mut runner = RecordingRunner {
         crab_remote_exists: true,
@@ -403,9 +471,14 @@ fn matching_refs_skip_lfs_scan_and_git_push_by_default()
     )?;
 
     assert!(!summary.created_cache);
-    let commands = action_commands(&runner);
-    assert_command(commands[5], "git", &["show-ref"]);
-    assert_command(commands[6], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
+    let commands = destination_commands(&runner);
+    assert_command(
+        commands[2],
+        "git",
+        &["config", "--unset-all", "remote.crab.fetch"],
+    );
+    assert_command(commands[3], "git", &["show-ref"]);
+    assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
     assert!(!commands.iter().any(|command| {
         command.program == "git" && command.args.first().map(String::as_str) == Some("lfs")
     }));
@@ -424,6 +497,7 @@ fn force_lfs_check_runs_full_lfs_verification_without_git_push()
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
     std::fs::create_dir_all(&cache)?;
+    std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let mut args = base_args(cache);
     args.force_lfs_check = true;
     let mut runner = RecordingRunner {
@@ -440,18 +514,32 @@ fn force_lfs_check_runs_full_lfs_verification_without_git_push()
     )?;
 
     assert!(summary.lfs_enabled);
-    let commands = action_commands(&runner);
-    assert_command(commands[7], "git", &["lfs", "ls-files", "--all"]);
+    let commands = destination_commands(&runner);
+    assert_command(commands[5], "git", &["lfs", "ls-files", "--all"]);
     assert_command(
-        commands[8],
+        commands[6],
         "git",
         &["lfs", "fetch", "--all", ORIGIN_REMOTE],
     );
-    assert_command(commands[9], "crab", &["lfs", "push", "--all", CRAB_REMOTE]);
+    assert_command(commands[7], "crab", &["lfs", "push", "--all", CRAB_REMOTE]);
     assert!(!commands.iter().any(|command| {
         command.program == "git" && command.args.first().map(String::as_str) == Some("push")
     }));
     Ok(())
+}
+
+#[test]
+fn failed_destination_initialization_stops_before_discovery_or_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let args = base_args(temp.path().join("cache.git"));
+    let mut options = test_options();
+    options.initialize_destination = |_, _, _| Err(CrabError::Cancelled);
+    let mut runner = changed_ref_runner();
+    let result = run_mirror_with_runner(&args, &CancellationToken::new(), options, &mut runner);
+    assert!(matches!(result, Err(CrabError::Cancelled)));
+    assert!(!runner.commands.iter().any(|command| command.args
+        == ["ls-remote", "--refs", CRAB_REMOTE]
+        || command.args.first().is_some_and(|arg| arg == "push")));
 }
 
 #[test]
@@ -496,7 +584,6 @@ fn skip_lfs_omits_lfs_subprocesses() -> std::result::Result<(), Box<dyn std::err
             .iter()
             .all(|command| command.args.first().map(String::as_str) != Some("lfs"))
     );
-    assert_eq!(commands.len(), 6);
     assert_command(
         commands[commands.len() - 1],
         "git",

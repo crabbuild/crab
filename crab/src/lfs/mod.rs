@@ -37,6 +37,7 @@ pub mod batch;
 pub(crate) mod cache;
 pub mod config;
 pub(crate) mod coordinator;
+pub(crate) mod discovery;
 pub mod extension;
 pub mod fetch_filter;
 pub mod lifecycle;

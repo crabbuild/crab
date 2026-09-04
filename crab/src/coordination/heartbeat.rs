@@ -1,23 +1,17 @@
 //! Background task that periodically extends a push lock's TTL.
 //!
-//! While a push is in progress, the [`LockHeartbeat`] reads the lock
-//! payload, verifies the holder matches, and writes a new `expires_at`
-//! via ETag-based CAS. If the lock is stolen, deleted, or unreachable
-//! after one retry, the heartbeat cancels the push via a
-//! [`CancellationToken`].
+//! While an operation is in progress, [`LockHeartbeat`] delegates renewal
+//! to the shared lock owner. Lost or released ownership and exhausted
+//! bounded retries cancel the operation via a [`CancellationToken`].
 //!
 use std::time::Duration;
 
-use bytes::Bytes;
-use object_store::path::Path;
+use crab_coordination::PushLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
-use crate::core::error::CrabError;
-use crate::storage::retry::{RetryClass, retry_class};
 use crate::storage::store::Store;
-use crab_coordination::{PushLockPayload as LockPayload, unix_now};
 
 /// Minimum heartbeat interval (seconds).
 const MIN_INTERVAL_SECS: u64 = 10;
@@ -25,8 +19,8 @@ const MIN_INTERVAL_SECS: u64 = 10;
 /// Background task that periodically extends a push lock's TTL.
 ///
 /// Spawn via [`LockHeartbeat::spawn`]; stop via [`LockHeartbeat::stop`].
-/// If the lock is stolen, deleted, or a CAS conflict occurs, the
-/// heartbeat cancels the associated push through `push_cancel`.
+/// Lost or released ownership and exhausted bounded retries cancel the
+/// associated operation through `push_cancel`.
 pub struct LockHeartbeat {
     cancel: CancellationToken,
     handle: Option<JoinHandle<()>>,
@@ -37,7 +31,7 @@ impl LockHeartbeat {
     ///
     /// `interval` is clamped to `[10, ttl - 10]` seconds. The heartbeat
     /// runs until explicitly stopped or until it detects the lock has
-    /// been stolen/deleted.
+    /// been stolen, deleted, or released, or renewal fails.
     pub fn spawn(
         store: Store,
         lock_path: String,
@@ -102,9 +96,8 @@ impl LockHeartbeat {
     /// Stop the heartbeat task and wait for it to exit.
     pub async fn stop(mut self) {
         self.cancel.cancel();
-        // The task checks the cancel token on each iteration, so it
-        // will exit promptly. Ignore join errors (task panicked or was
-        // already finished).
+        // Join the current bounded renewal before the caller releases its
+        // lock; dropping an in-flight request leaves its result uncertain.
         if let Some(handle) = self.handle.take() {
             let _ = handle.await;
         }
@@ -158,8 +151,6 @@ async fn heartbeat_loop(
     stop_cancel: CancellationToken,
     self_cancel: CancellationToken,
 ) {
-    let obj_path = Path::from(lock_path.as_str());
-
     loop {
         // Sleep for the heartbeat interval, but wake early if either
         // the push or the heartbeat itself is cancelled.
@@ -180,138 +171,20 @@ async fn heartbeat_loop(
             return;
         }
 
-        match try_extend(&store, &obj_path, &holder, ttl).await {
+        match PushLock::renew_if_holder(store.inner(), &lock_path, &holder, ttl).await {
             Ok(()) => {
                 debug!(lock_path = %lock_path, "heartbeat extended lock TTL");
             }
-            Err(HeartbeatFailure::LockStolen { actual_holder }) => {
-                warn!(
-                    lock_path = %lock_path,
-                    actual_holder = %actual_holder,
-                    "lock stolen by another holder, cancelling push"
-                );
-                push_cancel.cancel();
-                return;
-            }
-            Err(HeartbeatFailure::LockDeleted) => {
-                warn!(lock_path = %lock_path, "lock deleted, cancelling push");
-                push_cancel.cancel();
-                return;
-            }
-            Err(HeartbeatFailure::CasConflict) => {
-                warn!(
-                    lock_path = %lock_path,
-                    "CAS conflict during heartbeat, lock may be stolen — cancelling push"
-                );
-                push_cancel.cancel();
-                return;
-            }
-            Err(HeartbeatFailure::Transient(err)) => {
-                warn!(
-                    lock_path = %lock_path,
-                    error = %err,
-                    "heartbeat transient error, retrying once"
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                match try_extend(&store, &obj_path, &holder, ttl).await {
-                    Ok(()) => {
-                        debug!(lock_path = %lock_path, "heartbeat retry succeeded");
-                    }
-                    Err(retry_err) => {
-                        error!(
-                            lock_path = %lock_path,
-                            error = ?retry_err,
-                            "heartbeat retry failed, cancelling push"
-                        );
-                        push_cancel.cancel();
-                        return;
-                    }
-                }
-            }
-            Err(HeartbeatFailure::Fatal(err)) => {
+            Err(error) => {
                 error!(
                     lock_path = %lock_path,
-                    error = %err,
-                    "heartbeat fatal error, cancelling push"
+                    %error,
+                    "push lock renewal failed, cancelling operation"
                 );
                 push_cancel.cancel();
                 return;
             }
         }
-    }
-}
-
-/// Internal failure modes for a single heartbeat attempt.
-#[derive(Debug)]
-enum HeartbeatFailure {
-    /// Lock holder doesn't match — someone else owns the lock.
-    LockStolen { actual_holder: String },
-    /// Lock file was deleted.
-    LockDeleted,
-    /// ETag-based CAS failed — lock was modified between read and write.
-    CasConflict,
-    /// Transient storage error — worth retrying once.
-    Transient(CrabError),
-    /// Non-transient, non-CAS error — give up.
-    Fatal(CrabError),
-}
-
-/// Attempt a single heartbeat: read lock, verify holder, extend TTL.
-async fn try_extend(
-    store: &Store,
-    obj_path: &Path,
-    holder: &str,
-    ttl: Duration,
-) -> std::result::Result<(), HeartbeatFailure> {
-    // Read current lock payload with ETag.
-    let (body, etag) = match store.get_with_etag(obj_path).await {
-        Ok(pair) => pair,
-        Err(CrabError::NotFound { .. }) => {
-            return Err(HeartbeatFailure::LockDeleted);
-        }
-        Err(e) => {
-            return Err(classify_heartbeat_error(e));
-        }
-    };
-
-    // Deserialize and verify holder.
-    let payload: LockPayload = serde_json::from_slice(&body).map_err(|e| {
-        HeartbeatFailure::Fatal(CrabError::Internal(format!(
-            "heartbeat: malformed lock payload: {e}"
-        )))
-    })?;
-
-    if payload.holder != holder {
-        return Err(HeartbeatFailure::LockStolen {
-            actual_holder: payload.holder,
-        });
-    }
-
-    // Write new expires_at via CAS.
-    let new_payload = LockPayload {
-        holder: holder.to_owned(),
-        expires_at: unix_now() + ttl.as_secs(),
-        lease_secs: ttl.as_secs(),
-    };
-    let new_body = serde_json::to_vec(&new_payload).map_err(|e| {
-        HeartbeatFailure::Fatal(CrabError::Internal(format!(
-            "heartbeat: serialize lock payload: {e}"
-        )))
-    })?;
-
-    match store.update(obj_path, Bytes::from(new_body), etag).await {
-        Ok(_) => Ok(()),
-        Err(CrabError::CasConflict { .. }) => Err(HeartbeatFailure::CasConflict),
-        Err(e) => Err(classify_heartbeat_error(e)),
-    }
-}
-
-/// Map a storage error into the appropriate heartbeat failure category.
-fn classify_heartbeat_error(err: CrabError) -> HeartbeatFailure {
-    match retry_class(&err) {
-        RetryClass::Transient | RetryClass::Throttled { .. } => HeartbeatFailure::Transient(err),
-        _ => HeartbeatFailure::Fatal(err),
     }
 }
 
@@ -319,7 +192,10 @@ fn classify_heartbeat_error(err: CrabError) -> HeartbeatFailure {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use crab_coordination::{PushLockPayload as LockPayload, unix_now};
     use object_store::memory::InMemory;
+    use object_store::path::Path;
     use std::sync::Arc;
 
     fn memory_store() -> Store {
@@ -467,6 +343,97 @@ mod tests {
         assert!(
             push_cancel.is_cancelled(),
             "push should be cancelled on deleted lock"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn released_claim_cancels_heartbeat_without_resurrection() {
+        let store = memory_store();
+        let lock_path = "repo/locks/refs/heads/main/lock";
+        let holder = "original-holder";
+        let payload = LockPayload::released(holder);
+        store
+            .put(
+                &Path::from(lock_path),
+                Bytes::from(serde_json::to_vec(&payload).unwrap()),
+            )
+            .await
+            .unwrap();
+        let before = store.get_with_etag(&Path::from(lock_path)).await.unwrap();
+        let cancel = CancellationToken::new();
+        let heartbeat = LockHeartbeat::spawn(
+            store.clone(),
+            lock_path.to_owned(),
+            holder.to_owned(),
+            Duration::from_secs(300),
+            Duration::from_secs(10),
+            cancel.clone(),
+        );
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        heartbeat.stop().await;
+        let after = store.get_with_etag(&Path::from(lock_path)).await.unwrap();
+
+        assert!(
+            cancel.is_cancelled(),
+            "released ownership must stop the operation"
+        );
+        assert_eq!(after, before, "heartbeat must not rewrite a released claim");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AWS_BUCKET, AWS_ENDPOINT_URL and credentials for a writable S3-compatible test bucket"]
+    async fn s3_released_claim_rejects_cached_and_heartbeat_renewal() {
+        let inner = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(std::env::var("AWS_BUCKET").unwrap())
+            .with_endpoint(std::env::var("AWS_ENDPOINT_URL").unwrap())
+            .with_allow_http(true)
+            .build()
+            .unwrap();
+        let store = Store::new(Arc::new(inner));
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let prefix = format!(
+            "qualification/lease-renewal-{}-{timestamp}",
+            std::process::id()
+        );
+        println!("retained qualification prefix: {prefix}");
+        let ttl = Duration::from_secs(60);
+        let mut lock = PushLock::acquire_ref(store.inner(), &prefix, "refs/heads/main", ttl)
+            .await
+            .unwrap();
+        PushLock::release_ref_if_holder(store.inner(), &prefix, "refs/heads/main", lock.holder())
+            .await
+            .unwrap();
+        let path = Path::from(lock.path());
+        let before = store.get_with_etag(&path).await.unwrap();
+        let cached_result = lock.renew().await;
+        let cancel = CancellationToken::new();
+        let heartbeat = LockHeartbeat::spawn(
+            store.clone(),
+            lock.path().to_owned(),
+            lock.holder().to_owned(),
+            ttl,
+            Duration::from_secs(10),
+            cancel.clone(),
+        );
+        let cancelled = tokio::time::timeout(Duration::from_secs(15), cancel.cancelled()).await;
+        heartbeat.stop().await;
+        let after = store.get_with_etag(&path).await.unwrap();
+        lock.release().await.unwrap();
+
+        assert!(
+            cached_result.is_err(),
+            "released claim must reject cached renewal"
+        );
+        assert!(
+            cancelled.is_ok(),
+            "heartbeat must cancel after observing release"
+        );
+        assert_eq!(
+            after, before,
+            "neither renewal may rewrite the released claim"
         );
     }
 

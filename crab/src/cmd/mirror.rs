@@ -8,23 +8,43 @@ use std::env;
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use clap::Parser;
+use crab_cache::lifecycle::CacheUseGuard;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::OutputMode;
+use crate::git::process::GIT_ENV_REMOVALS;
 use crate::git::url::CrabUrl;
+
+mod cache;
+mod history;
+mod hook;
+mod pointers;
+mod pre_push;
+mod process;
+mod reconcile;
+mod types;
+
+use cache::prepare_cache;
+use process::SystemCommandRunner;
+
+pub use hook::mirror_hook_status;
+pub use pre_push::{MirrorPrePushArgs, run_mirror_pre_push};
+pub use types::{
+    MirrorApplySummary, MirrorCheckSummary, MirrorCommandOutcome, MirrorDriftState,
+    MirrorHookState, MirrorHookStatus, MirrorPlanAction, MirrorPlanActionKind, MirrorPointerIssue,
+    MirrorPointerState, MirrorPointerStatus, MirrorReconciliationPlan, MirrorRefState,
+    MirrorRefStatus,
+};
 
 const CRAB_REMOTE: &str = "crab";
 const ORIGIN_REMOTE: &str = "origin";
 const REMOTE_HELPER: &str = "git-remote-crab";
 const LFS_FETCH_REF_CHUNK_SIZE: usize = 128;
-
-const GIT_ENV_REMOVALS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
 
 /// Arguments for `crab mirror`.
 #[derive(Debug, Clone, Parser)]
@@ -51,6 +71,26 @@ pub struct MirrorArgs {
     #[arg(long)]
     pub force_lfs_check: bool,
 
+    /// Inspect ref drift and Crab pointer availability without publishing refs.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Write a create-once reconciliation plan from `--check`.
+    #[arg(long, value_name = "PATH")]
+    pub write_plan: Option<PathBuf>,
+
+    /// Apply an immutable reconciliation plan after revalidating both remotes.
+    #[arg(long, value_name = "PATH")]
+    pub apply_plan: Option<PathBuf>,
+
+    /// Approve deletion of destination-only refs in both plan and apply invocations.
+    #[arg(long)]
+    pub allow_delete_refs: bool,
+
+    /// Return a failing exit status unless refs and pointer data are healthy.
+    #[arg(long)]
+    pub ci: bool,
+
     /// Structured JSON output (single envelope with terminal result).
     #[arg(long, conflicts_with = "jsonl")]
     pub json: bool,
@@ -65,6 +105,16 @@ impl MirrorArgs {
     #[must_use]
     pub fn output_mode(&self) -> OutputMode {
         OutputMode::from_flags(self.json, self.jsonl)
+    }
+
+    /// Whether this invocation uses the integrity/reconciliation contract.
+    #[must_use]
+    pub fn is_integrity_operation(&self) -> bool {
+        self.check
+            || self.apply_plan.is_some()
+            || self.write_plan.is_some()
+            || self.allow_delete_refs
+            || self.ci
     }
 }
 
@@ -97,10 +147,35 @@ pub fn run_mirror(args: &MirrorArgs, cancel: &CancellationToken) -> Result<Mirro
         require_remote_helper: true,
         helper_path,
         crab_binary,
-        lfs_object_id_collector: crate::cmd::lfs::push::collect_lfs_object_ids_from_range_in,
+        lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
+        initialize_destination: initialize_mirror_destination,
     };
-    let mut runner = SystemCommandRunner;
+    let mut runner = SystemCommandRunner::new(cancel.clone());
     run_mirror_with_runner(args, cancel, options, &mut runner)
+}
+
+/// Inspect mirror integrity or apply a prevalidated reconciliation plan.
+pub async fn run_mirror_integrity(
+    args: &MirrorArgs,
+    cancel: &CancellationToken,
+) -> Result<MirrorCommandOutcome> {
+    let mode = args.output_mode();
+    let options = MirrorExecution {
+        mode,
+        require_remote_helper: true,
+        helper_path: helper_path_override(),
+        crab_binary: crate::cmd::init::crab_binary_path(),
+        lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
+        initialize_destination: initialize_mirror_destination,
+    };
+    let mut runner = SystemCommandRunner::new(cancel.clone());
+    let store = async {
+        let destination = crate::git::url::CrabUrl::parse(&args.destination)?;
+        let config = crate::core::config::Config::resolve_local()?;
+        crate::auth::build_repository_url_store(&config, destination, "mirror-check", cancel).await
+    }
+    .await;
+    reconcile::run_integrity_command(args, cancel, options, &mut runner, store).await
 }
 
 #[derive(Debug, Clone)]
@@ -110,9 +185,11 @@ struct MirrorExecution {
     helper_path: Option<OsString>,
     crab_binary: String,
     lfs_object_id_collector: LfsObjectIdCollector,
+    initialize_destination: fn(&str, &Path, &CancellationToken) -> Result<()>,
 }
 
-type LfsObjectIdCollector = fn(&Path, &[String], &[String]) -> Result<Vec<String>>;
+type LfsObjectIdCollector =
+    fn(&Path, &[String], &[String], &CancellationToken) -> Result<Vec<String>>;
 
 fn run_mirror_with_runner(
     args: &MirrorArgs,
@@ -128,19 +205,24 @@ fn run_mirror_with_runner(
     let atomic = !args.no_atomic;
 
     let _parsed = CrabUrl::parse(&args.destination)?;
-    let cache_dir = resolve_cache_dir(&args);
-    let created_cache = !cache_dir.exists();
+    let cache_dir = resolve_cache_dir(&args, &invocation_dir);
 
     preflight(runner, &options, lfs_enabled)?;
     check_cancelled(cancel)?;
 
-    prepare_cache(&args, &cache_dir, created_cache, &options, runner)?;
+    // Hold the same ownership as inspection/apply until LFS and ref publication
+    // finish; a refresh during either operation could change the selected refs.
+    let cache = CacheUseGuard::acquire(&cache_dir, cancel)?;
+    let cache_dir = cache.path();
+    let created_cache = prepare_cache(&args, &cache, cancel, &options, runner)?;
     check_cancelled(cancel)?;
 
-    ensure_crab_remote(&cache_dir, &args.destination, &options, runner)?;
+    ensure_crab_remote(cache_dir, &args.destination, &options, runner)?;
     check_cancelled(cancel)?;
 
-    let ref_delta = load_ref_delta(&cache_dir, &options, runner)?;
+    (options.initialize_destination)(&args.destination, cache_dir, cancel)?;
+    check_cancelled(cancel)?;
+    let ref_delta = load_ref_delta(cache_dir, &options, runner)?;
     check_cancelled(cancel)?;
 
     if ref_delta.is_empty() {
@@ -148,14 +230,14 @@ fn run_mirror_with_runner(
             eprintln!("mirror: destination refs already match source");
         }
         if lfs_enabled && args.force_lfs_check {
-            mirror_lfs_full(&cache_dir, &options, runner)?;
+            mirror_lfs_full(cache_dir, &options, runner)?;
         } else if lfs_enabled && options.mode == OutputMode::Text {
             eprintln!("mirror: skipping LFS scan because refs are unchanged");
         }
         check_cancelled(cancel)?;
         return finish_mirror_summary(
             &args,
-            &cache_dir,
+            cache_dir,
             created_cache,
             lfs_enabled,
             atomic,
@@ -165,21 +247,57 @@ fn run_mirror_with_runner(
     }
 
     if lfs_enabled {
-        mirror_lfs_incremental(&cache_dir, &ref_delta, &options, runner)?;
+        mirror_lfs_incremental(cache_dir, &ref_delta, &options, runner, cancel)?;
         check_cancelled(cancel)?;
     }
 
-    push_git_refs(&cache_dir, atomic, &options, runner)?;
+    push_git_refs(cache_dir, atomic, &options, runner)?;
 
     finish_mirror_summary(
         &args,
-        &cache_dir,
+        cache_dir,
         created_cache,
         lfs_enabled,
         atomic,
         start,
         options.mode,
     )
+}
+
+fn initialize_mirror_destination(
+    destination: &str,
+    cache_dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    crate::cmd::lfs::block_on_runtime(async {
+        let destination = crate::git::url::ObjectUrl::parse(destination)?;
+        let config = crate::core::config::Config::resolve_for_repo(cache_dir)?;
+        // Bootstrap needs the primary object endpoint before a repository layout
+        // exists; ordinary repository resolution would reject that empty prefix.
+        let resolved =
+            crate::storage::resolve_object_url_store(&destination, &config, "repo-create", cancel)
+                .await?;
+        let store = resolved.store;
+        let router = crate::storage::StoreLayout::new(store.clone(), resolved.prefix);
+        match store.head(&router.layout_descriptor_path()).await {
+            // Existing repositories must pass the normal read validation;
+            // implicit mirroring must not repair a lost manifest in place.
+            Ok(_) => Ok(()),
+            Err(CrabError::NotFound { .. }) => {
+                // The owned cache HEAD came from the source advertisement.
+                // Using the configured default here can select a different,
+                // existing branch and silently change a fresh clone's checkout.
+                let source_head = std::fs::read_to_string(cache_dir.join("HEAD"))?;
+                let default_head = format!("refs/heads/{}", config.default_branch);
+                let head = source_head
+                    .trim()
+                    .strip_prefix("ref: ")
+                    .unwrap_or(&default_head);
+                crate::cmd::init::initialize_remote_repository_store(&store, &router, head).await
+            }
+            Err(error) => Err(error),
+        }
+    })
 }
 
 fn resolve_source(source: &str, invocation_dir: &Path) -> Result<String> {
@@ -280,101 +398,6 @@ fn run_preflight(
     }
 }
 
-fn prepare_cache(
-    args: &MirrorArgs,
-    cache_dir: &Path,
-    created_cache: bool,
-    options: &MirrorExecution,
-    runner: &mut dyn CommandRunner,
-) -> Result<()> {
-    if created_cache {
-        create_cache_parent(cache_dir)?;
-        if options.mode == OutputMode::Text {
-            eprintln!("mirror: cloning source into bare mirror cache");
-        }
-        let cache_arg = cache_dir.display().to_string();
-        let parent = cache_dir
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty());
-        run_required(
-            runner,
-            git_command(
-                [
-                    "clone",
-                    "--mirror",
-                    "--",
-                    args.source.as_str(),
-                    cache_arg.as_str(),
-                ],
-                parent,
-                options,
-                true,
-            ),
-            options.mode,
-        )?;
-        return Ok(());
-    }
-
-    if !cache_dir.is_dir() {
-        return Err(CrabError::Configuration {
-            key: "mirror cache path exists but is not a directory".to_owned(),
-            origin: cache_dir.display().to_string(),
-        });
-    }
-    validate_bare_cache(cache_dir, options, runner)?;
-
-    if options.mode == OutputMode::Text {
-        eprintln!("mirror: updating bare mirror cache");
-    }
-    run_required(
-        runner,
-        git_command(
-            ["remote", "set-url", ORIGIN_REMOTE, args.source.as_str()],
-            Some(cache_dir),
-            options,
-            true,
-        ),
-        options.mode,
-    )?;
-    run_required(
-        runner,
-        git_command(
-            ["remote", "update", "--prune", ORIGIN_REMOTE],
-            Some(cache_dir),
-            options,
-            true,
-        ),
-        options.mode,
-    )?;
-
-    Ok(())
-}
-
-fn validate_bare_cache(
-    cache_dir: &Path,
-    options: &MirrorExecution,
-    runner: &mut dyn CommandRunner,
-) -> Result<()> {
-    let output = runner.run(
-        &git_command(
-            ["rev-parse", "--is-bare-repository"],
-            Some(cache_dir),
-            options,
-            false,
-        ),
-        options.mode,
-    )?;
-
-    if output.status.success && output.stdout.trim() == "true" {
-        return Ok(());
-    }
-
-    Err(CrabError::Configuration {
-        key: "mirror cache is not a bare Git repository".to_owned(),
-        origin: cache_dir.display().to_string(),
-    })
-}
-
 fn ensure_crab_remote(
     cache_dir: &Path,
     destination: &str,
@@ -402,6 +425,23 @@ fn ensure_crab_remote(
         git_command(args, Some(cache_dir), options, true),
         options.mode,
     )?;
+
+    // Every cache ref belongs to the source. Git's post-push tracking update
+    // must not overwrite source-owned refs/remotes/crab/* with destination tips.
+    let command = git_command(
+        ["config", "--unset-all", "remote.crab.fetch"],
+        Some(cache_dir),
+        options,
+        false,
+    );
+    let output = runner.run(&command, options.mode)?;
+    if !output.status.success && output.status.code != Some(5) {
+        return Err(CrabError::Protocol(command_failure_detail(
+            &command,
+            &output,
+            "failed to disable destination tracking in mirror cache",
+        )));
+    }
 
     Ok(())
 }
@@ -469,7 +509,7 @@ fn load_local_refs(
             "failed to read local mirror refs",
         )));
     }
-    Ok(parse_ref_lines(&output.stdout, true))
+    Ok(parse_ref_lines(&output.stdout))
 }
 
 fn load_remote_refs(
@@ -484,10 +524,10 @@ fn load_remote_refs(
         false,
     );
     let output = run_required(runner, command, options.mode)?;
-    Ok(parse_ref_lines(&output.stdout, false))
+    Ok(parse_ref_lines(&output.stdout))
 }
 
-fn parse_ref_lines(output: &str, filter_local_crab_tracking: bool) -> BTreeMap<String, String> {
+fn parse_ref_lines(output: &str) -> BTreeMap<String, String> {
     let mut refs = BTreeMap::new();
     for line in output
         .lines()
@@ -501,10 +541,7 @@ fn parse_ref_lines(output: &str, filter_local_crab_tracking: bool) -> BTreeMap<S
         let Some(name) = parts.next() else {
             continue;
         };
-        if name == "HEAD" || name.ends_with("^{}") {
-            continue;
-        }
-        if filter_local_crab_tracking && name.starts_with("refs/remotes/crab/") {
+        if sha == "ref:" || name == "HEAD" || name.ends_with("^{}") {
             continue;
         }
         refs.insert(name.to_owned(), sha.to_owned());
@@ -587,6 +624,7 @@ fn mirror_lfs_incremental(
     ref_delta: &RefDelta,
     options: &MirrorExecution,
     runner: &mut dyn CommandRunner,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let (local_shas, remote_shas) = ref_delta.lfs_ranges();
     if local_shas.is_empty() {
@@ -599,7 +637,8 @@ fn mirror_lfs_incremental(
     if options.mode == OutputMode::Text {
         eprintln!("mirror: scanning changed Git objects for LFS pointers");
     }
-    let object_ids = (options.lfs_object_id_collector)(cache_dir, &local_shas, &remote_shas)?;
+    let object_ids =
+        (options.lfs_object_id_collector)(cache_dir, &local_shas, &remote_shas, cancel)?;
     if object_ids.is_empty() {
         if options.mode == OutputMode::Text {
             eprintln!("mirror: no changed LFS objects found");
@@ -755,24 +794,18 @@ fn command_failure_detail(
     )
 }
 
-fn create_cache_parent(cache_dir: &Path) -> Result<()> {
-    if let Some(parent) = cache_dir.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
-
-fn resolve_cache_dir(args: &MirrorArgs) -> PathBuf {
-    args.cache_dir.clone().unwrap_or_else(|| {
+fn resolve_cache_dir(args: &MirrorArgs, invocation_dir: &Path) -> PathBuf {
+    let path = args.cache_dir.clone().unwrap_or_else(|| {
         crate::cache::default_cache_root()
             .join("mirrors")
             .join(format!(
                 "mirror-{}.git",
                 mirror_cache_key(&args.source, &args.destination)
             ))
-    })
+    });
+    // Git initialization runs from the cache parent, not the invocation directory.
+    // Resolve relative input first so a nested path is not applied twice.
+    invocation_dir.join(path)
 }
 
 fn mirror_cache_key(source: &str, destination: &str) -> String {
@@ -845,6 +878,7 @@ struct ProcessCommand {
     envs: Vec<(String, OsString)>,
     env_remove: Vec<String>,
     stdin: Option<String>,
+    verify_blobs: Vec<crab_git::batch::BlobHeader>,
     replay_output: bool,
 }
 
@@ -857,6 +891,7 @@ impl ProcessCommand {
             envs: Vec::new(),
             env_remove: Vec::new(),
             stdin: None,
+            verify_blobs: Vec::new(),
             replay_output: false,
         }
     }
@@ -888,6 +923,11 @@ impl ProcessCommand {
 
     fn stdin(mut self, stdin: String) -> Self {
         self.stdin = Some(stdin);
+        self
+    }
+
+    fn verify_blobs(mut self, blobs: Vec<crab_git::batch::BlobHeader>) -> Self {
+        self.verify_blobs = blobs;
         self
     }
 
@@ -932,57 +972,6 @@ struct ProcessOutput {
 
 trait CommandRunner {
     fn run(&mut self, command: &ProcessCommand, mode: OutputMode) -> Result<ProcessOutput>;
-}
-
-struct SystemCommandRunner;
-
-impl CommandRunner for SystemCommandRunner {
-    fn run(&mut self, command: &ProcessCommand, mode: OutputMode) -> Result<ProcessOutput> {
-        let mut process = Command::new(&command.program);
-        process.args(&command.args);
-        if let Some(current_dir) = &command.current_dir {
-            process.current_dir(current_dir);
-        }
-        for key in &command.env_remove {
-            process.env_remove(key);
-        }
-        for (key, value) in &command.envs {
-            process.env(key, value);
-        }
-        if command.stdin.is_some() {
-            process.stdin(Stdio::piped());
-        } else {
-            process.stdin(Stdio::null());
-        }
-        process.stdout(Stdio::piped());
-        process.stderr(Stdio::piped());
-
-        let mut child = process.spawn()?;
-        if let Some(stdin) = &command.stdin {
-            let mut child_stdin = child.stdin.take().ok_or_else(|| {
-                CrabError::Internal(format!("{} stdin was not piped", command.display()))
-            })?;
-            child_stdin.write_all(stdin.as_bytes())?;
-        }
-
-        let output = child.wait_with_output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-
-        if mode == OutputMode::Text && command.replay_output {
-            replay_stdout(&stdout);
-            replay_stderr(&stderr);
-        }
-
-        Ok(ProcessOutput {
-            status: ProcessStatus {
-                success: output.status.success(),
-                code: output.status.code(),
-            },
-            stdout,
-            stderr,
-        })
-    }
 }
 
 fn replay_stdout(output: &str) {

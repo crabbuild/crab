@@ -1389,7 +1389,7 @@ pub fn error_code(err: &CrabError) -> &'static str {
         CrabError::RefAlreadyExists { .. } => "CRAB-E0011",
         CrabError::PushLockHeld { .. } => "CRAB-E0012",
         CrabError::NonFastForward { .. } => "CRAB-E0017",
-        CrabError::CorruptObject { .. } => "CRAB-E0020",
+        CrabError::CorruptObject { .. } | CrabError::GitPackCorrupt(_) => "CRAB-E0020",
         CrabError::ChunkNotFound { .. } => "CRAB-E0021",
         CrabError::NotFound { .. } => "CRAB-E0030",
         CrabError::Forbidden { .. } => "CRAB-E0031",

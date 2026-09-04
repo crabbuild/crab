@@ -38,6 +38,11 @@ pub enum FailSpec {
     /// Sleep for `Duration` then proceed to the real backend. Lets
     /// tests verify that `Retry-After`-style waits are honored.
     LatencyOnly(Duration),
+    /// Announce entry and pause until released or the operation future is dropped.
+    Pause {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    },
     /// Return a `NotFound` error.
     NotFound,
     /// Return a `Precondition` error (classified as a CAS conflict).
@@ -116,6 +121,11 @@ async fn apply_spec(spec: Option<FailSpec>) -> object_store::Result<()> {
         }),
         Some(FailSpec::LatencyOnly(d)) => {
             tokio::time::sleep(d).await;
+            Ok(())
+        }
+        Some(FailSpec::Pause { entered, release }) => {
+            entered.notify_one();
+            release.notified().await;
             Ok(())
         }
     }

@@ -4,20 +4,19 @@
 //! via the shared [`super::store_setup`] module.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
 use crate::lfs::batch::{BatchResolver, PatternFilter};
-use crab_git::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE, hex_encode};
-use crab_git::pointer_detect::{PointerKind, classify};
+use crate::lfs::config::LfsConfig;
+use crate::lfs::fetch_filter::compile_fetch_filter;
+use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
-use super::store_setup::resolve_lfs_remote_for_operation_with_remote_sync;
-
-const CAT_FILE_REQUEST_BATCH_SIZE: usize = 256;
+use super::store_setup::{git_remote_url_output, resolve_lfs_remote_context};
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsFetchOptions {
@@ -46,11 +45,32 @@ pub struct LfsPullOptions {
 /// Downloads missing LFS objects from the remote store into the local
 /// `.git/lfs/objects` cache. Supports include/exclude pattern filtering,
 /// `--recent`, `--all`, and `--dry-run`.
-pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
+pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
     validate_fetch_options(&options)?;
-    let (remote, refs) = remote_and_refs_from_options(&options)?;
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", remote.as_deref())?;
-    let entries = collect_lfs_pointers(options.all, options.recent, &refs)?;
+    let (remote, refs) = remote_and_refs_from_options(&options, cancel)?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "pull",
+        remote.as_deref(),
+        Path::new("."),
+        cancel,
+    ))?;
+    // Bulk history is deliberately independent of configured recent/path
+    // selection, matching Git LFS's backup and migration contract.
+    let recent = !options.all
+        && (options.recent
+            || crate::lfs::recent::git_config_bool_in(
+                Path::new("."),
+                "lfs.fetchrecentalways",
+                false,
+                cancel,
+            )?);
+    let entries = if options.stdin && refs.is_empty() && !options.all && !recent {
+        Vec::new()
+    } else {
+        collect_lfs_pointers(Path::new("."), options.all, recent, &refs, cancel)?
+    };
+    check_cancelled(cancel)?;
 
     if entries.is_empty() {
         if options.json {
@@ -59,21 +79,20 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             eprintln!("fetch: no LFS objects to fetch");
         }
         if options.prune {
-            run_fetch_prune(options.dry_run)?;
+            run_fetch_prune(options.dry_run, cancel)?;
         }
         return Ok(());
     }
 
-    let inc_filter = options
-        .include
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
-    let exc_filter = options
-        .exclude
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
+    let (inc_filter, exc_filter) = if options.all {
+        (None, None)
+    } else {
+        resolve_fetch_filters(
+            &ctx.config,
+            options.include.as_deref(),
+            options.exclude.as_deref(),
+        )?
+    };
 
     let transfers = plan_fetch_transfers(
         &entries,
@@ -82,6 +101,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
         &ctx.local_lfs_dir,
         options.refetch,
     )?;
+    check_cancelled(cancel)?;
 
     if transfers.is_empty() {
         if options.json {
@@ -90,7 +110,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             eprintln!("fetch: all objects up to date");
         }
         if options.prune {
-            run_fetch_prune(options.dry_run)?;
+            run_fetch_prune(options.dry_run, cancel)?;
         }
         return Ok(());
     }
@@ -106,7 +126,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
             }
         }
         if options.prune {
-            run_fetch_prune(true)?;
+            run_fetch_prune(true, cancel)?;
         }
         return Ok(());
     }
@@ -120,7 +140,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
     let local_lfs_dir_for_json = ctx.local_lfs_dir.clone();
 
     super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
 
         if !options.json {
             eprintln!("fetch: downloading {downloaded_count} object(s)");
@@ -143,7 +163,7 @@ pub fn run_lfs_fetch(options: LfsFetchOptions) -> Result<()> {
     }
 
     if options.prune {
-        run_fetch_prune(false)?;
+        run_fetch_prune(false, cancel)?;
     }
 
     Ok(())
@@ -177,48 +197,43 @@ fn validate_fetch_options(options: &LfsFetchOptions) -> Result<()> {
     Ok(())
 }
 
+fn resolve_fetch_filters(
+    config: &LfsConfig,
+    include: Option<&str>,
+    exclude: Option<&str>,
+) -> Result<(Option<PatternFilter>, Option<PatternFilter>)> {
+    // Preserve explicit empty overrides until compilation: clearing one
+    // restriction must not reinstate its configured value or clear the other.
+    Ok((
+        compile_fetch_filter(include.or(config.fetch_include.as_deref()))?,
+        compile_fetch_filter(exclude.or(config.fetch_exclude.as_deref()))?,
+    ))
+}
+
 fn remote_and_refs_from_options(
     options: &LfsFetchOptions,
+    cancel: &CancellationToken,
 ) -> Result<(Option<String>, Vec<String>)> {
-    let refs = refs_from_options(options)?;
     if options.stdin {
+        let refs = super::input::read_stdin_lines(cancel)?;
         return Ok((options.remote.clone(), refs));
     }
+    let refs = options.refs.clone();
 
     let Some(candidate) = options.remote.as_ref() else {
         return Ok((None, refs));
     };
 
-    if git_remote_exists(candidate) || !refs.is_empty() {
+    if git_remote_exists(candidate, cancel)? || !refs.is_empty() {
         return Ok((Some(candidate.clone()), refs));
     }
 
     Ok((None, vec![candidate.clone()]))
 }
 
-fn git_remote_exists(name: &str) -> bool {
-    Command::new("git")
-        .args(["remote", "get-url", name])
-        .output()
-        .ok()
-        .is_some_and(|output| output.status.success())
-}
-
-fn refs_from_options(options: &LfsFetchOptions) -> Result<Vec<String>> {
-    if !options.stdin {
-        return Ok(options.refs.clone());
-    }
-
-    let stdin = std::io::stdin();
-    stdin
-        .lock()
-        .lines()
-        .map(|line| {
-            line.map(|line| line.trim().to_owned())
-                .map_err(CrabError::Io)
-        })
-        .filter(|line| !matches!(line, Ok(value) if value.is_empty()))
-        .collect()
+fn git_remote_exists(name: &str, cancel: &CancellationToken) -> Result<bool> {
+    let output = git_remote_url_output(Path::new("."), name, false, cancel)?;
+    Ok(output.status.success())
 }
 
 #[derive(Debug, Clone)]
@@ -348,46 +363,51 @@ fn local_object_path(local_lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(oid_hex)
 }
 
-fn run_fetch_prune(dry_run: bool) -> Result<()> {
-    super::prune::run_lfs_prune(super::prune::LfsPruneOptions {
-        verify_remote: false,
-        no_verify_remote: false,
-        verify_unreachable: false,
-        no_verify_unreachable: false,
-        when_unverified: Some("continue".to_owned()),
-        recent: false,
-        dry_run,
-        force: true,
-        verbose: dry_run,
-    })
+fn run_fetch_prune(dry_run: bool, cancel: &CancellationToken) -> Result<()> {
+    super::prune::run_lfs_prune_with_cancel(
+        super::prune::LfsPruneOptions {
+            verify_remote: false,
+            no_verify_remote: false,
+            verify_unreachable: false,
+            no_verify_unreachable: false,
+            when_unverified: Some("continue".to_owned()),
+            recent: false,
+            dry_run,
+            force: true,
+            verbose: dry_run,
+        },
+        cancel,
+    )
 }
 
 /// Run `crab lfs pull`.
 ///
 /// Fetches missing LFS objects then replaces LFS pointers in the working
 /// tree with the actual file content.
-pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
-    let ctx = resolve_lfs_remote_for_operation_with_remote_sync("pull", options.remote.as_deref())?;
-    let entries = collect_lfs_pointers(false, false, &[])?;
+pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Result<()> {
+    check_cancelled(cancel)?;
+    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
+        "pull",
+        options.remote.as_deref(),
+        Path::new("."),
+        cancel,
+    ))?;
+    let entries = collect_lfs_pointers(Path::new("."), false, false, &[], cancel)?;
+    check_cancelled(cancel)?;
 
     if entries.is_empty() {
         eprintln!("pull: no LFS objects to pull");
         return Ok(());
     }
 
-    let inc_filter = options
-        .include
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
-    let exc_filter = options
-        .exclude
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
+    let (inc_filter, exc_filter) = resolve_fetch_filters(
+        &ctx.config,
+        options.include.as_deref(),
+        options.exclude.as_deref(),
+    )?;
 
     super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config);
+        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
 
         let missing =
             resolver.find_missing_for_fetch(&entries, inc_filter.as_ref(), exc_filter.as_ref())?;
@@ -406,6 +426,7 @@ pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
 
     let checkout_paths =
         checkout_paths_for_pull(&entries, inc_filter.as_ref(), exc_filter.as_ref());
+    check_cancelled(cancel)?;
 
     if checkout_paths.is_empty() {
         eprintln!("pull: updated 0 file(s) in working tree");
@@ -416,7 +437,7 @@ pub fn run_lfs_pull(options: LfsPullOptions) -> Result<()> {
         paths: checkout_paths,
         ..super::checkout::LfsCheckoutOptions::default()
     })?;
-
+    check_cancelled(cancel)?;
     Ok(())
 }
 
@@ -443,402 +464,53 @@ fn checkout_paths_for_pull(
         .collect()
 }
 
-/// Collect `(path, LfsPointer)` entries from HEAD (or all refs).
-///
-/// Uses `git ls-tree -r` + `git cat-file --batch` to enumerate blobs
-/// and parse LFS pointers.
 fn collect_lfs_pointers(
+    repo_dir: &Path,
     all: bool,
     recent: bool,
     refs: &[String],
+    cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
-    let tree_lines = if all {
-        if refs.is_empty() {
-            ls_tree_all_refs()?
-        } else {
-            ls_tree_refs(refs)?
-        }
-    } else if recent {
-        let mut entries = if refs.is_empty() {
-            ls_tree_head()?
-        } else {
-            ls_tree_refs(refs)?
-        };
-        entries.extend(ls_tree_recent_refs_and_commits(refs)?);
-        entries
-    } else if !refs.is_empty() {
-        ls_tree_refs(refs)?
-    } else {
-        ls_tree_head()?
-    };
-
-    if tree_lines.is_empty() {
-        return Ok(Vec::new());
+    check_cancelled(cancel)?;
+    if all {
+        return crate::lfs::discovery::collect_pointers_from_history_in(
+            repo_dir,
+            refs,
+            crate::lfs::discovery::HistoryOperation::Fetch,
+            cancel,
+        );
     }
-
-    let mut child = Command::new("git")
-        .args(["cat-file", "--batch"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| CrabError::Internal(format!("failed to spawn git cat-file: {e}")))?;
-
-    let mut stdin = match child.stdin.take() {
-        Some(stdin) => stdin,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CrabError::Internal(
-                "git cat-file stdin unavailable".to_owned(),
-            ));
+    let mut selected = if refs.is_empty() {
+        let repository = gix::discover(repo_dir).map_err(io::Error::other)?;
+        let head = repository.head().map_err(io::Error::other)?;
+        if head.is_unborn() {
+            Vec::new()
+        } else {
+            vec!["HEAD".to_owned()]
         }
+    } else {
+        refs.to_vec()
     };
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(CrabError::Internal(
-                "git cat-file stdout unavailable".to_owned(),
-            ));
-        }
+    let recent_commits = if recent {
+        let recent_refs = crate::lfs::recent::recent_ref_oids_in(repo_dir, 0, cancel)?;
+        check_cancelled(cancel)?;
+        let mut roots = selected.clone();
+        roots.extend(recent_refs.iter().cloned());
+        selected.extend(recent_refs);
+        crate::lfs::recent::recent_commit_oids_in(repo_dir, &roots, 0, cancel)?
+    } else {
+        Vec::new()
     };
-    let mut reader = BufReader::new(stdout);
-    let mut entries = Vec::new();
+    check_cancelled(cancel)?;
     let mut seen = HashSet::new();
-    let scan_result = (|| -> Result<()> {
-        for request_batch in tree_lines.chunks(CAT_FILE_REQUEST_BATCH_SIZE) {
-            for (blob_hash, _) in request_batch {
-                writeln!(stdin, "{blob_hash}").map_err(|e| {
-                    CrabError::Internal(format!("failed to query git cat-file: {e}"))
-                })?;
-            }
-            stdin
-                .flush()
-                .map_err(|e| CrabError::Internal(format!("failed to query git cat-file: {e}")))?;
-
-            for (blob_hash, filename) in request_batch {
-                let mut header = Vec::new();
-                if reader
-                    .read_until(b'\n', &mut header)
-                    .map_err(|e| CrabError::Internal(format!("failed to read git cat-file: {e}")))?
-                    == 0
-                {
-                    return Err(CrabError::Internal(
-                        "git cat-file closed before returning a response".to_owned(),
-                    ));
-                }
-                let header = String::from_utf8_lossy(header.strip_suffix(b"\n").unwrap_or(&header));
-                let parts: Vec<&str> = header.split_whitespace().collect();
-
-                if parts.len() < 2 {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned a malformed response for {blob_hash}"
-                    )));
-                }
-                if parts[1] == "missing" {
-                    continue;
-                }
-                if parts.len() < 3 {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned a malformed response for {blob_hash}"
-                    )));
-                }
-
-                let Ok(obj_size) = parts[2].parse::<u64>() else {
-                    return Err(CrabError::Internal(format!(
-                        "git cat-file returned an invalid object size for {blob_hash}"
-                    )));
-                };
-
-                if parts[1] == "blob" && obj_size <= MAX_LFS_POINTER_SIZE as u64 {
-                    let mut content = vec![0u8; obj_size as usize];
-                    reader.read_exact(&mut content).map_err(|e| {
-                        CrabError::Internal(format!("failed to read Git blob: {e}"))
-                    })?;
-                    if let PointerKind::Lfs(pointer) = classify(&content)
-                        && pointer.size > 0
-                        && seen.insert((filename.clone(), pointer.oid))
-                    {
-                        entries.push((filename.clone(), pointer));
-                    }
-                } else {
-                    io::copy(&mut reader.by_ref().take(obj_size), &mut io::sink()).map_err(
-                        |e| CrabError::Internal(format!("failed to skip Git blob: {e}")),
-                    )?;
-                }
-
-                let mut newline = [0u8; 1];
-                reader
-                    .read_exact(&mut newline)
-                    .map_err(|e| CrabError::Internal(format!("failed to finish Git blob: {e}")))?;
-                if newline[0] != b'\n' {
-                    return Err(CrabError::Internal(
-                        "git cat-file returned an unterminated object body".to_owned(),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    })();
-
-    drop(stdin);
-    drop(reader);
-    if let Err(error) = scan_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| CrabError::Internal(format!("git cat-file failed: {e}")))?;
-    if !output.status.success() {
-        return Err(CrabError::Internal(format!(
-            "git cat-file failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    Ok(entries)
-}
-
-/// Run `git ls-tree -r HEAD` and return `(blob_hash, filename)` pairs.
-fn ls_tree_head() -> Result<Vec<(String, String)>> {
-    ls_tree_ref("HEAD")
-}
-
-fn ls_tree_ref(ref_name: &str) -> Result<Vec<(String, String)>> {
-    let output = Command::new("git")
-        .args(["ls-tree", "-r", "-z", ref_name])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git ls-tree: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Not a valid object name") {
-            return Ok(Vec::new());
-        }
-        return Err(CrabError::Internal(format!(
-            "git ls-tree failed for {ref_name}: {stderr}"
-        )));
-    }
-
-    Ok(parse_ls_tree_output(&output.stdout))
-}
-
-fn ls_tree_refs(refs: &[String]) -> Result<Vec<(String, String)>> {
-    let mut all_entries = Vec::new();
-    for ref_name in refs {
-        all_entries.extend(ls_tree_ref(ref_name)?);
-    }
-    Ok(all_entries)
-}
-
-/// Run `git ls-tree -r` for every local ref.
-fn ls_tree_all_refs() -> Result<Vec<(String, String)>> {
-    let refs_output = Command::new("git")
-        .args(["rev-parse", "--all"])
-        .output()
-        .map_err(|e| CrabError::Internal(format!("failed to run git rev-parse: {e}")))?;
-
-    if !refs_output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let refs_text = String::from_utf8_lossy(&refs_output.stdout);
-    let mut all_entries = Vec::new();
-
-    for ref_sha in refs_text.lines() {
-        let ref_sha = ref_sha.trim();
-        if ref_sha.is_empty() {
-            continue;
-        }
-
-        let output = Command::new("git")
-            .args(["ls-tree", "-r", "-z", ref_sha])
-            .output()
-            .map_err(|e| {
-                CrabError::Internal(format!("failed to run git ls-tree for {ref_sha}: {e}"))
-            })?;
-
-        if output.status.success() {
-            let entries = parse_ls_tree_output(&output.stdout);
-            all_entries.extend(entries);
-        }
-    }
-
-    Ok(all_entries)
-}
-
-/// Run `git ls-tree -r` for recent refs and recent commits.
-fn ls_tree_recent_refs_and_commits(base_refs: &[String]) -> Result<Vec<(String, String)>> {
-    let recent_refs = crate::lfs::recent::recent_ref_oids(0)?;
-    let mut recent_roots = if base_refs.is_empty() {
-        vec!["HEAD".to_owned()]
-    } else {
-        base_refs.to_vec()
-    };
-    recent_roots.extend(recent_refs.iter().cloned());
-
-    let mut refs = recent_refs;
-    refs.extend(crate::lfs::recent::recent_commit_oids(&recent_roots)?);
-
-    if refs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    ls_tree_refs(&refs)
-}
-
-/// Parse `git ls-tree -r` output into `(blob_hash, filename)` pairs.
-fn parse_ls_tree_output(output: &[u8]) -> Vec<(String, String)> {
-    let mut results = Vec::new();
-
-    for record in output.split(|byte| *byte == 0) {
-        if record.is_empty() {
-            continue;
-        }
-        let Some(separator) = record.iter().position(|byte| *byte == b'\t') else {
-            continue;
-        };
-        let (meta, filename) = record.split_at(separator);
-        let meta = String::from_utf8_lossy(meta);
-        let parts: Vec<&str> = meta.split_whitespace().collect();
-        if parts.len() < 3 || parts[1] != "blob" {
-            continue;
-        }
-        let filename = &filename[1..];
-        if filename.is_empty() {
-            continue;
-        }
-        results.push((
-            parts[2].to_owned(),
-            String::from_utf8_lossy(filename).into_owned(),
-        ));
-    }
-
-    results
+    selected.retain(|revision| seen.insert(revision.clone()));
+    crate::lfs::discovery::collect_pointers_for_fetch_in(
+        repo_dir,
+        &selected,
+        &recent_commits,
+        cancel,
+    )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::Digest;
-    use std::fs;
-
-    fn pointer(data: &[u8]) -> LfsPointer {
-        let oid: [u8; 32] = sha2::Sha256::digest(data).into();
-        LfsPointer {
-            oid,
-            size: data.len() as u64,
-            extensions: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validate_fetch_rejects_json_with_prune() {
-        let options = LfsFetchOptions {
-            json: true,
-            prune: true,
-            ..LfsFetchOptions::default()
-        };
-
-        let err = validate_fetch_options(&options).unwrap_err();
-
-        assert!(err.to_string().contains("--json"));
-    }
-
-    #[test]
-    fn remote_operand_becomes_ref_when_not_configured_and_alone() {
-        let options = LfsFetchOptions {
-            remote: Some("feature".to_owned()),
-            ..LfsFetchOptions::default()
-        };
-
-        let (remote, refs) = remote_and_refs_from_options(&options).unwrap();
-
-        assert_eq!(remote, None);
-        assert_eq!(refs, vec!["feature"]);
-    }
-
-    #[test]
-    fn plan_fetch_transfers_skips_local_without_refetch() {
-        let dir = tempfile::tempdir().unwrap();
-        let ptr = pointer(b"local");
-        let local_path = local_object_path(dir.path(), &ptr.oid);
-        fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        fs::write(local_path, b"local").unwrap();
-        let entries = vec![("asset.bin".to_owned(), ptr)];
-
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
-
-        assert!(transfers.is_empty());
-    }
-
-    #[test]
-    fn plan_fetch_transfers_includes_local_with_refetch() {
-        let dir = tempfile::tempdir().unwrap();
-        let ptr = pointer(b"local");
-        let local_path = local_object_path(dir.path(), &ptr.oid);
-        fs::create_dir_all(local_path.parent().unwrap()).unwrap();
-        fs::write(local_path, b"local").unwrap();
-        let entries = vec![("asset.bin".to_owned(), ptr)];
-
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), true).unwrap();
-
-        assert_eq!(transfers.len(), 1);
-    }
-
-    #[test]
-    fn plan_fetch_transfers_deduplicates_by_oid() {
-        let dir = tempfile::tempdir().unwrap();
-        let ptr = pointer(b"same");
-        let entries = vec![
-            ("a.bin".to_owned(), ptr.clone()),
-            ("b.bin".to_owned(), ptr.clone()),
-        ];
-
-        let transfers = plan_fetch_transfers(&entries, None, None, dir.path(), false).unwrap();
-
-        assert_eq!(transfers.len(), 1);
-        assert_eq!(transfers[0].path, "a.bin");
-    }
-
-    #[test]
-    fn checkout_paths_for_pull_applies_include_and_exclude() {
-        let entries = vec![
-            ("models/a.bin".to_owned(), pointer(b"a")),
-            ("models/tmp.bin".to_owned(), pointer(b"tmp")),
-            ("docs/readme.bin".to_owned(), pointer(b"readme")),
-        ];
-        let include = PatternFilter::new("models/**").unwrap();
-        let exclude = PatternFilter::new("models/tmp.bin").unwrap();
-
-        let paths = checkout_paths_for_pull(&entries, Some(&include), Some(&exclude));
-
-        assert_eq!(paths, vec!["models/a.bin"]);
-    }
-
-    #[test]
-    fn fetch_json_href_uses_crab_lfs_scheme_and_fanout() {
-        let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-        let href = fetch_json_href("repo/path", oid);
-
-        assert_eq!(
-            href,
-            "crab-lfs://repo/path/lfs/objects/01/23/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[test]
-    fn parse_ls_tree_output_preserves_special_path_bytes() {
-        let oid = "0123456789012345678901234567890123456789";
-        let output = format!("100644 blob {oid}\tmodels/line\nname.bin\0");
-
-        assert_eq!(
-            parse_ls_tree_output(output.as_bytes()),
-            vec![(oid.to_owned(), "models/line\nname.bin".to_owned())]
-        );
-    }
-}
+mod tests;

@@ -967,7 +967,6 @@ jobs:
     timeout-minutes: 90
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-smoke
       CRAB_E2E_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -980,8 +979,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
 
+      - name: Verify Git capability contract
+        run: |
+          python3 crab/scripts/verify_git_capability_matrix.py
+          python3 crab/scripts/tests/test_verify_git_capability_matrix.py
+
       - name: Install smoke dependencies
         run: |
+          # Keep packaged binaries and generated evidence outside the source checkout.
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y curl libfuse3-dev pipx
           pipx install awscli
@@ -991,15 +997,15 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
-          path: release-dist
+          path: ${{ runner.temp }}/protocol-v2-release-dist
 
       - name: Extract release artifact
         run: |
           set -euo pipefail
-          mkdir -p release-bin
-          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
-          test -x release-bin/crab
-          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+          mkdir -p "$RUNNER_TEMP/protocol-v2-release-bin"
+          tar -xzf "$RUNNER_TEMP/protocol-v2-release-dist/crab-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/protocol-v2-release-bin"
+          test -x "$RUNNER_TEMP/protocol-v2-release-bin/crab"
+          test -L "$RUNNER_TEMP/protocol-v2-release-bin/git-remote-crab" || ln -s crab "$RUNNER_TEMP/protocol-v2-release-bin/git-remote-crab"
 
       - name: Start RustFS
         run: |
@@ -1024,10 +1030,11 @@ jobs:
       - name: Run lifecycle against the packaged artifact
         run: |
           python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
-            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --crab-bin "$RUNNER_TEMP/protocol-v2-release-bin/crab" \
             --backend rustfs \
             --bucket "$CRAB_E2E_BUCKET" \
             --endpoint-url "$AWS_ENDPOINT_URL" \
+            --mirror-reconciliation \
             --root "$CRAB_E2E_ROOT" \
             --run-id "$CRAB_E2E_RUN_ID" \
             --source-root "$GITHUB_WORKSPACE"
@@ -1071,7 +1078,6 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-${{ matrix.label }}
       CRAB_E2E_RUN_ID: release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -1086,6 +1092,7 @@ jobs:
 
       - name: Install compatibility dependencies
         run: |
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
@@ -1098,15 +1105,26 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
-          path: release-dist
+          path: ${{ runner.temp }}/protocol-v2-release-dist
 
       - name: Extract exact Linux release artifact
         run: |
           set -euo pipefail
-          mkdir -p release-bin
-          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
-          test -x release-bin/crab
-          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+          mkdir -p "$RUNNER_TEMP/protocol-v2-release-bin"
+          tar -xzf "$RUNNER_TEMP/protocol-v2-release-dist/crab-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/protocol-v2-release-bin"
+          test -x "$RUNNER_TEMP/protocol-v2-release-bin/crab"
+
+      - name: Fetch pinned previous release for rollback qualification
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/protocol-v2-rollback"
+          cd "$RUNNER_TEMP/protocol-v2-rollback"
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
+            --output crab-linux-x86_64.tar.gz
+          echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict
+          tar -xzf crab-linux-x86_64.tar.gz
+          test -x crab
 
       - name: Install selected Git
         shell: bash
@@ -1134,6 +1152,7 @@ jobs:
           fi
           "$git_bin" --version
           echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+          dirname "$git_bin" >> "$GITHUB_PATH"
 
       - name: Start RustFS
         run: |
@@ -1158,14 +1177,28 @@ jobs:
       - name: Run lifecycle against exact artifact
         run: |
           python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
-            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --crab-bin "$RUNNER_TEMP/protocol-v2-release-bin/crab" \
+            --rollback-crab-bin "$RUNNER_TEMP/protocol-v2-rollback/crab" \
+            --rollback-crab-tag v1.0.1 \
             --git-bin "$GIT_BIN" \
             --backend rustfs \
             --bucket "$CRAB_E2E_BUCKET" \
             --endpoint-url "$AWS_ENDPOINT_URL" \
+            --mirror-reconciliation \
             --root "$CRAB_E2E_ROOT" \
             --run-id "$CRAB_E2E_RUN_ID" \
             --source-root "$GITHUB_WORKSPACE"
+
+      - name: Enforce all declared capability evidence
+        run: |
+          python3 crab/scripts/verify_git_capability_matrix.py \
+            --report "$CRAB_E2E_ROOT/$CRAB_E2E_RUN_ID/artifacts/report.json" \
+            --profile linux-rustfs-release \
+            --git-version "${{ matrix.git_version }}" \
+            --git-bin "$GIT_BIN" \
+            --binary "$RUNNER_TEMP/protocol-v2-release-bin/crab" \
+            --rollback-binary "$RUNNER_TEMP/protocol-v2-rollback/crab" \
+            --source-revision "$(git rev-parse HEAD)"
 
       - name: Capture RustFS logs
         if: always()

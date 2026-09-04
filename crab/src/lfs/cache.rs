@@ -167,6 +167,43 @@ pub(crate) fn is_valid(lfs_dir: &Path, oid: &[u8; 32], size: u64) -> Result<bool
     }
 }
 
+/// Streams a file while verifying the exact emitted bytes against its pointer.
+///
+/// Emitted bytes are tentative until this returns successfully. Callers must
+/// reject partial output on error; prior path validation cannot prove that a
+/// mutable cache still contains those bytes when it is later opened or read.
+pub(crate) fn stream_verified(
+    path: &Path,
+    oid: &[u8; 32],
+    expected_size: u64,
+    mut emit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut file = File::open(path).map_err(CrabError::Io)?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    let corrupt = || CrabError::LfsObjectCorrupt {
+        oid: hex_encode(oid),
+    };
+    loop {
+        let read = file.read(&mut buffer).map_err(CrabError::Io)?;
+        if read == 0 {
+            break;
+        }
+        size = size.checked_add(read as u64).ok_or_else(corrupt)?;
+        if size > expected_size {
+            return Err(corrupt());
+        }
+        hasher.update(&buffer[..read]);
+        emit(&buffer[..read])?;
+    }
+    let actual: [u8; 32] = hasher.finalize().into();
+    if actual != *oid || size != expected_size {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
 /// Atomically installs already-materialized bytes after integrity validation.
 pub(crate) fn install_bytes(
     lfs_dir: &Path,
@@ -255,6 +292,102 @@ fn hash_file(path: &Path) -> Result<([u8; 32], u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_hashing_matches_published_sha256_vectors() {
+        // Fixed external digests keep the writer and verifier from agreeing
+        // on the same hashing regression after a dependency/backend change.
+        for (content, expected) in [
+            (
+                Vec::new(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc".to_vec(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                vec![b'a'; 1_000_000],
+                "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut writer = ObjectWriter::new(dir.path()).unwrap();
+            for chunk in content.chunks(63) {
+                writer.write_all(chunk).unwrap();
+            }
+            let staged = writer.finish().unwrap();
+            assert_eq!(hex_encode(staged.oid()), expected);
+            let oid = *staged.oid();
+            let path = staged.install(dir.path()).unwrap();
+            let mut output = Vec::new();
+            stream_verified(&path, &oid, content.len() as u64, |bytes| {
+                output.extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(output, content);
+        }
+    }
+
+    #[test]
+    fn streamed_bytes_remain_tentative_until_digest_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = vec![0x5a; 3 * 64 * 1024];
+        let oid = Sha256::digest(&content).into();
+        let path = install_bytes(dir.path(), &oid, content.len() as u64, &content).unwrap();
+        let mut emitted = 0;
+        let result = stream_verified(&path, &oid, content.len() as u64, |bytes| {
+            emitted += bytes.len();
+            if emitted == bytes.len() {
+                std::fs::write(&path, vec![0; content.len()]).unwrap();
+            }
+            Ok(())
+        });
+        assert!(matches!(result, Err(CrabError::LfsObjectCorrupt { .. })));
+    }
+
+    #[test]
+    fn verified_stream_emits_exact_valid_content_in_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        for content in [Vec::new(), vec![0x5a; 3 * 64 * 1024 + 1]] {
+            let oid = Sha256::digest(&content).into();
+            let path = install_bytes(dir.path(), &oid, content.len() as u64, &content).unwrap();
+            let mut actual = Vec::new();
+            stream_verified(&path, &oid, content.len() as u64, |bytes| {
+                assert!(bytes.len() <= 64 * 1024);
+                actual.extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(actual, content);
+        }
+    }
+
+    #[test]
+    fn verified_stream_does_not_emit_bytes_past_the_declared_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized");
+        std::fs::write(&path, [0; 10]).unwrap();
+        let mut emitted = 0;
+        let result = stream_verified(&path, &[0; 32], 1, |bytes| {
+            emitted += bytes.len();
+            Ok(())
+        });
+        assert!(matches!(result, Err(CrabError::LfsObjectCorrupt { .. })) && emitted == 0);
+    }
+
+    #[test]
+    fn verified_stream_preserves_sink_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"valid content";
+        let oid = Sha256::digest(content).into();
+        let path = install_bytes(dir.path(), &oid, content.len() as u64, content).unwrap();
+        let result = stream_verified(&path, &oid, content.len() as u64, |_| {
+            Err(CrabError::Cancelled)
+        });
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+    }
 
     #[test]
     fn corrupt_cached_object_is_rejected() {

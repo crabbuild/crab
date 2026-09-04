@@ -549,7 +549,7 @@ mod delete_ref {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",
@@ -970,7 +970,7 @@ mod pipeline_error_outcomes {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",
@@ -1386,7 +1386,7 @@ mod atomic_push {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",
@@ -2042,7 +2042,7 @@ mod receive_policy {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",
@@ -2601,7 +2601,7 @@ mod followtags {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",
@@ -2898,7 +2898,7 @@ mod head_symref {
             NativePushInputs::new(
                 Some(store),
                 None,
-                None,
+                crab::git::push_staging::PushStaging::Missing,
                 router,
                 push_state,
                 "origin",

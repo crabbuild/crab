@@ -4,6 +4,7 @@ mod error;
 mod fetch_admission;
 mod hidden_refs;
 mod hydrator;
+mod integrity;
 mod ref_advertisement;
 mod selection;
 mod store_client;
@@ -15,6 +16,7 @@ pub use fetch_admission::{
     FetchAdmissionPolicy, FetchAdmissionReject, FetchWant, validate_fetch_wants_with_manifest,
 };
 pub use hydrator::{ReadStoreLayout, ShardHydrator, fixed_hydrate_concurrency};
+pub use integrity::verify_origin_recipe;
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, manifest_ref_advertisement,
 };

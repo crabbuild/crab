@@ -2,10 +2,9 @@
 //!
 //! Walks the working tree, identifies crab-tracked pointer files
 //! matching the resolved pattern set, and batch-hydrates them via the
-//! [`Hydrator`] trait. The default [`SmudgeSessionHydrator`] delegates
-//! to [`SmudgeSession`](crate::git::smudge::SmudgeSession) for real
-//! content reconstruction. A [`StubHydrator`] that writes pointer bytes
-//! back unchanged is available for tests.
+//! [`Hydrator`] trait. Configured repositories use [`ShardHydrator`];
+//! unconfigured repositories retain local staging reconstruction through
+//! [`SmudgeSessionHydrator`]. A [`StubHydrator`] is available for tests.
 //!
 //! All writes go through a tempfile-then-rename pattern for crash
 //! safety: a SIGINT mid-write leaves only a tempfile that the OS
@@ -52,6 +51,8 @@ use crab_types::pointer::{MAX_POINTER_SIZE, Pointer};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::FileDataSequenceEntry;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
+
+mod execute;
 
 /// Per-file hydration result sent through the progress channel.
 ///
@@ -3221,33 +3222,143 @@ pub fn run_clear_speculation() -> Result<()> {
     Ok(())
 }
 
-/// Run the hydrate command.
+/// Run hydration at an explicit root using its resolved storage and restore policy.
 ///
-/// Resolves effective patterns, walks the working tree, parses pointer
-/// files, and batch-hydrates them via [`SmudgeSessionHydrator`] which
-/// delegates to the full smudge pipeline for content reconstruction.
-///
-/// # Errors
-///
-/// Returns [`CrabError::InvalidPattern`] on bad globs,
-/// [`CrabError::Io`] on filesystem failures, or
-/// [`CrabError::Cancelled`] if the token fires mid-walk.
+/// Configured remotes fail closed; only an absent remote selects local staging.
+/// Returns selection, reconstruction, filesystem and cancellation errors.
 pub async fn run_hydrate(
+    root: &Path,
+    args: &HydrateArgs,
+    config: &Config,
+    restore_flags: &crate::cmd::hydrate_restore::RestoreFlags,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let hydrator = configured_hydrator(config, restore_flags, cancel).await?;
+    run_hydrate_in(root, args, config, hydrator.as_ref(), cancel).await
+}
+
+/// Hydrate as a step whose caller owns progress and the terminal result.
+pub(crate) async fn hydrate_worktree(
+    root: &Path,
     args: &HydrateArgs,
     config: &Config,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let ctx = AppContext::new(config.clone(), cancel.clone());
-    let hydrator = SmudgeSessionHydrator::new(ctx);
-    run_hydrate_in(&cwd, args, config, &hydrator, cancel).await
+    let flags = crate::cmd::hydrate_restore::RestoreFlags::default();
+    let hydrator = configured_hydrator(config, &flags, cancel).await?;
+    run_hydrate_in_with_reporting(root, args, config, hydrator.as_ref(), None, cancel).await
 }
 
-/// Run the hydrate command with a shared chunk cache.
+async fn configured_hydrator(
+    config: &Config,
+    restore_flags: &crate::cmd::hydrate_restore::RestoreFlags,
+    cancel: &CancellationToken,
+) -> Result<Box<dyn Hydrator>> {
+    error::check_cancelled(cancel)?;
+    if let Some(parsed) = resolve_hydrate_remote_url(config)? {
+        let selection =
+            crate::replication::select_read_store(config, &parsed, "hydrate", cancel).await?;
+        if let crate::replication::ReadSource::Replica { name } = &selection.source {
+            debug!(replica = %name, "selected read replica for hydrate");
+        }
+        let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
+        // Bulk hydrate already streams through the full-xorb cache. A decoded
+        // range cache here would add writes and eviction churn to one-pass reads.
+        let mut hydrator =
+            ShardHydrator::with_config_from_cli_layout(caching_store, selection.router, config)?;
+        let requested_restore = restore_flags.resolve_auto_restore(config.hydrate.auto_restore);
+        if restore_flags.restore && !config.tier.enabled {
+            return Err(error::CrabError::Configuration {
+                key: "tier.enabled is false; cannot restore archived xorbs".into(),
+                origin: "hydrate --restore".into(),
+            });
+        }
+        if requested_restore && config.tier.enabled {
+            let mut options = crate::tier::runtime::restore_options_from_config(config)?;
+            if let Some(tier) = &restore_flags.restore_tier {
+                options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
+            }
+            if let Some(days) = restore_flags.restore_duration_days {
+                options.duration = Duration::from_secs(u64::from(days) * 86_400);
+            }
+            let backend = crate::tier::runtime::build_restore_backend(config, &parsed).await?;
+            let orchestrator = Arc::new(crate::tier::restore::RestoreOrchestrator::with_options(
+                backend,
+                config.tier.restore_max_concurrency,
+                Duration::from_secs(config.tier.restore_timeout_secs),
+                options,
+            ));
+            hydrator = hydrator.with_restore(Some(orchestrator), true);
+        } else {
+            hydrator = hydrator.with_restore(None, false);
+        }
+        error::check_cancelled(cancel)?;
+        return Ok(Box::new(hydrator));
+    }
+
+    // Local unpublished staging remains readable without a configured remote.
+    // Never enter this path after a configured provider or replica fails.
+    let ctx = AppContext::new(config.clone(), cancel.clone());
+    Ok(Box::new(SmudgeSessionHydrator::new(ctx)))
+}
+
+/// Hydrate an already selected inventory without interpreting paths as patterns.
 ///
-/// Same as [`run_hydrate`] but passes the cache to the smudge pipeline
-/// so fetched chunks are cached for reuse by FUSE and subsequent hydrate
-/// operations.
+/// Paths are absolute members of `root`; pointers carry the selected identity.
+/// Uses the hydrate reporting contract and returns verified batch counts.
+pub(crate) async fn hydrate_selected(
+    root: &Path,
+    selected: Vec<(PathBuf, Pointer)>,
+    config: &Config,
+    mode: OutputMode,
+    cancel: &CancellationToken,
+) -> Result<HydrateSummary> {
+    error::check_cancelled(cancel)?;
+    if selected.is_empty() {
+        return Ok(HydrateSummary::default());
+    }
+    let flags = crate::cmd::hydrate_restore::RestoreFlags::default();
+    let hydrator = configured_hydrator(config, &flags, cancel).await?;
+    refresh_pointer_attributes(root, mode);
+    run_selected_hydration(
+        root,
+        selected,
+        hydrator.as_ref(),
+        HydrateReporting {
+            mode: Some(mode),
+            manifest: false,
+            recover_from: None,
+            pending_hydration: None,
+        },
+        cancel,
+    )
+    .await
+}
+
+fn refresh_pointer_attributes(root: &Path, mode: OutputMode) {
+    if let Err(error) = crate::cmd::clone::autotrack_pointer_extensions(root, mode) {
+        debug!(%error, "autotrack rescan failed; continuing with existing patterns");
+    }
+}
+
+/// Parse the configured hydration remote, distinguishing absence from invalid policy.
+pub fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crate::git::url::CrabUrl>> {
+    let Some(url) = config.remote_url.as_deref() else {
+        return Ok(None);
+    };
+    if url.trim().is_empty() {
+        return Err(error::CrabError::Configuration {
+            key: "remote.url".into(),
+            origin: "crab.toml contains an empty [remote].url".into(),
+        });
+    }
+    crate::git::url::CrabUrl::parse(url).map(Some)
+}
+
+/// Run local smudge-session hydration with a shared chunk cache.
+///
+/// This low-level entry point does not compose remote readers; CLI callers use
+/// [`run_hydrate`] so configured storage policy is honored.
 pub async fn run_hydrate_with_cache(
     args: &HydrateArgs,
     config: &Config,
@@ -3266,6 +3377,17 @@ pub async fn run_hydrate_in(
     args: &HydrateArgs,
     config: &Config,
     hydrator: &dyn Hydrator,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    run_hydrate_in_with_reporting(root, args, config, hydrator, Some(args.mode), cancel).await
+}
+
+async fn run_hydrate_in_with_reporting(
+    root: &Path,
+    args: &HydrateArgs,
+    config: &Config,
+    hydrator: &dyn Hydrator,
+    mode: Option<OutputMode>,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let pending_hydration = pending_worktree_hydration(root, args)?;
@@ -3288,7 +3410,7 @@ pub async fn run_hydrate_in(
     };
 
     let Some(filter) = filter else {
-        if !args.mode.is_machine() {
+        if mode == Some(OutputMode::Text) {
             print_help();
         }
         return Ok(());
@@ -3300,9 +3422,8 @@ pub async fn run_hydrate_in(
     // discovered since the last clone are picked up automatically.
     // Best-effort: failures here must not block hydrate. Idempotent —
     // only appends missing rules, existing ones are left alone.
-    if let Err(e) = crate::cmd::clone::autotrack_pointer_extensions(root, args.mode) {
-        debug!(error = %e, "autotrack rescan failed; continuing with existing patterns");
-    }
+    let attribute_mode = mode.unwrap_or(OutputMode::Json);
+    refresh_pointer_attributes(root, attribute_mode);
 
     let mut to_hydrate: Vec<(PathBuf, Pointer)> = Vec::new();
     let manifest_filter;
@@ -3337,23 +3458,68 @@ pub async fn run_hydrate_in(
 
     collect_missing_index_pointers(root, selection_filter, cancel, &mut to_hydrate)?;
 
+    run_selected_hydration(
+        root,
+        to_hydrate,
+        hydrator,
+        HydrateReporting {
+            mode,
+            manifest: manifest_entries.is_some(),
+            recover_from: args.recover_from.as_deref(),
+            pending_hydration: pending_hydration.as_ref(),
+        },
+        cancel,
+    )
+    .await
+    .map(|_| ())
+}
+
+struct HydrateReporting<'a> {
+    mode: Option<OutputMode>,
+    manifest: bool,
+    recover_from: Option<&'a Path>,
+    pending_hydration: Option<&'a PendingWorktreeHydration>,
+}
+
+async fn run_selected_hydration(
+    root: &Path,
+    to_hydrate: Vec<(PathBuf, Pointer)>,
+    hydrator: &dyn Hydrator,
+    reporting: HydrateReporting<'_>,
+    cancel: &CancellationToken,
+) -> Result<HydrateSummary> {
+    let HydrateReporting {
+        mode,
+        manifest,
+        recover_from,
+        pending_hydration,
+    } = reporting;
     if to_hydrate.is_empty() {
         if let Some(pending) = pending_hydration.as_ref() {
             mark_pending_worktree_hydration_applied(root, &pending.policy)?;
         }
-        emit_empty_hydrate_summary(args.mode);
-        return Ok(());
+        if let Some(mode) = mode {
+            emit_empty_hydrate_summary(mode);
+        }
+        return Ok(HydrateSummary::default());
     }
 
     info!(count = to_hydrate.len(), "hydrating files");
 
     // Compute totals for progress reporting.
-    let total_bytes: u64 = to_hydrate.iter().map(|(_, ptr)| ptr.size).sum();
+    let total_bytes = to_hydrate.iter().try_fold(0_u64, |total, (_, pointer)| {
+        total.checked_add(pointer.size).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "selected hydration byte total exceeds u64",
+            )
+        })
+    })?;
     let total_files = to_hydrate.len() as u64;
 
     // In JSONL manifest mode, set up a per-file result channel so the
     // hydrator streams one JSONL row per file as it completes.
-    let is_manifest_jsonl = manifest_entries.is_some() && args.mode == OutputMode::Jsonl;
+    let is_manifest_jsonl = manifest && mode == Some(OutputMode::Jsonl);
     let (file_result_tx, file_result_rx) = if is_manifest_jsonl {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<HydrateFileResult>();
         (Some(tx), Some(rx))
@@ -3368,8 +3534,8 @@ pub async fn run_hydrate_in(
     });
 
     // Build the optional JSONL stream for streaming mode.
-    let jsonl_stream: Option<Arc<std::sync::Mutex<JsonlStream<Stdout>>>> = match args.mode {
-        OutputMode::Jsonl => Some(Arc::new(std::sync::Mutex::new(JsonlStream::new(
+    let jsonl_stream: Option<Arc<std::sync::Mutex<JsonlStream<Stdout>>>> = match mode {
+        Some(OutputMode::Jsonl) => Some(Arc::new(std::sync::Mutex::new(JsonlStream::new(
             "hydrate.event",
             "1.0",
             std::io::stdout(),
@@ -3405,51 +3571,31 @@ pub async fn run_hydrate_in(
         };
 
     // Spawn a live progress ticker when stderr is a TTY (text mode only).
-    let ticker = if args.mode == OutputMode::Text {
+    let ticker = if mode == Some(OutputMode::Text) {
         progress.start_ticker(cancel)
     } else {
         None
     };
 
     let start = Instant::now();
-    let selected_to_hydrate = to_hydrate.clone();
+    let selected_to_hydrate = to_hydrate;
 
-    // --- `--recover-from` phase --------------------------------------
-    //
-    // When the user supplies a local source, walk the to-hydrate list
-    // first and short-circuit any pointer whose blake3 hash matches a
-    // candidate file under the supplied path. Recovered pointers are
-    // dropped from `to_hydrate` so the remote hydrator never sees them.
-    //
-    // Recovery is best-effort and side-effect-bounded: a hash mismatch
-    // or missing candidate falls through to the normal hydrator, never
-    // to a write that doesn't match the pointer.
-    let (to_hydrate, recover_stats) = if let Some(recover_path) = args.recover_from.as_deref() {
-        if !args.mode.is_machine() {
-            eprintln!("Recovering from local source: {}", recover_path.display(),);
-        }
-        run_recover_phase(recover_path, to_hydrate, cancel, Some(&progress))?
-    } else {
-        (to_hydrate, RecoverPhaseStats::default())
-    };
-
-    // A sibling cache is only a candidate locator. Build it once off the async
-    // runtime, then clone and hash each candidate before the normal hydrator.
-    let candidate_root = root.to_path_buf();
-    let cow_candidates =
-        tokio::task::spawn_blocking(move || sibling_cow_candidates(&candidate_root))
-            .await
-            .map_err(|error| {
-                error::CrabError::Internal(format!(
-                    "CoW candidate discovery worker failed: {error}"
-                ))
-            })?;
-    let (to_hydrate, cow_stats) =
-        run_cow_phase(to_hydrate, &cow_candidates, cancel, Some(&progress)).await?;
-
-    let result = hydrator
-        .hydrate_batch(&to_hydrate, cancel, Some(&progress))
-        .await;
+    if let Some(recover_path) = recover_from
+        && mode == Some(OutputMode::Text)
+    {
+        eprintln!("Recovering from local source: {}", recover_path.display());
+    }
+    // Capture every phase error before joining reporters; recovery and CoW
+    // failures must not bypass their cleanup.
+    let result = execute::hydrate_selected_in(
+        root,
+        &selected_to_hydrate,
+        hydrator,
+        recover_from,
+        Some(&progress),
+        cancel,
+    )
+    .await;
 
     // Drop the progress Arc so the channel sender is closed and the
     // emitter task can drain remaining items and terminate. After
@@ -3465,83 +3611,16 @@ pub async fn run_hydrate_in(
     if let Some(handle) = ticker {
         handle.abort();
         let _ = handle.await;
-        // Clear the progress line.
         eprint!("\r\x1b[2K");
     }
 
-    let mut summary = result?;
-    // Fold the `--recover-from` phase results into the user-facing
-    // summary. Each recovered file counts toward `hydrated` /
-    // `bytes_written` (the working tree was materialized) and is also
-    // tallied separately so the summary line can call out the
-    // recovery path.
-    summary.hydrated += recover_stats.recovered;
-    summary.bytes_written += recover_stats.bytes_recovered;
-    summary.recovered = recover_stats.recovered;
-    summary.bytes_recovered = recover_stats.bytes_recovered;
-    summary.verified_paths.extend(recover_stats.verified_paths);
-    summary.hydrated += cow_stats.cloned;
-    summary.bytes_written += cow_stats.bytes_cloned;
-    summary.cow_cloned = cow_stats.cloned;
-    summary.bytes_cow_cloned = cow_stats.bytes_cloned;
-    summary.verified_paths.extend(cow_stats.verified_paths);
+    let summary = result?;
     let elapsed = start.elapsed();
 
     if let Some(pending) = pending_hydration.as_ref()
         && summary.failed == 0
     {
         mark_pending_worktree_hydration_applied(root, &pending.policy)?;
-    }
-
-    // Publish only descriptor-safe proofs captured by successful atomic
-    // writes. Sibling worktrees use this cache to locate CoW candidates;
-    // they still hash each candidate before publication. Best-effort: an
-    // unavailable cache only disables that local optimization.
-    if summary.hydrated > 0 {
-        let pointers = selected_to_hydrate
-            .iter()
-            .map(|(path, pointer)| (path.as_path(), pointer))
-            .collect::<HashMap<_, _>>();
-        let updates = summary
-            .verified_paths
-            .iter()
-            .filter_map(|verified| {
-                let pointer = pointers.get(verified.path.as_path())?;
-                if pointer.file_hash != verified.file_hash || pointer.size != verified.size {
-                    return None;
-                }
-                let rel = verified.path.strip_prefix(root).unwrap_or(&verified.path);
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                crate::cache::hydrated_pointer::entry_for_verified_stat(
-                    verified.index_stat,
-                    &pointer.serialize(),
-                )
-                .map(|entry| (rel_str, entry))
-            })
-            .collect::<Vec<_>>();
-        if !updates.is_empty() {
-            match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
-                Ok(cache_path) => {
-                    if let Err(e) =
-                        crate::cache::HydratedPointerCache::update_on_disk(&cache_path, updates)
-                    {
-                        debug!(
-                            path = %cache_path.display(),
-                            error = %e,
-                            "failed to persist hydrated-pointer cache (non-fatal)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    debug!(
-                        root = %root.display(),
-                        error = %e,
-                        "hydrated-pointer cache unavailable for hydrate"
-                    );
-                }
-            }
-        }
-        refresh_hydrated_index_entries(root, &summary.verified_paths);
     }
 
     // In non-manifest JSONL mode, emit retroactive file_done events.
@@ -3586,8 +3665,8 @@ pub async fn run_hydrate_in(
 
     let payload = HydrateSummaryPayload::from_summary(&summary, elapsed);
 
-    match args.mode {
-        OutputMode::Text => {
+    match mode {
+        Some(OutputMode::Text) => {
             let mut parts = Vec::new();
             parts.push(format!(
                 "Hydrated {} file(s) ({})",
@@ -3634,10 +3713,10 @@ pub async fn run_hydrate_in(
                 );
             }
         }
-        OutputMode::Json => {
+        Some(OutputMode::Json) => {
             emit_json("hydrate", "1.0", &payload);
         }
-        OutputMode::Jsonl => {
+        Some(OutputMode::Jsonl) => {
             if let Some(stream) = &jsonl_stream {
                 if is_manifest_jsonl {
                     // Manifest mode: emit the typed summary record.
@@ -3659,6 +3738,7 @@ pub async fn run_hydrate_in(
                 }
             }
         }
+        None => {}
     }
 
     if summary.failed > 0 {
@@ -3668,7 +3748,7 @@ pub async fn run_hydrate_in(
         )));
     }
 
-    Ok(())
+    Ok(summary)
 }
 
 fn refresh_hydrated_index_entries(
@@ -5461,9 +5541,226 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn hydration_owner_cancellation_precedes_root_and_remote_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent");
+        let mut config = Config::default();
+        config.remote_url = Some("invalid-remote".to_owned());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = run_hydrate(
+            &root,
+            &default_args(),
+            &config,
+            &crate::cmd::hydrate_restore::RestoreFlags::default(),
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(error::CrabError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn hydration_owner_rejects_invalid_remote_before_local_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        for remote in ["", " ", "not-a-crab-url"] {
+            let mut config = Config::default();
+            config.remote_url = Some(remote.to_owned());
+            let result = run_hydrate(
+                &dir.path().join("absent"),
+                &default_args(),
+                &config,
+                &crate::cmd::hydrate_restore::RestoreFlags::default(),
+                &CancellationToken::new(),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(error::CrabError::Configuration { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn hydration_owner_uses_explicit_root_for_unpublished_staging() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let content = command_path_content();
+        let (chunks, file_hash) = chunk_and_hash(&content);
+        let pointer = Pointer {
+            file_hash,
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let staging = stage_command_path_file(root, file_hash, &chunks, pointer.size).await;
+        drop(staging);
+        let path = root.join("model.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=crab -text\n").unwrap();
+        run_git(root, &["add", "model.bin", ".gitattributes"]);
+        let args = HydrateArgs {
+            all: true,
+            ..default_args()
+        };
+
+        run_hydrate(
+            root,
+            &args,
+            &Config::default(),
+            &crate::cmd::hydrate_restore::RestoreFlags::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), content);
+    }
+
     #[derive(Default)]
     struct RecordingHydrator {
         paths: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_hydration_keeps_a_pattern_matching_sibling_untouched() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let content = command_path_content();
+        let (chunks, file_hash) = chunk_and_hash(&content);
+        let pointer = Pointer {
+            file_hash,
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let staging = stage_command_path_file(root, file_hash, &chunks, pointer.size).await;
+        drop(staging);
+        let selected = root.join("data[1].bin");
+        let decoy = root.join("data1.bin");
+        std::fs::write(&selected, pointer.serialize()).unwrap();
+        std::fs::write(&decoy, pointer.serialize()).unwrap();
+        let summary = hydrate_selected(
+            root,
+            vec![(selected.clone(), pointer.clone())],
+            &Config::default(),
+            OutputMode::Json,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                summary.hydrated,
+                std::fs::read(selected).unwrap(),
+                std::fs::read(decoy).unwrap(),
+            ),
+            (1, content, pointer.serialize()),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_hydration_cancellation_precedes_storage_admission() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut config = Config::default();
+        config.remote_url = Some("invalid-remote".to_owned());
+        let result = hydrate_selected(
+            Path::new("missing-root"),
+            vec![(PathBuf::from("missing-root/data.bin"), sample_pointer(4096))],
+            &config,
+            OutputMode::Json,
+            &cancel,
+        )
+        .await;
+        assert!(matches!(result, Err(error::CrabError::Cancelled)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_hydration_cache_preserves_literal_backslash() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        let content = b"literal path content".to_vec();
+        let pointer = Pointer {
+            file_hash: *blake3::hash(&content).as_bytes(),
+            size: content.len() as u64,
+            shard_hint: None,
+        };
+        let path = root.join("data\\1.bin");
+        std::fs::write(&path, pointer.serialize()).unwrap();
+        execute::hydrate_selected_in(
+            root,
+            &[(path, pointer)],
+            &ContentHydrator { content },
+            None,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let cache_path =
+            crate::cache::hydrated_pointer::cache_path_for_worktree_root(root).unwrap();
+        let cache = crate::cache::HydratedPointerCache::load_sync(&cache_path);
+        assert_eq!(
+            (
+                cache.get("data\\1.bin").is_some(),
+                cache.get("data/1.bin").is_some()
+            ),
+            (true, false),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_hydration_joins_manifest_reporter_on_execution_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_selected_hydration(
+                dir.path(),
+                vec![(dir.path().join("data.bin"), sample_pointer(4096))],
+                &RecordingHydrator::default(),
+                HydrateReporting {
+                    mode: Some(OutputMode::Jsonl),
+                    manifest: true,
+                    recover_from: Some(dir.path()),
+                    pending_hydration: None,
+                },
+                &cancel,
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(error::CrabError::Cancelled))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_hydration_rejects_unrepresentable_byte_total() {
+        let hydrator = RecordingHydrator::default();
+        let result = run_selected_hydration(
+            Path::new("missing-root"),
+            vec![
+                (
+                    PathBuf::from("missing-root/a.bin"),
+                    sample_pointer(u64::MAX),
+                ),
+                (PathBuf::from("missing-root/b.bin"), sample_pointer(1)),
+            ],
+            &hydrator,
+            HydrateReporting {
+                mode: Some(OutputMode::Json),
+                manifest: false,
+                recover_from: None,
+                pending_hydration: None,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(error::CrabError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+        ));
     }
 
     impl RecordingHydrator {

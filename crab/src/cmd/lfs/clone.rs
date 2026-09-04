@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Default)]
 pub struct LfsCloneOptions {
@@ -13,7 +14,8 @@ pub struct LfsCloneOptions {
     pub skip_repo: bool,
 }
 
-pub fn run_lfs_clone(options: LfsCloneOptions) -> Result<ExitCode> {
+pub fn run_lfs_clone(options: LfsCloneOptions, cancel: &CancellationToken) -> Result<ExitCode> {
+    check_cancelled(cancel)?;
     if clone_positionals(&options.args).is_empty() {
         return Err(CrabError::Configuration {
             key: "crab lfs clone".to_owned(),
@@ -27,23 +29,30 @@ pub fn run_lfs_clone(options: LfsCloneOptions) -> Result<ExitCode> {
 
     let cwd = std::env::current_dir()?;
     run_git_clone_without_lfs(&options.args, &cwd)?;
+    check_cancelled(cancel)?;
 
     let cloned_dir = cloned_dir_from_args(&options.args, &cwd)?;
     let _guard = CurrentDirGuard::push(&cloned_dir)?;
 
     if has_lfs_pointers_in_head() {
         if clone_fetch_only(&options.args) {
-            super::fetch::run_lfs_fetch(super::fetch::LfsFetchOptions {
-                include: options.include.clone(),
-                exclude: options.exclude.clone(),
-                ..super::fetch::LfsFetchOptions::default()
-            })?;
+            super::fetch::run_lfs_fetch(
+                super::fetch::LfsFetchOptions {
+                    include: options.include.clone(),
+                    exclude: options.exclude.clone(),
+                    ..super::fetch::LfsFetchOptions::default()
+                },
+                cancel,
+            )?;
         } else {
-            super::fetch::run_lfs_pull(super::fetch::LfsPullOptions {
-                include: options.include.clone(),
-                exclude: options.exclude.clone(),
-                ..super::fetch::LfsPullOptions::default()
-            })?;
+            super::fetch::run_lfs_pull(
+                super::fetch::LfsPullOptions {
+                    include: options.include.clone(),
+                    exclude: options.exclude.clone(),
+                    ..super::fetch::LfsPullOptions::default()
+                },
+                cancel,
+            )?;
         }
     }
 
@@ -57,6 +66,7 @@ pub fn run_lfs_clone(options: LfsCloneOptions) -> Result<ExitCode> {
         )?;
     }
 
+    check_cancelled(cancel)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -244,6 +254,16 @@ impl Drop for CurrentDirGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_clone_stops_before_argument_or_repository_work() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            run_lfs_clone(LfsCloneOptions::default(), &cancel),
+            Err(CrabError::Cancelled)
+        ));
+    }
 
     #[test]
     fn clone_positionals_skip_known_git_clone_options() {

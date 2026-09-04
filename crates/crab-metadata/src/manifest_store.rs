@@ -7,6 +7,7 @@ use crab_storage::{ETag, StorageError, Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
 
 use crate::error::{MetadataError, Result};
+use crate::layout_descriptor::{LayoutDescriptor, read_canonical_layout};
 use crate::manifests::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
     validate_manifest_payload, validate_pack_manifest_entry,
@@ -36,8 +37,10 @@ pub struct ManifestHistoryEntry {
 }
 
 /// Coherent repository state materialized from the compacted manifest and ref journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositorySnapshot {
+    /// Validated routing and recipe contract, independent of JSON formatting.
+    pub layout: LayoutDescriptor,
     /// Stored compacted manifest before journal overlay.
     pub manifest: Manifest,
     /// Backend CAS token for the compacted manifest.
@@ -62,6 +65,16 @@ pub struct RefJournalCompaction {
 }
 
 impl RepositorySnapshot {
+    /// Identify the validated layout and complete captured metadata without copying it.
+    ///
+    /// This digest is not a GC reservation or a replacement for the Git-only
+    /// validation digest. Callers bind repository identity and revalidate freshness.
+    pub fn digest(&self) -> Result<String> {
+        let mut hasher = blake3::Hasher::new_derive_key("crab repository snapshot v1");
+        serde_json::to_writer(&mut hasher, self).map_err(std::io::Error::other)?;
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+
     /// Return the current journal-projected manifest with a matching validation digest.
     #[must_use]
     pub fn materialized_manifest(&self) -> Manifest {
@@ -289,6 +302,30 @@ pub async fn select_manifest_history(
     Ok(selected)
 }
 
+/// Read one exact historical manifest without enumerating its generation.
+pub async fn read_manifest_history_exact(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    generation: u64,
+    digest: &str,
+) -> Result<Option<ManifestHistoryEntry>> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(MetadataError::Internal(
+            "historical manifest digest must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    let path = router.manifest_history_path(generation, digest);
+    match store.head(&path).await {
+        Ok(_) => read_history_entry(store, router, &path).await.map(Some),
+        Err(StorageError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn archive_manifest(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -327,6 +364,9 @@ pub async fn read_repository_snapshot(
     // publishing a newer manifest without stranding an old-manifest reader.
     let active_transactions = list_active_transactions(store, router).await?;
     let (manifest, manifest_etag) = read_manifest(store, router).await?;
+    // Preserve the absent-manifest contract for uninitialized metadata readers,
+    // but never return repository state without its authoritative layout.
+    let layout = read_canonical_layout(store, router).await?;
     let packs = if manifest.pack_index_hash.is_empty() {
         Vec::new()
     } else {
@@ -346,7 +386,16 @@ pub async fn read_repository_snapshot(
         &active_transactions,
     )
     .await?;
+    // Repository-open validation may predate this capture. Recheck its boundary
+    // so an invalid current descriptor cannot authorize the returned snapshot.
+    if read_canonical_layout(store, router).await? != layout {
+        return Err(MetadataError::CorruptObject {
+            path: router.layout_descriptor_path().to_string(),
+            reason: "repository layout changed during snapshot capture".to_owned(),
+        });
+    }
     Ok(RepositorySnapshot {
+        layout,
         manifest,
         manifest_etag,
         journal,
@@ -784,6 +833,129 @@ mod tests {
     fn memory_store() -> Store {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         Store::new(inner)
+    }
+
+    #[tokio::test]
+    async fn snapshot_digest_binds_non_git_metadata_and_journal_identity() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "digest/repo".to_owned());
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &manifest).await.unwrap();
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+        let original = snapshot.digest().unwrap();
+        let changes: [fn(&mut RepositorySnapshot); 6] = [
+            |value| value.manifest_etag.push_str("-replacement"),
+            |value| value.manifest.shard_index_hash = "a".repeat(64),
+            |value| value.journal.shards.push("a".repeat(64)),
+            |value| value.journal.transactions.push("a".repeat(64)),
+            |value| {
+                value
+                    .journal
+                    .visible_heads
+                    .insert("refs/heads/main".to_owned(), "a".repeat(64));
+            },
+            |value| {
+                value
+                    .journal
+                    .refs
+                    .insert("refs/heads/main".to_owned(), "a".repeat(40));
+            },
+        ];
+        let mut identities = BTreeSet::from([original]);
+        for change in changes {
+            let mut modified = snapshot.clone();
+            change(&mut modified);
+            assert_eq!(
+                modified.manifest.git_validation_digest,
+                snapshot.manifest.git_validation_digest
+            );
+            identities.insert(modified.digest().unwrap());
+        }
+        assert_eq!(identities.len(), changes.len() + 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_digest_is_stable_for_the_same_captured_state() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "digest/repo".to_owned());
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
+        create_manifest(
+            &store,
+            &router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let first = read_repository_snapshot(&store, &router).await.unwrap();
+        let second = read_repository_snapshot(&store, &router).await.unwrap();
+        assert_eq!(first.digest().unwrap(), second.digest().unwrap());
+    }
+
+    #[tokio::test]
+    async fn snapshot_requires_layout_but_ignores_equivalent_json_formatting() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "layout/repo".to_owned());
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &manifest).await.unwrap();
+        let missing = read_repository_snapshot(&store, &router).await.unwrap_err();
+        assert!(matches!(missing, MetadataError::CorruptObject { path, .. }
+            if path == router.layout_descriptor_path().as_ref()));
+        assert!(store.head(&router.layout_descriptor_path()).await.is_err());
+
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
+        let first = read_repository_snapshot(&store, &router).await.unwrap();
+        let path = router.layout_descriptor_path();
+        let (body, etag) = store.get_with_etag(&path).await.unwrap();
+        let formatted = serde_json::to_vec_pretty(&first.layout).unwrap();
+        assert_ne!(body.as_ref(), formatted.as_slice());
+        store
+            .update(&path, Bytes::from(formatted), etag)
+            .await
+            .unwrap();
+        let second = read_repository_snapshot(&store, &router).await.unwrap();
+        assert_eq!(first.digest().unwrap(), second.digest().unwrap());
+
+        let mut changed = first.clone();
+        changed.layout.recipe_page_entries += 1;
+        assert_ne!(first.digest().unwrap(), changed.digest().unwrap());
+    }
+
+    #[tokio::test]
+    async fn snapshot_rejects_malformed_unsupported_and_oversized_layouts() {
+        let store = memory_store();
+        let router = StoreLayout::new(store.clone(), "layout/repo".to_owned());
+        let manifest = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &manifest).await.unwrap();
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
+        let canonical = LayoutDescriptor::canonical();
+        let mut version = canonical.clone();
+        version.schema_version += 1;
+        let mut parameters = canonical.clone();
+        parameters.chunk_partition_bits += 1;
+        let mut corrupt = canonical;
+        corrupt.digest = "0".repeat(64);
+        for body in [
+            b"not-json".to_vec(),
+            serde_json::to_vec(&version).unwrap(),
+            serde_json::to_vec(&parameters).unwrap(),
+            serde_json::to_vec(&corrupt).unwrap(),
+            vec![b' '; crate::layout_descriptor::MAX_LAYOUT_DESCRIPTOR_BYTES as usize + 1],
+        ] {
+            let path = router.layout_descriptor_path();
+            let (_, etag) = store.get_with_etag(&path).await.unwrap();
+            store.update(&path, Bytes::from(body), etag).await.unwrap();
+            assert!(read_repository_snapshot(&store, &router).await.is_err());
+            assert_eq!(read_manifest(&store, &router).await.unwrap().0, manifest);
+        }
     }
 
     struct DelayedGetStore {
@@ -1362,6 +1534,9 @@ mod tests {
     async fn journal_compaction_publishes_bounded_repository_snapshot() {
         let store = memory_store();
         let router = test_layout(store.clone());
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));
@@ -1472,6 +1647,9 @@ mod tests {
         let store = Store::new(delayed.clone() as Arc<dyn ObjectStore>);
         let router = test_layout(store.clone());
         let base = Manifest::default_for_repo("refs/heads/main");
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
         create_manifest(&store, &router, &base).await.unwrap();
         let head = read_ref_head(&store, &router, "refs/heads/main")
             .await
@@ -1533,6 +1711,9 @@ mod tests {
     async fn materialized_manifest_reseals_journal_projected_refs() {
         let store = memory_store();
         let router = test_layout(store.clone());
+        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
+            .await
+            .unwrap();
         let mut base = Manifest::default_for_repo("refs/heads/main");
         base.refs
             .insert("refs/heads/main".to_owned(), "a".repeat(40));

@@ -369,6 +369,12 @@ impl Store {
     }
 
     #[must_use]
+    pub fn with_target_identity(mut self, identity: [u8; 32]) -> Self {
+        self.inner = self.inner.with_target_identity(identity);
+        self
+    }
+
+    #[must_use]
     pub fn with_signer(mut self, signer: Arc<dyn object_store::signer::Signer>) -> Self {
         self.inner = self.inner.with_signer(signer);
         self

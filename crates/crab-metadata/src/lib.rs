@@ -27,6 +27,8 @@ pub mod pack_metadata;
 pub mod pack_origin;
 #[cfg(feature = "local-index")]
 pub mod persistent_chunk_index;
+#[cfg(feature = "storage")]
+pub mod plan_receipt;
 pub mod receipts;
 #[cfg(feature = "storage")]
 pub mod ref_journal;

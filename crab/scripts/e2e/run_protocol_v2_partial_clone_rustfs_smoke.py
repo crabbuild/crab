@@ -18,6 +18,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,9 +26,11 @@ import tempfile
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 try:
     import resource
@@ -102,6 +105,20 @@ def deterministic_bytes(size: int, seed: str) -> bytes:
         result.extend(hashlib.sha256(f"{seed}:{counter}".encode()).digest())
         counter += 1
     return bytes(result[:size])
+
+
+@contextmanager
+def hold_cache_lock(path: Path):
+    """Hold the native lock used by Crab without replacing its inode."""
+    with path.open("a+b") as lock:
+        lock.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
 
 
 class ProtocolV2PartialCloneSmoke:
@@ -253,13 +270,21 @@ class ProtocolV2PartialCloneSmoke:
         return env
 
     def temp_disk_bytes(self) -> int:
+        def on_walk_error(error: OSError) -> None:
+            # Git removes temporary pack directories while resource sampling
+            # runs. Losing that sample is normal; other scan errors are not.
+            if not isinstance(error, FileNotFoundError):
+                raise error
+
         total = 0
-        for path in self.temp_root.rglob("*"):
-            try:
-                if path.is_file():
-                    total += path.stat().st_size
-            except FileNotFoundError:
-                continue
+        for directory, _, names in os.walk(self.temp_root, onerror=on_walk_error):
+            for name in names:
+                path = Path(directory) / name
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except FileNotFoundError:
+                    continue
         return total
 
     def child_usage(self) -> dict[str, int]:
@@ -387,6 +412,7 @@ class ProtocolV2PartialCloneSmoke:
         env: dict[str, str],
         input_data: bytes | None,
         timeout: int,
+        on_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
     ) -> tuple[int, bytes, bytes, int, int]:
         """Run one child while sampling session temporary space."""
         started = time.monotonic()
@@ -417,6 +443,9 @@ class ProtocolV2PartialCloneSmoke:
                         except BrokenPipeError:
                             pass
                     process.stdin.close()
+
+                if on_started is not None:
+                    on_started(process)
 
                 while process.poll() is None:
                     temp_peak = max(temp_peak, self.temp_disk_bytes())
@@ -471,19 +500,23 @@ class ProtocolV2PartialCloneSmoke:
 
     def install_helper_alias(self, crab_bin: Path | None = None) -> None:
         self.bin_dir.mkdir(parents=True, exist_ok=True)
-        alias = self.bin_dir / "git-remote-crab"
         target = crab_bin or self.crab_bin
-        if alias.is_symlink() or alias.exists():
-            alias.unlink()
-        try:
-            alias.symlink_to(target)
-        except (NotImplementedError, OSError):
-            shutil.copy2(target, alias)
-        if os.name == "nt":
-            windows_alias = self.bin_dir / "git-remote-crab.exe"
-            if windows_alias.exists():
-                windows_alias.unlink()
-            shutil.copy2(target, windows_alias)
+        # Hooks invoke `crab` via PATH. Pin that command too, otherwise the
+        # fixture can silently qualify an unrelated installed binary. Only
+        # the remote helper changes during the prior-release rollback probe.
+        for name, executable in (("git-remote-crab", target), ("crab", self.crab_bin)):
+            alias = self.bin_dir / name
+            if alias.is_symlink() or alias.exists():
+                alias.unlink()
+            try:
+                alias.symlink_to(executable)
+            except (NotImplementedError, OSError):
+                shutil.copy2(executable, alias)
+            if os.name == "nt":
+                windows_alias = self.bin_dir / f"{name}.exe"
+                if windows_alias.exists():
+                    windows_alias.unlink()
+                shutil.copy2(executable, windows_alias)
 
     def configure_reachable_oid_admission(self, repo: Path, enabled: bool) -> None:
         """Set the internal policy used by a fixture's raw-OID probes."""
@@ -537,7 +570,10 @@ class ProtocolV2PartialCloneSmoke:
 
     def log_paths(self, name: str) -> tuple[Path, Path]:
         self.command_index += 1
-        base = f"{self.command_index:03d}-{slug(name)}"
+        # Full command labels stay in the report. Bound UTF-8 filename bytes;
+        # the monotonic index distinguishes truncated or repeated labels.
+        label = slug(name).encode("utf-8")[:120].decode("utf-8", errors="ignore")
+        base = f"{self.command_index:03d}-{label}"
         self.logs.mkdir(parents=True, exist_ok=True)
         return self.logs / f"{base}.stdout.log", self.logs / f"{base}.stderr.log"
 
@@ -551,6 +587,7 @@ class ProtocolV2PartialCloneSmoke:
         extra_env: dict[str, str] | None = None,
         input_data: bytes | None = None,
         timeout: int | None = None,
+        on_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
     ) -> dict[str, Any]:
         env = self.env.copy()
         if extra_env:
@@ -564,6 +601,7 @@ class ProtocolV2PartialCloneSmoke:
             env,
             input_data,
             timeout or self.args.timeout,
+            on_started,
         )
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -1429,7 +1467,8 @@ class ProtocolV2PartialCloneSmoke:
             name="full clone",
             extra_env=self.trace_env(self.artifacts / "full-clone.trace2.json"),
         )
-        self.run_git(self.full, ["fsck", "--strict"], name="full clone fsck")
+        fsck = self.run_git(self.full, ["fsck", "--strict"], name="full clone fsck")
+        self.check("complete-clone-strict-fsck", record["exit_code"] == 0 and fsck["exit_code"] == 0)
         self.redact_trace(self.artifacts / "full-clone.trace2.json", "full-clone.trace2.redacted.json")
         after = self.record_telemetry_delta("full_clone", telemetry_before)
         self.report["performance"]["normal-v2-full"] = {
@@ -1866,25 +1905,39 @@ class ProtocolV2PartialCloneSmoke:
         )
         telemetry_after_push = self.record_telemetry_delta("incomplete_odb_push", push_baseline)
         admission_baseline = self.storage_telemetry()
+        # Fetching into the writer can skip object transfer when Git already
+        # has the tip. A fresh reader must exercise admission before taking
+        # the steady-state read-only inventory used by the filter matrix.
+        admission_repo = self.run_root / "post-push-admission"
         admission_fetch = self.run_git(
-            self.filtered,
+            self.run_root,
             [
                 "-c",
                 "protocol.version=2",
-                "fetch",
-                "origin",
-                "refs/heads/partial-clone-push:refs/remotes/origin/partial-clone-push",
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                "--single-branch",
+                "--branch",
+                "partial-clone-push",
+                self.remote_url,
+                str(admission_repo),
             ],
             name="settle post-push read admission",
+        )
+        admitted_tip = self.git_value(
+            admission_repo, ["rev-parse", "HEAD"], name="verify admitted push tip"
         )
         admission_telemetry = self.record_telemetry_delta(
             "post_push_read_admission", admission_baseline
         )
         self.check(
             "post-push-read-admission",
-            admission_fetch["exit_code"] == 0,
+            admission_fetch["exit_code"] == 0 and admitted_tip == new_commit,
             {
                 "fetch_exit": admission_fetch["exit_code"],
+                "expected_tip": new_commit,
+                "admitted_tip": admitted_tip,
                 "telemetry": self.report["telemetry"]["post_push_read_admission"],
             },
         )
@@ -2163,6 +2216,1429 @@ class ProtocolV2PartialCloneSmoke:
                 },
             )
 
+    def json_data(self, record: dict[str, Any], schema: str) -> dict[str, Any]:
+        raw = self.command_outputs.get(record["stdout_log"], self.stdout(record))
+        payload = json.loads(raw)
+        if payload.get("schema") != schema or not isinstance(payload.get("data"), dict):
+            raise SmokeError(f"{record['name']} did not emit {schema} success JSON")
+        return payload["data"]
+
+    def native_ref_lifecycle_checks(self) -> None:
+        """Prove empty discovery, exact ref names, and atomic lease semantics."""
+        source = self.run_root / "ref-source"
+        clone = self.run_root / "empty-clone"
+        remote = self.remote_url + "-refs"
+        self.run_git(self.run_root, ["init", "-b", "main", str(source)])
+        self.run_cmd("initialize empty ref remote", [str(self.crab_bin), "init", remote], source)
+        empty_refs = self.run_git(source, ["ls-remote", remote], name="list empty remote")
+        self.run_git(
+            self.run_root,
+            ["-c", "init.defaultBranch=main", "clone", remote, str(clone)],
+            name="clone empty remote",
+        )
+        empty_head = self.git_value(clone, ["symbolic-ref", "HEAD"], name="empty clone HEAD")
+        self.check(
+            "empty-clone-and-unborn-discovery",
+            not self.stdout(empty_refs).strip()
+            and empty_head == "refs/heads/main"
+            and not self.pack_files(clone),
+            {"head": empty_head},
+        )
+        (source / "content.txt").write_text("first\n", encoding="utf-8")
+        self.run_git(source, ["add", "content.txt"])
+        self.run_git(source, ["commit", "-m", "initial ref lifecycle"])
+        first = self.git_value(source, ["rev-parse", "HEAD"], name="initial ref lifecycle OID")
+
+        def bucket_identity() -> list[tuple[str, str, int]]:
+            listed = self.run_aws(
+                ["list-objects-v2", "--bucket", self.args.bucket],
+                name="capture bucket identity around push preview",
+            )
+            return sorted(
+                (item["Key"], item["ETag"], int(item["Size"]))
+                for item in json.loads(self.stdout(listed)).get("Contents", [])
+            )
+
+        before_preview = bucket_identity()
+        preview = self.run_git(
+            source, ["push", "--dry-run", "--porcelain", remote, "main:main"],
+            name="preview initial push without publishing",
+        )
+        self.check(
+            "dry-run-creation-preserves-bucket",
+            any(line.startswith("*\trefs/heads/main:refs/heads/main\t")
+                for line in self.stdout(preview).splitlines())
+            and bucket_identity() == before_preview,
+        )
+        # A full hexadecimal branch name must remain a ref, never an OID hint.
+        hex_ref = "refs/heads/" + "a" * 40
+        self.run_git(source, ["update-ref", hex_ref, first])
+        self.run_git(
+            source,
+            ["push", "--atomic", remote, "refs/heads/main:refs/heads/main", f"{hex_ref}:{hex_ref}"],
+            name="atomic creation with SHA-looking branch",
+        )
+        self.run_git(clone, ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+        hex_tip = self.git_value(
+            clone, ["rev-parse", "refs/remotes/origin/" + "a" * 40], name="SHA-looking remote ref OID"
+        )
+        fsck = self.run_git(clone, ["fsck", "--strict"], name="empty clone strict fsck after first fetch")
+        self.check("sha-looking-ref-fetch", hex_tip == first)
+        self.check("ref-lifecycle-strict-fsck", fsck["exit_code"] == 0)
+
+        (source / "content.txt").write_text("second\n", encoding="utf-8")
+        self.run_git(source, ["add", "content.txt"])
+        self.run_git(source, ["commit", "-m", "advance ref lifecycle"])
+        second = self.git_value(source, ["rev-parse", "HEAD"], name="advanced ref lifecycle OID")
+        self.run_git(source, ["update-ref", hex_ref, second])
+        self.run_git(
+            source,
+            ["push", "--atomic", remote, "refs/heads/main:refs/heads/main", f"{hex_ref}:{hex_ref}"],
+            name="atomic update of both refs",
+        )
+
+        def remote_refs() -> dict[str, str]:
+            record = self.run_git(source, ["ls-remote", "--refs", remote])
+            return {name: oid for oid, name in (line.split() for line in self.stdout(record).splitlines())}
+
+        advanced = {"refs/heads/main": second, hex_ref: second}
+        self.check("atomic-multi-ref-update", remote_refs() == advanced)
+        before_preview = bucket_identity()
+        self.run_git(
+            source,
+            ["push", "--dry-run", "--atomic", "--force", remote,
+             f"{first}:refs/heads/main", f":{hex_ref}", f"{second}:refs/heads/preview-only"],
+            name="preview mixed force deletion and creation",
+        )
+        # ls-remote may acquire a read-admission lease. Inspect the preview's
+        # complete bucket identity before that separate observation runs.
+        after_preview = bucket_identity()
+        self.check(
+            "dry-run-mixed-batch-preserves-bucket",
+            after_preview == before_preview and remote_refs() == advanced,
+        )
+        before_preview = bucket_identity()
+        stale_preview = self.run_git(
+            source,
+            ["push", "--dry-run", "--atomic", f"--force-with-lease={hex_ref}:{first}",
+             remote, f":{hex_ref}", f"{second}:refs/heads/preview-only"],
+            name="stale lease rejects push preview",
+            check=False,
+        )
+        self.check(
+            "dry-run-stale-lease-refuses-whole-batch",
+            stale_preview["exit_code"] != 0 and bucket_identity() == before_preview,
+        )
+        rejected = self.run_git(
+            source,
+            [
+                "push", "--atomic", "--force",
+                f"--force-with-lease={hex_ref}:{first}",
+                remote, f":{hex_ref}", f"{first}:refs/heads/main",
+            ],
+            name="stale deletion lease rejects whole atomic push",
+            check=False,
+        )
+        self.check(
+            "atomic-stale-lease-retains-all-refs",
+            rejected["exit_code"] != 0 and remote_refs() == advanced,
+        )
+        self.run_git(
+            source,
+            [
+                "push", "--atomic", f"--force-with-lease=refs/heads/main:{second}",
+                f"--force-with-lease={hex_ref}:{second}",
+                remote, f"{first}:refs/heads/main", f":{hex_ref}",
+            ],
+            name="approved leased force update and deletion",
+        )
+        self.check("leased-force-and-branch-deletion", remote_refs() == {"refs/heads/main": first})
+
+    def everyday_git_workflow_checks(self) -> None:
+        """Exercise Git porcelain across independent clients using only bucket remotes."""
+        remote = self.remote_url + "-refs"
+        writer = self.run_root / "workflow-writer"
+        peer = self.run_root / "workflow-peer"
+        for repo in (writer, peer):
+            self.run_git(self.run_root, ["clone", remote, str(repo)])
+        for repo, filename in ((writer, "writer.txt"), (peer, "peer.txt")):
+            (repo / filename).write_text(filename + "\n", encoding="utf-8")
+            self.run_git(repo, ["add", filename])
+            self.run_git(repo, ["commit", "-m", f"add {filename}"])
+        self.run_git(writer, ["push", "origin", "main"])
+        self.run_git(peer, ["pull", "--rebase", "origin", "main"])
+        self.run_git(peer, ["push", "origin", "main"])
+        self.run_git(writer, ["pull", "--ff-only", "origin", "main"])
+        self.check(
+            "everyday-pull-rebase-and-fast-forward",
+            self.git_value(writer, ["rev-parse", "HEAD"], name="writer tip after pulls")
+            == self.git_value(peer, ["rev-parse", "HEAD"], name="peer tip after rebase")
+            and (writer / "peer.txt").read_bytes() == b"peer.txt\n"
+            and (peer / "writer.txt").read_bytes() == b"writer.txt\n",
+        )
+        self.run_git(peer, ["notes", "add", "-m", "bucket-only note", "HEAD"])
+        self.run_git(peer, ["push", "origin", "refs/notes/commits"])
+        self.run_git(writer, ["fetch", "origin", "refs/notes/commits:refs/notes/commits"])
+        self.check(
+            "everyday-notes-round-trip",
+            self.git_value(writer, ["notes", "show", "HEAD"], name="read fetched note") == "bucket-only note",
+        )
+
+        linked = self.run_root / "workflow-linked"
+        self.run_git(writer, ["worktree", "add", "-b", "linked", str(linked)])
+        (linked / "linked.txt").write_bytes(b"linked worktree\n")
+        self.run_git(linked, ["add", "linked.txt"])
+        self.run_git(linked, ["commit", "-m", "commit from linked worktree"])
+        self.run_git(linked, ["push", "-u", "origin", "HEAD"])
+        self.run_git(peer, ["fetch", "origin"])
+        self.check(
+            "everyday-linked-worktree-push",
+            self.git_value(peer, ["show", "origin/linked:linked.txt"], name="read linked-worktree publication")
+            == "linked worktree",
+        )
+
+        # Git intentionally requires explicit trust for custom transports in
+        # recursive submodules. Permit only Crab, only for these invocations.
+        child_remote = self.remote_url
+        trusted = ["-c", "protocol.crab.allow=always"]
+        self.run_git(writer, trusted + ["submodule", "add", child_remote, "modules/child"])
+        child_tip = self.git_value(writer / "modules/child", ["rev-parse", "HEAD"], name="original submodule tip")
+        self.run_git(writer, ["commit", "-am", "add bucket-backed submodule"])
+        self.run_git(writer, ["push", "origin", "main"])
+        recursive = self.run_root / "workflow-recursive"
+        self.run_git(self.run_root, trusted + ["clone", "--recurse-submodules", remote, str(recursive)])
+        self.check(
+            "everyday-recursive-submodule-clone",
+            self.git_value(recursive / "modules/child", ["rev-parse", "HEAD"], name="cloned submodule tip") == child_tip
+            and self.git_value(recursive, ["ls-tree", "HEAD", "modules/child"], name="cloned gitlink").startswith("160000 commit "),
+        )
+        mirror = self.run_root / "workflow-backup.git"
+        self.run_git(self.run_root, ["clone", "--mirror", remote, str(mirror)])
+        expected_refs = self.git_value(writer, ["ls-remote", "--refs", "origin"], name="live backup ref inventory")
+        actual_refs = self.git_value(mirror, ["for-each-ref", "--format=%(objectname)%09%(refname)"], name="bare backup ref inventory")
+        self.check("everyday-bare-mirror-preserves-all-refs", actual_refs == expected_refs)
+        for repo in (writer, peer, recursive, recursive / "modules/child", mirror):
+            self.run_git(repo, ["fsck", "--strict", "--full"])
+
+    def mirror_cache_cleanup_checks(
+        self, source: Path, remote: str, cache: Path, plan: Path
+    ) -> None:
+        """Clean only this run's explicit cache, never the user's default roots."""
+        control = self.run_root / "cache-clean-control"
+        self.run_git(self.run_root, ["init", str(control)])
+        (control / ".crab").mkdir()
+        (control / ".crab/local.toml").write_text(
+            "[cache]\nchunk_cache_dir = " + json.dumps(str(cache / "chunks")) + "\n",
+            encoding="utf-8",
+        )
+        clean_env = {"CRAB_CACHE_DIR": str(cache)}
+        mirror_args = [str(self.crab_bin), "mirror", str(source), remote,
+                       "--cache-dir", str(cache), "--json"]
+        refs_before = self.git_value(cache, ["show-ref"], name="cache refs before cleanup")
+        remote_before = self.git_value(
+            control, ["ls-remote", "--refs", remote], name="remote refs before cache cleanup"
+        )
+        with hold_cache_lock(cache.with_name(cache.name + ".crab-cache-use.lock")):
+            busy = self.run_cmd(
+                "cache clean refuses active mirror owner",
+                [str(self.crab_bin), "cache", "clean"], control,
+                extra_env=clean_env, check=False,
+            )
+            alias_busy = self.run_cmd(
+                "optimize cache clean refuses active mirror owner",
+                [str(self.crab_bin), "optimize", "cache", "clean"],
+                control, extra_env=clean_env, check=False,
+            )
+            self.check(
+                "mirror-owner-blocks-cache-clean-before-deletion",
+                busy["exit_code"] != 0 and alias_busy["exit_code"] != 0
+                and self.git_value(cache, ["show-ref"], name="refs after busy cleanup") == refs_before,
+            )
+
+        with hold_cache_lock(cache.with_name(cache.name + ".crab-cache-clean.lock")):
+            blocked_check = self.run_cmd(
+                "mirror check refuses active cache cleanup", mirror_args + ["--check", "--ci"],
+                control, check=False,
+            )
+            blocked_apply = self.run_cmd(
+                "mirror apply refuses active cache cleanup",
+                mirror_args + ["--apply-plan", str(plan)], control, check=False,
+            )
+            self.check(
+                "cache-clean-blocks-mirror-check-and-apply",
+                blocked_check["exit_code"] != 0 and blocked_apply["exit_code"] != 0
+                and self.json_data(blocked_check, "mirror.check").get("state") == "unverifiable"
+                and self.git_value(cache, ["show-ref"], name="refs during cleanup lock") == refs_before,
+            )
+
+        self.run_cmd(
+            "clean idle isolated mirror cache",
+            [str(self.crab_bin), "cache", "clean"], control, extra_env=clean_env,
+        )
+        self.check(
+            "idle-cache-clean-removes-only-isolated-cache-data",
+            cache.is_dir() and not any(cache.iterdir())
+            and self.git_value(
+                control, ["ls-remote", "--refs", remote], name="remote refs after cache cleanup"
+            ) == remote_before,
+        )
+        rebuilt = self.run_cmd(
+            "mirror reclones cache emptied by cleanup", mirror_args + ["--check"], control,
+        )
+        rebuilt_data = self.json_data(rebuilt, "mirror.check")
+        self.run_git(cache, ["fsck", "--strict", "--full"], name="strict fsck rebuilt mirror cache")
+        self.check(
+            "mirror-reclones-cleaned-cache-with-exact-refs-and-origin-proof",
+            rebuilt_data.get("state") == "source_ahead"
+            and rebuilt_data.get("pointers", {}).get("state") == "verified"
+            and self.git_value(cache, ["show-ref"], name="rebuilt mirror refs") == refs_before,
+        )
+
+        # A nested cleanup leaves its lock inode inside the parent Git cache.
+        # Rebuilding must preserve that inode even after all Git data is gone.
+        self.run_cmd(
+            "clean isolated nested Git object cache",
+            [str(self.crab_bin), "cache", "clean"], control,
+            extra_env={"CRAB_CACHE_DIR": str(cache / "objects")},
+        )
+        marker = cache / "objects.crab-cache-clean.lock"
+        with marker.open("rb") as opened_before_cleanup:
+            self.run_cmd(
+                "clean parent mirror cache retaining nested marker",
+                [str(self.crab_bin), "cache", "clean"], control, extra_env=clean_env,
+            )
+            self.check(
+                "mirror-cleanup-leaves-a-marker-only-skeleton",
+                marker.is_file() and not (cache / "HEAD").exists(),
+            )
+            control_config = sha256_file(control / ".git/config")
+            restored = self.run_cmd(
+                "rebuild marker-only cache with ambient Git paths",
+                mirror_args + ["--check"], control,
+                extra_env={
+                    "GIT_COMMON_DIR": str(control / ".git"),
+                    "GIT_OBJECT_DIRECTORY": str(control / ".git/objects"),
+                    "GIT_CONFIG": str(control / ".git/config"),
+                },
+            )
+            restored_data = self.json_data(restored, "mirror.check")
+            self.run_git(cache, ["fsck", "--strict", "--full"], name="strict fsck marker-only rebuilt cache")
+            self.check(
+                "mirror-rebuilds-marker-only-cache-with-stable-lock-inodes",
+                os.path.samestat(os.fstat(opened_before_cleanup.fileno()), marker.stat())
+                and restored_data.get("state") == "source_ahead"
+                and restored_data.get("pointers", {}).get("state") == "verified"
+                and self.git_value(cache, ["show-ref"], name="marker-only rebuilt refs") == refs_before,
+            )
+            self.check(
+                "mirror-cache-ignores-ambient-git-repository-paths",
+                sha256_file(control / ".git/config") == control_config
+                and not (cache / "objects/info/alternates").exists()
+                and self.git_value(
+                    control, ["ls-remote", "--refs", remote], name="remote refs after marker-only rebuild"
+                ) == remote_before,
+            )
+
+    def mirror_cancellation_checks(self, source: Path, destination: str) -> None:
+        # CLI signal injection below is POSIX-only. Windows token/job contracts
+        # run natively in CI; do not claim a Windows CLI signal qualification.
+        if os.name == "nt":
+            return
+        cache = self.run_root / "mirror-cancellation-cache.git"
+        control = self.run_root / "mirror-cancellation-control"
+        self.run_git(self.run_root, ["init", str(control)])
+        (control / ".crab").mkdir()
+        (control / ".crab/local.toml").write_text(
+            "[cache]\nchunk_cache_dir = " + json.dumps(str(cache / "chunks")) + "\n",
+            encoding="utf-8",
+        )
+        ready = self.run_root / "mirror-pack-hook-ready"
+        stopped = self.run_root / "mirror-pack-hook-stopped"
+        hook = self.run_root / "mirror-pack-hook.py"
+        hook.write_text(
+            "import os, signal, time\nfrom pathlib import Path\n"
+            f"ready = Path({str(ready)!r})\nstopped = Path({str(stopped)!r})\n"
+            "def stop(_signal, _frame):\n"
+            "    stopped.write_text('stopped')\n    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "ready.write_text(str(os.getpid()))\n"
+            "deadline = time.monotonic() + 60\n"
+            "while time.monotonic() < deadline: time.sleep(0.05)\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        config_root = self.run_root / "mirror-pack-hook-config"
+        (config_root / "git").mkdir(parents=True)
+        self.run_git(
+            self.run_root,
+            ["config", "--file", str(config_root / "git/config"), "uploadpack.packObjectsHook",
+             f"{shlex.quote(sys.executable)} {shlex.quote(str(hook))}"],
+            name="configure isolated upload-pack hook",
+        )
+        before = self.git_value(
+            self.run_root, ["ls-remote", "--refs", destination],
+            name="refs before cancelled mirror fetch",
+        )
+
+        def cancel_when_fetch_started(process: subprocess.Popen[bytes]) -> None:
+            deadline = time.monotonic() + 30
+            while not ready.exists():
+                if process.poll() is not None:
+                    # Return through run_cmd so the failed fixture's complete
+                    # stdout/stderr survive in the retained report.
+                    return
+                if time.monotonic() >= deadline:
+                    raise SmokeError("mirror did not reach the real upload-pack hook")
+                time.sleep(0.05)
+            cleanup = self.run_cmd(
+                "cache cleanup during active mirror fetch",
+                [str(self.crab_bin), "cache", "clean"], control,
+                check=False, extra_env={"CRAB_CACHE_DIR": str(cache)},
+            )
+            self.check(
+                "mirror-cancel-retains-cache-owner-while-fetch-runs",
+                cleanup["exit_code"] != 0 and (cache / "HEAD").is_file()
+                and "in use" in Path(cleanup["stderr_log"]).read_text(encoding="utf-8"),
+            )
+            process.send_signal(signal.SIGTERM)
+
+        cancelled = self.run_cmd(
+            "cancel mirror during real source pack generation",
+            [str(self.crab_bin), "mirror", source.as_uri(), destination,
+             "--cache-dir", str(cache), "--check", "--json"],
+            self.run_root, check=False, timeout=60, on_started=cancel_when_fetch_started,
+            extra_env={
+                # Local transport clears command-scope Git parameters. XDG
+                # global config reaches upload-pack on Git 2.30.9 and later,
+                # without editing the user's real global configuration.
+                "XDG_CONFIG_HOME": str(config_root),
+            },
+        )
+        self.check(
+            "mirror-cancel-stops-real-pack-child-before-return",
+            cancelled["exit_code"] != 0 and stopped.exists()
+            and "cancel" in self.command_outputs[cancelled["stdout_log"]].lower(),
+        )
+        self.run_cmd(
+            "clean mirror cache after cancelled fetch",
+            [str(self.crab_bin), "cache", "clean"], control,
+            extra_env={"CRAB_CACHE_DIR": str(cache)},
+        )
+        self.check(
+            "mirror-cancel-releases-cache-without-publishing-refs",
+            not (cache / "HEAD").exists()
+            and self.git_value(self.run_root, ["ls-remote", "--refs", destination],
+                name="refs after cancelled mirror fetch") == before,
+        )
+
+    def mirror_lfs_discovery_check(self, source: Path, destination: str) -> None:
+        """Refuse a corrupt Git LFS pointer before any publication, then recover."""
+        oid = self.git_value(source, ["rev-parse", "HEAD:hook-lfs.bin"], name="capture LFS pointer Git OID")
+        head = self.git_value(source, ["rev-parse", "HEAD"], name="capture LFS discovery source ref")
+        before = self.git_value(source, ["ls-remote", "--refs", destination], name="capture refs before LFS discovery fault")
+        path = source / ".git/objects" / oid[:2] / oid[2:]
+        original = path.read_bytes()
+        working_bytes = (source / "hook-lfs.bin").read_bytes()
+        large_file = self.artifacts / "lfs-discovery-large-blob.bin"
+        large_file.write_bytes(b"x" * 65536)
+        large_oid = self.git_value(source, ["hash-object", "-w", str(large_file)], name="create LFS discovery large-header fault")
+        replacement = (source / ".git/objects" / large_oid[:2] / large_oid[2:]).read_bytes()
+        command = [str(self.crab_bin), "lfs", "push", "--dry-run", destination]
+        # Only this disposable fixture's directory entry changes. Restore it
+        # even if the assertion fails; no source worktree data is rewritten.
+        path.unlink()
+        try:
+            path.write_bytes(replacement)
+            rejected = self.run_cmd("LFS discovery rejects oversized corrupt pointer", command, source, check=False)
+            self.check(
+                "mirror-lfs-discovery-rejects-corrupt-git-pointer",
+                rejected["exit_code"] != 0
+                and f"checksum differs from {oid}" in Path(rejected["stderr_log"]).read_text(encoding="utf-8")
+                and self.git_value(source, ["rev-parse", "HEAD"], name="verify source ref after LFS discovery refusal") == head
+                and self.git_value(source, ["ls-remote", "--refs", destination], name="verify remote refs after LFS discovery refusal") == before,
+            )
+        finally:
+            if path.exists():
+                path.unlink()
+            path.write_bytes(original)
+        self.run_cmd("LFS discovery accepts restored Git pointer", command, source)
+        self.check(
+            "mirror-lfs-discovery-restoration-preserves-refs",
+            path.read_bytes() == original and (source / "hook-lfs.bin").read_bytes() == working_bytes
+            and self.git_value(source, ["ls-remote", "--refs", destination], name="verify refs after LFS discovery restoration") == before,
+        )
+
+    def mirror_pre_push_batch_checks(self) -> None:
+        """Publish real hook batches while HEAD differs from the selected refs."""
+        source = self.run_root / "hook-source"
+        upstream = self.run_root / "hook-upstream.git"
+        destination = self.remote_url + "-hook"
+        source.mkdir()
+        self.run_git(self.run_root, ["init", "-b", "main", str(source)])
+        self.run_git(source, ["config", "core.hooksPath", ".hooks"])
+        self.run_git(self.run_root, ["init", "--bare", "-b", "main", str(upstream)])
+        self.run_git(source, ["remote", "add", "origin", str(upstream)])
+        self.run_cmd(
+            "initialize actual collaboration hook fixture",
+            [str(self.crab_bin), "init", "--mirror=origin", destination], source,
+        )
+        (source / "baseline.txt").write_text("hook baseline\n", encoding="utf-8")
+        self.run_git(source, ["add", "baseline.txt", "crab.toml"])
+        self.run_git(source, ["commit", "-m", "hook baseline"])
+        baseline = self.git_value(source, ["rev-parse", "HEAD"], name="hook baseline oid")
+        self.run_git(
+            source, ["push", "--atomic", "origin", "main:main", "main:retired"],
+            name="seed both remotes through installed collaboration hook",
+        )
+        initial = self.git_value(
+            source, ["ls-remote", "--refs", "origin"], name="initial collaboration refs"
+        )
+        self.check(
+            "mirror-hook-publishes-initial-batch-from-custom-hooks-path",
+            (source / ".hooks/pre-push").is_file()
+            and initial == self.git_value(
+                source, ["ls-remote", "--refs", destination], name="initial Crab hook refs"
+            ),
+        )
+
+        self.run_git(source, ["switch", "-c", "topic"])
+        content = deterministic_bytes(1024 * 1024, f"hook-pointer:{self.run_id}")
+        (source / "hook-data.bin").write_bytes(content)
+        self.run_cmd("track hook pointer", [str(self.crab_bin), "track", "hook-data.bin"], source)
+        self.run_cmd("stage hook pointer", [str(self.crab_bin), "add", "hook-data.bin"], source)
+        self.run_git(source, ["add", ".gitattributes"])
+        self.run_git(source, ["commit", "-m", "hook pointer data"])
+        revision = self.git_value(source, ["rev-parse", "HEAD"], name="hook revision-expression oid")
+
+        self.run_cmd("compose LFS with mirror hook", [str(self.crab_bin), "lfs", "install", "--local"], source)
+        lfs_content = deterministic_bytes(128 * 1024, f"hook-lfs:{self.run_id}")
+        (source / "hook-lfs.bin").write_bytes(lfs_content)
+        attributes = source / ".gitattributes"
+        attributes.write_text(
+            attributes.read_text(encoding="utf-8")
+            + "\nhook-lfs.bin filter=lfs diff=lfs merge=lfs -text\n",
+            encoding="utf-8",
+        )
+        self.run_git(source, ["add", ".gitattributes", "hook-lfs.bin"])
+        self.run_git(source, ["commit", "-m", "hook LFS data"])
+        self.mirror_lfs_discovery_check(source, destination)
+        self.run_git(source, ["tag", "-a", "hook-v1", "-m", "hook annotated tag"])
+        selected = self.git_value(source, ["rev-parse", "topic"], name="hook selected commit")
+        tag_oid = self.git_value(source, ["rev-parse", "hook-v1"], name="hook selected tag object")
+        self.run_git(source, ["switch", "--detach", baseline])
+        self.run_git(
+            source,
+            ["push", "--atomic", "origin", "topic~:refs/heads/revision",
+             "topic:refs/heads/review", "topic:refs/heads/main",
+             "refs/tags/hook-v1:refs/tags/released", ":refs/heads/retired"],
+            name="mixed hook batch from detached HEAD with pointer and LFS data",
+        )
+        expected = {
+            "refs/heads/main": selected, "refs/heads/review": selected,
+            "refs/heads/revision": revision, "refs/tags/released": tag_oid,
+        }
+        for remote, label in (("origin", "collaboration"), (destination, "Crab")):
+            refs = self.git_value(source, ["ls-remote", "--refs", remote], name=f"mixed hook {label} refs")
+            observed = {ref: oid for oid, ref in (line.split() for line in refs.splitlines())}
+            self.check(f"mirror-hook-exact-mixed-batch-{label}", observed == expected, {"refs": observed})
+        self.check(
+            "mirror-hook-preserves-detached-source-HEAD",
+            self.git_value(source, ["rev-parse", "HEAD"], name="source HEAD after mixed hook") == baseline,
+        )
+
+        clone = self.run_root / "hook-clone"
+        self.run_cmd(
+            "fresh clone and hydrate hook-published pointer",
+            [str(self.crab_bin), "clone", destination, str(clone), "--no-lazy"], self.run_root,
+        )
+        self.check("mirror-hook-publishes-exact-pointer-bytes", (clone / "hook-data.bin").read_bytes() == content)
+        lfs_pointer = self.git_value(clone, ["show", "HEAD:hook-lfs.bin"], name="hook LFS pointer")
+        lfs_output = self.artifacts / "hook-lfs-hydrated.bin"
+        self.run_binary(
+            "hydrate hook-published LFS object from fresh clone",
+            [str(self.crab_bin), "lfs", "smudge", "hook-lfs.bin"], clone, lfs_output,
+            input_data=(lfs_pointer + "\n").encode(),
+        )
+        self.check("mirror-hook-publishes-exact-LFS-bytes", lfs_output.read_bytes() == lfs_content)
+        self.run_git(clone, ["fsck", "--strict", "--full"], name="strict fsck hook-published clone")
+
+        # Rejection by the second remote is not a distributed rollback. The
+        # first remote must retain the selected snapshot, and retry converge.
+        reject_hook = upstream / "hooks/pre-receive"
+        reject_hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        reject_hook.chmod(0o755)
+        retry_ref = "refs/heads/retry"
+        retry_spec = f"topic:{retry_ref}"
+        try:
+            rejected = self.run_git(
+                source, ["push", "origin", retry_spec], check=False,
+                name="collaboration rejects after Crab hook publication",
+            )
+        finally:
+            reject_hook.unlink()
+        self.check(
+            "mirror-hook-retains-Crab-ahead-after-collaboration-rejection",
+            rejected["exit_code"] != 0
+            and not self.git_value(source, ["ls-remote", "origin", retry_ref], name="rejected collaboration ref")
+            and self.git_value(source, ["ls-remote", destination, retry_ref], name="retained Crab retry ref").split()[0] == selected,
+        )
+        self.run_git(source, ["push", "origin", retry_spec], name="retry rejected collaboration push")
+        self.check(
+            "mirror-hook-retry-converges-without-extra-refs",
+            self.git_value(source, ["ls-remote", "--refs", "origin"], name="retried collaboration refs")
+            == self.git_value(source, ["ls-remote", "--refs", destination], name="retried Crab refs"),
+        )
+
+        self.run_git(
+            source,
+            ["push", "--atomic", "--force", "origin", f"{baseline}:refs/heads/main",
+             f"{baseline}:refs/heads/review", ":refs/tags/released"],
+            name="explicit rewrite and deletion through collaboration hook",
+        )
+        expected.update({"refs/heads/main": baseline, "refs/heads/review": baseline, retry_ref: selected})
+        expected.pop("refs/tags/released")
+        rewritten = self.git_value(source, ["ls-remote", "--refs", destination], name="rewritten Crab refs")
+        self.check(
+            "mirror-hook-rewrites-and-deletes-only-explicit-refs",
+            {ref: oid for oid, ref in (line.split() for line in rewritten.splitlines())} == expected
+            and rewritten == self.git_value(source, ["ls-remote", "--refs", "origin"], name="rewritten collaboration refs"),
+        )
+        self.run_git(clone, ["fetch", "--prune", "--prune-tags", "origin"], name="fetch rewritten and deleted hook refs")
+        fsck = self.run_git(clone, ["fsck", "--strict", "--full"], name="strict fsck after hook rewrite and deletion")
+        self.check("mirror-hook-rewrites-remain-fetchable", fsck["exit_code"] == 0)
+
+        # Direct Crab pushes bypass the mirror guard, creating deliberate drift.
+        self.run_git(
+            source, ["push", "--force", destination, f"{revision}:refs/heads/main"],
+            name="independently advance Crab for hook conflict",
+        )
+        crab_before = self.git_value(source, ["ls-remote", "--refs", destination], name="Crab refs before hook conflict")
+        source_before = self.git_value(source, ["ls-remote", "--refs", "origin"], name="source refs before hook conflict")
+        conflict = self.run_git(
+            source, ["push", "--atomic", "origin", "topic:refs/heads/main", "topic:refs/heads/must-not-publish"],
+            name="diverged Crab rejects complete collaboration batch", check=False,
+        )
+        self.check(
+            "mirror-hook-conflict-preserves-both-remotes-and-whole-batch",
+            conflict["exit_code"] != 0
+            and crab_before == self.git_value(source, ["ls-remote", "--refs", destination], name="Crab after hook conflict")
+            and source_before == self.git_value(source, ["ls-remote", "--refs", "origin"], name="source after hook conflict"),
+        )
+
+    def mirror_metadata_staleness_check(self, source: Path, destination: str, label: str) -> None:
+        """A metadata-only CAS must invalidate plans even when Git refs do not move."""
+        plan = self.artifacts / f"mirror-{label}-metadata-plan.json"
+        before = self.run_cmd(
+            f"save {label} mirror plan before metadata change",
+            [str(self.crab_bin), "mirror", str(source), destination,
+             "--check", "--write-plan", str(plan), "--json"],
+            self.run_root,
+        )
+        before_data = self.json_data(before, "mirror.check")
+        plan_bytes = plan.read_bytes()
+        plan_data = json.loads(plan_bytes)
+        if (
+            plan_data.get("blocked")
+            or not plan_data.get("destination_snapshot")
+            or not plan_data.get("recipe_digest")
+            or before_data.get("state") != label.replace("-", "_")
+            or bool(plan_data.get("actions")) != (label == "source-ahead")
+        ):
+            raise SmokeError("metadata staleness fixture requires a fully verified plan")
+
+        # This is the isolated smoke repository, never a user-selected prefix.
+        # Preserve Git/data roots and use CAS so the fixture cannot overwrite a
+        # concurrent commit. The old Git-only digest deliberately does not move.
+        key = f"{REMOTE_PREFIX}/{self.run_id}-mirror/manifest"
+        original = self.artifacts / f"mirror-{label}-manifest-before.json"
+        current = self.run_aws(
+            ["get-object", "--bucket", self.args.bucket, "--key", key, str(original)],
+            name=f"capture {label} mirror manifest identity",
+        )
+        etag = json.loads(self.stdout(current))["ETag"]
+        manifest = json.loads(original.read_bytes())
+        manifest["session_id"] = f"mirror-metadata-{self.run_id}-{label}"
+        changed = self.artifacts / f"mirror-{label}-manifest-changed.json"
+        changed.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+        self.run_aws(
+            ["put-object", "--bucket", self.args.bucket, "--key", key,
+             "--if-match", etag, "--body", str(changed)],
+            name=f"CAS {label} mirror metadata without changing refs",
+        )
+        refused = self.run_cmd(
+            f"refuse stale {label} mirror metadata plan",
+            [str(self.crab_bin), "mirror", str(source), destination,
+             "--apply-plan", str(plan), "--json"],
+            self.run_root,
+            check=False,
+        )
+        refusal = json.loads(self.stdout(refused))
+        after = self.run_cmd(
+            f"verify {label} mirror refs and bytes after stale plan refusal",
+            [str(self.crab_bin), "mirror", str(source), destination, "--check", "--json"],
+            self.run_root,
+        )
+        after_data = self.json_data(after, "mirror.check")
+        confirmed = self.artifacts / f"mirror-{label}-manifest-after.json"
+        self.run_aws(
+            ["get-object", "--bucket", self.args.bucket, "--key", key, str(confirmed)],
+            name=f"verify {label} stale plan preserved canonical metadata",
+        )
+        pointer_proof = after_data.get("pointers", {})
+        self.check(
+            f"mirror-{label}-plan-rejects-metadata-only-change",
+            refused["exit_code"] != 0
+            and refusal.get("error", {}).get("code") == "CRAB-E0060"
+            and before_data.get("refs") == after_data.get("refs")
+            and before_data.get("destination_snapshot") != after_data.get("destination_snapshot")
+            and pointer_proof.get("recipe_digest") == plan_data["recipe_digest"]
+            and pointer_proof.get("state") == "verified"
+            and pointer_proof.get("verified") == 1
+            and plan.read_bytes() == plan_bytes
+            and confirmed.read_bytes() == changed.read_bytes(),
+            {
+                "exit_code": refused["exit_code"],
+                "error": refusal.get("error"),
+                "actions": len(plan_data["actions"]),
+                "before_snapshot": before_data.get("destination_snapshot"),
+                "after_snapshot": after_data.get("destination_snapshot"),
+                "recipe_digest": pointer_proof.get("recipe_digest"),
+            },
+        )
+
+    def mirror_layout_identity_check(self, source: Path, destination: str) -> None:
+        """Plan identity follows validated layout semantics, never missing/corrupt layout."""
+        plan = self.artifacts / "mirror-layout-plan.json"
+        checked = self.run_cmd(
+            "save mirror plan before layout changes",
+            [str(self.crab_bin), "mirror", str(source), destination,
+             "--check", "--write-plan", str(plan), "--json"], self.run_root,
+        )
+        before = self.json_data(checked, "mirror.check")
+        plan_bytes = plan.read_bytes()
+        if json.loads(plan_bytes).get("blocked") or before.get("state") != "equal":
+            raise SmokeError("layout identity fixture requires a verified equal plan")
+
+        # Only the generated smoke repository is modified, always through CAS.
+        # Restore its exact descriptor in finally; do not repair through Crab.
+        prefix = f"{REMOTE_PREFIX}/{self.run_id}-mirror"
+        key = f"{prefix}/layout"
+        original = self.artifacts / "mirror-layout-original.json"
+        fetched = self.run_aws(
+            ["get-object", "--bucket", self.args.bucket, "--key", key, str(original)],
+            name="capture mirror layout identity",
+        )
+        etag = json.loads(self.stdout(fetched))["ETag"]
+        manifest_before = self.artifacts / "mirror-layout-manifest-before.json"
+        self.run_aws(
+            ["get-object", "--bucket", self.args.bucket, "--key", f"{prefix}/manifest", str(manifest_before)],
+            name="capture canonical manifest before layout fixture",
+        )
+        layout = json.loads(original.read_bytes())
+        formatted = self.artifacts / "mirror-layout-formatted.json"
+        formatted.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        updated = self.run_aws(
+            ["put-object", "--bucket", self.args.bucket, "--key", key,
+             "--if-match", etag, "--body", str(formatted)], name="change only layout JSON formatting",
+        )
+        etag = json.loads(self.stdout(updated))["ETag"]
+        try:
+            equivalent = self.run_cmd(
+                "verify equivalent layout preserves mirror identity",
+                [str(self.crab_bin), "mirror", str(source), destination, "--check", "--json"], self.run_root,
+            )
+            equivalent_data = self.json_data(equivalent, "mirror.check")
+            self.check(
+                "mirror-layout-formatting-preserves-plan-identity",
+                before.get("destination_identity") == equivalent_data.get("destination_identity")
+                and before.get("destination_snapshot") == equivalent_data.get("destination_snapshot")
+                and equivalent_data.get("pointers", {}).get("state") == "verified"
+                and equivalent_data.get("pointers", {}).get("verified") == 1,
+            )
+            layout["schema_version"] += 1
+            unsupported = self.artifacts / "mirror-layout-unsupported.json"
+            unsupported.write_text(json.dumps(layout) + "\n", encoding="utf-8")
+            updated = self.run_aws(
+                ["put-object", "--bucket", self.args.bucket, "--key", key,
+                 "--if-match", etag, "--body", str(unsupported)], name="install unsupported fixture layout",
+            )
+            etag = json.loads(self.stdout(updated))["ETag"]
+            blocked_plan = self.artifacts / "mirror-layout-blocked-plan.json"
+            blocked = self.run_cmd(
+                "invalid layout blocks mirror check and planning",
+                [str(self.crab_bin), "mirror", str(source), destination,
+                 "--check", "--ci", "--write-plan", str(blocked_plan), "--json"],
+                self.run_root, check=False,
+            )
+            refused = self.run_cmd(
+                "invalid layout refuses saved mirror plan replay",
+                [str(self.crab_bin), "mirror", str(source), destination,
+                 "--apply-plan", str(plan), "--json"], self.run_root, check=False,
+            )
+            after_layout = self.artifacts / "mirror-layout-after-refusal.json"
+            manifest_after = self.artifacts / "mirror-layout-manifest-after.json"
+            for object_key, output in [(key, after_layout), (f"{prefix}/manifest", manifest_after)]:
+                self.run_aws(
+                    ["get-object", "--bucket", self.args.bucket, "--key", object_key, str(output)],
+                    name=f"verify canonical {output.stem} after layout refusal",
+                )
+            blocked_data = self.json_data(blocked, "mirror.check")
+            self.check(
+                "mirror-invalid-layout-blocks-check-plan-and-replay",
+                blocked["exit_code"] != 0 and refused["exit_code"] != 0
+                and blocked_data.get("state") == "unverifiable"
+                and blocked_data.get("ci_passed") is False
+                and json.loads(blocked_plan.read_bytes()).get("blocked") is True
+                and after_layout.read_bytes() == unsupported.read_bytes()
+                and manifest_after.read_bytes() == manifest_before.read_bytes()
+                and plan.read_bytes() == plan_bytes,
+            )
+        finally:
+            self.run_aws(
+                ["put-object", "--bucket", self.args.bucket, "--key", key,
+                 "--if-match", etag, "--body", str(original)], name="restore isolated fixture layout through CAS",
+            )
+
+    def mirror_oversized_header_check(self, source: Path, destination: str) -> None:
+        """Corrupt only a disposable cache; a large header must not hide a pointer."""
+        cache = self.run_root / "mirror-oversized-header.git"
+        self.run_git(self.run_root, ["clone", "--mirror", str(source), str(cache)])
+        oid = self.git_value(source, ["rev-parse", "HEAD:mirror-data.bin"], name="capture pointer OID before oversized-header fault")
+        object_path = cache / "objects" / oid[:2] / oid[2:]
+        original = object_path.read_bytes()
+        source_object = source / ".git/objects" / oid[:2] / oid[2:]
+        source_original = source_object.read_bytes()
+        large_file = self.artifacts / "oversized-header-blob.bin"
+        large_file.write_bytes(deterministic_bytes(65536, "oversized-header"))
+        large_oid = self.git_value(cache, ["hash-object", "-w", str(large_file)], name="create oversized-header cache fixture")
+        replacement = (cache / "objects" / large_oid[:2] / large_oid[2:]).read_bytes()
+        before = self.git_value(source, ["ls-remote", "--refs", destination], name="capture remote refs before oversized-header fault")
+        plan = self.run_root / "oversized-header-plan.json"
+        args = [str(self.crab_bin), "mirror", str(source), destination,
+                "--cache-dir", str(cache), "--check", "--ci", "--json"]
+        # Local clone can hardlink source objects. Replace only this cache's
+        # directory entry, then restore its captured bytes on every exit path.
+        object_path.unlink()
+        try:
+            object_path.write_bytes(replacement)
+            result = self.run_cmd(
+                "mirror rejects pointer disguised by oversized blob header",
+                args + ["--write-plan", str(plan)], self.run_root, check=False,
+            )
+            data = self.json_data(result, "mirror.check")
+            pointers = data.get("pointers", {})
+            # Destination inspection may import a healthy packed copy of this
+            # OID. Git and gitoxide can then select different copies: exact
+            # header binding must reject that before the body checksum stage.
+            identity_errors = (f"Git blob batch header differs for {oid}",
+                               f"Git blob checksum differs from {oid}")
+            self.check(
+                "mirror-oversized-header-cannot-hide-corrupt-pointer",
+                result["exit_code"] != 0 and data.get("ci_passed") is False
+                and pointers.get("state") == "unverifiable"
+                and any(issue.get("detail", "").endswith(identity_errors)
+                        for issue in pointers.get("issues", []))
+                and json.loads(plan.read_text(encoding="utf-8")).get("blocked") is True
+                and source_object.read_bytes() == source_original
+                and self.git_value(source, ["ls-remote", "--refs", destination], name="verify refs after oversized-header refusal") == before,
+                pointers,
+            )
+        finally:
+            if object_path.exists():
+                object_path.unlink()
+            object_path.write_bytes(original)
+        repaired = self.run_cmd("mirror verifies restored cache object", args, self.run_root)
+        self.check(
+            "mirror-restored-cache-resumes-complete-pointer-proof",
+            self.json_data(repaired, "mirror.check").get("pointers", {}).get("verified") == 1
+            and source_object.read_bytes() == source_original
+            and self.git_value(source, ["ls-remote", "--refs", destination], name="verify refs after cache restoration") == before,
+        )
+
+    def mirror_initial_plan_checks(self) -> None:
+        """Require first-import attribution and historical retry after source drift."""
+        source = self.run_root / "initial-plan-source"
+        upstream = self.run_root / "initial-plan-upstream.git"
+        remote = self.remote_url + "-initial-plan"
+        plan = self.artifacts / "initial-mirror-plan.json"
+        self.run_git(self.run_root, ["init", "-b", "main", str(source)])
+        self.run_git(self.run_root, ["init", "--bare", str(upstream)])
+        self.run_git(source, ["remote", "add", "origin", str(upstream)])
+        self.run_git(source, ["config", "core.hooksPath", ".git/hooks"])
+        (source / "readme.txt").write_text("initial mirror content\n", encoding="utf-8")
+        self.run_git(source, ["add", "readme.txt"])
+        self.run_git(source, ["commit", "-m", "initial planned import"])
+        self.run_git(source, ["tag", "v1"])
+        self.run_cmd("initialize empty planned destination",
+                     [str(self.crab_bin), "init", "--mirror=origin", remote], source)
+        mirror = [str(self.crab_bin), "mirror", str(source), remote]
+        checked = self.run_cmd("plan first mirror import",
+                               [*mirror, "--check", "--write-plan", str(plan), "--json"],
+                               self.run_root)
+        self.check("initial-mirror-plan-is-source-ahead",
+                   self.json_data(checked, "mirror.check").get("state") == "source_ahead")
+        apply = [*mirror, "--apply-plan", str(plan), "--json"]
+        applied = self.json_data(
+            self.run_cmd("apply first mirror import", apply, self.run_root), "mirror.apply")
+        transaction = applied.get("transaction_id")
+        self.check("initial-mirror-import-has-transaction-receipt",
+                   isinstance(transaction, str) and len(transaction) == 64
+                   and applied.get("actions_applied") == 2
+                   and applied.get("final_state") == "equal")
+        source_refs = self.git_value(source, ["show-ref"], name="initial source refs")
+        remote_refs = self.git_value(self.run_root, ["ls-remote", "--refs", remote],
+                                     name="initial planned remote refs")
+        self.check("initial-mirror-import-publishes-exact-batch",
+                   sorted(source_refs.split()) == sorted(remote_refs.split()))
+        (source / "readme.txt").write_text("new source content\n", encoding="utf-8")
+        self.run_git(source, ["add", "readme.txt"])
+        self.run_git(source, ["commit", "-m", "advance source after planned import"])
+        retried = self.json_data(
+            self.run_cmd("replay historical plan after source advances", apply, self.run_root),
+            "mirror.apply")
+        self.check("historical-mirror-retry-retains-identity-and-current-drift",
+                   retried.get("already_applied") is True
+                   and retried.get("transaction_id") == transaction
+                   and retried.get("actions_applied") == 0
+                   and retried.get("final_state") == "source_ahead")
+        after = self.git_value(self.run_root, ["ls-remote", "--refs", remote],
+                              name="remote refs after historical retry")
+        self.check("historical-mirror-retry-does-not-publish-new-source", after == remote_refs)
+
+    def mirror_reconciliation_checks(self) -> None:
+        """Exercise read-only drift, immutable plan/apply, CI, and deletion approval."""
+        mirror_source = self.run_root / "mirror-source"
+        mirror_upstream = self.run_root / "mirror-upstream.git"
+        mirror_url = self.remote_url + "-mirror"
+        mirror_source.mkdir()
+        self.run_git(self.run_root, ["init", "-b", "main", str(mirror_source)])
+        self.run_git(mirror_source, ["config", "core.hooksPath", ".git/hooks"])
+        self.run_git(self.run_root, ["init", "--bare", str(mirror_upstream)])
+        self.run_git(
+            mirror_source,
+            ["remote", "add", "origin", str(mirror_upstream)],
+        )
+        (mirror_source / "baseline.txt").write_text("mirror baseline\n", encoding="utf-8")
+        self.run_git(mirror_source, ["add", "baseline.txt"])
+        self.run_git(mirror_source, ["commit", "-m", "mirror baseline"])
+        self.run_cmd(
+            "initialize isolated mirror destination",
+            [str(self.crab_bin), "init", "--mirror=origin", mirror_url],
+            mirror_source,
+        )
+        content = deterministic_bytes(1024 * 1024, f"mirror-origin:{self.run_id}")
+        (mirror_source / "mirror-data.bin").write_bytes(content)
+        self.run_cmd(
+            "track real mirror pointer data",
+            [str(self.crab_bin), "track", "mirror-data.bin"],
+            mirror_source,
+        )
+        self.run_cmd(
+            "stage real mirror pointer data",
+            [str(self.crab_bin), "add", "mirror-data.bin", "--json"],
+            mirror_source,
+        )
+        self.run_git(mirror_source, ["add", ".gitattributes"])
+        self.run_git(mirror_source, ["commit", "-m", "mirror origin byte fixture"])
+        self.run_git(mirror_source, ["tag", "-a", "mirror-v1", "-m", "mirror annotated tag"])
+        self.run_git(
+            mirror_source,
+            ["push", mirror_url, "refs/heads/main:refs/heads/main", "refs/tags/mirror-v1:refs/tags/mirror-v1"],
+            name="seed isolated mirror destination",
+        )
+        baseline = self.run_cmd(
+            "verify isolated mirror baseline",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--json",
+            ],
+            self.run_root,
+        )
+        baseline_data = self.json_data(baseline, "mirror.check")
+        self.check(
+            "mirror-equal-baseline-passes-CI-policy",
+            baseline_data.get("state") == "equal"
+            and baseline_data.get("ci_passed") is True
+            and baseline_data.get("hook", {}).get("state") == "installed",
+        )
+        pointer_proof = baseline_data.get("pointers", {})
+        self.check(
+            "mirror-verifies-real-origin-pointer-bytes",
+            pointer_proof.get("discovered") == 1
+            and pointer_proof.get("verified") == 1
+            and pointer_proof.get("state") == "verified",
+            pointer_proof,
+        )
+        index_prefix = f"{REMOTE_PREFIX}/{self.run_id}-mirror/file_index_db/"
+        index_listing = self.run_aws(
+            ["list-objects-v2", "--bucket", self.args.bucket, "--prefix", index_prefix],
+            name="inventory isolated mirror acceleration before fault",
+        )
+        index_keys = [entry["Key"] for entry in json.loads(self.stdout(index_listing)).get("Contents", [])]
+        if not index_keys or any(not key.startswith(index_prefix) for key in index_keys):
+            raise SmokeError("mirror index fault requires a nonempty exact-prefix inventory")
+        # Remove only this disposable repository's derived file index. Canonical
+        # manifest/shards/xorbs remain intact; inspection must not recreate a DB.
+        for key in index_keys:
+            self.run_aws(
+                ["delete-object", "--bucket", self.args.bucket, "--key", key],
+                name="remove isolated mirror acceleration object",
+            )
+        without_index = self.run_cmd(
+            "verify mirror origin without acceleration",
+            [str(self.crab_bin), "mirror", str(mirror_source), mirror_url, "--check", "--ci", "--json"],
+            self.run_root,
+        )
+        without_index_data = self.json_data(without_index, "mirror.check")
+        index_after = self.run_aws(
+            ["list-objects-v2", "--bucket", self.args.bucket, "--prefix", index_prefix],
+            name="verify mirror check did not recreate acceleration",
+        )
+        self.check(
+            "mirror-verifies-canonical-data-without-acceleration-writes",
+            without_index_data.get("ci_passed") is True
+            and without_index_data.get("pointers", {}).get("verified") == 1
+            and not json.loads(self.stdout(index_after)).get("Contents"),
+            {"removed_derived_objects": len(index_keys), "pointers": without_index_data.get("pointers")},
+        )
+        mirror_clone = self.run_root / "mirror-hydrated-clone"
+        self.run_cmd(
+            "clone and hydrate mirrored pointer data",
+            [str(self.crab_bin), "clone", mirror_url, str(mirror_clone), "--no-lazy"],
+            self.run_root,
+        )
+        self.check(
+            "mirror-clone-reconstructs-exact-source-bytes",
+            (mirror_clone / "mirror-data.bin").read_bytes() == content,
+            {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()},
+        )
+        self.run_git(mirror_clone, ["fsck", "--strict", "--full"], name="strict fsck mirrored data clone")
+        self.mirror_layout_identity_check(mirror_source, mirror_url)
+        self.mirror_oversized_header_check(mirror_source, mirror_url)
+        self.mirror_metadata_staleness_check(mirror_source, mirror_url, "equal")
+
+        hook = mirror_source / ".git/hooks/pre-push"
+        disabled_hook = hook.with_name("pre-push.disabled-for-smoke")
+        hook.rename(disabled_hook)
+        try:
+            missing_hook = self.run_cmd(
+                "mirror CI detects missing hook",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url, "--check", "--ci", "--json"],
+                self.run_root,
+                check=False,
+            )
+        finally:
+            disabled_hook.rename(hook)
+        missing_hook_data = self.json_data(missing_hook, "mirror.check")
+        self.check(
+            "mirror-CI-detects-missing-hook",
+            missing_hook["exit_code"] != 0
+            and missing_hook_data.get("hook", {}).get("state") == "missing"
+            and missing_hook_data.get("ci_passed") is False,
+        )
+
+        plan = self.artifacts / "mirror-source-ahead-plan.json"
+        self.run_git(mirror_source, ["switch", "-c", "mirror/reconciliation"])
+        (mirror_source / "mirror-reconciliation.txt").write_text(
+            "source-ahead mirror state\n", encoding="utf-8"
+        )
+        self.run_git(mirror_source, ["add", "mirror-reconciliation.txt"])
+        self.run_git(mirror_source, ["commit", "-m", "mirror source-ahead fixture"])
+        self.mirror_metadata_staleness_check(mirror_source, mirror_url, "source-ahead")
+
+        check = self.run_cmd(
+            "mirror source-ahead check and plan",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--write-plan",
+                str(plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        check_data = self.json_data(check, "mirror.check")
+        plan_data = json.loads(plan.read_text(encoding="utf-8"))
+        self.check(
+            "mirror-plan-captures-source-ahead",
+            check_data.get("state") == "source_ahead"
+            and plan_data.get("blocked") is False
+            and any(
+                action.get("kind") == "update_crab_ref"
+                and action.get("ref_name") == "refs/heads/mirror/reconciliation"
+                for action in plan_data.get("actions", [])
+            ),
+            {"state": check_data.get("state"), "plan_id": plan_data.get("plan_id")},
+        )
+
+        relative_cache = "relative-mirror/cache.git"
+        relative_check = self.run_cmd(
+            "inspect mirror using nested relative cache",
+            [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+             "--check", "--cache-dir", relative_cache, "--json"],
+            self.run_root,
+        )
+        relative_data = self.json_data(relative_check, "mirror.check")
+        self.check(
+            "mirror-relative-cache-resolves-from-invocation",
+            Path(relative_data["cache_dir"]).resolve() == (self.run_root / relative_cache).resolve()
+            and relative_data.get("state") == "source_ahead",
+        )
+
+        cache = Path(check_data["cache_dir"]).resolve()
+        cache_refs_before = self.git_value(cache, ["show-ref"], name="cache refs before mirror faults")
+        crab_refs_before = self.git_value(
+            self.run_root, ["ls-remote", "--refs", mirror_url], name="Crab refs before mirror faults"
+        )
+        # Hold the same native advisory lock from a separate process. The
+        # released-shape CLI must refuse all three paths before cache refresh.
+        lock_path = cache.with_name(cache.name + ".crab-cache-use.lock")
+        with hold_cache_lock(lock_path):
+            busy_check = self.run_cmd(
+                "mirror CI refuses busy cache",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                 "--check", "--ci", "--json"],
+                self.run_root, check=False,
+            )
+            busy_apply = self.run_cmd(
+                "mirror apply refuses busy cache",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                 "--apply-plan", str(plan), "--json"],
+                self.run_root, check=False,
+            )
+            busy_legacy = self.run_cmd(
+                "legacy mirror refuses busy cache",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                 "--skip-lfs", "--json"],
+                self.run_root, check=False,
+            )
+        busy_data = self.json_data(busy_check, "mirror.check")
+        self.check(
+            "mirror-cache-contention-fails-closed",
+            all(result["exit_code"] != 0 for result in (busy_check, busy_apply, busy_legacy))
+            and busy_data.get("state") == "unverifiable"
+            and busy_data.get("ci_passed") is False,
+        )
+
+        offline_source = self.run_root / "mirror-source-offline"
+        mirror_source.rename(offline_source)
+        try:
+            source_outage = self.run_cmd(
+                "mirror CI refuses stale cache when source is unavailable",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                 "--check", "--ci", "--json"],
+                self.run_root, check=False,
+            )
+            outage_apply = self.run_cmd(
+                "mirror plan cannot apply with unavailable source",
+                [str(self.crab_bin), "mirror", str(mirror_source), mirror_url,
+                 "--apply-plan", str(plan), "--json"],
+                self.run_root, check=False,
+            )
+        finally:
+            offline_source.rename(mirror_source)
+        outage_data = self.json_data(source_outage, "mirror.check")
+        self.check(
+            "mirror-source-unavailable-fails-closed",
+            source_outage["exit_code"] != 0
+            and outage_data.get("state") == "unverifiable"
+            and outage_data.get("refs") == []
+            and outage_data.get("ci_passed") is False,
+        )
+        self.check("mirror-unavailable-source-refuses-apply", outage_apply["exit_code"] != 0)
+        cache_refs_after = self.git_value(cache, ["show-ref"], name="cache refs after mirror faults")
+        crab_refs_after = self.git_value(
+            self.run_root, ["ls-remote", "--refs", mirror_url], name="Crab refs after mirror faults"
+        )
+        self.check(
+            "mirror-cache-and-source-faults-preserve-refs",
+            cache_refs_after == cache_refs_before and crab_refs_after == crab_refs_before,
+        )
+
+        self.mirror_cache_cleanup_checks(
+            mirror_source, mirror_url, self.run_root / relative_cache, plan
+        )
+        self.mirror_cancellation_checks(mirror_source, mirror_url)
+
+        shallow_source = self.run_root / "mirror-shallow-source.git"
+        shallow_plan = self.artifacts / "mirror-shallow-source-plan.json"
+        self.run_git(
+            self.run_root,
+            ["clone", "--bare", "--depth=1", "--no-local", str(mirror_source), str(shallow_source)],
+            name="prepare shallow mirror source",
+        )
+        shallow_check = self.run_cmd(
+            "incomplete mirror source cannot plan destination deletions",
+            [str(self.crab_bin), "mirror", str(shallow_source), mirror_url,
+             "--cache-dir", str(self.run_root / "mirror-shallow-cache.git"),
+             "--check", "--ci", "--allow-delete-refs", "--write-plan", str(shallow_plan), "--json"],
+            self.run_root, check=False,
+        )
+        shallow_data = self.json_data(shallow_check, "mirror.check")
+        self.check(
+            "mirror-shallow-source-cannot-propose-destination-deletions",
+            shallow_check["exit_code"] != 0
+            and shallow_data.get("state") == "unverifiable"
+            and json.loads(shallow_plan.read_text(encoding="utf-8")).get("blocked") is True
+            and self.git_value(
+                self.run_root, ["ls-remote", "--refs", mirror_url],
+                name="destination refs after incomplete source rejection",
+            ) == crab_refs_before,
+        )
+
+        applied = self.run_cmd(
+            "apply mirror source-ahead plan",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--apply-plan",
+                str(plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        applied_data = self.json_data(applied, "mirror.apply")
+        source_oid = self.git_value(
+            mirror_source,
+            ["rev-parse", "refs/heads/mirror/reconciliation"],
+            name="mirror source-ahead oid",
+        )
+        crab_oid = self.git_value(
+            mirror_source,
+            ["ls-remote", mirror_url, "refs/heads/mirror/reconciliation"],
+            name="mirror applied oid",
+        ).split()[0]
+        self.check(
+            "mirror-plan-apply-publishes-exact-ref",
+            applied_data.get("final_state") == "equal" and crab_oid == source_oid,
+            {"source_oid": source_oid, "crab_oid": crab_oid},
+        )
+
+        reapplied = self.run_cmd(
+            "reapply mirror plan",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--apply-plan",
+                str(plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        self.check(
+            "mirror-plan-reapply-is-idempotent",
+            self.json_data(reapplied, "mirror.apply").get("already_applied") is True,
+        )
+
+        self.run_git(
+            mirror_source,
+            ["push", mirror_url, "HEAD:refs/heads/mirror-recoverable"],
+            name="create Crab-only recoverable ref",
+        )
+        blocked_plan = self.artifacts / "mirror-blocked-deletion-plan.json"
+        blocked = self.run_cmd(
+            "plan Crab-only ref without deletion approval",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--write-plan",
+                str(blocked_plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        blocked_data = json.loads(blocked_plan.read_text(encoding="utf-8"))
+        self.check(
+            "mirror-retains-Crab-only-ref-by-default",
+            self.json_data(blocked, "mirror.check").get("state") == "crab_ahead"
+            and blocked_data.get("blocked") is True
+            and blocked_data.get("actions") == [],
+        )
+
+        delete_plan = self.artifacts / "mirror-approved-deletion-plan.json"
+        self.run_cmd(
+            "plan explicitly approved Crab-only deletion",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--allow-delete-refs",
+                "--write-plan",
+                str(delete_plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        refused = self.run_cmd(
+            "refuse deletion plan without second approval",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--apply-plan",
+                str(delete_plan),
+                "--json",
+            ],
+            self.run_root,
+            check=False,
+        )
+        self.check("mirror-delete-requires-apply-approval", refused["exit_code"] != 0)
+        self.run_cmd(
+            "apply explicitly approved Crab-only deletion",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--apply-plan",
+                str(delete_plan),
+                "--allow-delete-refs",
+                "--json",
+            ],
+            self.run_root,
+        )
+        deleted = self.run_git(
+            mirror_source,
+            ["ls-remote", mirror_url, "refs/heads/mirror-recoverable"],
+            name="verify Crab-only ref deletion",
+        )
+        self.check("mirror-approved-delete-removes-only-planned-ref", not self.stdout(deleted).strip())
+
+        unavailable = self.run_cmd(
+            "mirror CI reports unavailable provider",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--ci",
+                "--json",
+            ],
+            self.run_root,
+            check=False,
+            extra_env={
+                "AWS_ENDPOINT": "http://127.0.0.1:1",
+                "AWS_ENDPOINT_URL": "http://127.0.0.1:1",
+                "AWS_ENDPOINT_URL_S3": "http://127.0.0.1:1",
+                "ENDPOINT_URL": "http://127.0.0.1:1",
+                "AWS_MAX_ATTEMPTS": "1",
+            },
+        )
+        unavailable_data = self.json_data(unavailable, "mirror.check")
+        self.check(
+            "mirror-CI-fails-closed-when-provider-unavailable",
+            unavailable["exit_code"] != 0
+            and unavailable_data.get("ci_passed") is False
+            and unavailable_data.get("state") == "unverifiable",
+        )
+
+        divergence_base = self.git_value(
+            mirror_source,
+            ["rev-parse", "HEAD"],
+            name="mirror divergence base",
+        )
+        (mirror_source / "source-divergence.txt").write_text(
+            "source side\n", encoding="utf-8"
+        )
+        self.run_git(mirror_source, ["add", "source-divergence.txt"])
+        self.run_git(mirror_source, ["commit", "-m", "source side divergence"])
+        source_divergence_oid = self.git_value(
+            mirror_source,
+            ["rev-parse", "HEAD"],
+            name="mirror source divergence oid",
+        )
+        self.run_git(mirror_source, ["reset", "--hard", divergence_base])
+        (mirror_source / "crab-divergence.txt").write_text(
+            "Crab side\n", encoding="utf-8"
+        )
+        self.run_git(mirror_source, ["add", "crab-divergence.txt"])
+        self.run_git(mirror_source, ["commit", "-m", "Crab side divergence"])
+        self.run_git(
+            mirror_source,
+            [
+                "push",
+                "--force",
+                mirror_url,
+                "HEAD:refs/heads/mirror/reconciliation",
+            ],
+            name="publish Crab side divergence",
+        )
+        self.run_git(mirror_source, ["reset", "--hard", source_divergence_oid])
+        diverged_plan = self.artifacts / "mirror-diverged-plan.json"
+        diverged = self.run_cmd(
+            "mirror detects and blocks diverged ref",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--write-plan",
+                str(diverged_plan),
+                "--json",
+            ],
+            self.run_root,
+        )
+        diverged_data = self.json_data(diverged, "mirror.check")
+        diverged_plan_data = json.loads(diverged_plan.read_text(encoding="utf-8"))
+        self.check(
+            "mirror-divergence-is-detected-without-mutation",
+            diverged_data.get("state") == "diverged"
+            and diverged_plan_data.get("blocked") is True
+            and diverged_plan_data.get("actions") == []
+            and any(
+                ref.get("name") == "refs/heads/mirror/reconciliation"
+                and ref.get("state") == "diverged"
+                for ref in diverged_data.get("refs", [])
+            ),
+        )
+
+        (mirror_source / "missing-data.ptr").write_text(
+            "version https://crab.dev/spec/v1\n" + "file-hash " + "f" * 64 + "\nsize 1\n",
+            encoding="utf-8",
+        )
+        self.run_git(mirror_source, ["add", "missing-data.ptr"])
+        self.run_git(mirror_source, ["commit", "-m", "missing pointer data fixture"])
+        missing = self.run_cmd(
+            "mirror CI rejects missing pointer data",
+            [
+                str(self.crab_bin),
+                "mirror",
+                str(mirror_source),
+                mirror_url,
+                "--check",
+                "--ci",
+                "--json",
+            ],
+            self.run_root,
+            check=False,
+        )
+        missing_data = self.json_data(missing, "mirror.check")
+        self.check(
+            "mirror-CI-fails-missing-pointer-data",
+            missing["exit_code"] != 0
+            and missing_data.get("ci_passed") is False
+            and missing_data.get("pointers", {}).get("state") == "missing",
+        )
+
     def redaction_check(self) -> None:
         leaks: list[str] = []
         for path in (*self.logs.glob("*.log"), *self.artifacts.glob("*.json")):
@@ -2315,6 +3791,8 @@ class ProtocolV2PartialCloneSmoke:
             "aws_cli_version": redact_text(aws_version, self.credentials()),
             "backend": self.args.backend,
             "object_store_health": health,
+            "operating_system": {"darwin": "macos", "win32": "windows"}.get(sys.platform, sys.platform),
+            "repository_mode": "direct",
             "object_store_container": self.args.rustfs_container,
         }
         self.write_report()
@@ -2344,6 +3822,7 @@ class ProtocolV2PartialCloneSmoke:
         ) = self.setup_source()
         self.record_provenance(source_revision, health)
         self.store_snapshot("after-push")
+        self.native_ref_lifecycle_checks()
 
         baseline = self.storage_telemetry()
         self.clone_full(baseline)
@@ -2362,9 +3841,16 @@ class ProtocolV2PartialCloneSmoke:
         )
         self.store_snapshot("after-filtered-lifecycle")
         self.filter_matrix(large_oid, small_oid, sparse_oid)
+        # These clones may warm the source's pack cache; preserve the existing
+        # cold full-versus-filtered measurements before running them.
+        self.everyday_git_workflow_checks()
         hidden_oid, dangling_oid = self.create_security_refs()
         self.security_checks(hidden_oid, dangling_oid)
         self.disconnect_check()
+        if self.args.mirror_reconciliation:
+            self.mirror_initial_plan_checks()
+            self.mirror_pre_push_batch_checks()
+            self.mirror_reconciliation_checks()
         self.redaction_check()
         self.report["protocol_telemetry"] = self.protocol_telemetry()
         self.write_report()
@@ -2415,6 +3901,11 @@ def parse_args() -> argparse.Namespace:
         "--require-existing-bucket",
         action="store_true",
         help="Refuse to create a missing bucket (required for external qualification)",
+    )
+    parser.add_argument(
+        "--mirror-reconciliation",
+        action="store_true",
+        help="Also qualify mirror check, plan/apply, CI, and deletion safety",
     )
     parser.add_argument("--access-key", default=os.environ.get("AWS_ACCESS_KEY_ID", "crab"))
     parser.add_argument("--secret-key", default=os.environ.get("AWS_SECRET_ACCESS_KEY", "crab"))

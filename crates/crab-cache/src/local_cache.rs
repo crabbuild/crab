@@ -1161,26 +1161,23 @@ impl LocalCache {
         Ok(s)
     }
 
-    /// Remove all cached data.
+    /// Remove cached data while preserving coordination markers.
     ///
     /// # Errors
     ///
-    /// Returns [`CacheError::Io`] on filesystem failure.
+    /// Returns [`CacheError::Io`] on filesystem failure or active cache ownership.
     pub async fn clean(&self) -> Result<()> {
-        let mut entries = match tokio::fs::read_dir(&self.root).await {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let file_type = entry.file_type().await?;
-            if file_type.is_dir() {
-                tokio::fs::remove_dir_all(&path).await?;
-            } else {
-                tokio::fs::remove_file(&path).await?;
-            }
+        if !tokio::fs::try_exists(&self.root).await? {
+            return Ok(());
         }
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let guard = crate::lifecycle::CacheCleanGuard::acquire(&root, &cancel)?;
+            guard.clean(&cancel).map(|_| ())
+        })
+        .await
+        .map_err(|error| CacheError::Io(std::io::Error::other(error)))??;
         debug!("cache cleaned");
         Ok(())
     }
@@ -3369,15 +3366,9 @@ mod tests {
         assert_eq!(stats.xorb_bytes, 0);
         assert_eq!(stats.stage_bytes, 0);
         assert_eq!(stats.manifest_count, 0);
-        assert!(
-            tokio::fs::read_dir(cache.root())
-                .await
-                .unwrap()
-                .next_entry()
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(!repo_index.exists());
+        assert!(!cache.root().join("bloom.bin").exists());
+        assert!(std::fs::read_dir(cache.root()).unwrap().next().is_none());
     }
 
     #[tokio::test]

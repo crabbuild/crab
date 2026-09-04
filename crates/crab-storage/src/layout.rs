@@ -238,6 +238,26 @@ impl<S> StoreLayout<S> {
         ))
     }
 
+    /// Prefix containing bounded commit attempts for one mirror plan.
+    #[must_use]
+    pub fn ref_journal_plan_attempts_prefix(&self, plan_id: &str) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/plans/v1/{plan_id}/attempts"))
+    }
+
+    /// Path to one immutable mirror-plan commit intent.
+    #[must_use]
+    pub fn ref_journal_plan_intent_path(&self, plan_id: &str, attempt: u32) -> ObjectPath {
+        self.repo_path(&format!(
+            "refs/journal/plans/v1/{plan_id}/attempts/{attempt:08}.json"
+        ))
+    }
+
+    /// Path to the immutable terminal receipt for one mirror plan.
+    #[must_use]
+    pub fn ref_journal_plan_receipt_path(&self, plan_id: &str) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/plans/v1/{plan_id}/terminal.json"))
+    }
+
     /// Path to a bulk manifest object: `{repo}/manifests/{prefix}-{hash}`.
     ///
     /// Bulk objects are immutable and content-addressed. `prefix` is one of
@@ -567,6 +587,25 @@ mod tests {
         assert_eq!(
             layout.manifest_history_path(42, &digest).as_ref(),
             format!("org/models/manifests/history/00000000000000000042-{digest}.json")
+        );
+    }
+
+    #[test]
+    fn ref_journal_plan_paths_are_versioned_and_repo_local() {
+        let layout = test_layout();
+        let plan_id = "d".repeat(64);
+
+        assert_eq!(
+            layout.ref_journal_plan_attempts_prefix(&plan_id).as_ref(),
+            format!("org/models/refs/journal/plans/v1/{plan_id}/attempts")
+        );
+        assert_eq!(
+            layout.ref_journal_plan_intent_path(&plan_id, 7).as_ref(),
+            format!("org/models/refs/journal/plans/v1/{plan_id}/attempts/00000007.json")
+        );
+        assert_eq!(
+            layout.ref_journal_plan_receipt_path(&plan_id).as_ref(),
+            format!("org/models/refs/journal/plans/v1/{plan_id}/terminal.json")
         );
     }
 

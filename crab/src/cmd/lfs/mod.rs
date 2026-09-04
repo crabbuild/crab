@@ -15,6 +15,7 @@ pub mod fetch;
 pub mod filter_process;
 pub mod fsck;
 pub mod hooks;
+mod input;
 pub mod install;
 pub mod locks;
 pub mod logs;
@@ -225,12 +226,12 @@ pub enum LfsCmd {
     },
     /// Upload LFS objects to the remote store.
     Push {
-        /// Git remote name. Crab reads this Git remote URL when provided.
+        /// Git remote name or Crab remote URL; omitted uses the configured default.
         remote: Option<String>,
-        /// Refs or additional object IDs to push.
+        /// Refs or object IDs; ordinary push without refs or --stdin defaults to HEAD.
         #[arg(value_name = "REF_OR_OID")]
         args: Vec<String>,
-        /// Upload all locally-known LFS objects.
+        /// Upload complete selected history; omitted refs select local branches and tags.
         #[arg(long, short = 'a')]
         all: bool,
         /// Upload a specific LFS object by OID.
@@ -722,7 +723,7 @@ pub fn run_lfs(cmd: &LfsCmd) -> Result<std::process::ExitCode> {
     run_lfs_with_cancel(cmd, &CancellationToken::new())
 }
 
-/// Dispatch an LFS command while honoring cancellation for optimize-owned paths.
+/// Dispatch an LFS command with caller cancellation for supported operations.
 pub fn run_lfs_with_cancel(
     cmd: &LfsCmd,
     cancel: &CancellationToken,
@@ -770,12 +771,15 @@ pub fn run_lfs_with_cancel(
             skip_repo,
             args,
         } => {
-            return clone::run_lfs_clone(clone::LfsCloneOptions {
-                args: args.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-                skip_repo: *skip_repo,
-            });
+            return clone::run_lfs_clone(
+                clone::LfsCloneOptions {
+                    args: args.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                    skip_repo: *skip_repo,
+                },
+                cancel,
+            );
         }
         LfsCmd::Track {
             patterns,
@@ -958,30 +962,36 @@ pub fn run_lfs_with_cancel(
             dry_run,
             json,
         } => {
-            fetch::run_lfs_fetch(fetch::LfsFetchOptions {
-                remote: remote.clone(),
-                refs: refs.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-                recent: *recent,
-                all: *all,
-                stdin: *stdin,
-                prune: *prune,
-                refetch: *refetch,
-                dry_run: *dry_run,
-                json: *json,
-            })?;
+            fetch::run_lfs_fetch(
+                fetch::LfsFetchOptions {
+                    remote: remote.clone(),
+                    refs: refs.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                    recent: *recent,
+                    all: *all,
+                    stdin: *stdin,
+                    prune: *prune,
+                    refetch: *refetch,
+                    dry_run: *dry_run,
+                    json: *json,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Pull {
             remote,
             include,
             exclude,
         } => {
-            fetch::run_lfs_pull(fetch::LfsPullOptions {
-                remote: remote.clone(),
-                include: include.clone(),
-                exclude: exclude.clone(),
-            })?;
+            fetch::run_lfs_pull(
+                fetch::LfsPullOptions {
+                    remote: remote.clone(),
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                },
+                cancel,
+            )?;
         }
         LfsCmd::Push {
             remote,
@@ -991,17 +1001,20 @@ pub fn run_lfs_with_cancel(
             stdin,
             dry_run,
         } => {
-            push::run_lfs_push(push::LfsPushOptions {
-                remote: remote.clone(),
-                args: args.clone(),
-                all: *all,
-                object_id: object_id.clone(),
-                stdin: *stdin,
-                dry_run: *dry_run,
-            })?;
+            push::run_lfs_push(
+                push::LfsPushOptions {
+                    remote: remote.clone(),
+                    args: args.clone(),
+                    all: *all,
+                    object_id: object_id.clone(),
+                    stdin: *stdin,
+                    dry_run: *dry_run,
+                },
+                cancel,
+            )?;
         }
         LfsCmd::PrePush { remote, url } => {
-            push::run_lfs_pre_push(remote.as_deref(), url.as_deref())?;
+            push::run_lfs_pre_push(remote.as_deref(), url.as_deref(), cancel)?;
         }
         LfsCmd::Checkout {
             paths,

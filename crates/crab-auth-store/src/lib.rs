@@ -91,7 +91,9 @@ pub fn build_store_from_transfer_grant(
                 &direct.container,
             );
             let multipart_identity = built.multipart_identity;
-            let mut store = Store::new(built.inner).with_bucket_identity(identity);
+            let mut store = Store::new(built.inner)
+                .with_bucket_identity(identity)
+                .with_target_identity(built.target_identity);
             if let Some(signer) = built.signer {
                 store = store.with_signer(signer);
             }
@@ -112,7 +114,10 @@ pub fn build_store_from_transfer_grant(
                     .as_ref()
                     .map(|staging| staging.prefix.as_str()),
             )?);
-            Store::new(inner).with_bucket_identity(crab_storage::BucketIdentity::local_unset())
+            let target_identity = crab_storage::identity::endpoint_identity(&gateway.service_url)?;
+            Store::new(inner)
+                .with_bucket_identity(crab_storage::BucketIdentity::local_unset())
+                .with_target_identity(target_identity)
         }
     }
     .with_storage_scope(crab_types::storage::StorageScope {
@@ -199,7 +204,9 @@ pub fn build_store_from_credentials(bucket: &str, credentials: CloudCredentials)
     let built = build_object_store_from_credentials(bucket, credentials)?;
     let identity = crab_storage::BucketIdentity::new(built.provider, bucket, bucket);
     let multipart_identity = built.multipart_identity;
-    let mut store = Store::new(built.inner).with_bucket_identity(identity);
+    let mut store = Store::new(built.inner)
+        .with_bucket_identity(identity)
+        .with_target_identity(built.target_identity);
     if let Some(signer) = built.signer {
         store = store.with_signer(signer);
     }
@@ -262,6 +269,7 @@ pub fn build_protected_push_store(
             );
             let store = Store::new(default_read)
                 .with_bucket_identity(identity)
+                .with_target_identity(write.target_identity)
                 .with_read_routes(read_routes);
             Ok(store.with_staging_write_store(upload_prefix.to_owned(), write.inner))
         }

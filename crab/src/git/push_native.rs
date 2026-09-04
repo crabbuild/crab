@@ -23,6 +23,7 @@ use crate::git::push::{
     acquire_push_lock_leases, duplicate_destination_result, release_push_lock_leases,
     run_push_batch_with_locks,
 };
+use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::PushSpec;
 use crate::git::walk::PointerBlob;
@@ -31,6 +32,7 @@ use crate::storage::store::Store;
 use crab_staging::StagingAreaReadOnly;
 
 pub(crate) const MIRROR_GIT_ONLY_ENV: &str = "CRAB_INTERNAL_MIRROR_GIT_ONLY";
+pub(crate) const MIRROR_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
 
 /// Configuration for the native push pipeline.
 #[derive(Debug, Clone)]
@@ -74,7 +76,7 @@ pub struct NativePushConfig {
 pub struct NativePushInputs<'a> {
     pub store: Option<Store>,
     pub caching_store: Option<crab_cache_store::CachingStore>,
-    pub staging: Option<Arc<StagingAreaReadOnly>>,
+    pub staging: PushStaging,
     pub router: StoreLayout,
     pub push_state: &'a mut PushState,
     pub remote_name: &'a str,
@@ -89,7 +91,7 @@ impl<'a> NativePushInputs<'a> {
     pub fn new(
         store: Option<Store>,
         caching_store: Option<crab_cache_store::CachingStore>,
-        staging: Option<Arc<StagingAreaReadOnly>>,
+        staging: PushStaging,
         router: StoreLayout,
         push_state: &'a mut PushState,
         remote_name: &'a str,
@@ -195,11 +197,6 @@ pub async fn run_native_push(
     specs: &[PushSpec],
     inputs: NativePushInputs<'_>,
 ) -> Result<PushResult> {
-    if specs.is_empty() {
-        debug!("native push: empty spec list, nothing to do");
-        return Ok(PushResult::empty());
-    }
-
     let NativePushInputs {
         store,
         caching_store,
@@ -213,6 +210,21 @@ pub async fn run_native_push(
         mut pre_acquired_locks,
     } = inputs;
     let operation_metrics = metrics.clone();
+
+    // Inputs transfer lease ownership even if validation or an empty batch
+    // exits before discovery. Await cleanup before allowing a caller's retry.
+    release_native_locks_on_error(
+        validate_mirror_plan_context(config),
+        &mut pre_acquired_locks,
+    )
+    .await?;
+    if specs.is_empty() {
+        debug!("native push: empty spec list, nothing to do");
+        if let Some(leases) = pre_acquired_locks.take() {
+            release_push_lock_leases(leases).await;
+        }
+        return Ok(PushResult::empty());
+    }
 
     if let Some(result) = duplicate_destination_result(specs) {
         if let Some(leases) = pre_acquired_locks.take() {
@@ -275,7 +287,11 @@ pub async fn run_native_push(
         "native push: starting pipeline"
     );
 
-    let git_dirs = resolve_native_git_dirs(config.push.git_dir.as_deref())?;
+    let git_dirs = release_native_locks_on_error(
+        resolve_native_git_dirs(config.push.git_dir.as_deref()),
+        &mut pre_acquired_locks,
+    )
+    .await?;
     let mut delegated_push = config.push.clone();
     if delegated_push.git_dir.is_none() {
         delegated_push.git_dir = Some(git_dirs.per_worktree.clone());
@@ -360,7 +376,7 @@ pub async fn run_native_push(
     // content gets picked up.
     if !config.mirror_git_only && pointers.is_empty() && config.incremental {
         let staging_has_files = staging
-            .as_ref()
+            .reader()
             .and_then(|s| s.list_files().ok())
             .is_some_and(|files| !files.is_empty());
 
@@ -400,6 +416,22 @@ pub async fn run_native_push(
     if pointers.is_empty() {
         debug!("native push: no pointers discovered, nothing to upload");
     }
+
+    // Tagged v1.0.1 allows pointer-free pushes while an exclusive staging
+    // holder is busy. Pointer publication must instead return that exact lock
+    // outcome and release the remote leases already acquired for discovery.
+    let staging = match staging {
+        PushStaging::Ready(reader) => Some(reader),
+        PushStaging::Missing => None,
+        PushStaging::Locked { .. } if pointers.is_empty() => None,
+        PushStaging::Locked { holder_pid } => {
+            return release_native_locks_on_error(
+                Err(CrabError::StagingLocked { holder_pid }),
+                &mut pre_acquired_locks,
+            )
+            .await;
+        }
+    };
 
     // ── Follow-tags synthesis ──────────────────────────────────────
     //
@@ -448,7 +480,6 @@ pub async fn run_native_push(
     // reads chunk-index classifications directly from the global
     // `chunk_index_db`. The phase tag and progress event are retained
     // for compatibility with existing progress watchers.
-    check_cancelled(&cancel)?;
     let phase_start = Instant::now();
     progress.report_shard_sync(0, 0, phase_start.elapsed());
     debug!("native push: phase 2 (shard sync) skipped");
@@ -568,6 +599,38 @@ pub async fn run_native_push(
     }
 
     Ok(result)
+}
+
+fn validate_mirror_plan_context(config: &NativePushConfig) -> Result<()> {
+    if let Some(plan_id) = config.push.mirror_plan_id.as_deref() {
+        if !config.mirror_git_only {
+            return Err(CrabError::Protocol(
+                "mirror plan identity is only valid for mirror reconciliation".to_owned(),
+            ));
+        }
+        if config.push.active_active_replication.is_some()
+            || config
+                .push
+                .protected_push
+                .as_ref()
+                .and_then(|session| session.active_active_writer.as_ref())
+                .is_some()
+        {
+            return Err(CrabError::Protocol(
+                "mirror plan receipts are not supported by active-active finalize".to_owned(),
+            ));
+        }
+        if plan_id.len() != 64
+            || !plan_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(CrabError::Protocol(
+                "mirror plan identity must be 64 lowercase hexadecimal characters".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[expect(
@@ -704,7 +767,7 @@ fn collect_followtag_specs(
         return Ok(Vec::new());
     }
 
-    let peeled_tips = crab_git::tag::peeled_tag_refs_at(&git_dirs.common, &direct_tips)?;
+    let peeled_tips = crab_git::tag::peeled_revision_targets_at(&git_dirs.common, &direct_tips)?;
     let mut reachable_commits = std::collections::HashSet::new();
     let mut walked_tips = std::collections::HashSet::new();
     for (ref_name, direct_sha) in &direct_tips {
@@ -809,11 +872,12 @@ fn phase_discover(
     let sha_map = resolve_refs(&src_refs, git_dirs)?;
     let src_tag_targets: BTreeMap<String, String> = sha_map
         .iter()
-        .filter(|(name, _)| name.starts_with("refs/tags/"))
         .map(|(name, sha)| (name.clone(), sha.clone()))
         .collect();
-    let peeled_src_tags = crab_git::tag::peeled_tag_refs_at(&git_dirs.common, &src_tag_targets)
-        .map_err(|error| CrabError::Internal(error.to_string()))?;
+    // Source keys can be frozen OIDs, not only refs/tags names. Preserve the
+    // tag object for publication while walking its captured commit target.
+    let peeled_src_tags =
+        crab_git::tag::peeled_revision_targets_at(&git_dirs.common, &src_tag_targets)?;
 
     // Open the local ODB once so we can probe old_sha validity for each
     // spec. When the probe fails, fall back to a full walk — rewritten
@@ -1126,6 +1190,32 @@ fn update_push_state_on_success(
 mod tests {
     use super::*;
 
+    #[test]
+    fn mirror_plan_context_accepts_a_valid_direct_plan() {
+        let mut config = NativePushConfig::new(PushConfig::default());
+        config.mirror_git_only = true;
+        config.push.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(validate_mirror_plan_context(&config).is_ok());
+    }
+
+    #[test]
+    fn mirror_plan_context_rejects_identity_outside_mirror_mode() {
+        let mut non_mirror = NativePushConfig::new(PushConfig::default());
+        non_mirror.push.mirror_plan_id = Some("a".repeat(64));
+
+        assert!(validate_mirror_plan_context(&non_mirror).is_err());
+    }
+
+    #[test]
+    fn mirror_plan_context_rejects_noncanonical_identity() {
+        let mut uppercase = NativePushConfig::new(PushConfig::default());
+        uppercase.mirror_git_only = true;
+        uppercase.push.mirror_plan_id = Some("A".repeat(64));
+
+        assert!(validate_mirror_plan_context(&uppercase).is_err());
+    }
+
     #[derive(Debug)]
     struct ManifestReadFailingStore {
         inner: object_store::memory::InMemory,
@@ -1284,6 +1374,35 @@ mod tests {
     }
 
     #[test]
+    fn frozen_tag_oid_discovers_its_commit_after_local_tag_is_deleted() {
+        let fixture = TinyGitFixture::new();
+        fixture.commit_text("a.txt", "one");
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "-a", "v1", "-m", "tagged"]);
+        let tag_oid =
+            TinyGitFixture::git_output(&fixture.work_tree, &["rev-parse", "refs/tags/v1"]);
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "-d", "v1"]);
+        let git_dirs = NativeGitDirs {
+            per_worktree: fixture.git_dir.clone(),
+            common: fixture.git_dir.clone(),
+        };
+        let spec = PushSpec {
+            force: false,
+            src: tag_oid.clone(),
+            dst: "refs/tags/published".to_owned(),
+        };
+        let (_, entries, resolved) = phase_discover(
+            &[spec],
+            &PushState::default(),
+            "crab://bucket/repo",
+            None,
+            false,
+            &git_dirs,
+        )
+        .unwrap();
+        assert_eq!((entries.len(), resolved.get(&tag_oid)), (1, Some(&tag_oid)));
+    }
+
+    #[test]
     fn native_push_config_defaults() {
         let base = PushConfig::default();
         let config = NativePushConfig::new(base);
@@ -1382,7 +1501,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1447,7 +1566,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1491,7 +1610,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router.clone(),
                 &mut push_state,
                 "origin",
@@ -1512,6 +1631,60 @@ mod tests {
                 .is_empty(),
             "cancelled follow-tags push must not publish remote state"
         );
+    }
+
+    #[tokio::test]
+    async fn early_native_return_releases_pre_acquired_locks_before_returning() {
+        for case in ["invalid-plan", "non-mirror-plan", "empty-batch"] {
+            let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+            let router = StoreLayout::new(store.clone(), case.to_owned());
+            let mut config = NativePushConfig::new(PushConfig::default());
+            config.mirror_git_only = case != "non-mirror-plan";
+            config.push.mirror_plan_id = match case {
+                "invalid-plan" => Some("invalid".to_owned()),
+                "non-mirror-plan" => Some("a".repeat(64)),
+                _ => None,
+            };
+            let specs = vec![main_push_spec()];
+            let cancel = CancellationToken::new();
+            let leases = acquire_push_lock_leases(&store, case, &specs, &config.push, &cancel)
+                .await
+                .unwrap();
+            let mut state = PushState::default();
+            let requested_specs = if case == "empty-batch" {
+                &[][..]
+            } else {
+                &specs
+            };
+            let result = run_native_push(
+                &config,
+                requested_specs,
+                NativePushInputs::new(
+                    Some(store.clone()),
+                    None,
+                    PushStaging::Missing,
+                    router,
+                    &mut state,
+                    "origin",
+                    "crab://bucket/early-return",
+                    None,
+                    cancel,
+                )
+                .with_pre_acquired_locks(Some(leases)),
+            )
+            .await;
+            assert_eq!(result.is_ok(), case == "empty-batch", "{case}");
+            assert!(
+                !crab_coordination::PushLock::ref_lease_is_claimed(
+                    store.inner(),
+                    case,
+                    "refs/heads/main",
+                )
+                .await
+                .unwrap(),
+                "{case}: cleanup must complete before returning to the caller"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1543,7 +1716,7 @@ mod tests {
             NativePushInputs::new(
                 Some(store.clone()),
                 None,
-                None,
+                PushStaging::Missing,
                 router,
                 &mut push_state,
                 "origin",
@@ -1590,6 +1763,209 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn staging_contention_rejects_pointer_push_and_releases_remote_locks() {
+        let fixture = TinyGitFixture::new();
+        let pointer = crab_types::pointer::Pointer {
+            file_hash: [9; 32],
+            size: 1024,
+            shard_hint: None,
+        };
+        fixture.commit_text(
+            "large.bin",
+            &String::from_utf8(pointer.serialize()).unwrap(),
+        );
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let prefix = "staging-contention";
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            ..PushConfig::default()
+        });
+        config.progress = false;
+        let specs = vec![main_push_spec()];
+        let mut state = PushState::default();
+
+        let error = run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Locked {
+                    holder_pid: Some(4321),
+                },
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/staging-contention",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect_err("pointer push must retain contention");
+
+        assert!(matches!(
+            error,
+            CrabError::StagingLocked {
+                holder_pid: Some(4321)
+            }
+        ));
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .unwrap();
+        assert!(
+            snapshot.journal.refs.is_empty(),
+            "contention must not publish a ref"
+        );
+        let reacquired = acquire_push_lock_leases(
+            &store,
+            prefix,
+            &specs,
+            &config.push,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("staging rejection must release every remote lease");
+        release_push_lock_leases(reacquired).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initial_mirror_push_records_the_exact_multi_ref_transaction() {
+        let fixture = TinyGitFixture::new();
+        let tip = fixture.commit_text("readme.txt", "initial mirror content");
+        TinyGitFixture::run_git(&fixture.work_tree, &["tag", "v1"]);
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "initial-mirror-plan".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let plan_id = "a".repeat(64);
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            mirror_plan_id: Some(plan_id.clone()),
+            atomic: true,
+            ..PushConfig::default()
+        });
+        config.push.metadb.chunk_index.local_path =
+            Some(fixture.work_tree.join("metadb/chunks.sqlite"));
+        config.mirror_git_only = true;
+        config.progress = false;
+        config.emit_summary = false;
+        let specs = vec![
+            main_push_spec(),
+            PushSpec {
+                force: false,
+                src: "refs/tags/v1".to_owned(),
+                dst: "refs/tags/v1".to_owned(),
+            },
+        ];
+        let mut state = PushState::default();
+        let result = run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Missing,
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/initial-mirror-plan",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("initial mirror push");
+        assert!(result.all_ok());
+        let receipt =
+            crate::metadata::manifest::resolve_mirror_plan_receipt(&store, &router, &plan_id)
+                .await
+                .unwrap()
+                .expect("successful mirror push must have a terminal receipt");
+        let crab_metadata::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id, .. } =
+            receipt.commit
+        else {
+            panic!("direct mirror push must use journal authority");
+        };
+        let transaction = crate::metadata::manifest::read_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction_id,
+        )
+        .await
+        .unwrap();
+        let expected = BTreeMap::from([
+            ("refs/heads/main".to_owned(), (None, Some(tip.clone()))),
+            ("refs/tags/v1".to_owned(), (None, Some(tip))),
+        ]);
+        let edits = transaction
+            .edits
+            .into_iter()
+            .map(|edit| (edit.ref_name, (edit.old_oid, edit.new_oid)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(edits, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pointer_free_push_ignores_staging_contention() {
+        let fixture = TinyGitFixture::new();
+        let tip = fixture.commit_text("readme.txt", "ordinary Git content");
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "staging-busy-plain-git".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .unwrap();
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            ..PushConfig::default()
+        });
+        config.push.metadb.chunk_index.local_path =
+            Some(fixture.work_tree.join("metadb/chunks.sqlite"));
+        config.progress = false;
+        config.emit_summary = false;
+        let mut state = PushState::default();
+        let result = run_native_push(
+            &config,
+            &[main_push_spec()],
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Locked { holder_pid: None },
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/staging-busy-plain-git",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("pointer-free push");
+        assert!(
+            result.all_ok(),
+            "pointer-free push must preserve tagged contention behavior"
+        );
+        let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.journal.refs.get("refs/heads/main"), Some(&tip));
+    }
+
     #[test]
     fn lock_rejection_retains_failure_stage() {
         let result = push_lock_rejection_result(
@@ -1625,7 +2001,7 @@ mod tests {
             NativePushInputs {
                 store: None,
                 caching_store: None,
-                staging: None,
+                staging: PushStaging::Missing,
                 router,
                 push_state: &mut push_state,
                 remote_name: "origin",

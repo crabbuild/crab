@@ -1545,6 +1545,9 @@ mod tests {
     async fn pruning_old_root_makes_its_unique_pack_collectible() {
         let store = memory_store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .unwrap();
         let old_pack_id = "c".repeat(64);
         let (old_pack_hash, _, pack_write) = compact_pack_index(
             1,

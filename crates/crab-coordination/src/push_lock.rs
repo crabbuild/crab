@@ -466,6 +466,20 @@ impl PushLock {
         Ok(())
     }
 
+    /// Renews a non-released claim only while its stored holder matches.
+    ///
+    /// Background owners without the current CAS token use the same bounded
+    /// renewal policy as [`Self::renew`]. A released or replaced claim fails.
+    pub async fn renew_if_holder(
+        store: &Arc<dyn ObjectStore>,
+        path: &str,
+        holder: &str,
+        ttl: Duration,
+    ) -> Result<()> {
+        renew_one(store, path, holder, ttl, None).await?;
+        Ok(())
+    }
+
     /// Marks every expired lease beneath `prefix` released.
     pub async fn reclaim_expired(store: &Arc<dyn ObjectStore>, prefix: &str) -> Result<u64> {
         let locks_prefix = Path::from(push_locks_prefix(prefix)?);
@@ -722,6 +736,15 @@ async fn renew_one_after_cas_conflict(
             ref_name: path.to_owned(),
             holder: payload.holder,
             expires_at_unix: Some(payload.expires_at),
+        });
+    }
+    // A tombstone keeps the previous holder for diagnostics, not authority.
+    // Successor handoff or repair may revoke a claim while its heartbeat is
+    // still running; refreshing that payload would resurrect the old owner.
+    if payload.is_released() {
+        return Err(CoordinationError::CasConflict {
+            path: path.to_owned(),
+            expected_etag: etag.e_tag,
         });
     }
     let body = serialize_payload(
@@ -1472,6 +1495,35 @@ mod tests {
         assert!(metered.fail_next_get.swap(false, Ordering::AcqRel));
         lock.release().await.unwrap();
         assert!(requests.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[tokio::test]
+    async fn renewal_cannot_resurrect_an_explicitly_released_claim() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let prefix = "org/repo";
+        let mut lock =
+            PushLock::acquire_ref(&store, prefix, "refs/heads/main", Duration::from_secs(60))
+                .await
+                .unwrap();
+        PushLock::release_ref_if_holder(&store, prefix, "refs/heads/main", lock.holder())
+            .await
+            .unwrap();
+        let path = Path::from(lock.path());
+        let before = get_with_version(&store, &path).await.unwrap();
+        let cached_result = lock.renew().await;
+        let uncached_result =
+            PushLock::renew_if_holder(&store, lock.path(), lock.holder(), lock.ttl()).await;
+        let after = get_with_version(&store, &path).await.unwrap();
+        lock.release().await.unwrap();
+
+        assert!(
+            cached_result.is_err() && uncached_result.is_err(),
+            "release revokes the old holder's renewal authority"
+        );
+        assert_eq!(
+            after, before,
+            "a rejected renewal must not rewrite the tombstone"
+        );
     }
 
     #[tokio::test]

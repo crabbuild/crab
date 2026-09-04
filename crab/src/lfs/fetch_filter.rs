@@ -25,14 +25,13 @@ impl FetchPathFilter {
     ///
     /// Returns `None` when neither include nor exclude filtering is configured.
     pub fn from_patterns(include: Option<&str>, exclude: Option<&str>) -> Result<Option<Self>> {
+        let include = compile_fetch_filter(include)?;
+        let exclude = compile_fetch_filter(exclude)?;
         if include.is_none() && exclude.is_none() {
             return Ok(None);
         }
 
-        Ok(Some(Self {
-            include: include.map(compile_fetch_filter).transpose()?,
-            exclude: exclude.map(compile_fetch_filter).transpose()?,
-        }))
+        Ok(Some(Self { include, exclude }))
     }
 
     /// Returns whether a path should be smudged/fetched.
@@ -65,9 +64,17 @@ pub fn path_allowed_by_fetch_filters(
         .is_none_or(|filter| filter.allows(path)))
 }
 
-fn compile_fetch_filter(patterns: &str) -> Result<PatternFilter> {
+pub(crate) fn compile_fetch_filter(patterns: Option<&str>) -> Result<Option<PatternFilter>> {
+    let Some(patterns) = patterns else {
+        return Ok(None);
+    };
     let normalized = normalize_fetch_filter_patterns(patterns);
-    PatternFilter::new(&normalized)
+    // Git LFS uses an empty value to clear a restriction. An empty generic
+    // path matcher selects nothing, which would suppress every download.
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    PatternFilter::new(&normalized).map(Some)
 }
 
 fn normalize_fetch_filter_patterns(patterns: &str) -> String {
@@ -106,6 +113,25 @@ fn has_glob_metachar(pattern: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_patterns_clear_only_the_selected_restriction() {
+        assert!(
+            FetchPathFilter::from_patterns(Some(""), Some(""))
+                .unwrap()
+                .is_none()
+        );
+        let filter = FetchPathFilter::from_patterns(Some(""), Some("private"))
+            .unwrap()
+            .unwrap();
+        assert!(filter.allows("public/asset.bin"));
+        assert!(!filter.allows("private/asset.bin"));
+        let filter = FetchPathFilter::from_patterns(Some("public"), Some(""))
+            .unwrap()
+            .unwrap();
+        assert!(filter.allows("public/asset.bin"));
+        assert!(!filter.allows("private/asset.bin"));
+    }
 
     #[test]
     fn fetch_filters_allow_matching_include() {

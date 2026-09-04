@@ -19,6 +19,31 @@ Hydration is selective: you can hydrate specific files by glob pattern, or use
 `--all` to hydrate everything. Files already replaced with full content are not
 selected again.
 
+Explicit hydration, post-clone eager/selective hydration, clone's `always`
+prefetch profile, post-pull hydration and init's configured auto-patterns use
+the same cloud-reader composition. Clone profiles resolve configuration and
+files from the cloned repository, not the parent directory. Restore defaults
+come from that repository's resolved configuration; explicit hydrate flags
+override them. A configured remote error is returned rather than switching to
+local staging. Local unpublished staging remains available when no remote is
+configured. Automatic clone profile failures remain warnings; retry with
+`crab hydrate --profile always` after addressing the reported cause.
+
+`crab pull` completes Git integration before selecting post-pull hydration.
+It resolves the worktree root even when invoked from a subdirectory, compares
+checked pre/post-pull commits, and stops on Git or path-inventory failure.
+Conflicts come from the unmerged index, not progress-message text. Cancelling
+the Git phase stops its owned process tree before normal cancellation returns;
+Git may already have changed HEAD, so inspect `git status` before retrying.
+`--no-hydrate` skips Crab's later hydration phase; it does not disable Git
+smudge filters during checkout. Selected Git filenames and parsed pointers go
+directly to the shared hydration pipeline, without interpreting filenames as
+patterns. An unchanged sibling matching a changed filename's glob syntax is
+not selected. Post-pull hydration retains the `hydrate` / `hydrate.event`
+reporting used by the released CLI. Whole-command progress/result composition,
+missing-pointer admission and descriptor-race qualification remain open in
+Plan 017.
+
 ## Arguments
 
 | Argument | Required | Description |

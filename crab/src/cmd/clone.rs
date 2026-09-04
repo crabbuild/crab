@@ -214,8 +214,14 @@ pub async fn run_clone_in(
 
     // Step 5: Populate the working tree after crab config is ready.
     let phase = PhaseTimer::start("clone", "checkout");
-    checkout_head(&target_dir, &args.url)?;
+    checkout_head(&target_dir, &args.url, args.mode)?;
     emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
+
+    // Historical revisions may predate project configuration. Persist the
+    // explicit clone location for subsequent reads only after checkout, so
+    // an existing project file remains authoritative and is never clobbered.
+    check_cancelled(cancel)?;
+    ensure_project_remote(&target_dir, &args.url)?;
 
     // Step 3b: Auto-track extensions for any pointer blobs that landed
     // in the working tree. Cloned repositories sometimes ship a stale
@@ -457,23 +463,7 @@ async fn run_post_checkout_hydrate(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let config = crate::core::config::Config::resolve_for_repo(target_dir)?;
-    let remote = config
-        .remote_url
-        .as_deref()
-        .ok_or_else(|| CrabError::Configuration {
-            key: "remote.url".to_owned(),
-            origin: "crab.toml does not declare [remote].url".to_owned(),
-        })?;
-    let parsed = crate::git::url::CrabUrl::parse(remote)?;
-    let selection =
-        crate::replication::select_read_store(&config, parsed, "hydrate", cancel).await?;
-    let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-    let hydrator = crate::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        selection.router,
-        &config,
-    )?;
-    crate::cmd::hydrate::run_hydrate_in(target_dir, args, &config, &hydrator, cancel).await
+    crate::cmd::hydrate::hydrate_worktree(target_dir, args, &config, cancel).await
 }
 
 async fn run_post_clone_shard_sync_with_selector<F, Fut>(
@@ -693,19 +683,31 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
 }
 
 /// Populate the worktree from HEAD after crab config is ready.
-fn checkout_head(target: &Path, remote_url: &str) -> Result<()> {
+fn checkout_head(target: &Path, remote_url: &str, mode: OutputMode) -> Result<()> {
     scrub_git_pack_appledouble_files(target)?;
 
+    // Git's branch-status chatter is not part of a clone JSON envelope.
+    // Keep stderr diagnostics and the existing human-readable checkout output.
+    let stdout = if mode.is_machine() {
+        std::process::Stdio::null()
+    } else {
+        std::process::Stdio::inherit()
+    };
     let checkout_status = Command::new("git")
         .args(["checkout", "HEAD"])
         .env(crate::core::config::CLONE_REMOTE_URL_ENV, remote_url)
         .current_dir(target)
-        .stdout(std::process::Stdio::inherit())
+        .stdout(stdout)
         .stderr(std::process::Stdio::inherit())
         .status()?;
 
     if !checkout_status.success() {
-        tracing::warn!("git checkout after clone returned non-zero, continuing");
+        // A fetched object database is not a completed clone when a required
+        // filter leaves checkout incomplete. Stop before hydration or success.
+        return Err(CrabError::Protocol(format!(
+            "git checkout exited with status {}",
+            checkout_status.code().unwrap_or(-1),
+        )));
     }
 
     Ok(())
@@ -800,19 +802,11 @@ fn scrub_git_pack_appledouble_files(target: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Load committed `crab.toml` before checkout when possible.
 fn project_config_for_checkout(
     target: &Path,
 ) -> Result<Option<crate::core::project_config::ProjectConfig>> {
-    match project_config_from_head(target)? {
-        Some(config) => Ok(Some(config)),
-        None => crate::core::project_config::ProjectConfig::load_for_repo(target),
-    }
-}
-
-fn project_config_from_head(
-    target: &Path,
-) -> Result<Option<crate::core::project_config::ProjectConfig>> {
+    // Only the cloned revision owns pre-checkout policy. Walking ancestors
+    // when HEAD lacks this file can select an unrelated enclosing project.
     let output = Command::new("git")
         .args(["show", "HEAD:crab.toml"])
         .current_dir(target)
@@ -850,6 +844,39 @@ fn configure_lazy_checkout(target: &Path) -> Result<()> {
     crate::cmd::config::run_config_set_at("checkout.lazy", "true", &config_path)
 }
 
+fn ensure_project_remote(target: &Path, url: &str) -> Result<()> {
+    use crate::core::project_config::{CONFIG_FILE_NAME, ProjectConfig, RemoteConfig};
+
+    let path = target.join(CONFIG_FILE_NAME);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => return ProjectConfig::load(&path).map(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let config = ProjectConfig {
+        version: 1,
+        remote: RemoteConfig {
+            url: url.to_owned(),
+        },
+        track: None,
+        hydrate: None,
+        mirror: None,
+        replication: None,
+        auth: None,
+        prefetch: None,
+        workflow: None,
+    };
+    let temporary = tempfile::NamedTempFile::new_in(target)?;
+    ProjectConfig::write(temporary.path(), &config)?;
+    temporary.as_file().sync_all()?;
+    // A concurrently created project file must win without being overwritten.
+    // Leave Git's index untouched; adopting this project policy is explicit.
+    temporary
+        .persist_noclobber(&path)
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
 /// Auto-hydrate the `always` prefetch profile after a clone.
 ///
 /// Loads the `prefetch.profiles.always` entry from `crab.toml`. If the `always`
@@ -865,7 +892,13 @@ async fn auto_hydrate_always_profile(
     mode: OutputMode,
     cancel: &CancellationToken,
 ) {
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+    let config = match crate::core::config::Config::resolve_for_repo(repo_root) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load clone configuration, skipping auto-hydrate");
+            return;
+        }
+    };
 
     if !config.hydrate.auto_prefetch {
         tracing::debug!("auto_prefetch disabled, skipping always-profile hydration");
@@ -920,7 +953,9 @@ async fn auto_hydrate_always_profile(
         recover_from: None,
     };
 
-    if let Err(e) = crate::cmd::hydrate::run_hydrate(&hydrate_args, &config, cancel).await {
+    if let Err(e) =
+        crate::cmd::hydrate::hydrate_worktree(repo_root, &hydrate_args, &config, cancel).await
+    {
         tracing::warn!(
             error = %e,
             "auto-hydrate of always profile failed; clone succeeded, run \
@@ -1358,6 +1393,32 @@ mod tests {
     }
 
     #[test]
+    fn checkout_failure_is_not_a_successful_clone() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_in(root, &["init"]);
+        git_in(root, &["config", "user.email", "test@example.invalid"]);
+        git_in(root, &["config", "user.name", "Test User"]);
+        std::fs::write(root.join("asset.bin"), "committed content\n").unwrap();
+        git_in(root, &["add", "asset.bin"]);
+        git_in(root, &["commit", "-m", "checkout fixture"]);
+        git_in(root, &["clone", "--no-checkout", ".", "checkout"]);
+        let clone = root.join("checkout");
+        std::fs::write(
+            clone.join(".git/info/attributes"),
+            "asset.bin filter=refuse\n",
+        )
+        .unwrap();
+        git_in(&clone, &["config", "filter.refuse.smudge", "false"]);
+        git_in(&clone, &["config", "filter.refuse.required", "true"]);
+
+        let result = checkout_head(&clone, "crab://bucket/repo", OutputMode::Json);
+
+        assert!(matches!(result, Err(CrabError::Protocol(_))));
+    }
+
+    #[test]
     fn clone_configures_crab_lfs_filter_before_checkout() {
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         for (skip_smudge, expected_suffix) in [
@@ -1547,6 +1608,99 @@ mod tests {
         assert!(!config.contains("credential"));
     }
 
+    #[test]
+    fn clone_project_remote_is_persisted_without_staging() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git_in(root, &["init"]);
+        std::fs::write(root.join("README.md"), "original\n").unwrap();
+        git_in(root, &["add", "README.md"]);
+        let before = std::fs::read(root.join(".git/index")).unwrap();
+
+        ensure_project_remote(root, "crab://bucket/history").unwrap();
+
+        let config = crate::core::config::Config::resolve_for_repo(root).unwrap();
+        assert_eq!(config.remote_url.as_deref(), Some("crab://bucket/history"));
+        assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), before);
+        assert!(!root.join(".crab/local.toml").exists());
+    }
+
+    #[test]
+    fn clone_project_remote_preserves_existing_policy_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let original = "# Team policy\nversion = 1\n[remote]\nurl = \"crab://primary/team\"\n[hydrate]\ndefault = \"eager\"\n";
+        let path = root.join("crab.toml");
+        std::fs::write(&path, original).unwrap();
+
+        ensure_project_remote(root, "crab://clone-location/other").unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn clone_project_remote_rejects_invalid_files_without_replacing_them() {
+        for content in [
+            "[",
+            "version = 99\n[remote]\nurl = \"crab://bucket/repo\"\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("crab.toml");
+            std::fs::write(&path, content).unwrap();
+
+            assert!(ensure_project_remote(dir.path(), "crab://bucket/history").is_err());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn clone_project_remote_does_not_inherit_an_enclosing_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://parent/unrelated\"\n",
+        )
+        .unwrap();
+        let target = dir.path().join("clone");
+        std::fs::create_dir(&target).unwrap();
+
+        ensure_project_remote(&target, "crab://bucket/history").unwrap();
+
+        let config =
+            crate::core::project_config::ProjectConfig::load(&target.join("crab.toml")).unwrap();
+        assert_eq!(config.remote.url, "crab://bucket/history");
+    }
+
+    #[test]
+    fn clone_project_remote_ignores_parent_policy_before_checkout() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crab.toml"),
+            "[remote]\nurl = \"crab://parent/unrelated\"\n[hydrate]\ndefault = \"eager\"\n",
+        )
+        .unwrap();
+        let target = dir.path().join("clone");
+        std::fs::create_dir(&target).unwrap();
+        git_in(&target, &["init"]);
+
+        assert!(project_config_for_checkout(&target).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clone_project_remote_rejects_a_dangling_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crab.toml");
+        let absent = dir.path().join("absent.toml");
+        std::os::unix::fs::symlink(&absent, &path).unwrap();
+
+        assert!(ensure_project_remote(dir.path(), "crab://bucket/history").is_err());
+        assert_eq!(std::fs::read_link(path).unwrap(), absent);
+        assert!(!absent.exists());
+    }
+
     #[tokio::test]
     async fn clone_shard_sync_uses_selected_replica_store() {
         let cache_tmp = tempfile::tempdir().unwrap();
@@ -1606,6 +1760,9 @@ mod tests {
         generation: u64,
         shard_bytes: &'static [u8],
     ) -> String {
+        crate::core::remote_layout::initialize(store, router)
+            .await
+            .unwrap();
         let shard_hash = crab_xet::hash::compute_data_hash(shard_bytes);
         store
             .put(

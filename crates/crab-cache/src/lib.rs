@@ -7,6 +7,8 @@ pub mod cache_client;
 pub mod error;
 pub mod key;
 #[cfg(feature = "local-cache")]
+pub mod lifecycle;
+#[cfg(feature = "local-cache")]
 pub mod local_cache;
 pub mod path_class;
 pub mod root;

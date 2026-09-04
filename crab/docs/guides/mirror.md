@@ -15,6 +15,16 @@ repository into a `crab://` remote. It preserves commit SHAs and refs exactly by
 using Git's mirror clone, fetch, and push behavior. It does not rewrite history
 or convert repository contents into Crab-native tracked files.
 
+Full mirroring initializes a genuinely empty destination prefix before reading
+its refs, preserving the source's symbolic HEAD as its initial default branch.
+Existing repositories still require a valid layout and manifest;
+mirroring does not repair missing or invalid metadata in place. Integrity
+inspection (`--check`) remains read-only and requires an initialized destination.
+
+All source refs are preserved, including `refs/remotes/crab/*`. The destination
+remote does not write tracking refs into the source cache after a push, so those
+names cannot be overwritten or mistaken for destination-only data during planning.
+
 On later runs, the same command syncs the existing mirror. Crab updates the
 bare cache from `SOURCE`, compares the cache refs with `DESTINATION`, and skips
 the Git push when the refs already match. In that no-op case Crab also skips the

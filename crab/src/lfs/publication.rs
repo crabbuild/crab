@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::lfs::config::LfsConfig;
 use crate::lfs::coordinator::{
     TransferCoordinator, TransferDirection, TransferOutcome, TransferRequest,
@@ -13,6 +13,7 @@ use crate::lfs::lock::LockManager;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use crab_lfs::{LfsError, LfsObjectStore};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Publishes and verifies each LFS dependency introduced after `remote_tips`.
 ///
@@ -25,7 +26,9 @@ pub(crate) async fn publish_reachable(
     git_dir: PathBuf,
     tips: Vec<String>,
     remote_tips: Vec<String>,
+    cancel: &CancellationToken,
 ) -> Result<()> {
+    check_cancelled(cancel)?;
     if tips.is_empty() {
         return Ok(());
     }
@@ -33,21 +36,24 @@ pub(crate) async fn publish_reachable(
     let scan_dir = git_dir.clone();
     let scan_tips = tips.clone();
     let scan_remote_tips = remote_tips.clone();
+    let scan_cancel = cancel.clone();
     // A partial clone can advertise remote refs whose tips are absent from
     // this local ODB. Such tips cannot be passed as `^<tip>` boundaries to
     // `git rev-list`; Git rejects the whole scan with "bad object". Only
     // locally resolvable remote tips are valid exclusion boundaries here.
     let (scan_remote_tips, entries) = tokio::task::spawn_blocking(move || {
         let scan_remote_tips = locally_available_remote_tips(&scan_dir, &scan_remote_tips);
-        let entries = crate::cmd::lfs::push::collect_pointers_from_range_in(
+        let entries = crate::lfs::discovery::collect_pointers_from_range_in(
             &scan_dir,
             &scan_tips,
             &scan_remote_tips,
+            &scan_cancel,
         )?;
         Ok::<_, CrabError>((scan_remote_tips, entries))
     })
     .await
-    .map_err(|error| CrabError::Internal(format!("LFS dependency scan failed: {error}")))??;
+    .map_err(|error| CrabError::Io(std::io::Error::other(error)))??;
+    check_cancelled(cancel)?;
     if scan_remote_tips.len() != remote_tips.len() {
         tracing::debug!(
             remote_tips = remote_tips.len(),
@@ -64,6 +70,7 @@ pub(crate) async fn publish_reachable(
 
     let mut pointers = HashMap::<[u8; 32], LfsPointer>::new();
     for (_path, pointer) in entries {
+        check_cancelled(cancel)?;
         match pointers.get(&pointer.oid) {
             Some(existing) if existing.size != pointer.size => {
                 return Err(CrabError::LfsObjectCorrupt {
@@ -89,7 +96,7 @@ pub(crate) async fn publish_reachable(
     let missing = Arc::new(Mutex::new(Vec::<TransferRequest>::new()));
     let missing_for_operation = Arc::clone(&missing);
     let remote_for_operation = Arc::clone(&remote);
-    TransferCoordinator::new((&config).into())
+    TransferCoordinator::new((&config).into(), cancel)
         .execute(
             TransferDirection::Upload,
             requests,
@@ -124,7 +131,7 @@ pub(crate) async fn publish_reachable(
     // this phase, matching porcelain and custom-agent transfers.
     let remote_for_operation = Arc::clone(&remote);
     let pointers_for_operation = Arc::clone(&pointers);
-    TransferCoordinator::new((&config).into())
+    TransferCoordinator::new((&config).into(), cancel)
         .execute(
             TransferDirection::Upload,
             missing,
@@ -145,6 +152,7 @@ pub(crate) async fn publish_reachable(
                             CrabError::Io(error)
                         }
                     })?;
+                    check_cancelled(&cancel)?;
                     if metadata.len() != request.size {
                         return Err(CrabError::LfsObjectCorrupt {
                             oid: hex_encode(&request.oid),
@@ -162,6 +170,7 @@ pub(crate) async fn publish_reachable(
                         .put_stream_with_size(&request.oid, Some(request.size), &local_path)
                         .await
                         .map_err(CrabError::from)?;
+                    check_cancelled(&cancel)?;
                     remote
                         .verify_size(&request.oid, request.size)
                         .await
@@ -332,6 +341,7 @@ mod tests {
             git_dir,
             vec![head],
             Vec::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -340,6 +350,40 @@ mod tests {
         assert_eq!(
             remote.verify(&pointer.oid).await.unwrap(),
             Bytes::from(content)
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_foreign_lfs_lock_before_upload() {
+        let (repo, pointer, content, head) = fixture();
+        let lfs_dir = LfsConfig::resolve_storage_dir(repo.path()).unwrap();
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content).unwrap();
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let owner = format!(
+            "{}-other",
+            crate::cmd::lfs::store_setup::git_user_identity().unwrap_or_default()
+        );
+        LockManager::lfs(crate::storage::Store::from_storage(store.clone()), "repo")
+            .lock_with_expiry("asset.bin", &owner, None)
+            .await
+            .unwrap();
+
+        let result = publish_reachable(
+            store.clone(),
+            "repo".to_owned(),
+            repo.path().join(".git"),
+            vec![head],
+            Vec::new(),
+            &CancellationToken::new(),
+        )
+        .await;
+        let uploaded = LfsObjectStore::new(store, "repo")
+            .exists(&pointer.oid)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(CrabError::LfsLockConflict { path, .. }) if path == "asset.bin")
+                && !uploaded
         );
     }
 
@@ -354,6 +398,7 @@ mod tests {
             repo.path().join(".git"),
             vec![head],
             Vec::new(),
+            &CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -377,6 +422,7 @@ mod tests {
             repo.path().join(".git"),
             vec![head],
             vec!["f".repeat(40)],
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -414,7 +460,7 @@ mod tests {
         assert!(
             Command::new("git")
                 .args(["clone", "--quiet", "--filter=blob:none", "--no-checkout",])
-                .arg(format!("file://{}", remote.display()))
+                .arg(url::Url::from_file_path(&remote).unwrap().as_str())
                 .arg(&client)
                 .status()
                 .unwrap()
@@ -431,6 +477,7 @@ mod tests {
         }
         let missing_before = git(&client)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "")
             .args(["cat-file", "-e", &pointer_blob])
             .status()
             .unwrap();
@@ -478,12 +525,14 @@ mod tests {
             client.join(".git"),
             vec![local_tip],
             vec![remote_tip],
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
 
         let missing_after = git(&client)
             .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "")
             .args(["cat-file", "-e", &pointer_blob])
             .status()
             .unwrap();

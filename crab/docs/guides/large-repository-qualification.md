@@ -105,6 +105,52 @@ first-parent commits and use `--replay-count 3 --sample-size 3`. Smoke reports
 require the verifier's explicit `--allow-smoke` option and cannot satisfy the
 full qualification gate.
 
+## Managed-file daily workflow on a real history
+
+The replay workload above does not substitute for staging and reconstructing
+managed files. The existing add/commit/push harness has a separate `--source`
+profile. It creates two disposable clones at the input's captured HEAD and
+tests both `crab add` / `crab push` and `git add` / `git push`. Commit creation
+uses `git commit`; there is no `crab commit` subcommand.
+
+```bash
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab AWS_SESSION_TOKEN= \
+python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
+  --source "$HOME/Workspace/Github/kubernetes/kubernetes" \
+  --root "$HOME/Workspace/Github/crab-qualification" \
+  --run-id kubernetes-managed-files-a \
+  --bucket crabbuild --endpoint-url http://127.0.0.1:9000 \
+  --crab-bin "$HOME/Workspace/crabbuild-target/crab-large-repo-qualification/release/crab" \
+  --size-mib 65 --timeout 1800 --push-timeout 3600
+```
+
+Each case publishes two identical payloads, checks pointer staging and
+deduplication, clones through `crab clone` with a separate initially empty
+cache, and checks the advertised ref and clone tip. Hydrate must reproduce
+both SHA-256 digests. Dehydrate must restore a pointer, and rehydrate must
+remain byte-identical. Git connectivity is also checked. This profile skips
+the synthetic Git error matrix; run the default profile separately for that
+matrix. It does not produce a comparable performance report or replace the
+full replay/version/provider release gates.
+
+The source checkout is never updated or cleaned, and its HEAD/status are
+checked again even when the workflow fails. The writer clones borrow source
+Git objects through `--shared`, so do not prune or mutate the source during a
+run. The remote clone does not borrow those objects. See the
+[Git shared-clone contract](https://git-scm.com/docs/git-clone#Documentation/git-clone.txt---shared).
+Use a unique run directory beneath the mounted workspace; overlapping source
+and output directories, existing runs, and fixture-path collisions are
+rejected. Keep the selected executable unchanged for the entire run; its
+digest is checked again before success. Logs, reports, worktrees, and remote
+test data are retained.
+
+An existing Crab pointer in the input history is a real dependency, not
+ordinary fixture text. A new destination must contain verified payloads for
+those pointers before refs can be published. If the bytes are unavailable,
+retain the failed report and recover them from an explicitly identified
+source. Do not strip pointers, weaken publication checks, or present a run on
+a different revision as proof for the original history.
+
 ## Compare consecutive runs
 
 ```bash

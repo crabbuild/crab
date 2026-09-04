@@ -20,22 +20,13 @@ use crab_auth::{CredentialProvider, CredentialResolution};
 
 use crate::Result;
 
+#[derive(Clone)]
 pub struct RefreshingStoreParts {
     pub inner: Arc<dyn ObjectStore>,
     pub signer: Option<Arc<dyn Signer>>,
     pub multipart: Option<Arc<dyn MultipartStore>>,
     pub multipart_identity: Option<crab_storage::BucketIdentity>,
-}
-
-impl Clone for RefreshingStoreParts {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            signer: self.signer.as_ref().map(Arc::clone),
-            multipart: self.multipart.as_ref().map(Arc::clone),
-            multipart_identity: self.multipart_identity.clone(),
-        }
-    }
+    pub target_identity: [u8; 32],
 }
 
 type StoreBuilder = dyn Fn(CredentialResolution) -> Result<RefreshingStoreParts> + Send + Sync;
@@ -130,8 +121,8 @@ where
             .await
             .map_err(to_object_store_error)?;
         let parts = (self.build)(resolution).map_err(to_object_store_error)?;
-        let current_identity = self.state.read().await.multipart_identity.clone();
-        if parts.multipart_identity != current_identity {
+        let mut state = self.state.write().await;
+        if parts.multipart_identity != state.multipart_identity {
             return Err(object_store::Error::Generic {
                 store: "refreshing",
                 source: std::io::Error::new(
@@ -141,7 +132,15 @@ where
                 .into(),
             });
         }
-        *self.state.write().await = parts.clone();
+        // A credential rotation may not redirect an operation whose snapshot and
+        // publication proof were bound to the initial provider target.
+        if parts.target_identity != state.target_identity {
+            return Err(to_object_store_error(crate::AuthStoreError::AuthFailed {
+                path: "credential refresh changed the storage target; resolve a new operation"
+                    .to_owned(),
+            }));
+        }
+        *state = parts.clone();
         Ok(parts)
     }
 
@@ -716,6 +715,7 @@ mod tests {
                     unauthenticated: false,
                 })),
                 multipart_identity: multipart_identity.clone(),
+                target_identity: [0; 32],
             })
         });
         RefreshingObjectStore::new(
@@ -726,6 +726,35 @@ mod tests {
             initial,
             builder,
         )
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_target_change_and_preserves_original_store() {
+        for proactive in [false, true] {
+            let provider = Arc::new(MockProvider::default());
+            provider.needs_refresh.store(proactive, Ordering::SeqCst);
+            let initial = RefreshingStoreParts {
+                inner: Arc::new(MockStore {
+                    generation: 0,
+                    unauth_once: !proactive,
+                    forbidden: false,
+                }),
+                signer: None,
+                target_identity: [1; 32],
+                multipart: None,
+                multipart_identity: None,
+            };
+            let store = wrapper(provider, Arc::new(AtomicUsize::new(0)), initial);
+            let error = store.get(&Path::from("object")).await.unwrap_err();
+            let object_store::Error::Generic { source, .. } = error else {
+                panic!("target mismatch must retain its typed source");
+            };
+            assert!(matches!(
+                source.downcast_ref::<crate::AuthStoreError>(),
+                Some(crate::AuthStoreError::AuthFailed { .. })
+            ));
+            assert_eq!(store.state.read().await.target_identity, [1; 32]);
+        }
     }
 
     #[tokio::test]
@@ -745,6 +774,7 @@ mod tests {
                 signer: None,
                 multipart: None,
                 multipart_identity: None,
+                target_identity: [0; 32],
             },
         );
 
@@ -776,6 +806,7 @@ mod tests {
                 signer: None,
                 multipart: None,
                 multipart_identity: None,
+                target_identity: [0; 32],
             },
         );
 
@@ -806,6 +837,7 @@ mod tests {
                 signer: None,
                 multipart: None,
                 multipart_identity: None,
+                target_identity: [0; 32],
             },
         );
 
@@ -835,6 +867,7 @@ mod tests {
                 signer: None,
                 multipart: None,
                 multipart_identity: None,
+                target_identity: [0; 32],
             },
         );
         let raw: Arc<dyn ObjectStore> = Arc::new(store);
@@ -873,6 +906,7 @@ mod tests {
                     "endpoint-a",
                     "bucket",
                 )),
+                target_identity: [0; 32],
             },
         );
 
@@ -909,6 +943,7 @@ mod tests {
                     "endpoint-b",
                     "bucket",
                 )),
+                target_identity: [0; 32],
             })
         });
         let store = RefreshingObjectStore::new(
@@ -928,6 +963,7 @@ mod tests {
                     unauthenticated: false,
                 })),
                 multipart_identity: Some(initial_identity),
+                target_identity: [0; 32],
             },
             builder,
         );

@@ -60,9 +60,9 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
             retry_after: *retry_after,
         },
         CrabError::CasConflict { .. } => RetryClass::StateDependent,
-        CrabError::CorruptObject { .. } | CrabError::PackIntegrity { .. } => {
-            RetryClass::FatalAfterOneRetry
-        }
+        CrabError::CorruptObject { .. }
+        | CrabError::GitPackCorrupt(_)
+        | CrabError::PackIntegrity { .. } => RetryClass::FatalAfterOneRetry,
         CrabError::Io(_) => RetryClass::InspectErrno,
         CrabError::Storage(e) => classify_storage(e),
         // Partial push outcomes: the retry decision hinges on why the
@@ -486,6 +486,17 @@ mod tests {
             path: "repo/objects/x".into(),
             reason: "hash mismatch".into(),
         };
+        assert_eq!(retry_class(&err), RetryClass::FatalAfterOneRetry);
+    }
+
+    #[test]
+    fn classifies_typed_pack_corruption_as_fatal_after_one_retry() {
+        let err = CrabError::from(crab_git::pack_locator::PackLocatorError::IndexOpen {
+            path: "pack.idx".into(),
+            source: gix_pack::index::init::Error::Corrupt {
+                message: "invalid index".into(),
+            },
+        });
         assert_eq!(retry_class(&err), RetryClass::FatalAfterOneRetry);
     }
 

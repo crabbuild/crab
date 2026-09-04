@@ -81,7 +81,11 @@ struct FilterWorktreePaths {
 #[derive(Debug)]
 enum SmudgeOutput {
     Bytes(Bytes),
-    File(PathBuf),
+    LfsFile {
+        path: PathBuf,
+        oid: [u8; 32],
+        size: u64,
+    },
     TemporaryFile(tempfile::TempPath),
 }
 
@@ -229,21 +233,33 @@ where
         let input: Box<dyn Read + Send> = Box::new(input);
 
         let input = BufReader::with_capacity(256 * 1024, input);
-        let output = BufWriter::with_capacity(256 * 1024, output);
-        run_filter_loop_with_lfs_source(
-            input,
-            output,
-            ctx,
-            staging_cell_clone,
-            lfs_store,
-            prefetch_clone,
-            hydrator_clone,
-            Some(handle_clone),
-            speculation_cell_clone,
-        )
+        let mut output = BufWriter::with_capacity(256 * 1024, output);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_filter_loop_with_lfs_source(
+                input,
+                &mut output,
+                ctx,
+                staging_cell_clone,
+                lfs_store,
+                prefetch_clone,
+                hydrator_clone,
+                Some(handle_clone),
+                speculation_cell_clone,
+            )
+        }));
+        // Every complete response is explicitly flushed. On failure, discard
+        // pending bytes so BufWriter's destructor cannot retry a broken frame.
+        let _ = output.into_parts();
+        result.unwrap_or_else(|panic_info| {
+            Err(CrabError::Internal(format!(
+                "filter session panicked: {}",
+                panic_payload_to_string(&panic_info)
+            )))
+        })
     })
     .await
-    .map_err(|e| CrabError::Internal(format!("filter process task panicked: {e}")))?;
+    .map_err(|e| CrabError::Internal(format!("filter process task panicked: {e}")))
+    .and_then(|result| result);
 
     // Drain the prefetch queue so no background reconstructors outlive
     // the filter session. This fires the shared cancellation token and
@@ -641,12 +657,19 @@ async fn acquire_writer(cell: &std::sync::Mutex<LazyStaging>) -> StagingAcquire 
 /// Filter command parsed from the protocol stream.
 #[derive(Debug, Clone)]
 struct FilterCommand {
-    command: String,
+    command: FilterOperation,
     pathname: String,
     /// Additional key=value metadata from the command header. Used to
     /// observe the `can-delay=1` capability that git sets on smudge
     /// commands eligible for delayed processing.
     metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterOperation {
+    Clean,
+    Smudge,
+    ListAvailableBlobs,
 }
 
 impl FilterCommand {
@@ -760,32 +783,29 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
         // Check for cancellation between operations.
         ctx.check_cancelled()?;
 
-        let cmd = match read_command(&mut input) {
-            Ok(Some(cmd)) => cmd,
-            Ok(None) => break, // EOF — git closed stdin
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to read filter command, ending session");
-                break;
-            }
+        let Some(cmd) = read_command(&mut input)? else {
+            break;
         };
 
-        let is_lfs_clean = cmd.command == "clean"
+        let is_lfs_clean = cmd.command == FilterOperation::Clean
             && session.resolve_filter_for(&cmd.pathname)
                 == Some(crate::git::filter_attr_cache::FilterKind::Lfs);
-        if cmd.command == "clean" && !is_lfs_clean && !file_index_checker_attempted {
+        if cmd.command == FilterOperation::Clean && !is_lfs_clean && !file_index_checker_attempted {
             file_index_checker_attempted = true;
             if let Some(handle) = handle.as_ref() {
                 install_clean_file_index_checker(&mut session, &ctx, handle);
             }
         }
 
-        // Session isolation: catch panics per-operation so one failure
-        // doesn't corrupt session state for subsequent operations.
+        // Dispatch and recovery share the content boundary. A fresh reader
+        // during recovery would consume the next request after a late failure.
+        let mut content = PktLineReader::from_read(&mut input);
+        let mut response = FilterResponse::new(&mut output);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             dispatch_command(
                 &cmd,
-                &mut input,
-                &mut output,
+                &mut content,
+                &mut response,
                 &mut session,
                 &ctx,
                 &staging_cell,
@@ -797,47 +817,51 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
             )
         }));
 
-        match result {
-            Ok(Ok(())) => {}
+        let error = match result {
+            Ok(Ok(())) => continue,
             Ok(Err(e)) => {
                 tracing::error!(
-                    command = %cmd.command,
+                    command = ?cmd.command,
                     path = %cmd.pathname,
                     error = %e,
                     "filter operation failed"
                 );
-                session.reset_transient_state();
-                // Drain any content that was still buffered in the input
-                // stream. If dispatch_command failed before
-                // read_content_until_flush could complete (e.g., panic
-                // mid-parse or early error), leftover data packets would
-                // be misread as the next command header. See CR4-F4.
-                drain_until_flush(&mut input);
-                write_status(&mut output, "error")?;
-                write_flush(&mut output)?;
-                // Flush the BufWriter so git sees the error response
-                // immediately. Without this, the status=error bytes sit
-                // in the 256 KiB buffer and git blocks on stdin — most
-                // visible when the error occurs on the last file in a
-                // batch. See finding S1-P4-1.
-                output.flush().map_err(CrabError::Io)?;
+                e
             }
             Err(panic_info) => {
                 let msg = panic_payload_to_string(&panic_info);
                 tracing::error!(
-                    command = %cmd.command,
+                    command = ?cmd.command,
                     path = %cmd.pathname,
                     panic = %msg,
                     "filter operation panicked"
                 );
-                session.reset_transient_state();
-                drain_until_flush(&mut input);
-                write_status(&mut output, "error")?;
-                write_flush(&mut output)?;
-                // See comment above — same flush requirement on the panic path.
-                output.flush().map_err(CrabError::Io)?;
+                CrabError::Internal(format!("filter operation panicked: {msg}"))
             }
+        };
+        session.reset_transient_state();
+        if matches!(response.state, ResponseState::Complete) {
+            continue;
         }
+        // A partial response cannot be replaced with a new status list: Git
+        // would parse that status as content or as the remainder of a packet.
+        if matches!(response.state, ResponseState::Started)
+            || matches!(content.state, ContentState::Failed)
+        {
+            return Err(error);
+        }
+        // Git requires the content flush before an error response. Delayed
+        // blob-list requests have no body; malformed content ends the session
+        // because its next packet boundary cannot be recovered safely.
+        if matches!(
+            cmd.command,
+            FilterOperation::Clean | FilterOperation::Smudge
+        ) {
+            while content.read_packet()?.is_some() {}
+        }
+        write_status(&mut output, "error")?;
+        write_flush(&mut output)?;
+        output.flush().map_err(CrabError::Io)?;
     }
 
     // Persist the bloom filter so the next filter-process session
@@ -985,18 +1009,27 @@ fn handshake<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
 /// Read a single filter command header (command + pathname + metadata + flush).
 ///
 /// Returns `None` on EOF (git closed stdin).
-fn read_command<R: Read>(input: &mut R) -> Result<Option<FilterCommand>> {
-    // First line is "command=<cmd>".
-    let Some(command_line) = read_text_line(input)? else {
+fn read_command<R: BufRead>(input: &mut R) -> Result<Option<FilterCommand>> {
+    // EOF is normal only between requests. Once any header byte arrives,
+    // a missing packet or flush is a terminal framing error, not completion.
+    if input.fill_buf().map_err(CrabError::Io)?.is_empty() {
         return Ok(None);
-    };
+    }
+    let command_line = read_text_line(input)?
+        .ok_or_else(|| CrabError::Protocol("expected filter command, got flush".to_owned()))?;
 
-    let command = command_line
-        .strip_prefix("command=")
-        .ok_or_else(|| {
-            CrabError::Protocol(format!("expected 'command=...', got '{command_line}'"))
-        })?
-        .to_owned();
+    // Unknown operations have no agreed content shape. Reject them before
+    // dispatch instead of acknowledging or guessing how to drain their body.
+    let command = match command_line.strip_prefix("command=") {
+        Some("clean") => FilterOperation::Clean,
+        Some("smudge") => FilterOperation::Smudge,
+        Some("list_available_blobs") => FilterOperation::ListAvailableBlobs,
+        _ => {
+            return Err(CrabError::Protocol(format!(
+                "unsupported filter command: {command_line}"
+            )));
+        }
+    };
 
     // Read remaining key=value pairs until flush.
     let mut pathname = String::new();
@@ -1008,6 +1041,11 @@ fn read_command<R: Read>(input: &mut R) -> Result<Option<FilterCommand>> {
         } else if let Some((k, v)) = line.split_once('=') {
             metadata.insert(k.to_owned(), v.to_owned());
         }
+    }
+    if command != FilterOperation::ListAvailableBlobs && pathname.is_empty() {
+        return Err(CrabError::Protocol(
+            "filter content request has no pathname".to_owned(),
+        ));
     }
 
     Ok(Some(FilterCommand {
@@ -1027,8 +1065,8 @@ fn read_command<R: Read>(input: &mut R) -> Result<Option<FilterCommand>> {
 #[allow(clippy::too_many_arguments)]
 fn dispatch_command<R: Read, W: Write>(
     cmd: &FilterCommand,
-    input: &mut R,
-    output: &mut W,
+    input: &mut PktLineReader<R>,
+    output: &mut FilterResponse<W>,
     session: &mut super::clean::CleanSession,
     ctx: &AppContext,
     staging_cell: &Arc<std::sync::Mutex<LazyStaging>>,
@@ -1038,8 +1076,8 @@ fn dispatch_command<R: Read, W: Write>(
     handle: Option<&tokio::runtime::Handle>,
     speculation: &Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
 ) -> Result<()> {
-    match cmd.command.as_str() {
-        "clean" => {
+    match cmd.command {
+        FilterOperation::Clean => {
             // Resolve ownership before touching XET staging. LFS has its own
             // cache and remote publication path and must never contend on the
             // XET staging lock in a mixed-repository filter session.
@@ -1081,32 +1119,16 @@ fn dispatch_command<R: Read, W: Write>(
             // Stream pkt-line packets straight into the CDC chunker and
             // blake3 hasher, bounding peak memory to one packet
             // (≤64 KiB), the ≤1 KiB pointer probe, and the chunker's
-            // internal window instead of the full file payload. The fresh
-            // reader releases its borrow on `input` as soon as `clean_stream`
-            // returns, so the session-isolation wrapper's
-            // `drain_until_flush` on the error path still works.
-            let mut reader = PktLineReader::from_read(&mut *input);
-            let pointer_bytes = session.clean_stream(&cmd.pathname, &mut reader)?;
+            // internal window instead of the full file payload.
+            let pointer_bytes = session.clean_stream(&cmd.pathname, input)?;
 
-            // Response: status list + flush, content + flush, empty list + flush.
-            write_status(output, "success")?;
-            write_flush(output)?;
-            write_content(output, &pointer_bytes)?;
-            write_flush(output)?;
-            // Empty second status list, terminated by flush.
-            write_flush(output)?;
-            output.flush().map_err(CrabError::Io)?;
+            output.content_response(|output| write_content(output, &pointer_bytes))?;
         }
-        "smudge" => {
+        FilterOperation::Smudge => {
             let content = match read_smudge_input_until_flush(input)? {
                 SmudgeInput::PointerCandidate(content) => content,
                 SmudgeInput::PassthroughFile(path) => {
-                    write_status(output, "success")?;
-                    write_flush(output)?;
-                    write_content_file(output, &path)?;
-                    write_flush(output)?;
-                    write_flush(output)?;
-                    output.flush().map_err(CrabError::Io)?;
+                    output.content_response(|output| write_content_file(output, &path))?;
                     return Ok(());
                 }
             };
@@ -1207,12 +1229,7 @@ fn dispatch_command<R: Read, W: Write>(
                     }
                 })
             {
-                write_status(output, "success")?;
-                write_flush(output)?;
-                write_content_file(output, file.path())?;
-                write_flush(output)?;
-                write_flush(output)?;
-                output.flush().map_err(CrabError::Io)?;
+                output.content_response(|output| write_content_file(output, file.path()))?;
                 return Ok(());
             }
 
@@ -1236,14 +1253,9 @@ fn dispatch_command<R: Read, W: Write>(
                 )?,
             };
 
-            write_status(output, "success")?;
-            write_flush(output)?;
-            write_smudge_output(output, &result)?;
-            write_flush(output)?;
-            write_flush(output)?;
-            output.flush().map_err(CrabError::Io)?;
+            output.content_response(|output| write_smudge_output(output, &result))?;
         }
-        "list_available_blobs" => {
+        FilterOperation::ListAvailableBlobs => {
             // Git asks which delayed blobs are ready. Drain the queue's
             // completed list; each pathname is echoed back so git
             // retrieves those first.
@@ -1254,12 +1266,6 @@ fn dispatch_command<R: Read, W: Write>(
             };
 
             write_available_blobs_response(output, &ready)?;
-            output.flush().map_err(CrabError::Io)?;
-        }
-        other => {
-            tracing::warn!(command = %other, "unknown filter command");
-            write_status(output, "error")?;
-            write_flush(output)?;
             output.flush().map_err(CrabError::Io)?;
         }
     }
@@ -1319,7 +1325,11 @@ fn try_stream_lfs_smudge(
     };
     let local_path = crate::lfs::cache::object_path(&lfs_dir, &pointer.oid);
     if crate::lfs::cache::is_valid(&lfs_dir, &pointer.oid, pointer.size)? {
-        return Ok(Some(SmudgeOutput::File(local_path)));
+        return Ok(Some(SmudgeOutput::LfsFile {
+            path: local_path,
+            oid: pointer.oid,
+            size: pointer.size,
+        }));
     }
 
     let Some(store) = lfs_store.resolve() else {
@@ -1344,7 +1354,11 @@ fn try_stream_lfs_smudge(
                 pointer.size,
                 temp,
             )?;
-            Ok(Some(SmudgeOutput::File(installed)))
+            Ok(Some(SmudgeOutput::LfsFile {
+                path: installed,
+                oid: pointer.oid,
+                size: pointer.size,
+            }))
         }
         Err(error) if session.should_skip_lfs_download_errors() => {
             tracing::warn!(
@@ -1720,14 +1734,9 @@ fn read_ready(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io::Resul
 /// Read a text line, stripping the trailing newline. Returns `None` on flush.
 fn read_text_line<R: Read>(input: &mut R) -> Result<Option<String>> {
     let mut buf = [0u8; 4];
-    match input.read_exact(&mut buf) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(CrabError::Io(e)),
-    }
+    input.read_exact(&mut buf).map_err(CrabError::Io)?;
 
-    // Check for flush/delimiter/response-end.
-    if &buf == b"0000" || &buf == b"0001" || &buf == b"0002" {
+    if &buf == b"0000" {
         return Ok(None);
     }
 
@@ -1763,8 +1772,7 @@ fn read_text_line<R: Read>(input: &mut R) -> Result<Option<String>> {
 /// Direct LFS parsing accepts `MAX_LFS_POINTER_SIZE` bytes, so only after that
 /// boundary is exceeded can the body be classified as passthrough and
 /// spooled packet-by-packet to disk with bounded memory.
-fn read_smudge_input_until_flush<R: Read>(input: &mut R) -> Result<SmudgeInput> {
-    let mut reader = PktLineReader::from_read(input);
+fn read_smudge_input_until_flush<R: Read>(reader: &mut PktLineReader<R>) -> Result<SmudgeInput> {
     let mut pointer_candidate = Vec::with_capacity(MAX_LFS_POINTER_SIZE);
     let mut passthrough: Option<tempfile::NamedTempFile> = None;
     while let Some(packet) = reader.read_packet()? {
@@ -1797,36 +1805,65 @@ fn read_smudge_input_until_flush<R: Read>(input: &mut R) -> Result<SmudgeInput> 
     }
 }
 
-/// Drain packet-lines from `input` until a flush/delimiter packet is seen
-/// or EOF is reached. Used as a best-effort recovery after an error
-/// dispatching a command, so the next `read_command` call starts at a
-/// protocol boundary rather than in the middle of the previous command's
-/// content packets. See finding CR4-F4.
-fn drain_until_flush<R: Read>(input: &mut R) {
-    let mut hdr = [0u8; 4];
-    loop {
-        match input.read_exact(&mut hdr) {
-            Ok(()) => {}
-            Err(_) => return, // EOF or I/O error — give up.
-        }
+struct FilterResponse<W: Write> {
+    inner: W,
+    state: ResponseState,
+    failed: bool,
+}
 
-        if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
-            return;
-        }
+enum ResponseState {
+    NotStarted,
+    Started,
+    Complete,
+}
 
-        let Ok(hex) = std::str::from_utf8(&hdr) else {
-            return;
-        };
-        let Ok(len) = u16::from_str_radix(hex, 16).map(usize::from) else {
-            return;
-        };
-        if len < 4 {
-            return;
+impl<W: Write> FilterResponse<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            state: ResponseState::NotStarted,
+            failed: false,
         }
-        let mut discard = vec![0u8; len - 4];
-        if input.read_exact(&mut discard).is_err() {
-            return;
+    }
+
+    fn content_response(&mut self, emit: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        write_status(self, "success")?;
+        write_flush(self)?;
+        let result = emit(self);
+        if self.failed {
+            return result;
         }
+        // Content readers fail between packets; finish that response with a
+        // final error status. Transport failures and panics may split a packet
+        // and must instead terminate the session without another response.
+        write_flush(self)?;
+        if result.is_err() {
+            write_status(self, "error")?;
+        }
+        write_flush(self)?;
+        self.flush().map_err(CrabError::Io)?;
+        self.state = ResponseState::Complete;
+        result
+    }
+}
+
+impl<W: Write> Write for FilterResponse<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.state = ResponseState::Started;
+        // Poison before calling the transport so a panic cannot look like a
+        // recoverable source-read failure after partially writing a packet.
+        self.failed = true;
+        let count = self.inner.write(bytes)?;
+        self.failed = count == 0 && !bytes.is_empty();
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.state = ResponseState::Started;
+        self.failed = true;
+        self.inner.flush()?;
+        self.failed = false;
+        Ok(())
     }
 }
 
@@ -1859,7 +1896,11 @@ fn write_content<W: Write>(output: &mut W, data: &[u8]) -> Result<()> {
 fn write_smudge_output<W: Write>(output: &mut W, content: &SmudgeOutput) -> Result<()> {
     match content {
         SmudgeOutput::Bytes(data) => write_content(output, data),
-        SmudgeOutput::File(path) => write_content_file(output, path),
+        SmudgeOutput::LfsFile { path, oid, size } => {
+            crate::lfs::cache::stream_verified(path, oid, *size, |bytes| {
+                write_content(output, bytes)
+            })
+        }
         SmudgeOutput::TemporaryFile(path) => write_content_file(output, path),
     }
 }
@@ -1972,6 +2013,13 @@ const PKT_LINE_MAX_BODY: usize = 65516;
 pub struct PktLineReader<R: Read> {
     inner: R,
     buf: Vec<u8>,
+    state: ContentState,
+}
+
+enum ContentState {
+    Reading,
+    Finished,
+    Failed,
 }
 
 impl<R: Read> PktLineReader<R> {
@@ -1980,6 +2028,7 @@ impl<R: Read> PktLineReader<R> {
         Self {
             inner,
             buf: Vec::with_capacity(PKT_LINE_MAX_BODY),
+            state: ContentState::Reading,
         }
     }
 
@@ -1987,18 +2036,32 @@ impl<R: Read> PktLineReader<R> {
     ///
     /// Returns `Ok(Some(body))` for a data packet, `Ok(None)` for a flush
     /// packet (`0000`), or an error on I/O failure or malformed framing.
+    /// Flush is terminal for this reader. After a framing failure the reader
+    /// rejects further reads rather than guessing the next packet boundary.
     ///
     /// The returned slice borrows from the reader's internal buffer and is
     /// invalidated by the next call to `read_packet`. Callers that need to
     /// retain packet bytes past the next read must copy them.
     pub fn read_packet(&mut self) -> Result<Option<&[u8]>> {
+        match self.state {
+            ContentState::Finished => return Ok(None),
+            ContentState::Failed => {
+                return Err(CrabError::Protocol(
+                    "filter content framing lost".to_owned(),
+                ));
+            }
+            ContentState::Reading => {}
+        }
+        // A partial read or panic loses framing. Only a complete packet makes
+        // subsequent draining safe; never reinterpret its remainder as a header.
+        self.state = ContentState::Failed;
         let mut hdr = [0u8; 4];
         self.inner.read_exact(&mut hdr).map_err(CrabError::Io)?;
 
-        // Flush and the other delimiter packets all have zero body length.
-        // Git's filter content stream uses `0000`; accepting the protocol's
-        // other zero-body delimiters preserves the existing recovery boundary.
-        if &hdr == b"0000" || &hdr == b"0001" || &hdr == b"0002" {
+        // Only flush ends filter content. Delimiter/response-end belong to
+        // other Git protocols and cannot certify a complete filter request.
+        if &hdr == b"0000" {
+            self.state = ContentState::Finished;
             return Ok(None);
         }
 
@@ -2036,6 +2099,7 @@ impl<R: Read> PktLineReader<R> {
         self.inner
             .read_exact(&mut self.buf[..])
             .map_err(CrabError::Io)?;
+        self.state = ContentState::Reading;
         Ok(Some(&self.buf[..]))
     }
 }
@@ -2061,7 +2125,7 @@ mod tests {
     fn output_bytes(output: &SmudgeOutput) -> Vec<u8> {
         match output {
             SmudgeOutput::Bytes(bytes) => bytes.to_vec(),
-            SmudgeOutput::File(path) => std::fs::read(path).unwrap(),
+            SmudgeOutput::LfsFile { path, .. } => std::fs::read(path).unwrap(),
             SmudgeOutput::TemporaryFile(path) => std::fs::read(path).unwrap(),
         }
     }
@@ -2390,7 +2454,7 @@ mod tests {
         .expect("valid local LFS object should use the file-backed path");
 
         let path = match &result {
-            SmudgeOutput::File(path) => path,
+            SmudgeOutput::LfsFile { path, .. } => path,
             SmudgeOutput::Bytes(_) => {
                 panic!("local LFS object should not be materialized in memory")
             }
@@ -2494,7 +2558,7 @@ mod tests {
         input.extend(pkt_flush());
 
         let cmd = read_command(&mut &input[..]).unwrap().unwrap();
-        assert_eq!(cmd.command, "clean");
+        assert_eq!(cmd.command, FilterOperation::Clean);
         assert_eq!(cmd.pathname, "large.bin");
     }
 
@@ -2506,13 +2570,82 @@ mod tests {
     }
 
     #[test]
+    fn invalid_filter_requests_are_terminal_without_acknowledgment() {
+        let repo = tempfile::tempdir().unwrap();
+        let git_dir = repo.path().join(".git");
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let mut expected = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+        let smudge = [pkt_text("command=smudge"), pkt_text("pathname=plain.txt")].concat();
+        let requests = [
+            (
+                "unknown command",
+                [pkt_text("command=unsupported"), pkt_flush()].concat(),
+            ),
+            ("wrong command key", pkt_text("operation=smudge")),
+            ("partial length", b"001".to_vec()),
+            ("partial text", b"0010command=".to_vec()),
+            ("unexpected flush", pkt_flush()),
+            (
+                "missing list flush",
+                pkt_text("command=list_available_blobs"),
+            ),
+            (
+                "missing pathname",
+                [pkt_text("command=smudge"), pkt_flush(), pkt_flush()].concat(),
+            ),
+            (
+                "header delimiter",
+                [smudge.clone(), b"0001".to_vec(), pkt_flush()].concat(),
+            ),
+            (
+                "header response end",
+                [smudge.clone(), b"0002".to_vec(), pkt_flush()].concat(),
+            ),
+            (
+                "content delimiter",
+                [smudge.clone(), pkt_flush(), b"0001".to_vec()].concat(),
+            ),
+            (
+                "content response end",
+                [smudge, pkt_flush(), b"0002".to_vec()].concat(),
+            ),
+        ];
+        for (name, request) in requests {
+            let mut input = build_handshake_input();
+            input.extend(request);
+            let mut output = Vec::new();
+            let result = run_filter_loop(
+                &mut &input[..],
+                &mut output,
+                AppContext::default(),
+                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                None,
+                None,
+                None,
+                None,
+                Arc::new(std::sync::Mutex::new(None)),
+            );
+            assert!(result.is_err() && output == expected, "{name}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn handshake_requires_the_final_capability_flush() {
+        let mut input = build_handshake_input();
+        input.truncate(input.len() - 4);
+        assert!(handshake(&mut &input[..], &mut Vec::new()).is_err());
+    }
+
+    #[test]
     fn read_smudge_input_collects_pointer_candidate_across_packets() {
         let mut input = Vec::new();
         input.extend(pkt_data(b"hello "));
         input.extend(pkt_data(b"world"));
         input.extend(pkt_flush());
 
-        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        let content =
+            read_smudge_input_until_flush(&mut PktLineReader::from_slice(&input)).unwrap();
         assert!(matches!(
             content,
             SmudgeInput::PointerCandidate(bytes) if bytes == b"hello world"
@@ -2533,7 +2666,8 @@ mod tests {
         }
         input.extend(pkt_flush());
 
-        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        let content =
+            read_smudge_input_until_flush(&mut PktLineReader::from_slice(&input)).unwrap();
         assert!(matches!(
             content,
             SmudgeInput::PointerCandidate(bytes) if bytes == pointer
@@ -2551,7 +2685,8 @@ mod tests {
         }
         input.extend(pkt_flush());
 
-        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        let content =
+            read_smudge_input_until_flush(&mut PktLineReader::from_slice(&input)).unwrap();
         let SmudgeInput::PassthroughFile(path) = content else {
             panic!("large non-pointer input must be spooled");
         };
@@ -2568,7 +2703,8 @@ mod tests {
         }
         input.extend(pkt_flush());
 
-        let content = read_smudge_input_until_flush(&mut &input[..]).unwrap();
+        let content =
+            read_smudge_input_until_flush(&mut PktLineReader::from_slice(&input)).unwrap();
 
         assert!(matches!(
             content,
@@ -2911,6 +3047,371 @@ size 1048576\n";
     }
 
     #[test]
+    fn partial_response_write_failure_does_not_start_another_response() {
+        #[derive(Clone, Copy, Debug)]
+        enum Fault {
+            Error,
+            Zero,
+            Panic,
+            Flush,
+        }
+        struct FailOnceWriter {
+            bytes: Vec<u8>,
+            fail_at: usize,
+            failed: bool,
+            writes_after_failure: usize,
+            fault: Fault,
+        }
+        impl Write for FailOnceWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.failed {
+                    self.writes_after_failure += 1;
+                } else if self.bytes.len() == self.fail_at && !matches!(self.fault, Fault::Flush) {
+                    self.failed = true;
+                    return match self.fault {
+                        Fault::Zero => Ok(0),
+                        Fault::Panic => panic!("injected response write panic"),
+                        _ => Err(io::Error::other("injected response write failure")),
+                    };
+                }
+                let count = if self.failed || matches!(self.fault, Fault::Flush) {
+                    bytes.len()
+                } else {
+                    bytes.len().min(self.fail_at - self.bytes.len())
+                };
+                self.bytes.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                if self.failed {
+                    self.writes_after_failure += 1;
+                } else if matches!(self.fault, Fault::Flush) && self.bytes.len() >= self.fail_at {
+                    self.failed = true;
+                    return Err(io::Error::other("injected response flush failure"));
+                }
+                Ok(())
+            }
+        }
+        let mut handshake_output = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut handshake_output).unwrap();
+        let mut input = build_handshake_input();
+        for pathname in ["first.txt", "next.txt"] {
+            input.extend(pkt_text("command=smudge"));
+            input.extend(pkt_text(&format!("pathname={pathname}")));
+            input.extend(pkt_flush());
+            input.extend(pkt_data(b"ordinary content"));
+            input.extend(pkt_flush());
+        }
+        for fault in [Fault::Error, Fault::Zero, Fault::Panic, Fault::Flush] {
+            for offset in [1, 2, 27, 45] {
+                let mut output = FailOnceWriter {
+                    bytes: Vec::new(),
+                    fail_at: handshake_output.len() + offset,
+                    failed: false,
+                    writes_after_failure: 0,
+                    fault,
+                };
+                let result = run_filter_loop(
+                    &mut &input[..],
+                    &mut output,
+                    AppContext::default(),
+                    Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Arc::new(std::sync::Mutex::new(None)),
+                );
+                assert!(
+                    result.is_err() && output.failed && output.writes_after_failure == 0,
+                    "fault {fault:?} at response byte {offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn content_read_failure_ends_with_error_status_at_a_packet_boundary() {
+        let mut bytes = Vec::new();
+        let mut response = FilterResponse::new(&mut bytes);
+        response
+            .content_response(|output| {
+                write_content(output, b"partial content")?;
+                Err(CrabError::Io(io::Error::other(
+                    "injected content read failure",
+                )))
+            })
+            .unwrap_err();
+        let mut expected = pkt_text("status=success");
+        expected.extend(pkt_flush());
+        expected.extend(pkt_data(b"partial content"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_text("status=error"));
+        expected.extend(pkt_flush());
+        assert_eq!(bytes, expected);
+    }
+
+    #[tokio::test]
+    async fn filter_process_discards_buffered_output_after_transport_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct OutputProbe {
+            written: usize,
+            fail_at: usize,
+            attempts: Arc<AtomicUsize>,
+            panic_on_failure: bool,
+        }
+        impl Write for OutputProbe {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.written == self.fail_at {
+                    self.attempts.fetch_add(1, Ordering::SeqCst);
+                    assert!(!self.panic_on_failure, "injected buffered transport panic");
+                    return Err(io::Error::other("injected buffered transport failure"));
+                }
+                let count = bytes.len().min(self.fail_at - self.written);
+                self.written += count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut handshake_output = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut handshake_output).unwrap();
+        let mut input = build_handshake_input();
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=plain.txt"));
+        input.extend(pkt_flush());
+        input.extend(pkt_data(b"ordinary content"));
+        input.extend(pkt_flush());
+        for fail_at in [2, handshake_output.len() + 2] {
+            for panic_on_failure in [false, true] {
+                let attempts = Arc::new(AtomicUsize::new(0));
+                let output = OutputProbe {
+                    written: 0,
+                    fail_at,
+                    attempts: Arc::clone(&attempts),
+                    panic_on_failure,
+                };
+                let result = run_filter_process(
+                    io::Cursor::new(input.clone()),
+                    output,
+                    AppContext::default(),
+                    None,
+                    None,
+                    None,
+                    #[cfg(unix)]
+                    None,
+                )
+                .await;
+                assert!(result.is_err() && attempts.load(Ordering::SeqCst) == 1);
+            }
+        }
+    }
+
+    #[test]
+    fn lfs_stream_rejects_cache_changes_after_validation() {
+        use sha2::{Digest, Sha256};
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_dir = repo.path().join(".git");
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let body = b"verified LFS content";
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: Sha256::digest(body).into(),
+            size: body.len() as u64,
+            extensions: Vec::new(),
+        };
+        let lfs_dir = git_dir.join("lfs");
+        let mut session = super::super::clean::CleanSession::new(AppContext::default());
+        session.set_repo_root(repo.path().to_path_buf());
+        for changed in [Vec::new(), vec![0; body.len()], vec![0; body.len() + 1]] {
+            let path = crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, body)
+                .unwrap();
+            let source = try_stream_lfs_smudge(
+                &pointer.serialize(),
+                "model.bin",
+                &LfsStoreSource::eager(None),
+                &session,
+                false,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            std::fs::write(path, &changed).unwrap();
+            let mut bytes = Vec::new();
+            let result = FilterResponse::new(&mut bytes)
+                .content_response(|output| write_smudge_output(output, &source));
+            assert!(
+                matches!(result, Err(CrabError::LfsObjectCorrupt { .. })),
+                "changed {}-byte cache must not complete successfully",
+                changed.len()
+            );
+        }
+    }
+
+    #[test]
+    fn disappearing_lfs_cache_reports_a_final_error_and_preserves_the_next_request() {
+        use sha2::{Digest, Sha256};
+
+        struct RemovingWriter {
+            bytes: Vec<u8>,
+            cache_path: PathBuf,
+            remove_at: usize,
+            removed: bool,
+        }
+        impl Write for RemovingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                if !self.removed && self.bytes.len() >= self.remove_at {
+                    std::fs::remove_file(&self.cache_path)?;
+                    self.removed = true;
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_dir = repo.path().join(".git");
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let body = b"verified LFS content";
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: Sha256::digest(body).into(),
+            size: body.len() as u64,
+            extensions: Vec::new(),
+        };
+        let lfs_dir = git_dir.join("lfs");
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, body).unwrap();
+        let mut expected = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+        expected.extend(pkt_text("status=success"));
+        expected.extend(pkt_flush());
+        let mut output = RemovingWriter {
+            bytes: Vec::new(),
+            cache_path: crate::lfs::cache::object_path(&lfs_dir, &pointer.oid),
+            remove_at: expected.len(),
+            removed: false,
+        };
+        expected.extend(pkt_flush());
+        expected.extend(pkt_text("status=error"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_text("status=success"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_data(b"next file"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_flush());
+        let mut input = build_handshake_input();
+        for (path, content) in [
+            ("cached.bin", pointer.serialize()),
+            ("readme.txt", b"next file".to_vec()),
+        ] {
+            input.extend(pkt_text("command=smudge"));
+            input.extend(pkt_text(&format!("pathname={path}")));
+            input.extend(pkt_flush());
+            input.extend(pkt_data(&content));
+            input.extend(pkt_flush());
+        }
+        run_filter_loop(
+            &mut &input[..],
+            &mut output,
+            AppContext::default(),
+            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .unwrap();
+        assert!(output.removed && output.bytes == expected);
+    }
+
+    #[test]
+    fn failed_smudge_preserves_the_next_request() {
+        assert_failed_smudge_preserves_the_next_request(LfsStoreSource::eager(None));
+    }
+
+    #[test]
+    fn panicking_smudge_preserves_the_next_request() {
+        assert_failed_smudge_preserves_the_next_request(LfsStoreSource::new(
+            None,
+            Some(Arc::new(|| panic!("injected remote resolution panic"))),
+        ));
+    }
+
+    fn assert_failed_smudge_preserves_the_next_request(source: LfsStoreSource) {
+        let repo = tempfile::tempdir().unwrap();
+        let git_dir = repo.path().join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: [0xab; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+        let content = b"ordinary content after a failed request";
+        let mut input = build_handshake_input();
+        for (path, body) in [
+            ("missing.bin", pointer.serialize()),
+            ("readme.txt", content.to_vec()),
+        ] {
+            input.extend(pkt_text("command=smudge"));
+            input.extend(pkt_text(&format!("pathname={path}")));
+            input.extend(pkt_flush());
+            input.extend(pkt_data(&body));
+            input.extend(pkt_flush());
+        }
+        let mut output = Vec::new();
+        run_filter_loop_with_lfs_source(
+            &mut &input[..],
+            &mut output,
+            AppContext::default(),
+            Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+            source,
+            None,
+            None,
+            None,
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+        expected.extend(pkt_text("status=error"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_text("status=success"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_data(content));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_flush());
+        assert_eq!(output, expected);
+    }
+
+    #[test]
     fn non_lazy_lfs_smudge_fails_without_remote_store() {
         use crab_git::lfs_pointer::LfsPointer;
 
@@ -2935,6 +3436,118 @@ size 1048576\n";
         .unwrap_err();
 
         assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_errors_reply_after_flush_without_waiting_for_the_next_request() {
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let repo = tempfile::tempdir().unwrap();
+        let git_dir = repo.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::create_dir(git_dir.join("refs")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(repo.path().join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+        // A non-directory cache root fails clean before its remaining packets.
+        std::fs::write(git_dir.join("lfs"), "not a directory").unwrap();
+        let _env = GitEnvGuard::set(&git_dir, repo.path(), &git_dir);
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: [0xab; 32],
+            size: 1024,
+            extensions: Vec::new(),
+        };
+
+        for command in ["clean", "smudge"] {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let read_end = server.try_clone().unwrap();
+            let worker = std::thread::spawn(move || {
+                run_filter_loop(
+                    BufReader::new(read_end),
+                    BufWriter::new(server),
+                    AppContext::default(),
+                    Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Arc::new(std::sync::Mutex::new(None)),
+                )
+            });
+            // Always close the peer and join, including timeout/assertion failure.
+            let exchange = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.write_all(&build_handshake_input()).unwrap();
+                let mut expected = Vec::new();
+                handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+                let mut received = vec![0; expected.len()];
+                client.read_exact(&mut received).unwrap();
+                assert_eq!(received, expected);
+
+                client
+                    .write_all(&pkt_text(&format!("command={command}")))
+                    .unwrap();
+                client.write_all(&pkt_text("pathname=missing.bin")).unwrap();
+                client.write_all(&pkt_flush()).unwrap();
+                let body = if command == "clean" {
+                    vec![0x5a; MAX_LFS_POINTER_SIZE * 2]
+                } else {
+                    pointer.serialize()
+                };
+                client.write_all(&pkt_data(&body)).unwrap();
+                client
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                let pending = client.read(&mut [0]);
+                assert!(
+                    matches!(pending, Err(ref e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
+                );
+                client
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                if command == "clean" {
+                    client.write_all(&pkt_data(b"unread clean tail")).unwrap();
+                }
+                client.write_all(&pkt_flush()).unwrap();
+                let mut expected = pkt_text("status=error");
+                expected.extend(pkt_flush());
+                let mut received = vec![0; expected.len()];
+                client.read_exact(&mut received).unwrap();
+                assert_eq!(received, expected);
+
+                // A bodyless delay query must not borrow the following smudge.
+                client
+                    .write_all(&pkt_text("command=list_available_blobs"))
+                    .unwrap();
+                client.write_all(&pkt_flush()).unwrap();
+                let mut expected = pkt_flush();
+                expected.extend(pkt_text("status=success"));
+                expected.extend(pkt_flush());
+                let mut received = vec![0; expected.len()];
+                client.read_exact(&mut received).unwrap();
+                assert_eq!(received, expected);
+                client.write_all(&pkt_text("command=smudge")).unwrap();
+                client.write_all(&pkt_text("pathname=readme.txt")).unwrap();
+                client.write_all(&pkt_flush()).unwrap();
+                client.write_all(&pkt_data(b"next file")).unwrap();
+                client.write_all(&pkt_flush()).unwrap();
+                let mut expected = pkt_text("status=success");
+                expected.extend(pkt_flush());
+                expected.extend(pkt_data(b"next file"));
+                expected.extend(pkt_flush());
+                expected.extend(pkt_flush());
+                let mut received = vec![0; expected.len()];
+                client.read_exact(&mut received).unwrap();
+                assert_eq!(received, expected);
+            }));
+            let _ = client.shutdown(Shutdown::Both);
+            worker.join().unwrap().unwrap();
+            exchange.unwrap();
+        }
     }
 
     #[test]
@@ -3234,6 +3847,74 @@ size 1048576\n";
     }
 
     // --- PktLineReader tests ---
+
+    #[test]
+    fn malformed_content_ends_session_without_a_response() {
+        for malformed in [b"zzzz".as_slice(), b"0008ab", b"000"] {
+            let mut input = build_handshake_input();
+            input.extend(pkt_text("command=smudge"));
+            input.extend(pkt_text("pathname=broken.txt"));
+            input.extend(pkt_flush());
+            input.extend(malformed);
+            let mut output = Vec::new();
+            let result = run_filter_loop(
+                &mut &input[..],
+                &mut output,
+                AppContext::default(),
+                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                None,
+                None,
+                None,
+                None,
+                Arc::new(std::sync::Mutex::new(None)),
+            );
+            let mut expected = Vec::new();
+            handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+            assert!(result.is_err() && output == expected);
+        }
+    }
+
+    #[test]
+    fn pkt_line_reader_terminal_states_do_not_consume_another_packet() {
+        for terminal in [b"0000", b"zzzz"] {
+            let mut input = terminal.to_vec();
+            input.extend(pkt_data(b"next request"));
+            let mut cursor = io::Cursor::new(input);
+            {
+                let mut reader = PktLineReader::from_read(&mut cursor);
+                for _ in 0..2 {
+                    match reader.read_packet() {
+                        Ok(None) if terminal == b"0000" => {}
+                        Err(_) if terminal == b"zzzz" => {}
+                        other => panic!("unexpected terminal result: {other:?}"),
+                    }
+                }
+            }
+            assert_eq!(cursor.position(), 4);
+        }
+    }
+
+    #[test]
+    fn pkt_line_reader_does_not_resume_after_a_partial_read_panic() {
+        struct PanickingRead<'a>(&'a mut io::Cursor<Vec<u8>>);
+        impl Read for PanickingRead<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let count = buf.len().min(2);
+                self.0.read_exact(&mut buf[..count])?;
+                panic!("injected partial packet read panic");
+            }
+        }
+        let mut cursor = io::Cursor::new(pkt_data(b"payload"));
+        {
+            let mut reader = PktLineReader::from_read(PanickingRead(&mut cursor));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = reader.read_packet();
+            }));
+            assert!(result.is_err());
+            assert!(reader.read_packet().is_err());
+        }
+        assert_eq!(cursor.position(), 2);
+    }
 
     #[test]
     fn pkt_line_reader_reads_single_data_packet() {
