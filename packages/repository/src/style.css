@@ -145,6 +145,11 @@ main {
   max-width: 1440px;
   margin: auto;
 }
+.repo-body.repo-issues-workspace {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
 .toolbar,
 .panel-header,
 .section-heading,
@@ -1283,13 +1288,64 @@ main {
   }
 }
 
-.issues-page {
-  max-width: 1080px;
+.issues-workspace {
+  display: grid;
+  grid-template-columns: 256px minmax(0, 1fr);
+  min-height: calc(100vh - 113px);
+}
+.issues-sidebar {
+  padding: 16px 8px;
+  border-right: 1px solid var(--borderColor-default);
+}
+.issues-sidebar nav {
+  display: grid;
+  gap: 4px;
+}
+.issues-sidebar a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  color: var(--fgColor-default);
+  border-radius: var(--borderRadius-medium);
+  position: relative;
+}
+.issues-sidebar a:hover,
+.issues-sidebar a.active {
+  background: var(--bgColor-muted);
+  text-decoration: none;
+}
+.issues-sidebar a.active {
+  font-weight: 600;
+}
+.issues-sidebar a.active::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: -8px;
+  width: 3px;
+  border-radius: var(--borderRadius-medium);
+  background: var(--borderColor-accent-emphasis);
+}
+.issues-workspace-main {
+  min-width: 0;
+  padding: 28px 32px;
+}
+.issues-page,
+.labels-page {
+  max-width: 1136px;
   margin: 0 auto;
 }
 .issues-page h2 {
   font-size: 24px;
   line-height: 1.3;
+}
+.issues-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 .issues-filters,
 .issues-filters nav,
@@ -1310,17 +1366,25 @@ main {
 .discussion-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 20px 0 12px;
+  gap: 0;
+  margin: 16px 0;
 }
 .discussion-search-field {
   min-width: 0;
   flex: 1;
 }
-.discussion-list-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin: 0 0 12px;
+.discussion-search-field > span {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.discussion-search-submit {
+  align-self: stretch;
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.discussion-search > button:last-child:not(.discussion-search-submit) {
+  margin-left: 8px;
 }
 .button-link {
   color: var(--fgColor-default);
@@ -1343,7 +1407,20 @@ main {
 .issues-filters nav a.active {
   color: var(--fgColor-default);
   font-weight: 600;
+}
+.issue-list-panel {
+  overflow: hidden;
+}
+.issue-list-panel > .issues-filters {
+  min-height: 48px;
+  margin: 0;
+  padding: 0 16px;
   background: var(--bgColor-muted);
+  border-bottom: 1px solid var(--borderColor-default);
+}
+.issue-list-panel > .timing {
+  padding: 8px 16px;
+  border-top: 1px solid var(--borderColor-muted);
 }
 .issue-list {
   padding: 0;
@@ -1636,9 +1713,23 @@ main {
   text-align: center;
   padding: 48px 24px;
 }
+.issue-list-panel .issue-empty {
+  padding: 40px 24px;
+}
+.issue-list-panel .issue-empty h3 {
+  margin: 12px 0 4px;
+}
+.issue-list-panel .issue-empty p {
+  margin: 0;
+}
 .discussion-pagination {
   justify-content: center;
   margin: 24px 0;
+}
+.issue-list-panel .discussion-pagination {
+  margin: 0;
+  padding: 16px;
+  border-top: 1px solid var(--borderColor-muted);
 }
 .discussion-compose label {
   display: block;
@@ -1864,6 +1955,35 @@ main {
   padding-top: 16px;
 }
 @media (max-width: 640px) {
+  .issues-workspace {
+    display: block;
+  }
+  .issues-sidebar {
+    padding: 8px 16px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--borderColor-default);
+  }
+  .issues-sidebar nav {
+    display: flex;
+  }
+  .issues-sidebar a {
+    flex: 0 0 auto;
+  }
+  .issues-sidebar a.active::before {
+    top: auto;
+    right: 8px;
+    bottom: -8px;
+    left: 8px;
+    width: auto;
+    height: 2px;
+  }
+  .issues-workspace-main {
+    padding: 20px 16px;
+  }
+  .issues-heading h2 {
+    font-size: 20px;
+  }
   .issue-title-row {
     display: block;
   }
@@ -1871,14 +1991,14 @@ main {
     font-size: 24px;
   }
   .issues-filters {
-    align-items: flex-start;
+    align-items: center;
     gap: 4px;
   }
   .discussion-search {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
   .discussion-search-field {
-    flex-basis: 100%;
+    flex-basis: auto;
   }
   .issues-filters nav {
     gap: 0;
