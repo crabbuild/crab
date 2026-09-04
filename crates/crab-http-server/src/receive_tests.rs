@@ -2,7 +2,7 @@ use super::*;
 use std::path::Path;
 use std::process::Output;
 
-async fn git(path: &Path, args: &[&str]) -> Output {
+pub(super) async fn git(path: &Path, args: &[&str]) -> Output {
     let path = path.to_owned();
     let args: Vec<_> = args.iter().map(|arg| (*arg).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
@@ -28,7 +28,7 @@ async fn git(path: &Path, args: &[&str]) -> Output {
     .unwrap()
 }
 
-async fn success(path: &Path, args: &[&str]) -> String {
+pub(super) async fn success(path: &Path, args: &[&str]) -> String {
     let started = Instant::now();
     let output = git(path, args).await;
     assert!(

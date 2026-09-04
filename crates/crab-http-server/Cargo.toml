@@ -37,6 +37,7 @@ tracing = { workspace = true }
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
+async-trait = { workspace = true }
 object_store = { workspace = true }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

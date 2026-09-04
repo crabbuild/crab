@@ -414,6 +414,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "receive_fault_tests.rs"]
+mod receive_fault_tests;
+
+#[cfg(test)]
 #[path = "receive_tests.rs"]
 mod receive_tests;
 

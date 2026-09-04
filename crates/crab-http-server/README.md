@@ -296,8 +296,8 @@ have further bounds. Temporary disk needs can exceed the wire limit. Buffered an
 chunked native pushes are supported; receive requires identity content encoding.
 
 Disconnects and deadlines signal cancellation; owned workers retain admission
-until cleanup finishes. A known commit is never reported as a ref rejection due
-to later cleanup or indexing failure. If the response is lost or returns 503,
+and renew their GC fences until cleanup finishes. A known commit is never reported
+as a ref rejection due to later cleanup or indexing failure. If the response is lost or returns 503,
 inspect remote refs before retrying: publication may have committed. Subsequent
 reads run catalog repair for committed journal work. This is not yet durable
 application-level push receipt or complete disaster-recovery support.
@@ -309,9 +309,16 @@ for byte after removing client repositories. The deletion flow also exposed and
 fixed a shared catalog bug: removed tips must be looked up even when no surviving
 ref or new evidence mentions them. These small-repository tests are not Kubernetes
 push throughput or production qualification. Protected branches, protected-view
-and active-active publication coexistence, LFS upload endpoints, and restart/fault
+and active-active publication coexistence, LFS upload endpoints, and process-crash
 qualification remain unfinished; use this development server with standard Crab
 repository publication only.
+
+Injected storage faults pass against both memory storage and RustFS: lost marker
+replies, rejected marker writes, and cancellation before and after the commit
+boundary. A fresh server instance reads the exact committed state; an explicit
+retry publishes uncommitted requests and clears their prepared recovery evidence.
+Blob bytes match after the client directory is removed. These tests exercise
+cooperative shutdown and fresh instances, not abrupt process termination.
 
 To repeat the isolated receive qualification, source your private RustFS environment
 and choose a fresh prefix (the test creates a manifest and will not overwrite one):
@@ -327,6 +334,10 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
 Create the temporary directory first and use this checkout's own target directory.
 The test removes its Git client directories and retains the isolated object-storage
 repository for inspection.
+
+Repeat with another fresh prefix and replace `native_http_push_rustfs` with
+`receive_faults_rustfs` to exercise the four injected failures and GC fence renewal
+while a cancelled writer drains beyond its initial lease expiry.
 
 ## Issues and comments
 

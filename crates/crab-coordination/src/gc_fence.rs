@@ -685,10 +685,13 @@ pub struct GcFenceHeartbeat {
 }
 
 impl GcFenceHeartbeat {
-    /// Starts renewing `lease` and cancels `operation_cancel` on loss.
+    /// Renews `lease` until stopped or dropped, cancelling `failure_cancel` on loss.
+    ///
+    /// Cancelling the operation does not stop renewal: its owner must drain
+    /// in-flight work before stopping the heartbeat and releasing the lease.
     pub fn spawn(
         lease: &GcFenceLease,
-        operation_cancel: CancellationToken,
+        failure_cancel: CancellationToken,
         interval: Duration,
     ) -> Self {
         let cancel = CancellationToken::new();
@@ -700,14 +703,13 @@ impl GcFenceHeartbeat {
                 tokio::select! {
                     () = tokio::time::sleep(interval) => {}
                     () = self_cancel.cancelled() => return,
-                    () = operation_cancel.cancelled() => return,
                 }
-                if self_cancel.is_cancelled() || operation_cancel.is_cancelled() {
+                if self_cancel.is_cancelled() {
                     return;
                 }
                 if let Err(error) = lease.renew().await {
                     warn!(domain = %lease.domain(), %error, "GC fence renewal failed");
-                    operation_cancel.cancel();
+                    failure_cancel.cancel();
                     return;
                 }
             }
@@ -1091,6 +1093,31 @@ mod tests {
             observations[0], observations[1],
             "a completed sweep after recreation must not reuse the prior observation identity"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_writer_drains_without_leaving_expiry_quarantine() {
+        let store = memory_store();
+        let domain = "draining-writer";
+        let writer = GcFenceLease::acquire_writer(&store, domain, Duration::from_secs(3))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let heartbeat = GcFenceHeartbeat::spawn(&writer, cancel.clone(), Duration::from_secs(1));
+        cancel.cancel();
+        // Cancellation does not finish an in-flight publication. Another writer
+        // may enter while it drains beyond the original holder's expiry.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let other = GcFenceLease::acquire_writer(&store, domain, Duration::from_secs(30))
+            .await
+            .unwrap();
+        heartbeat.stop().await;
+        writer.release().await.unwrap();
+        other.release().await.unwrap();
+        let sweep = GcFenceLease::acquire_sweep(&store, domain, Duration::from_secs(30))
+            .await
+            .expect("a drained and released writer must not leave a crash quarantine");
+        sweep.release().await.unwrap();
     }
 
     #[tokio::test]
