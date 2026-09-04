@@ -64,6 +64,11 @@ pub enum MetadataError {
         source: crab_storage::StorageError,
     },
 
+    /// Publication was cancelled before attempting the active marker.
+    #[cfg(feature = "storage")]
+    #[error("ref journal publication cancelled before commit")]
+    RefJournalCancelled,
+
     /// The commit marker write failed and its exact bytes could not be confirmed.
     #[cfg(feature = "storage")]
     #[error(

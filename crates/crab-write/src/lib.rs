@@ -2,10 +2,14 @@
 pub mod catalog;
 pub mod generation;
 pub mod journal;
+mod namespace;
+pub use namespace::with_ref_namespace;
 
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    #[error(transparent)]
+    Namespace(#[from] crab_git::refname::RefNamespaceError),
     #[error("generation {generation} has no verified Git visibility proof")]
     VisibilityUnavailable { generation: u64 },
     #[error("ref {ref_name} no longer matches its expected old value at {path}")]

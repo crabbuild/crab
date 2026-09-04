@@ -982,9 +982,15 @@ mod tests {
             Vec::new(),
         )
         .expect("build transaction");
-        commit_ref_transaction(&primary_store, &primary_router, &transaction, &[head])
-            .await
-            .expect("commit transaction");
+        commit_ref_transaction(
+            &primary_store,
+            &primary_router,
+            &transaction,
+            &[head],
+            || false,
+        )
+        .await
+        .expect("commit transaction");
 
         let readiness = check_read_replica_readiness(
             &primary_store,

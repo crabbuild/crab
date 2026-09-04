@@ -84,6 +84,8 @@ impl ValidatedRefUpdates {
 /// A rejected plan leaves both the base refs and the quarantine unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum ReceivePlanError {
+    #[error(transparent)]
+    Namespace(#[from] crate::refname::RefNamespaceError),
     #[error("invalid ref update for {name}: {reason}")]
     Ref { name: String, reason: &'static str },
     #[error("invalid Git ref name {name}")]
@@ -225,16 +227,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     }
     // Git cannot store a ref and another ref nested beneath its name. Evaluate
     // the final map so an atomic delete-and-create can replace that namespace.
-    for name in refs.keys() {
-        for (index, _) in name.match_indices('/') {
-            if refs.contains_key(&name[..index]) {
-                return Err(ReceivePlanError::Ref {
-                    name: name.clone(),
-                    reason: "ref namespace conflicts with another ref",
-                });
-            }
-        }
-    }
+    crate::refname::validate_ref_namespace(refs.keys().map(String::as_str))?;
     let mut validator = Validator::new(incoming, source, limits, cancelled);
     // Validate all received objects, including unreachable objects. Otherwise a
     // syntactically corrupt object could be published for a later ref update.

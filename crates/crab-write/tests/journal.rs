@@ -40,6 +40,7 @@ async fn pending(store: &Store, layout: &StoreLayout<Store>) -> PushLock {
         None,
         Vec::new(),
         Vec::new(),
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -61,6 +62,239 @@ fn edit(name: &str, old: Option<char>, new: Option<char>) -> ref_journal::RefJou
         lock_holder: None,
         visibility_evidence_hash: None,
     }
+}
+
+#[tokio::test]
+async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
+    let (store, layout) = storage("namespace-race");
+    manifest_store::create_manifest(&store, &layout, &Manifest::default_for_repo(REF))
+        .await
+        .unwrap();
+    let parent = "refs/heads/feature";
+    let child = "refs/heads/feature/sub";
+    let first = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), parent, TTL)
+        .await
+        .unwrap();
+    let second = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), child, TTL)
+        .await
+        .unwrap();
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let (left, right) = tokio::join!(
+        commit_edits(
+            &store,
+            &layout,
+            &snapshot,
+            vec![edit(parent, None, Some('a'))],
+            Some(parent.to_owned()),
+            vec![],
+            vec![],
+            &cancel
+        ),
+        commit_edits(
+            &store,
+            &layout,
+            &snapshot,
+            vec![edit(child, None, Some('b'))],
+            Some(child.to_owned()),
+            vec![],
+            vec![],
+            &cancel
+        ),
+    );
+    first.release().await.unwrap();
+    second.release().await.unwrap();
+    assert_eq!(
+        usize::from(left.is_ok()) + usize::from(right.is_ok()),
+        1,
+        "{left:?} / {right:?}"
+    );
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(state.journal.refs.len(), 1);
+}
+
+#[tokio::test]
+async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits() {
+    let (store, layout) = storage("namespace-admission");
+    let main = pending(&store, &layout).await;
+    let gate = PushLock::acquire_internal(
+        store.inner(),
+        layout.repo_prefix(),
+        crab_coordination::GIT_REF_NAMESPACE_RESOURCE,
+        TTL,
+    )
+    .await
+    .unwrap();
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        commit_edits(
+            &store,
+            &layout,
+            &snapshot,
+            vec![edit(REF, Some('a'), Some('b'))],
+            None,
+            vec![],
+            vec![],
+            &cancel,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let dev = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), "refs/heads/dev", TTL)
+        .await
+        .unwrap();
+    let create = commit_edits(
+        &store,
+        &layout,
+        &snapshot,
+        vec![edit("refs/heads/dev", None, Some('c'))],
+        None,
+        vec![],
+        vec![],
+        &cancel,
+    );
+    tokio::pin!(create);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut create)
+            .await
+            .is_err()
+    );
+    cancel.cancel();
+    assert!(matches!(create.await, Err(WriteError::Cancelled)));
+    assert!(
+        PushLock::internal_lease_is_active(
+            store.inner(),
+            layout.repo_prefix(),
+            crab_coordination::GIT_REF_NAMESPACE_RESOURCE
+        )
+        .await
+        .unwrap()
+    );
+    gate.release().await.unwrap();
+    dev.release().await.unwrap();
+    main.release().await.unwrap();
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.journal.refs,
+        BTreeMap::from([(REF.to_owned(), "b".repeat(40))])
+    );
+}
+
+#[tokio::test]
+async fn atomic_namespace_replacement_removes_the_parent_before_creating_children() {
+    let (store, layout) = storage("namespace-replacement");
+    let main = pending(&store, &layout).await;
+    let child = format!("{REF}/child");
+    let lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), &child, TTL)
+        .await
+        .unwrap();
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    commit_edits(
+        &store,
+        &layout,
+        &snapshot,
+        vec![edit(REF, Some('a'), None), edit(&child, None, Some('b'))],
+        Some(child.clone()),
+        vec![],
+        vec![],
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    lease.release().await.unwrap();
+    main.release().await.unwrap();
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.journal.refs,
+        BTreeMap::from([(child, "b".repeat(40))])
+    );
+}
+
+#[tokio::test]
+async fn late_namespace_lease_loss_preserves_the_committed_result_and_new_holder() {
+    let (store, layout) = storage("namespace-outcome");
+    let main = pending(&store, &layout).await;
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    let path = object_store::path::Path::from(
+        crab_coordination::internal_lock_path(
+            layout.repo_prefix(),
+            crab_coordination::GIT_REF_NAMESPACE_RESOURCE,
+        )
+        .unwrap(),
+    );
+    let storage = &store;
+    let router = &layout;
+    let captured = &snapshot;
+    let lock_path = &path;
+    let result = crab_write::with_ref_namespace(
+        &store,
+        &layout,
+        Duration::from_secs(3),
+        &CancellationToken::new(),
+        |cancel| async move {
+            let result = commit_edits(
+                storage,
+                router,
+                captured,
+                vec![edit(REF, Some('a'), Some('b'))],
+                None,
+                vec![],
+                vec![],
+                &cancel,
+            )
+            .await?;
+            let replacement = Bytes::from_static(
+                br#"{"holder":"replacement","expires_at":18446744073709551615,"lease_secs":60}"#,
+            );
+            storage
+                .inner()
+                .put(lock_path, replacement.into())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), cancel.cancelled())
+                .await
+                .unwrap();
+            Ok::<_, WriteError>(result)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        ref_journal::transaction_is_active(&store, &layout, &result.transaction_id)
+            .await
+            .unwrap()
+    );
+    let payload = store
+        .inner()
+        .get(&path)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8(payload.to_vec())
+            .unwrap()
+            .contains("replacement")
+    );
+    main.release().await.unwrap();
 }
 
 #[tokio::test]
@@ -92,6 +326,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         None,
         vec![],
         vec![],
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -111,6 +346,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         Some(dev.to_owned()),
         vec![],
         vec![],
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -174,7 +410,17 @@ async fn invalid_or_stale_batch_leaves_no_journal_artifacts() {
             false,
         ),
     ] {
-        let result = commit_edits(&store, &layout, &snapshot, edits, None, vec![], vec![]).await;
+        let result = commit_edits(
+            &store,
+            &layout,
+            &snapshot,
+            edits,
+            None,
+            vec![],
+            vec![],
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
         if stale {
             assert!(
                 matches!(result, Err(WriteError::RefChanged { ref_name, .. }) if ref_name == REF)

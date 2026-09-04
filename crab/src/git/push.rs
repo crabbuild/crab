@@ -8224,6 +8224,8 @@ impl PushPipeline {
         if !eligible {
             return Ok(false);
         }
+        crab_git::refname::validate_ref_namespace(manifest.refs.keys().map(String::as_str))
+            .map_err(crab_write::WriteError::from)?;
 
         let git_dir = self.common_git_dir()?;
         let store = self
@@ -8243,10 +8245,45 @@ impl PushPipeline {
                 &self.router,
             )),
         )?;
-        let new_etag =
-            write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
-
-        *self.manifest_etag.lock().await = Some(new_etag);
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let namespace_layout = &layout;
+        let published = crab_write::with_ref_namespace(
+            storage,
+            &layout,
+            self.config.lock_ttl,
+            &self.cancel,
+            |cancel| async move {
+                check_cancelled(&cancel)?;
+                let fresh = crab_metadata::manifest_store::read_repository_snapshot(
+                    storage,
+                    namespace_layout,
+                )
+                .await?;
+                // Immutable uploads can overlap another first import or journal create.
+                // Recheck under the same namespace gate used by journal publication.
+                if fresh.manifest_etag != current.manifest_etag
+                    || !fresh.journal.refs.is_empty()
+                    || !fresh.journal.transactions.is_empty()
+                    || !fresh.journal.visible_heads.is_empty()
+                {
+                    return Ok::<_, CrabError>(false);
+                }
+                check_cancelled(&cancel)?;
+                let new_etag =
+                    write_manifest_cas(store, &self.router, manifest, &fresh.manifest_etag).await?;
+                *self.manifest_etag.lock().await = Some(new_etag);
+                Ok(true)
+            },
+        )
+        .await?;
+        if !published {
+            return Ok(false);
+        }
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
@@ -24645,6 +24682,99 @@ mod tests {
         .await;
         assert!(result.outcomes.is_empty());
         assert!(result.all_ok());
+    }
+
+    #[tokio::test]
+    async fn initial_manifest_rechecks_journal_creates_before_publication() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("initial-namespace-race");
+        initialize_test_repository(&store, &router).await;
+        let cancel = CancellationToken::new();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            cancel.clone(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let sha_map = pipeline.resolve_src_ref_map().unwrap();
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .unwrap();
+        pipeline.prepare_git_pack().await.unwrap();
+        pipeline.upload_packs().await.unwrap();
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .unwrap();
+        let storage = store.as_storage();
+        let layout =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        let captured = crab_metadata::manifest_store::read_repository_snapshot(storage, &layout)
+            .await
+            .unwrap();
+        let mut leases = Vec::new();
+        for name in ["refs/heads/main", "refs/heads/main/child"] {
+            leases.push(
+                PushLock::acquire_ref(
+                    store.inner(),
+                    router.repo_prefix(),
+                    name,
+                    Duration::from_secs(60),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        crab_write::journal::commit_edits(
+            storage,
+            &layout,
+            &captured,
+            vec![crab_metadata::ref_journal::RefJournalEdit {
+                ref_name: "refs/heads/main/child".to_owned(),
+                old_oid: None,
+                new_oid: Some(sha_map["refs/heads/main"].clone()),
+                peeled_oid: None,
+                lock_holder: Some(leases[1].holder().to_owned()),
+                visibility_evidence_hash: None,
+            }],
+            Some("refs/heads/main/child".to_owned()),
+            vec![],
+            vec![],
+            &cancel,
+        )
+        .await
+        .unwrap();
+        // The manifest ETag still matches; only the fresh journal reveals the
+        // competing create. Initial publication must hand off to normal commit.
+        let published = pipeline
+            .try_publish_initial_manifest(&candidate, &bulk, &captured, &mut None)
+            .await
+            .unwrap();
+        for lease in leases {
+            lease.release().await.unwrap();
+        }
+        assert!(!published);
+        let current = crab_metadata::manifest_store::read_repository_snapshot(storage, &layout)
+            .await
+            .unwrap();
+        assert!(current.manifest.refs.is_empty());
+        assert_eq!(
+            current
+                .journal
+                .refs
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["refs/heads/main/child"]
+        );
     }
 
     #[tokio::test]

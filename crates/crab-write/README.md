@@ -65,6 +65,23 @@ check. Existing committed journal edits count toward the old-value comparison,
 even before generation compaction. The function preserves exact new OIDs, tag
 peeling, HEAD changes, uploaded pack/shard references and visibility evidence.
 
+Creations and deletions additionally hold the renewable `git-ref-namespace`
+internal lease, reread the coherent repository snapshot, and validate the final
+ref set. Independently locked `feature` and `feature/sub` cannot both commit.
+An atomic delete of the parent and creation of its child remains valid. Updates
+to existing refs bypass this gate. The CLI's initial-manifest fast path uses the
+same gate and rechecks that no journal writer has published during its uploads.
+Namespace contention retries stop after two lease lifetimes and observe
+cancellation; in-flight storage calls still drain.
+
+`with_ref_namespace` exposes that gate for the initial-manifest publisher. Its
+callback must check the supplied cancellation token before publication and finish
+commit-outcome recovery once publication is attempted. The journal checks before
+each prepared head and before its active marker: cancellation there rolls back
+prepared heads. After the marker attempt it finishes recovery and promotion.
+Late renewal/release errors cannot replace a known successful commit result.
+Callers must retain and renew their edited-ref leases throughout this work.
+
 ## Caller responsibilities
 
 For the lower-level `catalog::publish_inventory`, the caller must supply the
@@ -78,7 +95,7 @@ Await journal and catalog lifecycle operations to completion; do not abort their
 future to enforce a deadline. They own stateful writes and lease cleanup. The
 caller still owns the generation-owner election and any required GC fences.
 
-For journal commit, callers also own write authorization, ref namespace/policy and
+For journal commit, callers also own write authorization, individual ref-name/policy and
 graph/dependency validation, immutable uploads, visibility proof, and ref leases.
 After a failed marker write, the metadata journal attempts bounded exact readback.
 Matching marker bytes confirm commit and allow head cleanup to continue. If the
@@ -117,6 +134,17 @@ Commit tests cover a second atomic batch over un-compacted journal state, includ
 causal parents, exact creation/update/deletion, peeled tag removal and HEAD changes.
 Stale and malformed batches leave storage unchanged, including no orphan journal
 artifacts. Existing compaction tests also enter through the shared commit function.
+
+Namespace tests cover conflicting concurrent creates, atomic parent replacement,
+existing-ref progress behind a busy namespace lease, cancellable admission and
+preservation of a committed result after lease loss. A CLI test interleaves a
+journal create with an initial import whose manifest ETag is still unchanged.
+Metadata tests cancel immediately before and after the marker boundary.
+A RustFS race accepts exactly one conflicting create, releases the namespace
+lease, and publishes the winning generation. Its commit/tree/blob bytes match
+through `crab-remote-git` after removal of the local fixture. The two contending
+operations complete in 229 ms and read readiness takes 163 ms for this small
+fixture; these shared-cache samples do not measure HTTP push latency.
 
 Metadata fault tests cover lost marker replies, unavailable readback, wrong or
 oversized marker bodies and compaction before readback. CLI/protected-service
