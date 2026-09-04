@@ -54,6 +54,10 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   });
   await page.goto("/");
   await page.getByText("Git access", { exact: true }).click();
+  await page.getByText("Credential manager setup", { exact: true }).click();
+  await expect(page.locator(".credential-setup code")).toHaveText(
+    "git config --global 'credential.http://127.0.0.1:5175.useHttpPath' true",
+  );
   const generate = page.getByRole("button", {
     name: "Generate token",
     exact: true,

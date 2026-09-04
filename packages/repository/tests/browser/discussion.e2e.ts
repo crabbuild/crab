@@ -266,14 +266,14 @@ test("header controls remain reachable on narrow screens in both themes", async 
             .map((control) => control.textContent?.trim()),
         );
       expect(obscured, `${theme} at ${width}px`).toEqual([]);
-      await header.locator("summary").click();
+      await header.getByText("Git access", { exact: true }).click();
       const popover = header.locator(".git-popover");
       await expect(popover.getByRole("heading")).toBeVisible();
       const bounds = await popover.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-      await header.locator("summary").click();
+      await header.getByText("Git access", { exact: true }).click();
     }
   }
 });
