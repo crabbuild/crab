@@ -5,7 +5,6 @@
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use base64::Engine as _;
 use crab::cache::{CacheKey, LocalCache, XetChunkCacheHandle};
 use crab_xet::hash::compute_data_hash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder};
@@ -306,8 +305,8 @@ async fn stats_commands_report_healthy_groups_when_the_other_is_unsafe() {
         let unsafe_path = if unsafe_family == "ranges" {
             let mut encoded = key.hash.as_bytes().to_vec();
             encoded.extend_from_slice(key.prefix.as_bytes());
-            let encoded = base64::engine::general_purpose::URL_SAFE.encode(encoded);
-            range_root.join(&encoded[..2]).join(encoded)
+            let encoded: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
+            range_root.join(format!("r-{}", &encoded[..2])).join(encoded)
         } else {
             let hex = shard_hash.hex();
             root.join("shards").join(&hex[..2]).join(hex)
@@ -567,8 +566,8 @@ async fn verify_and_prune_commands_preserve_non_range_owners() {
         .unwrap();
     let mut encoded = key.hash.as_bytes().to_vec();
     encoded.extend_from_slice(key.prefix.as_bytes());
-    let encoded = base64::engine::general_purpose::URL_SAFE.encode(encoded);
-    let entry_dir = range_root.join(&encoded[..2]).join(encoded);
+    let encoded: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
+    let entry_dir = range_root.join(format!("r-{}", &encoded[..2])).join(encoded);
     let payload = std::fs::read_dir(&entry_dir)
         .unwrap()
         .next()

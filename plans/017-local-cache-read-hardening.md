@@ -72,6 +72,10 @@ attributed against main. No suppressions were added to manufacture a pass.
 The cache feature-budget gate initially still required the removed Base64
 dependency. Its exact contract now matches the hex implementation; the full
 architecture checker and its three regression tests pass locally.
+The two CLI fixtures that construct range paths now use the canonical layout;
+their assertions are unchanged. All 11 command-maintenance tests and the
+command-cleanup test pass, including unsafe-family reporting and preservation
+of non-range owners during verify/prune.
 
 **Provider evidence mitigation:** `pb-provider-qualification.yml` now retains
 the S3 canary's report and redacted command logs separately from the provider
@@ -89,6 +93,19 @@ invalid assumptions intact. Remaining work includes installed cold/eager
 qualification, Git checkout memory amplification, safe old-root rotation,
 private spill/index lifecycle, native Windows ownership, and unresolved
 optional CI/provider gates. Unit passes are not merge approval.
+
+Next executable slices, in order; these refine the existing phases rather than
+creating a second implementation roadmap:
+
+| Slice / context | Owner and bounded change | Acceptance before closing |
+|---|---|---|
+| Existing cache upgrade / Phase 4 | `doctor` and cache lifecycle: identify old range layouts and unsafe metadata, define explicit stopped-owner rotation, preserve unknown files and Git/staging state. Do not add a legacy hot-path reader. | Upgrade fixtures retain the backup, restore exact bytes from origin, admit/account new ranges, and clean them completely. Active users prevent rotation; diagnostics never claim retained old bytes were reclaimed. |
+| Remaining private metadata / Phase 4 | Metadata index and shard-spill owners: complete private publication and descriptor-pinned read/write/cleanup for each family. Fresh-mode changes above are only a first slice. | Force spill; use permissive umasks, symlink/inode swaps, concurrent initializers and SQLite side files. Healthy fresh stats are complete; unsafe caches cannot expose bytes or redirect writes; origin reads remain exact. |
+| Resource admission / Phase 6 | Read output, decode, VFS and Git checkout owners: use the existing execution slices below. Resolve the tagged returned-buffer API decision before source-breaking changes. | Declare byte/queue/temp-disk limits first; at/over-limit and cancellation tests cover retained results, overlapping ranges and warm/cold reads. Retain process-tree resource traces for 10/20 GiB commands; no whole-process bound inferred from command RSS. |
+| Native platform and provider evidence / Phases 4 and 7 | Windows owner ACLs, native mount fixtures, provider canary and dedicated scale runner. Keep unavailable credentials/runners explicit. | Actual workflows complete on the advertised platforms/providers, retain failure diagnostics and verifiable provenance, and pass their existing acceptance checks. A skip, cancellation or missing artifact is not a pass. |
+
+Stop at the source-compatibility or environment boundary when its required
+decision/access is absent; independent mitigation and verification can proceed.
 
 ### 10/20 GiB expansion: case-insensitive range-cache maintenance gap
 
