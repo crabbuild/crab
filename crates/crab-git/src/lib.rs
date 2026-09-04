@@ -14,6 +14,7 @@ pub mod pointer_detect;
 pub mod pointer_ref;
 pub mod push_state;
 pub mod receive_plan;
+pub mod receive_wire;
 pub mod ref_resolve;
 pub mod refname;
 pub mod reject_reason;
