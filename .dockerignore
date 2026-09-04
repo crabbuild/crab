@@ -14,6 +14,16 @@
 !crab/**
 !crates/
 !crates/**
+!packages/
+packages/*
+!packages/repository/
+!packages/repository/package.json
+!packages/repository/package-lock.json
+!packages/repository/index.html
+!packages/repository/tsconfig.json
+!packages/repository/vite.config.ts
+!packages/repository/src/
+!packages/repository/src/**
 !deploy/
 !deploy/crab-service/
 !deploy/crab-service/compose/
