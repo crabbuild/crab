@@ -17,6 +17,14 @@ pub(super) enum PullState {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReviewState {
+    Commented,
+    Approved,
+    ChangesRequested,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct PullRequest {
@@ -47,6 +55,20 @@ pub(super) struct PullComment {
     pub updated_at: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PullReview {
+    pub number: u64,
+    pub request_id: String,
+    pub author: Identity,
+    pub body: String,
+    pub state: ReviewState,
+    pub commit_oid: String,
+    pub version: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 pub(super) struct NewPullRequest {
     pub author: Identity,
     pub request_id: String,
@@ -56,6 +78,14 @@ pub(super) struct NewPullRequest {
     pub base_oid: String,
     pub head_ref: String,
     pub head_oid: String,
+}
+
+pub(super) struct NewPullReview {
+    pub author: Identity,
+    pub request_id: String,
+    pub body: String,
+    pub state: ReviewState,
+    pub commit_oid: String,
 }
 
 pub(super) fn pull_path(number: u64) -> String {
@@ -68,6 +98,14 @@ pub(super) fn comments_root(number: u64) -> String {
 
 pub(super) fn comment_path(pull: u64, comment: u64) -> String {
     format!("{}/{comment:016}.json", comments_root(pull))
+}
+
+pub(super) fn reviews_root(number: u64) -> String {
+    format!("{ROOT}/{number:016}/reviews")
+}
+
+pub(super) fn review_path(pull: u64, review: u64) -> String {
+    format!("{}/{review:016}.json", reviews_root(pull))
 }
 
 pub(super) async fn recover_pull(
@@ -177,6 +215,74 @@ pub(super) async fn create_comment(
     let current =
         app_storage::create_or_read(repo, &comment_path(pull, original.number), original).await?;
     if current.request_id != request_id {
+        return Err(Error::Conflict);
+    }
+    Ok(current)
+}
+
+pub(super) async fn recover_review(
+    repo: &Repository,
+    pull: u64,
+    author: &Identity,
+    request_id: &str,
+    body: &str,
+    state: ReviewState,
+) -> Result<Option<PullReview>> {
+    let root = reviews_root(pull);
+    let reservation = format!("{root}/requests/{request_id}.json");
+    let Some((review, _)) = app_storage::read::<PullReview>(repo, &reservation).await? else {
+        return Ok(None);
+    };
+    if !app_storage::same_author(&review.author, author)
+        || review.body != body
+        || review.state != state
+    {
+        return Err(Error::RequestConflict);
+    }
+    Ok(Some(
+        app_storage::create_or_read(repo, &review_path(pull, review.number), review).await?,
+    ))
+}
+
+pub(super) async fn create_review(
+    repo: &Repository,
+    pull: u64,
+    input: NewPullReview,
+) -> Result<PullReview> {
+    let root = reviews_root(pull);
+    let reservation = format!("{root}/requests/{}.json", input.request_id);
+    let original = match app_storage::read::<PullReview>(repo, &reservation).await? {
+        Some((review, _)) => review,
+        None => {
+            let number = app_storage::reserve_number(repo, &root).await?;
+            let timestamp = app_storage::now()?;
+            app_storage::create_or_read(
+                repo,
+                &reservation,
+                PullReview {
+                    number,
+                    request_id: input.request_id.clone(),
+                    author: input.author.clone(),
+                    body: input.body.clone(),
+                    state: input.state,
+                    commit_oid: input.commit_oid.clone(),
+                    version: 1,
+                    created_at: timestamp,
+                    updated_at: timestamp,
+                },
+            )
+            .await?
+        }
+    };
+    if !app_storage::same_author(&original.author, &input.author)
+        || original.body != input.body
+        || original.state != input.state
+    {
+        return Err(Error::RequestConflict);
+    }
+    let current =
+        app_storage::create_or_read(repo, &review_path(pull, original.number), original).await?;
+    if current.request_id != input.request_id {
         return Err(Error::Conflict);
     }
     Ok(current)

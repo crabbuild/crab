@@ -411,7 +411,7 @@ Repeat with another fresh prefix and replace `native_http_push_rustfs` with
 `receive_faults_rustfs` to exercise the four injected failures and GC fence renewal
 while a cancelled writer drains beyond its initial lease expiry.
 
-## Issues, pull requests and comments
+## Issues, pull requests and reviews
 
 Repository members can create issues, write Markdown comments and browse open or
 closed discussions. Authors can edit their own content and close or reopen their
@@ -435,8 +435,13 @@ remain immutable review evidence. If either branch is deleted, the conversation
 and original IDs remain available while live file comparison is disabled. Pull
 comments use `/pulls/{number}/comments` and the same conditional edit contract.
 Authors can close or reopen their own pull requests; repository writers can also
-change their state. Merge, approvals, requested changes, checks and branch
-protection are not implemented.
+change their state. Reviews use `/pulls/{number}/reviews` and
+`/pulls/{number}/reviews/{review}`. A review records `commented`, `approved` or
+`changes_requested` against the exact current head commit. Pull request authors
+can comment but cannot approve or request changes on their own changes. Advancing
+the head leaves prior reviews visible with `current: false`; the state and commit
+of an existing review are immutable while its author can conditionally edit its
+body. Merge, checks and branch protection are not implemented.
 
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
@@ -449,18 +454,18 @@ Data lives under `<repository-prefix>/app/v1/issues` and `app/v1/pulls`,
 independently of Git refs, packs and metadata. Each JSON document has
 `schema_version: 1`; unknown versions are rejected. Conditional counter updates allocate numbers, immutable
 `requests/{uuid}.json` reservations make creation retries converge, and ETag
-updates protect visible issue/comment documents. Interrupted allocation can leave
+updates protect visible issue, comment and review documents. Interrupted allocation can leave
 numbering gaps. A retry completes an existing reservation without overwriting a
-later edit. Comments have their own counter and reservations under each issue.
+later edit. Comments and reviews have their own counters and reservations under
+their parent discussion.
 
 The service account needs reads and conditional writes to this app prefix in
 addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Labels, assignees, deletion/moderation, edit history, notifications, merge,
-reviews and checks remain unimplemented. Production backup/restore qualification
-is pending.
+Labels, assignees, deletion/moderation, edit history, notifications, merge and
+checks remain unimplemented. Production backup/restore qualification is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
 replayed both creation requests, edited content, closed/reopened the issue and
@@ -475,6 +480,18 @@ and reported that live comparison was unavailable. Warm detail, comment-list,
 pull-list and exact-change reads took 14.2, 1.3, 0.9 and 8.4 ms from the client;
 idempotent pull and comment replays took 552.7 and 581.5 ms. These localhost,
 shared-cache timings expose observed latency rather than production performance.
+An authenticated two-user integration test uses native Git pushes: one member
+opens a pull request, another approves its exact head, self-approval is rejected,
+and a later push makes the first approval outdated before a new decision is
+accepted.
+
+The RustFS qualification also created a commit-bound review, advanced the head,
+and verified that the first review became outdated while a second review bound
+to the new head. Both survived server restart; deleting the source branch kept
+both review records and marked both outdated. Initial pull and review writes took
+38.2 and 16.3 ms, the post-restart list took 33.1 ms, and idempotent replay took
+560.8 ms on localhost with shared caches. These are observations, not production
+latency guarantees.
 
 ## Current verification
 
@@ -577,7 +594,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push and tag lifecycle have scoped RustFS proof; protected branches and administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests and comments with author edits, conditional writes and live exact-branch comparison; merge, reviews, checks and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments and commit-bound review decisions with author edits, conditional writes and live exact-branch comparison; merge, checks and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

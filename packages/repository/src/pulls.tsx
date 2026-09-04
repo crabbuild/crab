@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { Button } from "@primer/react";
 import {
+  CheckCircleFillIcon,
+  CodeReviewIcon,
   CommentIcon,
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestIcon,
+  XCircleFillIcon,
 } from "@primer/octicons-react";
 import {
   endpoint,
@@ -54,7 +57,23 @@ interface PullRequest extends PullSummary {
   original_base_oid: string | null;
   original_head_oid: string | null;
   can_manage: boolean;
+  can_decide: boolean;
   branches_available: boolean;
+}
+
+type ReviewState = "commented" | "approved" | "changes_requested";
+
+interface PullReview {
+  number: number;
+  author: string;
+  body: string;
+  state: ReviewState;
+  commit_oid: string;
+  current: boolean;
+  version: number;
+  created_at: number;
+  updated_at: number;
+  can_edit: boolean;
 }
 
 interface Page<T> {
@@ -444,12 +463,17 @@ function PullDetail({
             )}
             {tab === "files" ? (
               data.branches_available ? (
-                <ComparisonView
-                  repo={repo}
-                  base={data.base_oid}
-                  head={data.head_oid}
-                  theme={theme}
-                />
+                <>
+                  <ComparisonView
+                    repo={repo}
+                    base={data.base_oid}
+                    head={data.head_oid}
+                    theme={theme}
+                  />
+                  {data.state === "open" && (
+                    <ReviewForm repo={repo} pull={data} csrf={csrf} />
+                  )}
+                </>
               ) : null
             ) : (
               <PullConversation
@@ -479,6 +503,9 @@ function PullConversation({
 }) {
   const commentsPath = endpoint(repo, `pulls/${pull.number}/comments`);
   const comments = useRequest<Page<PullComment>>(commentsPath);
+  const reviews = useRequest<Page<PullReview>>(
+    endpoint(repo, `pulls/${pull.number}/reviews`),
+  );
   const [body, setBody] = useState("");
   const commentMutation = useMutation(csrf);
   const stateMutation = useMutation(csrf);
@@ -493,20 +520,15 @@ function PullConversation({
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>
       </article>
       <Result state={comments}>
-        {(page) => (
-          <div className="discussion-thread">
-            {[...page.items].reverse().map((comment) => (
-              <article className="panel discussion-card" key={comment.number}>
-                <header>
-                  <strong>{comment.author}</strong>
-                  <span className="muted">
-                    commented {timestamp(comment.created_at)}
-                  </span>
-                </header>
-                <DiscussionMarkdown>{comment.body}</DiscussionMarkdown>
-              </article>
-            ))}
-          </div>
+        {(commentPage) => (
+          <Result state={reviews}>
+            {(reviewPage) => (
+              <PullTimeline
+                comments={commentPage.items}
+                reviews={reviewPage.items}
+              />
+            )}
+          </Result>
         )}
       </Result>
       <form
@@ -573,11 +595,188 @@ function PullConversation({
         <div>
           <strong>Merge is not enabled yet</strong>
           <p>
-            Review and discussion are durable. Merge commits, reviews, checks,
+            Review decisions and discussion are durable. Merge commits, checks,
             and protected-branch enforcement remain under development.
           </p>
         </div>
       </div>
     </div>
+  );
+}
+
+function PullTimeline({
+  comments,
+  reviews,
+}: {
+  comments: PullComment[];
+  reviews: PullReview[];
+}) {
+  const events = [
+    ...comments.map((comment) => ({
+      kind: "comment" as const,
+      value: comment,
+    })),
+    ...reviews.map((review) => ({ kind: "review" as const, value: review })),
+  ].sort((left, right) => left.value.created_at - right.value.created_at);
+  return (
+    <div className="discussion-thread pull-timeline">
+      {events.map((event) =>
+        event.kind === "comment" ? (
+          <article
+            className="panel discussion-card"
+            key={`comment-${event.value.number}`}
+          >
+            <header>
+              <strong>{event.value.author}</strong>
+              <span className="muted">
+                commented {timestamp(event.value.created_at)}
+              </span>
+            </header>
+            <DiscussionMarkdown>{event.value.body}</DiscussionMarkdown>
+          </article>
+        ) : (
+          <ReviewEvent
+            key={`review-${event.value.number}`}
+            review={event.value}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+function ReviewEvent({ review }: { review: PullReview }) {
+  const action =
+    review.state === "approved"
+      ? "approved these changes"
+      : review.state === "changes_requested"
+        ? "requested changes"
+        : "left a review";
+  const Icon =
+    review.state === "approved"
+      ? CheckCircleFillIcon
+      : review.state === "changes_requested"
+        ? XCircleFillIcon
+        : CodeReviewIcon;
+  return (
+    <article className={`panel review-event ${review.state}`}>
+      <header>
+        <span className="review-icon" aria-hidden="true">
+          <Icon />
+        </span>
+        <strong>{review.author}</strong>
+        <span> {action}</span>
+        {!review.current && <span className="review-outdated">Outdated</span>}
+        <span className="muted">{timestamp(review.created_at)}</span>
+      </header>
+      {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+      <footer className="muted">
+        Reviewed commit <code>{short(review.commit_oid)}</code>
+      </footer>
+    </article>
+  );
+}
+
+function ReviewForm({
+  repo,
+  pull,
+  csrf,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  csrf: string;
+}) {
+  const [body, setBody] = useState("");
+  const [state, setState] = useState<ReviewState>("commented");
+  const mutation = useMutation(csrf);
+  const submission = useSubmission();
+  const required = state !== "approved";
+  return (
+    <form
+      className="panel discussion-form review-form"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        const input = { body, state };
+        const created = await mutation.run<PullReview>(
+          endpoint(repo, `pulls/${pull.number}/reviews`),
+          "POST",
+          { ...input, request_id: submission(input) },
+        );
+        if (created)
+          navigate(
+            repoHref(repo, { view: "pulls", pull: String(pull.number) }),
+          );
+      }}
+    >
+      <h3>Submit your review</h3>
+      <Editor
+        id="pull-review"
+        label="Review summary"
+        value={body}
+        onChange={setBody}
+        disabled={mutation.pending}
+        required={required}
+      />
+      <fieldset className="review-choices">
+        <legend className="sr-only">Review decision</legend>
+        <label>
+          <input
+            type="radio"
+            name="review-state"
+            value="commented"
+            checked={state === "commented"}
+            disabled={mutation.pending}
+            onChange={() => setState("commented")}
+          />
+          <span>
+            <strong>Comment</strong>
+            <small>Leave feedback without an approval decision.</small>
+          </span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="review-state"
+            value="approved"
+            checked={state === "approved"}
+            disabled={mutation.pending || !pull.can_decide}
+            onChange={() => setState("approved")}
+          />
+          <span>
+            <strong>Approve</strong>
+            <small>Accept the changes at the current head commit.</small>
+          </span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="review-state"
+            value="changes_requested"
+            checked={state === "changes_requested"}
+            disabled={mutation.pending || !pull.can_decide}
+            onChange={() => setState("changes_requested")}
+          />
+          <span>
+            <strong>Request changes</strong>
+            <small>Block approval until the concerns are addressed.</small>
+          </span>
+        </label>
+      </fieldset>
+      {!pull.can_decide && (
+        <p className="muted">
+          Authors can comment, but cannot decide on their own changes.
+        </p>
+      )}
+      <Failure message={mutation.error} />
+      <div className="discussion-actions">
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={mutation.pending || (required && !body.trim())}
+        >
+          {mutation.pending ? "Submitting…" : "Submit review"}
+        </Button>
+      </div>
+    </form>
   );
 }

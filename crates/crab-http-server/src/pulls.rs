@@ -20,6 +20,7 @@ use crate::{
     server::Server,
 };
 
+mod reviews;
 mod storage;
 use storage::{NewPullRequest, PullComment, PullRequest, PullState};
 
@@ -38,6 +39,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/pulls/{number}/comments/{comment}",
             get(comment_detail).patch(edit_comment),
         )
+        .merge(reviews::routes())
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -65,6 +67,9 @@ fn pull_view(
         "updated_at": pull.updated_at,
         "can_edit": app_storage::same_author(&pull.author, actor),
         "can_manage": can_write || app_storage::same_author(&pull.author, actor),
+        "can_decide": pull.state == PullState::Open
+            && current.is_some()
+            && !app_storage::same_author(&pull.author, actor),
         "branches_available": current.is_some(),
     })
 }

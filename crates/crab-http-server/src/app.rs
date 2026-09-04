@@ -26,6 +26,8 @@ pub(crate) enum Error {
     NotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
+    #[error("Pull request authors cannot approve or request changes on their own changes")]
+    OwnReview,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
     #[error(
@@ -54,6 +56,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Only the author can edit this content",
+            ),
+            Self::OwnReview => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Pull request authors cannot approve or request changes on their own changes",
             ),
             Self::Conflict | Self::Storage(StorageError::StateConflict { .. }) => (
                 StatusCode::CONFLICT,
