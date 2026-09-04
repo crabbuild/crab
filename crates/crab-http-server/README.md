@@ -180,7 +180,7 @@ No cloud credentials are sent to the browser.
 
 ## Git HTTP reads
 
-The Clone menu exposes `/git/{owner}/{name}` for native Git protocol-v2 fetches.
+The Clone menu exposes `/git/{owner}/{name}.git` for native Git protocol-v2 fetches.
 The HTTP transport uses the same framing parser, visibility planner and bounded
 transfer profile as the Crab remote helper. `ls-refs`, shallow/deepen requests,
 filters and pack streaming are supported. Native push uses the separate
@@ -260,7 +260,7 @@ Configure your credential helper or `GIT_ASKPASS` with a Git access token first:
 
 ```sh
 python3 crates/crab-http-server/tests/verify_git_transport.py \
-  --url http://127.0.0.1:8788/git/my-team/my-project \
+  --url http://127.0.0.1:8788/git/my-team/my-project.git \
   --source /path/to/read-only-kubernetes \
   --revision FULL_UPLOADED_COMMIT \
   --workdir "$HOME/Workspace/Github/crab-qualification"
@@ -279,12 +279,54 @@ dependency selection remains pinned after later metadata updates and enforces
 per-session scan budgets. Scans and pointer proofs bound CPU work across the
 process and retain admission through cancellation. A combined dependency batch
 verifies Crab and LFS payloads from validated Git pointer blobs, including one
-deadline for selection and content reads. LFS HTTP transfer and production
-write/recovery qualification remain pending.
+deadline for selection and content reads. Production write/recovery qualification
+remains pending.
+
+## Git LFS transfers
+
+The canonical clone URL is `/git/{owner}/{name}.git`. Git LFS discovers
+`/info/lfs/objects/batch` from that URL without a separate `lfs.url` setting.
+Update development remotes that used the earlier suffix-free URL with
+`git remote set-url origin <URL from the Code menu>`.
+
+The batch API supports SHA-256 `basic` transfers. Read tokens download; write
+tokens also upload. Action URLs use the configured origin and the same scoped
+Git token. Every transfer rechecks access; upload checks it again after receiving
+the body, before storage publication. Revoked tokens cannot start another transfer.
+A multipart operation already in progress drains through completion or abort.
+
+Uploads stream to a private temporary file and then use `crab-lfs`'s verified,
+bounded-memory multipart publication. Downloads verify size and SHA-256 before
+opening a backpressured response. Already verified objects omit upload actions;
+missing/corrupt downloads return per-object errors. A successful upload needs no
+separate verify request. Git receive independently proves the pointer dependency
+before publishing its commit. No server-side Git checkout or LFS client is used.
+
+Batches accept at most 200 objects and 64 KiB of JSON, with a 30-second body
+budget. Files are limited to 512 MiB, matching the existing receive dependency
+limit; a push permits at most 2 GiB of dependency content. LFS byte transfers share
+the four Git transfer slots. Verification and byte transfer use a five-minute
+budget; started multipart work retains its slot and temporary file while draining,
+which can extend shutdown beyond that budget. Use a suitable `TMPDIR` for uploads.
+Downloads currently restart rather than resume ranges. The optional HTTP locking
+API returns 501; lock creation and enforcement across native HTTP pushes remain
+unfinished. Browser blob downloads still return exact Git pointer bytes.
+
+Native Git LFS qualification uploads a 10 MiB file, publishes its pointer commit,
+and checks exact hydrated bytes in an independent clone. HTTP tests cover invalid
+hashes/sizes, repeated uploads, missing objects, access scope, token revocation
+before publication and disconnect cleanup.
+
+An isolated RustFS run also pushed a 32 MiB LFS file, removed the source, and
+verified exact bytes in an independent clone. After removing that client and
+gracefully restarting the server, a second independent clone matched the same
+SHA-256. The local push took 491 ms; the first and restarted clones took 352 ms
+and 378 ms. These shared-cache localhost measurements verify the path and expose
+its observed latency; they are not production or Internet benchmarks.
 
 ## Native Git push
 
-`POST /git/{owner}/{name}/git-receive-pack` accepts exact native Git commits,
+`POST /git/{owner}/{name}.git/git-receive-pack` accepts exact native Git commits,
 branch/tag creation, fast-forward updates and deletions in one atomic batch.
 Non-fast-forward updates are rejected, including forced refspecs. Existing Crab
 repositories must be initialized before serving them. The local loopback operator
@@ -322,7 +364,7 @@ for byte after removing client repositories. The deletion flow also exposed and
 fixed a shared catalog bug: removed tips must be looked up even when no surviving
 ref or new evidence mentions them. These small-repository tests are not Kubernetes
 push throughput or production qualification. Protected branches, protected-view
-and active-active publication coexistence, LFS upload endpoints, and process-crash
+and active-active publication coexistence, LFS HTTP locking, and process-crash
 qualification remain unfinished; use this development server with standard Crab
 repository publication only.
 

@@ -149,6 +149,10 @@ pub(crate) async fn receive(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response> {
+    let name = name
+        .strip_suffix(".git")
+        .ok_or(ReceiveError::NotFound)?
+        .to_owned();
     let entry = server
         .repositories
         .get(&(owner.clone(), name.clone()))

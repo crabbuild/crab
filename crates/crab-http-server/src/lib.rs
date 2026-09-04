@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod git;
 mod issues;
+mod lfs;
 mod maintenance;
 mod receive;
 mod server;

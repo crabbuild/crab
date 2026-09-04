@@ -172,7 +172,7 @@ export function GitAccess({
 }
 
 export function CloneMenu({ repo }: { repo: Repository }) {
-  const url = `${window.location.origin}/git/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}`;
+  const url = `${window.location.origin}/git/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}.git`;
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   return (
