@@ -24,6 +24,17 @@ use crate::{
 
 const TTL: Duration = Duration::from_secs(300);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    NativePush,
+    PullRequest,
+}
+
+struct ReceiveInput {
+    pack: Option<BufReader<std::fs::File>>,
+    publication: Publication,
+}
+
 struct RefLease {
     name: String,
     holder: String,
@@ -91,7 +102,10 @@ pub(super) async fn run(
         key,
         directory,
         request,
-        Some(input),
+        ReceiveInput {
+            pack: Some(input),
+            publication: Publication::NativePush,
+        },
         cancel,
     )
     .await
@@ -109,9 +123,20 @@ pub(crate) async fn update_existing_ref(
         updates: vec![update],
         report_status: false,
     };
-    run_request(server, principal, key, directory, request, None, cancel)
-        .await
-        .map(drop)
+    run_request(
+        server,
+        principal,
+        key,
+        directory,
+        request,
+        ReceiveInput {
+            pack: None,
+            publication: Publication::PullRequest,
+        },
+        cancel,
+    )
+    .await
+    .map(drop)
 }
 
 async fn run_request(
@@ -120,7 +145,7 @@ async fn run_request(
     key: &(String, String),
     directory: tempfile::TempDir,
     request: receive_wire::ReceiveRequest,
-    input: Option<BufReader<std::fs::File>>,
+    input: ReceiveInput,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
@@ -175,7 +200,7 @@ async fn publish(
     principal: &Principal,
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
-    input: Option<BufReader<std::fs::File>>,
+    input: ReceiveInput,
     directory: &std::path::Path,
     leases: &[RefLease],
     cancel: &CancellationToken,
@@ -202,10 +227,28 @@ async fn publish(
             "Repository changed during receive admission; retry",
         ));
     }
+    let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
+    let protected = input.publication == Publication::NativePush
+        && request.updates.iter().any(|update| {
+            entry.config.protects(&update.name) && (update.old.is_some() || has_branch)
+        });
+    if protected {
+        if request.report_status {
+            let mut bytes = Vec::new();
+            receive_wire::report(
+                &mut bytes,
+                &request.updates,
+                None,
+                Some("protected branch requires a pull request"),
+            )?;
+            return Ok(bytes);
+        }
+        return Err(ReceiveError::Protected);
+    }
     let prepared = match validate::prepare(
         repository.clone(),
         directory.to_owned(),
-        input,
+        input.pack,
         request.updates.clone(),
         cancel,
     )

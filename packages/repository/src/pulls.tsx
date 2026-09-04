@@ -7,6 +7,7 @@ import {
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestIcon,
+  ShieldLockIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
 import {
@@ -691,6 +692,16 @@ function MergePanel({
           Crab verifies ancestry, dependency content, visibility, and the exact
           branch tips again while holding the base ref lock.
         </p>
+        {repo.protected_branches.includes(branch(pull.base_ref)) && (
+          <p className="protected-branch-note">
+            <ShieldLockIcon />
+            <span>
+              <code>{branch(pull.base_ref)}</code> is protected. Direct pushes
+              are blocked; this exact head can publish through the pull request
+              merge path.
+            </span>
+          </p>
+        )}
         {pull.can_merge ? (
           <Button
             variant="primary"

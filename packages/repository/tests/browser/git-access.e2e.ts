@@ -27,6 +27,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
             name,
             description: "",
             access: name === "first" ? "write" : "read",
+            protected_branches: [],
           })),
         },
       });

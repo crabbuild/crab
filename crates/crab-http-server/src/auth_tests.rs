@@ -197,6 +197,7 @@ impl Harness {
                         access: crate::RepositoryAccess::Read,
                     },
                 ],
+                protected_branches: vec![],
             },
             store: store.clone(),
             layout: StoreLayout::new(store, "test".into()),

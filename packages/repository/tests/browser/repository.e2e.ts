@@ -22,6 +22,7 @@ test.beforeEach(async ({ page }) => {
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              protected_branches: [],
             },
           ],
         },
