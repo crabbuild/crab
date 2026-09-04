@@ -18,6 +18,8 @@ bytes = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache"] }
 crab-cache-store = { workspace = true }
 crab-diff = { workspace = true }
+crab-git = { workspace = true }
+crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader"] }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
@@ -38,5 +40,6 @@ xet-data = { workspace = true }
 xet-runtime = { workspace = true }
 
 [dev-dependencies]
+futures-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
