@@ -6,6 +6,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   let fail = true;
   let issued = 0;
   let revoked = 0;
+  let requestedAccess = "read";
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -25,6 +26,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
             owner: "team",
             name,
             description: "",
+            access: name === "first" ? "write" : "read",
           })),
         },
       });
@@ -37,7 +39,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
     expect(request.postDataJSON()).toEqual({
       owner: "team",
       repository: "first",
-      access: "read",
+      access: requestedAccess,
     });
     if (fail) return route.fulfill({ status: 403 });
     issued++;
@@ -48,7 +50,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
         expires_in: 600,
         owner: "team",
         repository: "first",
-        access: "read",
+        access: requestedAccess,
       },
     });
   });
@@ -75,11 +77,22 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   const token = page.getByLabel("Read token for team/first", { exact: false });
   await expect(token).toHaveValue("fixture-token");
   await expect(token).toHaveAttribute("type", "password");
+  requestedAccess = "write";
+  await page.getByLabel("Access", { exact: true }).selectOption("write");
+  await expect(token).toHaveCount(0);
+  await generate.click();
+  await expect(
+    page.getByLabel("Write token for team/first", { exact: false }),
+  ).toHaveValue("fixture-token");
   await repository.selectOption("team/second");
+  await expect(page.getByLabel("Access", { exact: true })).toHaveValue("read");
+  await expect(
+    page.locator("#git-token-access option[value=write]"),
+  ).toHaveCount(0);
   await expect(token).toHaveCount(0);
   await page
     .getByRole("button", { name: "Revoke tokens", exact: true })
     .click();
   await expect(page.getByRole("status")).toContainText("have been revoked");
-  expect({ issued, revoked }).toEqual({ issued: 1, revoked: 1 });
+  expect({ issued, revoked }).toEqual({ issued: 2, revoked: 1 });
 });

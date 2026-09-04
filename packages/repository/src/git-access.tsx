@@ -21,6 +21,7 @@ export function GitAccess({
 }) {
   const [token, setToken] = useState<GitToken>();
   const [selected, setSelected] = useState("");
+  const [access, setAccess] = useState<"read" | "write">("read");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
   const credentialKey =
@@ -45,7 +46,7 @@ export function GitAccess({
             ? JSON.stringify({
                 owner: repository.owner,
                 repository: repository.name,
-                access: "read",
+                access,
               })
             : undefined,
       });
@@ -71,8 +72,8 @@ export function GitAccess({
         <h2>Git access token</h2>
         <p>
           Use <code>crab</code> as your Git username and this token as the
-          password. It can read only the selected repository and expires when
-          this sign-in expires or you sign out.
+          password. It grants the selected access to one repository and expires
+          when this sign-in expires or you sign out.
         </p>
         <p>Save it in your Git credential manager. It is shown only here.</p>
         <details className="credential-setup">
@@ -87,6 +88,7 @@ export function GitAccess({
           disabled={pending}
           onChange={(event) => {
             setSelected(event.target.value);
+            setAccess("read");
             setToken(undefined);
             setMessage(undefined);
           }}
@@ -101,13 +103,30 @@ export function GitAccess({
             );
           })}
         </select>
+        <label htmlFor="git-token-access">Access</label>
+        <select
+          id="git-token-access"
+          value={access}
+          disabled={pending || !repository}
+          onChange={(event) => {
+            setAccess(event.target.value === "write" ? "write" : "read");
+            setToken(undefined);
+            setMessage(undefined);
+          }}
+        >
+          <option value="read">Read (clone and fetch)</option>
+          {repository?.access === "write" && (
+            <option value="write">Read and write (push)</option>
+          )}
+        </select>
         {repositories.length === 0 && (
           <p>No repositories available for a token.</p>
         )}
         {token && (
           <>
             <label htmlFor="git-token">
-              Read token for {token.owner}/{token.repository} · expires in about{" "}
+              {token.access === "write" ? "Write" : "Read"} token for{" "}
+              {token.owner}/{token.repository} · expires in about{" "}
               {Math.ceil(token.expires_in / 60)} minutes
             </label>
             <input
@@ -189,7 +208,7 @@ export function CloneMenu({ repo }: { repo: Repository }) {
           password.
         </p>
         <p className="muted">
-          Fetch uses protocol v2. Push is not available yet.
+          Push requires write access. Non-fast-forward updates are rejected.
         </p>
         {error && (
           <p role="status">Select the URL field and copy it manually.</p>
