@@ -299,12 +299,25 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-These checks cover issue/comment edit focus, cancellation, close/reopen,
+These four checks cover issue/comment edit focus, cancellation, close/reopen,
 Markdown tab navigation, posting from preview, retained drafts after failure,
-and preserving focus moved elsewhere during a delayed response. They use
+and preserving focus moved elsewhere during a delayed response. Header checks
+exercise light/dark themes at 320–1,280 px, including control hit targets and
+Git access panel bounds. They use
 in-memory HTTP fixtures to isolate browser behavior; they do not prove storage
 persistence or replace authenticated RustFS qualification. CI runs them in a
 separate browser job and retains traces/screenshots on failure.
+
+An authenticated browser run against a separate RustFS fixture also exercised
+issue creation/edit/cancellation, comment preview/post/edit, close/reopen and
+page reload. A concurrent edit returned a conflict while preserving the local
+draft and the separately saved content; Git refs remained unchanged. Conflict
+review and merging still require additional UI work. Desktop/mobile screenshots
+revealed overlapping account/theme controls; the header now wraps account
+actions onto a separate mobile row, with its Git access panel below the header.
+The saved title, comment and reopened state also survived a server restart and
+fresh sign-in. These checks use a local test issuer, not a production identity
+provider, and do not constitute a complete accessibility audit.
 
 The authenticated Kubernetes/RustFS run matched the same data checks. Its median
 tree request was 8.878 ms, diff request 40.688 ms, and blame request 1,982.136 ms.
