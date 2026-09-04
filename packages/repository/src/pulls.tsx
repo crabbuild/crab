@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@primer/react";
 import {
   CheckCircleFillIcon,
+  ChecklistIcon,
   ClockIcon,
   CodeReviewIcon,
   CommentIcon,
@@ -22,6 +23,7 @@ import {
   type RepositoryLabel,
 } from "./api";
 import { ComparisonView } from "./content";
+import { CheckRuns } from "./check-runs";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
 import { LabelBadges } from "./discussion-labels";
@@ -99,6 +101,7 @@ interface PullRequest extends PullSummary {
       target_url: string | null;
       author: string | null;
       updated_at: number | null;
+      run_id: number | null;
     }>;
     satisfied: boolean;
   };
@@ -504,8 +507,21 @@ function PullDetail({
 }) {
   const path = endpoint(repo, `pulls/${number}`);
   const pull = useRequest<PullRequest>(path);
+  const requestedTab = url.searchParams.get("pull_tab");
   const tab =
-    url.searchParams.get("pull_tab") === "files" ? "files" : "conversation";
+    requestedTab === "files" || requestedTab === "checks"
+      ? requestedTab
+      : "conversation";
+  const requestedCheck = Number(url.searchParams.get("check"));
+  const selectedCheck =
+    Number.isSafeInteger(requestedCheck) && requestedCheck > 0
+      ? requestedCheck
+      : undefined;
+  const requestedCheckBefore = Number(url.searchParams.get("check_before"));
+  const checkBefore =
+    Number.isSafeInteger(requestedCheckBefore) && requestedCheckBefore > 0
+      ? requestedCheckBefore
+      : undefined;
   return (
     <section className="pulls-page pull-detail">
       <Result state={pull}>
@@ -545,6 +561,17 @@ function PullDetail({
                 <CommentIcon /> Conversation
               </Link>
               <Link
+                className={tab === "checks" ? "active" : ""}
+                aria-current={tab === "checks" ? "page" : undefined}
+                href={repoHref(repo, {
+                  view: "pulls",
+                  pull: String(number),
+                  pull_tab: "checks",
+                })}
+              >
+                <ChecklistIcon /> Checks
+              </Link>
+              <Link
                 className={tab === "files" ? "active" : ""}
                 aria-current={tab === "files" ? "page" : undefined}
                 href={repoHref(repo, {
@@ -556,14 +583,22 @@ function PullDetail({
                 Files changed
               </Link>
             </nav>
-            {!data.branches_available && (
+            {tab !== "checks" && !data.branches_available && (
               <div className="notice error">
                 One of this pull request&apos;s branches no longer exists. The
                 original commit IDs remain recorded, but the live comparison is
                 unavailable.
               </div>
             )}
-            {tab === "files" ? (
+            {tab === "checks" ? (
+              <CheckRuns
+                repo={repo}
+                pull={number}
+                oid={data.head_oid}
+                selected={selectedCheck}
+                before={checkBefore}
+              />
+            ) : tab === "files" ? (
               data.branches_available ? (
                 <>
                   <ComparisonView
@@ -799,7 +834,12 @@ function MergePanel({
             </span>
           </p>
         )}
-        <RequiredChecks requirements={requirements} refresh={refresh} />
+        <RequiredChecks
+          repo={repo}
+          pull={pull}
+          requirements={requirements}
+          refresh={refresh}
+        />
         {pull.can_merge ? (
           <Button
             variant="primary"
@@ -854,9 +894,13 @@ function MergePanel({
 }
 
 function RequiredChecks({
+  repo,
+  pull,
   requirements,
   refresh,
 }: {
+  repo: Repository;
+  pull: PullRequest;
   requirements: PullRequest["merge_requirements"];
   refresh: () => void;
 }) {
@@ -913,11 +957,22 @@ function RequiredChecks({
                           : "Unsuccessful")}
                 </small>
               </span>
-              {check.target_url && (
+              {check.run_id ? (
+                <Link
+                  href={repoHref(repo, {
+                    view: "pulls",
+                    pull: String(pull.number),
+                    pull_tab: "checks",
+                    check: String(check.run_id),
+                  })}
+                >
+                  Details
+                </Link>
+              ) : check.target_url ? (
                 <a href={check.target_url} target="_blank" rel="noreferrer">
                   Details
                 </a>
-              )}
+              ) : null}
             </li>
           );
         })}

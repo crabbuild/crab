@@ -59,6 +59,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
               checkState === "success" ? "https://ci.example.test/42" : null,
             author: checkState === "success" ? "CI service" : null,
             updated_at: checkState === "success" ? 1_700_000_040_000 : null,
+            run_id: checkState === "success" ? 7 : null,
           },
         ],
         satisfied: approvals >= 1 && checkState === "success",
@@ -172,6 +173,73 @@ test("pull request creation, discussion, and files follow the GitHub review flow
             mode: "100644",
             classification: "OrdinaryGit",
             text: "New content\n",
+          },
+        },
+      });
+    if (path === `/api/repos/team/project/commits/${head}/check-runs`) {
+      expect(url.searchParams.get("limit")).toBe("50");
+      return route.fulfill({
+        json: {
+          sha: head,
+          items: [
+            {
+              id: 7,
+              head_sha: head,
+              name: "ci/test",
+              status: "completed",
+              conclusion: "success",
+              details_url: "https://ci.example.test/runs/7",
+              output_title: "All tests passed",
+              author: "CI service",
+              version: 3,
+              started_at: 1_700_000_020_000,
+              completed_at: 1_700_000_040_000,
+              created_at: 1_700_000_010_000,
+              updated_at: 1_700_000_040_000,
+            },
+          ],
+          next: null,
+        },
+      });
+    }
+    if (path === `/api/repos/team/project/commits/${head}/check-runs/7`)
+      return route.fulfill({
+        json: {
+          id: 7,
+          head_sha: head,
+          name: "ci/test",
+          status: "completed",
+          conclusion: "success",
+          details_url: "https://ci.example.test/runs/7",
+          output_title: "All tests passed",
+          author: "CI service",
+          version: 3,
+          started_at: 1_700_000_020_000,
+          completed_at: 1_700_000_040_000,
+          created_at: 1_700_000_010_000,
+          updated_at: 1_700_000_040_000,
+          output: {
+            title: "All tests passed",
+            summary: "The **required test suite** passed.",
+            text: "No failures were reported.",
+            annotations: [
+              {
+                path: "src/lib.rs",
+                start_line: 42,
+                end_line: 44,
+                level: "warning",
+                title: "Slow assertion",
+                message: "This assertion took longer than expected.",
+              },
+            ],
+            steps: [
+              {
+                name: "Build and test",
+                status: "completed",
+                conclusion: "success",
+                log: "44 passed; 0 failed\n<script>alert(1)</script>\n",
+              },
+            ],
           },
         },
       });
@@ -323,6 +391,20 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Checks", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "ci/test" })).toBeVisible();
+  await expect(page.locator(".check-run-content")).toContainText(
+    "The required test suite passed.",
+  );
+  await expect(page.locator(".check-annotations")).toContainText(
+    "src/lib.rs:42–44",
+  );
+  await page.getByText("Build and test", { exact: true }).click();
+  await expect(page.locator(".check-steps pre")).toContainText(
+    "<script>alert(1)</script>",
+  );
+  await expect(page.locator(".check-steps script")).toHaveCount(0);
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible();

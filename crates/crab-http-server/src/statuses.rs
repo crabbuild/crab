@@ -95,7 +95,7 @@ pub(crate) fn same_context(left: &str, right: &str) -> bool {
     context_key(left) == context_key(right)
 }
 
-fn parse_oid(value: &str) -> Result<ObjectId> {
+pub(crate) fn parse_oid(value: &str) -> Result<ObjectId> {
     ObjectId::from_hex(value.as_bytes())
         .ok()
         .filter(|oid| !oid.is_null())
@@ -127,7 +127,7 @@ fn validate_description(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn validate_target(value: Option<&str>) -> Result<()> {
+pub(crate) fn validate_target(value: Option<&str>) -> Result<()> {
     let Some(value) = value else {
         return Ok(());
     };
@@ -140,7 +140,11 @@ fn validate_target(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn require_commit(server: &Server, repo: &Repository, oid: ObjectId) -> Result<String> {
+pub(crate) async fn require_commit(
+    server: &Server,
+    repo: &Repository,
+    oid: ObjectId,
+) -> Result<String> {
     let cancellation = server.cancellation.child_token();
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let repository = repo.open(server, &cancellation).await?;
