@@ -15,6 +15,7 @@ pub(super) enum PullState {
     #[default]
     Open,
     Closed,
+    Merged,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -23,6 +24,25 @@ pub(super) enum ReviewState {
     Commented,
     Approved,
     ChangesRequested,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum MergeMethod {
+    FastForward,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PullMerge {
+    pub request_id: String,
+    pub author: Identity,
+    pub method: MergeMethod,
+    pub pull_version: u64,
+    pub base_oid: String,
+    pub head_oid: String,
+    pub commit_oid: String,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -38,6 +58,10 @@ pub(super) struct PullRequest {
     pub base_oid: String,
     pub head_ref: String,
     pub head_oid: String,
+    #[serde(default)]
+    pub merge_pending: Option<PullMerge>,
+    #[serde(default)]
+    pub merge: Option<PullMerge>,
     pub version: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -88,6 +112,15 @@ pub(super) struct NewPullReview {
     pub commit_oid: String,
 }
 
+pub(super) struct NewPullMerge {
+    pub author: Identity,
+    pub request_id: String,
+    pub method: MergeMethod,
+    pub pull_version: u64,
+    pub base_oid: String,
+    pub head_oid: String,
+}
+
 pub(super) fn pull_path(number: u64) -> String {
     format!("{ROOT}/{number:016}/pull.json")
 }
@@ -106,6 +139,10 @@ pub(super) fn reviews_root(number: u64) -> String {
 
 pub(super) fn review_path(pull: u64, review: u64) -> String {
     format!("{}/{review:016}.json", reviews_root(pull))
+}
+
+fn merge_request_path(pull: u64, request_id: &str) -> String {
+    format!("{ROOT}/{pull:016}/merge/requests/{request_id}.json")
 }
 
 pub(super) async fn recover_pull(
@@ -155,6 +192,8 @@ pub(super) async fn create_pull(repo: &Repository, input: NewPullRequest) -> Res
                     base_oid: input.base_oid.clone(),
                     head_ref: input.head_ref.clone(),
                     head_oid: input.head_oid.clone(),
+                    merge_pending: None,
+                    merge: None,
                     version: 1,
                     created_at: timestamp,
                     updated_at: timestamp,
@@ -286,4 +325,166 @@ pub(super) async fn create_review(
         return Err(Error::Conflict);
     }
     Ok(current)
+}
+
+pub(super) fn merge_matches(left: &PullMerge, input: &NewPullMerge) -> bool {
+    app_storage::same_author(&left.author, &input.author)
+        && left.request_id == input.request_id
+        && left.method == input.method
+        && left.pull_version == input.pull_version
+        && left.base_oid == input.base_oid
+        && left.head_oid == input.head_oid
+}
+
+pub(super) async fn recover_merge(
+    repo: &Repository,
+    pull: u64,
+    input: &NewPullMerge,
+) -> Result<Option<PullMerge>> {
+    let path = merge_request_path(pull, &input.request_id);
+    let Some((record, _)) = app_storage::read::<PullMerge>(repo, &path).await? else {
+        return Ok(None);
+    };
+    if !merge_matches(&record, input) {
+        return Err(Error::RequestConflict);
+    }
+    Ok(Some(record))
+}
+
+pub(super) async fn reserve_merge(
+    repo: &Repository,
+    pull: u64,
+    input: &NewPullMerge,
+) -> Result<PullMerge> {
+    let path = merge_request_path(pull, &input.request_id);
+    let timestamp = app_storage::now()?;
+    let proposed = PullMerge {
+        request_id: input.request_id.clone(),
+        author: input.author.clone(),
+        method: input.method,
+        pull_version: input.pull_version,
+        base_oid: input.base_oid.clone(),
+        head_oid: input.head_oid.clone(),
+        commit_oid: input.head_oid.clone(),
+        created_at: timestamp,
+    };
+    let record = app_storage::create_or_read(repo, &path, proposed).await?;
+    if !merge_matches(&record, input) {
+        return Err(Error::RequestConflict);
+    }
+    Ok(record)
+}
+
+pub(super) async fn complete_merge(
+    repo: &Repository,
+    number: u64,
+    record: &PullMerge,
+) -> Result<PullRequest> {
+    let path = pull_path(number);
+    for _ in 0..10 {
+        let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if let Some(existing) = &pull.merge {
+            if existing.request_id == record.request_id {
+                return Ok(pull);
+            }
+            return Err(Error::MergeConflict);
+        }
+        if pull
+            .merge_pending
+            .as_ref()
+            .is_none_or(|pending| pending.request_id != record.request_id)
+        {
+            return Err(Error::MergeConflict);
+        }
+        pull.state = PullState::Merged;
+        pull.merge_pending = None;
+        pull.merge = Some(record.clone());
+        pull.version = pull
+            .version
+            .checked_add(1)
+            .filter(|value| *value < app_storage::MAX_NUMBER)
+            .ok_or(Error::Conflict)?;
+        pull.updated_at = app_storage::now()?;
+        match app_storage::update(repo, &path, &pull, etag).await {
+            Ok(()) => return Ok(pull),
+            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
+}
+
+pub(super) async fn begin_merge(
+    repo: &Repository,
+    number: u64,
+    record: &PullMerge,
+) -> Result<PullRequest> {
+    let path = pull_path(number);
+    for _ in 0..10 {
+        let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if let Some(existing) = &pull.merge {
+            if existing.request_id == record.request_id {
+                return Ok(pull);
+            }
+            return Err(Error::MergeConflict);
+        }
+        if let Some(pending) = &pull.merge_pending {
+            if pending.request_id == record.request_id {
+                return Ok(pull);
+            }
+            return Err(Error::MergeConflict);
+        }
+        if pull.state != PullState::Open || pull.version != record.pull_version {
+            return Err(Error::MergeConflict);
+        }
+        pull.merge_pending = Some(record.clone());
+        pull.version = pull
+            .version
+            .checked_add(1)
+            .filter(|value| *value < app_storage::MAX_NUMBER)
+            .ok_or(Error::Conflict)?;
+        pull.updated_at = app_storage::now()?;
+        match app_storage::update(repo, &path, &pull, etag).await {
+            Ok(()) => return Ok(pull),
+            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
+}
+
+pub(super) async fn abort_merge(repo: &Repository, number: u64, record: &PullMerge) -> Result<()> {
+    let path = pull_path(number);
+    for _ in 0..10 {
+        let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if pull.merge.is_some() {
+            return Ok(());
+        }
+        if pull
+            .merge_pending
+            .as_ref()
+            .is_none_or(|pending| pending.request_id != record.request_id)
+        {
+            return Ok(());
+        }
+        pull.merge_pending = None;
+        pull.version = pull
+            .version
+            .checked_add(1)
+            .filter(|value| *value < app_storage::MAX_NUMBER)
+            .ok_or(Error::Conflict)?;
+        pull.updated_at = app_storage::now()?;
+        match app_storage::update(repo, &path, &pull, etag).await {
+            Ok(()) => return Ok(()),
+            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
 }

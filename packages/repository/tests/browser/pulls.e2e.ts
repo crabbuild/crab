@@ -10,9 +10,11 @@ const pathHex = "README.md"
 test("pull request creation, discussion, and files follow the GitHub review flow", async ({
   page,
 }) => {
-  let state: "open" | "closed" = "open";
+  let state: "open" | "closed" | "merged" = "open";
   let created = false;
   let branchesAvailable = true;
+  let mergePending = false;
+  let mergeRequest = "";
   const comments: Array<Record<string, unknown>> = [];
   const reviews: Array<Record<string, unknown>> = [];
   const pull = () => ({
@@ -31,9 +33,30 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     created_at: 1_700_000_000_000,
     updated_at: 1_700_000_000_000,
     can_edit: true,
-    can_manage: true,
+    can_manage: !mergePending,
     can_decide: true,
-    branches_available: branchesAvailable,
+    can_merge: state === "open" && (branchesAvailable || mergePending),
+    branches_available: state === "merged" || branchesAvailable,
+    merge:
+      state === "merged"
+        ? {
+            author: "Local operator",
+            method: "fast_forward",
+            commit_oid: head,
+            created_at: 1_700_000_200_000,
+          }
+        : null,
+    merge_pending: mergePending
+      ? {
+          request_id: mergeRequest,
+          author: "Local operator",
+          method: "fast_forward",
+          pull_version: 1,
+          base_oid: base,
+          head_oid: head,
+          created_at: 1_700_000_150_000,
+        }
+      : null,
   });
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -173,6 +196,26 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         },
       });
     }
+    if (/\/pulls\/\d+\/merge$/.test(path)) {
+      const input = request.postDataJSON();
+      if (!mergePending) {
+        mergePending = true;
+        mergeRequest = input.request_id;
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              message:
+                "The merge may have completed. Reload the pull request before retrying the same submission",
+            },
+          },
+        });
+      }
+      expect(input.request_id).toBe(mergeRequest);
+      mergePending = false;
+      state = "merged";
+      return route.fulfill({ json: pull() });
+    }
     return route.fulfill({
       status: 404,
       json: { error: { message: "Fixture route unavailable" } },
@@ -242,6 +285,26 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     "Verified in the browser.",
   );
   await expect(page.locator(".review-event")).toContainText("Outdated");
+
+  branchesAvailable = true;
+  state = "open";
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Merge pull request", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "The merge may have completed",
+  );
+  branchesAvailable = false;
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Retry merge", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Retry merge", exact: true }).click();
+  await expect(page.locator(".pull-state")).toHaveText("Merged");
+  await expect(page.locator(".pull-merge-note")).toContainText(
+    "Local operator fast-forwarded commit",
+  );
 
   await page.setViewportSize({ width: 360, height: 800 });
   expect(

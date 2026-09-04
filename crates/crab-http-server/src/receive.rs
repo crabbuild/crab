@@ -19,6 +19,7 @@ mod validate;
 
 const MAX_BODY: u64 = 2 * 1024 * 1024 * 1024;
 const REQUEST_BUDGET: Duration = Duration::from_secs(5 * 60);
+const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
 const CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
 
 type Result<T> = std::result::Result<T, ReceiveError>;
@@ -246,4 +247,49 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
         return Err(ReceiveError::Cancelled);
     }
     Ok(())
+}
+
+pub(crate) async fn fast_forward(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    name: String,
+    old: gix_hash::ObjectId,
+    new: gix_hash::ObjectId,
+) -> Result<()> {
+    let permit = Arc::clone(&server.git_admission)
+        .try_acquire_owned()
+        .map_err(|_| ReceiveError::Busy)?;
+    let cancel = server.cancellation.child_token();
+    let worker_cancel = cancel.clone();
+    let worker_server = Arc::clone(&server);
+    let (send, result) = tokio::sync::oneshot::channel();
+    server.receives.spawn(async move {
+        let _permit = permit;
+        let work = publish::update_existing_ref(
+            &worker_server,
+            &principal,
+            &key,
+            crab_git::receive_plan::RefUpdate {
+                name,
+                old: Some(old),
+                new: Some(new),
+            },
+            &worker_cancel,
+        );
+        tokio::pin!(work);
+        let completed = tokio::select! {
+            result = &mut work => result,
+            () = tokio::time::sleep(REF_UPDATE_BUDGET) => {
+                worker_cancel.cancel();
+                work.await
+            }
+        };
+        if let Err(Err(error)) = send.send(completed) {
+            tracing::error!(error = ?error, "disconnected pull request merge failed");
+        }
+    });
+    result
+        .await
+        .map_err(|_| ReceiveError::Request("Merge worker stopped"))?
 }

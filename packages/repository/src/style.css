@@ -569,6 +569,9 @@ main {
   color: var(--fgColor-open);
 }
 .pull-status-icon.closed {
+  color: var(--fgColor-danger);
+}
+.pull-status-icon.merged {
   color: var(--fgColor-done);
 }
 .pull-branches {
@@ -668,6 +671,9 @@ main {
   background: var(--bgColor-open-emphasis);
 }
 .pull-state.closed {
+  background: var(--bgColor-danger-emphasis);
+}
+.pull-state.merged {
   background: var(--bgColor-done-emphasis);
 }
 .pull-tabs {
@@ -804,6 +810,23 @@ main {
   margin-top: 3px;
 }
 .pull-merge-note p {
+  margin-bottom: 0;
+}
+.pull-merge-note code {
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-muted);
+  padding: 1px 4px;
+}
+.pull-merge-note .merge-status-icon {
+  color: var(--fgColor-done);
+}
+.merge-action {
+  flex: 1;
+}
+.merge-action button {
+  margin-top: 12px;
+}
+.merge-action .notice {
   margin-bottom: 0;
 }
 @media (max-width: 640px) {

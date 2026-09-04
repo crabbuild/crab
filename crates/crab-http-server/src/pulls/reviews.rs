@@ -56,6 +56,10 @@ async fn pull_and_head(
     let (pull, _) = app_storage::read::<PullRequest>(repo, &storage::pull_path(id))
         .await?
         .ok_or(Error::NotFound)?;
+    if let Some(merge) = &pull.merge {
+        let head = merge.commit_oid.clone();
+        return Ok((pull, Some(head)));
+    }
     let repository = repo
         .open_current(server, RepositoryOptions::default(), &server.cancellation)
         .await

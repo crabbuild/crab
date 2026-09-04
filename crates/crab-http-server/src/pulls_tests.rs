@@ -284,3 +284,225 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
     server.cancellation.cancel();
     server.runtime.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
+    let mut server = maintenance_tests::fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    Arc::get_mut(&mut server).unwrap().port = port;
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let source = tempfile::tempdir().unwrap();
+    let path = source.path();
+    let git_url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    receive_tests::success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(path.join("README.md"), "base\n").unwrap();
+    receive_tests::success(path, &["add", "README.md"]).await;
+    receive_tests::success(path, &["commit", "-m", "base"]).await;
+    let base = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
+    receive_tests::success(path, &["push", &git_url, "main"]).await;
+    receive_tests::success(path, &["checkout", "-b", "feature"]).await;
+    std::fs::write(path.join("FEATURE.md"), "merged through Crab\n").unwrap();
+    receive_tests::success(path, &["add", "FEATURE.md"]).await;
+    receive_tests::success(path, &["commit", "-m", "feature"]).await;
+    let head = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
+    receive_tests::success(path, &["push", &git_url, "feature"]).await;
+
+    let client = reqwest::Client::new();
+    let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");
+    let created = json_request(
+        &client,
+        reqwest::Method::POST,
+        &root,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000030",
+            "title":"Merge the feature",
+            "body":"Use the existing verified commits.",
+            "base_ref":"refs/heads/main",
+            "head_ref":"refs/heads/feature"
+        }),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::CREATED);
+    let merge_input = json!({
+        "request_id":"00000000-0000-4000-8000-000000000031",
+        "version":created.1["version"],
+        "method":"fast_forward",
+        "base_oid":created.1["base_oid"],
+        "head_oid":created.1["head_oid"]
+    });
+    let busy = Arc::clone(&server.git_admission)
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{root}/1/merge"),
+            merge_input.clone(),
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let pending: Value = serde_json::from_slice(
+        &client
+            .get(format!("{root}/1"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pending["merge_pending"]["request_id"],
+        "00000000-0000-4000-8000-000000000031"
+    );
+    assert_eq!(pending["can_manage"], false);
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::PATCH,
+            &format!("{root}/1"),
+            json!({"version":pending["version"],"state":"closed"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    drop(busy);
+    let merged = json_request(
+        &client,
+        reqwest::Method::POST,
+        &format!("{root}/1/merge"),
+        merge_input.clone(),
+    )
+    .await;
+    assert_eq!(merged.0, StatusCode::OK);
+    assert_eq!(merged.1["state"], "merged");
+    assert_eq!(merged.1["base_oid"], base);
+    assert_eq!(merged.1["head_oid"], head);
+    assert_eq!(merged.1["merge"]["commit_oid"], head);
+    assert_eq!(merged.1["can_merge"], false);
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{root}/1/merge"),
+            merge_input,
+        )
+        .await
+        .1["version"],
+        merged.1["version"]
+    );
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::PATCH,
+            &format!("{root}/1"),
+            json!({"version":merged.1["version"],"state":"open"}),
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let refs: Value = serde_json::from_slice(
+        &client
+            .get(format!("http://127.0.0.1:{port}/api/repos/team/repo/refs"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        refs["refs"].as_array().unwrap().iter().any(|reference| {
+            reference["name"] == "refs/heads/main" && reference["oid"] == head
+        })
+    );
+    let compare = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/changes?rev={head}&base={base}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compare.status(), StatusCode::OK);
+    let compare: Value = serde_json::from_slice(&compare.bytes().await.unwrap()).unwrap();
+    assert_eq!(compare["changes"][0]["path"], "FEATURE.md");
+    receive_tests::success(path, &["push", &git_url, ":refs/heads/feature"]).await;
+    let detail: Value = serde_json::from_slice(
+        &client
+            .get(format!("{root}/1"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(detail["branches_available"], true);
+    assert_eq!(detail["base_oid"], base);
+    assert_eq!(detail["head_oid"], head);
+
+    receive_tests::success(path, &["checkout", "-b", "conflict", &base]).await;
+    std::fs::write(path.join("CONFLICT.md"), "diverged\n").unwrap();
+    receive_tests::success(path, &["add", "CONFLICT.md"]).await;
+    receive_tests::success(path, &["commit", "-m", "diverged"]).await;
+    receive_tests::success(path, &["push", &git_url, "conflict"]).await;
+    let second = json_request(
+        &client,
+        reqwest::Method::POST,
+        &root,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000032",
+            "title":"Diverged change",
+            "body":"This cannot fast-forward.",
+            "base_ref":"refs/heads/main",
+            "head_ref":"refs/heads/conflict"
+        }),
+    )
+    .await;
+    assert_eq!(second.0, StatusCode::CREATED);
+    let conflict = json_request(
+        &client,
+        reqwest::Method::POST,
+        &format!("{root}/2/merge"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000033",
+            "version":second.1["version"],
+            "method":"fast_forward",
+            "base_oid":second.1["base_oid"],
+            "head_oid":second.1["head_oid"]
+        }),
+    )
+    .await;
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
+
+    source.close().unwrap();
+    server.cancellation.cancel();
+    stop.cancel();
+    http.await.unwrap();
+    server.receives.close();
+    server.receives.wait().await;
+    server.finish_maintenance().await.unwrap();
+    server.runtime.shutdown().await;
+}

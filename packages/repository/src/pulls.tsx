@@ -40,7 +40,7 @@ interface PullComment {
 interface PullSummary {
   number: number;
   title: string;
-  state: "open" | "closed";
+  state: "open" | "closed" | "merged";
   author: string;
   base_ref: string;
   head_ref: string;
@@ -58,7 +58,23 @@ interface PullRequest extends PullSummary {
   original_head_oid: string | null;
   can_manage: boolean;
   can_decide: boolean;
+  can_merge: boolean;
   branches_available: boolean;
+  merge: {
+    author: string;
+    method: "fast_forward";
+    commit_oid: string;
+    created_at: number;
+  } | null;
+  merge_pending: {
+    request_id: string;
+    author: string;
+    method: "fast_forward";
+    pull_version: number;
+    base_oid: string;
+    head_oid: string;
+    created_at: number;
+  } | null;
 }
 
 type ReviewState = "commented" | "approved" | "changes_requested";
@@ -95,10 +111,16 @@ function branch(name: string) {
 }
 
 function PullBadge({ state }: { state: PullRequest["state"] }) {
+  const Icon =
+    state === "open"
+      ? GitPullRequestIcon
+      : state === "merged"
+        ? GitMergeIcon
+        : GitPullRequestClosedIcon;
   return (
     <span className={`pull-state ${state}`} aria-live="polite">
-      {state === "open" ? <GitPullRequestIcon /> : <GitPullRequestClosedIcon />}
-      {state === "open" ? "Open" : "Closed"}
+      <Icon />
+      {state === "open" ? "Open" : state === "merged" ? "Merged" : "Closed"}
     </span>
   );
 }
@@ -197,6 +219,8 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                     >
                       {pull.state === "open" ? (
                         <GitPullRequestIcon />
+                      ) : pull.state === "merged" ? (
+                        <GitMergeIcon />
                       ) : (
                         <GitPullRequestClosedIcon />
                       )}
@@ -423,12 +447,20 @@ function PullDetail({
               </h2>
               <div className="pull-summary">
                 <PullBadge state={data.state} />
-                <span>
-                  <strong>{data.author}</strong> wants to merge{" "}
-                  <code>{short(data.head_oid)}</code> from{" "}
-                  <code>{branch(data.head_ref)}</code> into{" "}
-                  <code>{branch(data.base_ref)}</code>
-                </span>
+                {data.merge ? (
+                  <span>
+                    <strong>{data.merge.author}</strong> fast-forwarded{" "}
+                    <code>{short(data.merge.commit_oid)}</code> into{" "}
+                    <code>{branch(data.base_ref)}</code>
+                  </span>
+                ) : (
+                  <span>
+                    <strong>{data.author}</strong> wants to merge{" "}
+                    <code>{short(data.head_oid)}</code> from{" "}
+                    <code>{branch(data.head_ref)}</code> into{" "}
+                    <code>{branch(data.base_ref)}</code>
+                  </span>
+                )}
               </div>
             </div>
             <nav className="pull-tabs" aria-label="Pull request">
@@ -591,16 +623,115 @@ function PullConversation({
         <Failure message={stateMutation.error} />
       </form>
       <div className="notice pull-merge-note">
-        <GitMergeIcon />
-        <div>
-          <strong>Merge is not enabled yet</strong>
-          <p>
-            Review decisions and discussion are durable. Merge commits, checks,
-            and protected-branch enforcement remain under development.
-          </p>
-        </div>
+        <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
       </div>
     </div>
+  );
+}
+
+function MergePanel({
+  repo,
+  pull,
+  csrf,
+  refresh,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  csrf: string;
+  refresh: () => void;
+}) {
+  const mutation = useMutation(csrf);
+  const submission = useSubmission();
+  const pending = pull.merge_pending;
+  if (pull.merge)
+    return (
+      <>
+        <GitMergeIcon className="merge-status-icon" />
+        <div>
+          <strong>Pull request merged</strong>
+          <p>
+            {pull.merge.author} fast-forwarded commit{" "}
+            <code>{short(pull.merge.commit_oid)}</code> into{" "}
+            <code>{branch(pull.base_ref)}</code>{" "}
+            {timestamp(pull.merge.created_at)}.
+          </p>
+        </div>
+      </>
+    );
+  if (pull.state === "closed")
+    return (
+      <>
+        <GitPullRequestClosedIcon />
+        <div>
+          <strong>This pull request is closed</strong>
+          <p>Reopen it before merging these commits.</p>
+        </div>
+      </>
+    );
+  if (!pull.branches_available && !pending)
+    return (
+      <>
+        <GitMergeIcon />
+        <div>
+          <strong>This pull request cannot be merged</strong>
+          <p>The base or head branch is unavailable.</p>
+        </div>
+      </>
+    );
+  return (
+    <>
+      <GitMergeIcon />
+      <div className="merge-action">
+        <strong>
+          {pending
+            ? `${pending.author} started a fast-forward merge`
+            : "This branch can be checked for a fast-forward merge"}
+        </strong>
+        <p>
+          Crab verifies ancestry, dependency content, visibility, and the exact
+          branch tips again while holding the base ref lock.
+        </p>
+        {pull.can_merge ? (
+          <Button
+            variant="primary"
+            disabled={mutation.pending}
+            onClick={async () => {
+              const input = pending
+                ? {
+                    version: pending.pull_version,
+                    method: pending.method,
+                    base_oid: pending.base_oid,
+                    head_oid: pending.head_oid,
+                  }
+                : {
+                    version: pull.version,
+                    method: "fast_forward" as const,
+                    base_oid: pull.base_oid,
+                    head_oid: pull.head_oid,
+                  };
+              const merged = await mutation.run<PullRequest>(
+                endpoint(repo, `pulls/${pull.number}/merge`),
+                "POST",
+                {
+                  ...input,
+                  request_id: pending?.request_id ?? submission(input),
+                },
+              );
+              if (merged) refresh();
+            }}
+          >
+            {mutation.pending
+              ? "Merging…"
+              : pending
+                ? "Retry merge"
+                : "Merge pull request"}
+          </Button>
+        ) : (
+          <p className="muted">Write access is required to merge.</p>
+        )}
+        <Failure message={mutation.error} />
+      </div>
+    </>
   );
 }
 
