@@ -290,6 +290,22 @@ tests cover the extracted framing/parser path and existing helper contracts.
 The local test issuer is not a production identity service. Dark/light
 rendering, highlighted source and an actual split diff were inspected in browser.
 
+Discussion keyboard regression checks run in Chromium:
+
+```bash
+cd packages/repository
+npm ci
+npx playwright install chromium
+npm run test:browser
+```
+
+These checks cover issue/comment edit focus, cancellation, close/reopen,
+Markdown tab navigation, posting from preview, retained drafts after failure,
+and preserving focus moved elsewhere during a delayed response. They use
+in-memory HTTP fixtures to isolate browser behavior; they do not prove storage
+persistence or replace authenticated RustFS qualification. CI runs them in a
+separate browser job and retains traces/screenshots on failure.
+
 The authenticated Kubernetes/RustFS run matched the same data checks. Its median
 tree request was 8.878 ms, diff request 40.688 ms, and blame request 1,982.136 ms.
 These mixed cached measurements do not isolate authentication overhead. Browser

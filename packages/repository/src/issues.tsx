@@ -9,7 +9,12 @@ import {
   type Repository,
 } from "./api";
 import { Link, Result } from "./ui";
-import { DiscussionMarkdown, Editor, Failure } from "./discussion";
+import {
+  DiscussionMarkdown,
+  Editor,
+  Failure,
+  useReturnFocus,
+} from "./discussion";
 
 interface Comment {
   number: number;
@@ -102,7 +107,7 @@ function useSubmission() {
 
 function IssueBadge({ state }: { state: Issue["state"] }) {
   return (
-    <span className={`issue-state ${state}`}>
+    <span className={`issue-state ${state}`} aria-live="polite">
       {state === "open" ? <IssueOpenedIcon /> : <IssueClosedIcon />}
       {state === "open" ? "Open" : "Closed"}
     </span>
@@ -184,6 +189,7 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                   <li key={issue.number}>
                     <span
                       className={`issue-status-icon ${issue.state}`}
+                      role="img"
                       aria-label={issue.state}
                     >
                       {issue.state === "open" ? (
@@ -321,6 +327,8 @@ function IssueDetail({
   const [issue, setIssue] = useState<Issue>();
   const [editing, setEditing] = useState(false);
   const mutation = useMutation(csrf);
+  const editTrigger = useReturnFocus<HTMLButtonElement>(editing);
+  const stateTrigger = useReturnFocus<HTMLButtonElement>(mutation.pending);
   useEffect(() => {
     const incoming = resource.data;
     if (incoming)
@@ -347,6 +355,7 @@ function IssueDetail({
           </Button>
           {current.can_edit && (
             <Button
+              ref={editTrigger}
               size="small"
               disabled={mutation.pending || editing}
               onClick={() => setEditing(true)}
@@ -394,6 +403,7 @@ function IssueDetail({
       {current.can_edit && (
         <div className="issue-state-controls">
           <Button
+            ref={stateTrigger}
             disabled={mutation.pending || editing}
             onClick={async () => {
               const updated = await mutation.run<Issue>(
@@ -455,6 +465,7 @@ function EditIssue({
       <label htmlFor="edit-issue-title">Title</label>
       <input
         id="edit-issue-title"
+        autoFocus
         value={title}
         onChange={(event) => setTitle(event.target.value)}
         disabled={mutation.pending}
@@ -591,6 +602,9 @@ function NewComment({
   const [body, setBody] = useState("");
   const mutation = useMutation(csrf);
   const submission = useSubmission();
+  const editor = useReturnFocus<HTMLTextAreaElement>(mutation.pending);
+  const [posted, setPosted] = useState(false);
+  const [completedSubmission, setCompletedSubmission] = useState(0);
   return (
     <form
       className="discussion-compose new-comment"
@@ -603,6 +617,8 @@ function NewComment({
           { ...input, request_id: submission(input) },
         );
         if (comment) {
+          setPosted(true);
+          setCompletedSubmission(comment.number);
           onCreated(comment);
           setBody("");
           submission({ body: "" });
@@ -611,14 +627,20 @@ function NewComment({
     >
       <h3>Add a comment</h3>
       <Editor
+        key={completedSubmission}
+        ref={editor}
         id="new-comment"
         label="Comment"
         value={body}
-        onChange={setBody}
+        onChange={(value) => {
+          setBody(value);
+          setPosted(false);
+        }}
         disabled={mutation.pending}
         required
       />
       <Failure message={mutation.error} />
+      <div role="status">{posted ? "Comment posted." : ""}</div>
       <div className="discussion-actions">
         <Button
           type="submit"
@@ -647,6 +669,7 @@ function CommentCard({
 }) {
   const [draft, setDraft] = useState<{ body: string; version: number }>();
   const mutation = useMutation(csrf);
+  const editTrigger = useReturnFocus<HTMLButtonElement>(Boolean(draft));
   return (
     <article id={`comment-${comment.number}`} className="discussion-card panel">
       <header>
@@ -657,6 +680,7 @@ function CommentCard({
         {comment.version > 1 && <span className="muted">edited</span>}
         {comment.can_edit && !draft && (
           <Button
+            ref={editTrigger}
             size="small"
             onClick={() =>
               setDraft({ body: comment.body, version: comment.version })
@@ -683,6 +707,7 @@ function CommentCard({
           }}
         >
           <Editor
+            autoFocus
             id={`edit-comment-${comment.number}`}
             label="Edit comment"
             value={draft.body}

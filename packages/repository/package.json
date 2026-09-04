@@ -8,8 +8,9 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "format": "prettier --write src vite.config.ts tsconfig.json package.json index.html",
-    "format:check": "prettier --check src vite.config.ts tsconfig.json package.json index.html"
+    "test:browser": "playwright test",
+    "format": "prettier --write src tests playwright.config.ts vite.config.ts tsconfig.json package.json index.html",
+    "format:check": "prettier --check src tests playwright.config.ts vite.config.ts tsconfig.json package.json index.html"
   },
   "dependencies": {
     "@pierre/diffs": "1.4.0",
@@ -24,6 +25,7 @@
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/react-is": "19.2.0",
