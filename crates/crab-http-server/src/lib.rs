@@ -49,6 +49,11 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("server readiness check failed")]
+    Healthcheck {
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 /// Server startup or lifecycle result.
