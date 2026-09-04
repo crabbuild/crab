@@ -189,6 +189,8 @@ mod tests {
             "doctor",
             "env",
             "errors",
+            "mirror.apply",
+            "mirror.check",
             "optimize.apply",
             "optimize.plan",
             "staging.stats",
@@ -247,6 +249,8 @@ mod tests {
             "fsck.event",
             "gc.event",
             "hydrate.event",
+            "mirror.apply.event",
+            "mirror.check.event",
             "optimize.xorbs.event",
             "prune.event",
             "push.event",
@@ -267,8 +271,8 @@ mod tests {
             "missing error schema"
         );
 
-        // Total count: 8 migrated + 24 new json + 12 streaming + 14 events + 1 error = 59
-        assert_eq!(schemas.len(), 59, "unexpected schema count");
+        // Total count: 8 migrated + 26 new json + 12 streaming + 16 events + 1 error = 63
+        assert_eq!(schemas.len(), 63, "unexpected schema count");
     }
 
     #[test]

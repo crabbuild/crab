@@ -174,6 +174,15 @@ can request one of the supported filter forms directly.
 
 ## Operations and repair
 
+The protocol qualification separates post-push read admission from steady-state
+filter reads. A fresh blobless clone of the pushed branch exercises journal
+compaction and derived-index repair before the filter matrix captures its
+canonical-object inventory. Fetching back into the writer is insufficient:
+Git may skip object transfer when the tip is already present locally. Subsequent
+filter reads must leave canonical object counts and bytes unchanged; generated
+response-pack cache and coordination objects are accounted for separately. This
+is not a claim that first-read repair works with read-only object-store credentials.
+
 Direct pushes and protected/service publication paths publish visibility
 before the corresponding ref or manifest commit. Protected receive extracts
 the closure from the already-verified materialization ODB before that workspace

@@ -24786,7 +24786,7 @@ mod tests {
                 lock_holder: None,
                 visibility_evidence_hash: None,
             }],
-            None,
+            Some(sibling.to_owned()),
             Vec::new(),
             Vec::new(),
         )

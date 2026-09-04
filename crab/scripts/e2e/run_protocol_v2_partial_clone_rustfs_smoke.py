@@ -1897,25 +1897,39 @@ class ProtocolV2PartialCloneSmoke:
         )
         telemetry_after_push = self.record_telemetry_delta("incomplete_odb_push", push_baseline)
         admission_baseline = self.storage_telemetry()
+        # Fetching into the writer can skip object transfer when Git already
+        # has the tip. A fresh reader must exercise admission before taking
+        # the steady-state read-only inventory used by the filter matrix.
+        admission_repo = self.run_root / "post-push-admission"
         admission_fetch = self.run_git(
-            self.filtered,
+            self.run_root,
             [
                 "-c",
                 "protocol.version=2",
-                "fetch",
-                "origin",
-                "refs/heads/partial-clone-push:refs/remotes/origin/partial-clone-push",
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                "--single-branch",
+                "--branch",
+                "partial-clone-push",
+                self.remote_url,
+                str(admission_repo),
             ],
             name="settle post-push read admission",
+        )
+        admitted_tip = self.git_value(
+            admission_repo, ["rev-parse", "HEAD"], name="verify admitted push tip"
         )
         admission_telemetry = self.record_telemetry_delta(
             "post_push_read_admission", admission_baseline
         )
         self.check(
             "post-push-read-admission",
-            admission_fetch["exit_code"] == 0,
+            admission_fetch["exit_code"] == 0 and admitted_tip == new_commit,
             {
                 "fetch_exit": admission_fetch["exit_code"],
+                "expected_tip": new_commit,
+                "admitted_tip": admitted_tip,
                 "telemetry": self.report["telemetry"]["post_push_read_admission"],
             },
         )

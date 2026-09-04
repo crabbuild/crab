@@ -1760,6 +1760,9 @@ mod tests {
         generation: u64,
         shard_bytes: &'static [u8],
     ) -> String {
+        crate::core::remote_layout::initialize(store, router)
+            .await
+            .unwrap();
         let shard_hash = crab_xet::hash::compute_data_hash(shard_bytes);
         store
             .put(
