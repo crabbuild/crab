@@ -187,7 +187,16 @@ impl Harness {
                 bucket: "test".into(),
                 prefix: "test".into(),
                 description: "Private project".into(),
-                members: vec!["alice-id".into(), "bob-id".into()],
+                members: vec![
+                    crate::RepositoryMember {
+                        subject: "alice-id".into(),
+                        access: crate::RepositoryAccess::Write,
+                    },
+                    crate::RepositoryMember {
+                        subject: "bob-id".into(),
+                        access: crate::RepositoryAccess::Read,
+                    },
+                ],
             },
             store: store.clone(),
             layout: StoreLayout::new(store, "test".into()),
@@ -401,14 +410,15 @@ async fn non_members_cannot_trigger_repository_publication() {
     let response = h
         .http
         .post(format!("{}/api/git-token", h.origin))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"owner":"team","repository":"private","access":"read"}).to_string())
         .header(header::COOKIE, &cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", session["csrf"].as_str().unwrap())
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let repo = &h.server.repositories[&("team".into(), "private".into())];
     crab_metadata::manifest_store::create_manifest(
         &repo.store,
@@ -431,7 +441,7 @@ async fn non_members_cannot_trigger_repository_publication() {
     let git = h
         .http
         .post(format!("{}/git/team/private/git-upload-pack", h.origin))
-        .basic_auth("crab", issued["token"].as_str())
+        .basic_auth("crab", Some("denied-token"))
         .header("git-protocol", "version=2")
         .header(
             header::CONTENT_TYPE,
@@ -443,7 +453,7 @@ async fn non_members_cannot_trigger_repository_publication() {
         .unwrap();
     assert_eq!(
         (api.status(), git.status()),
-        (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND)
+        (StatusCode::NOT_FOUND, StatusCode::UNAUTHORIZED)
     );
     assert!(repo.maintenance.lock().await.is_none());
     assert_eq!(
@@ -563,186 +573,8 @@ async fn confidential_client_uses_secret_file_and_authenticated_token_exchange()
     h.close().await;
 }
 
-#[tokio::test]
-async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
-    let h = Harness::new(false).await;
-    let cookie = h.login().await;
-    let session = h.json("/api/session", &cookie).await;
-    let csrf = session["csrf"].as_str().unwrap();
-    let git_url = format!(
-        "{}/git/team/private/info/refs?service=git-upload-pack",
-        h.origin
-    );
-    let response = h
-        .http
-        .get(&git_url)
-        .header(header::COOKIE, &cookie)
-        .header("git-protocol", "version=2")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
-    let response = h
-        .http
-        .post(format!("{}/api/git-token", h.origin))
-        .header(header::COOKIE, &cookie)
-        .header(header::ORIGIN, &h.origin)
-        .header("x-csrf-token", csrf)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-    let token = issued["token"].as_str().unwrap();
-    for authenticated in [false, true] {
-        let request = h
-            .http
-            .post(format!("{}/git/team/private/git-upload-pack", h.origin))
-            .header(
-                header::CONTENT_TYPE,
-                "application/x-git-upload-pack-request",
-            )
-            .body(b"0000".to_vec());
-        let response = if authenticated {
-            request.basic_auth("crab", Some(token))
-        } else {
-            request
-        }
-        .send()
-        .await
-        .unwrap();
-        assert_eq!(
-            response.status(),
-            if authenticated {
-                StatusCode::OK
-            } else {
-                StatusCode::UNAUTHORIZED
-            }
-        );
-    }
-    {
-        use tower::ServiceExt as _;
-        let _busy = h.server.git_admission.acquire_many(4).await.unwrap();
-        let authorization = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            format!("crab:{token}"),
-        );
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/git/team/private/git-upload-pack")
-            .header(header::HOST, h.origin.strip_prefix("http://").unwrap())
-            .header(header::AUTHORIZATION, format!("Basic {authorization}"))
-            .header(
-                header::CONTENT_TYPE,
-                "application/x-git-upload-pack-request",
-            )
-            .header("git-protocol", "version=2")
-            .body(axum::body::Body::from_stream(
-                futures_util::stream::pending::<
-                    std::result::Result<axum::body::Bytes, std::io::Error>,
-                >(),
-            ))
-            .unwrap();
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            router(Arc::clone(&h.server)).oneshot(request),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    }
-    let response = h
-        .http
-        .get(&git_url)
-        .basic_auth("crab", Some(token))
-        .header("git-protocol", "version=2")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response
-            .bytes()
-            .await
-            .unwrap()
-            .starts_with(b"000eversion 2\n")
-    );
-    let response = h
-        .http
-        .get(format!("{}/api/repos", h.origin))
-        .basic_auth("crab", Some(token))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body = b"0014command=ls-refs\n00010000trailing";
-    let response = h
-        .http
-        .post(format!("{}/git/team/private/git-upload-pack", h.origin))
-        .basic_auth("crab", Some(token))
-        .header("git-protocol", "version=2")
-        .header(
-            header::CONTENT_TYPE,
-            "application/x-git-upload-pack-request",
-        )
-        .body(body.to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let response = h
-        .http
-        .delete(format!("{}/api/git-token", h.origin))
-        .header(header::COOKIE, &cookie)
-        .header(header::ORIGIN, &h.origin)
-        .header("x-csrf-token", csrf)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let response = h
-        .http
-        .get(&git_url)
-        .basic_auth("crab", Some(token))
-        .header("git-protocol", "version=2")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let response = h
-        .http
-        .post(format!("{}/api/git-token", h.origin))
-        .header(header::COOKIE, &cookie)
-        .header(header::ORIGIN, &h.origin)
-        .header("x-csrf-token", csrf)
-        .send()
-        .await
-        .unwrap();
-    let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-    let token = issued["token"].as_str().unwrap();
-    let response = h
-        .http
-        .post(format!("{}/auth/logout", h.origin))
-        .header(header::COOKIE, &cookie)
-        .header(header::ORIGIN, &h.origin)
-        .header("x-csrf-token", csrf)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let response = h
-        .http
-        .get(&git_url)
-        .basic_auth("crab", Some(token))
-        .header("git-protocol", "version=2")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    h.close().await;
-}
-
 #[path = "auth_tests/issues.rs"]
 mod issues;
+
+#[path = "auth_tests/git_tokens.rs"]
+mod git_tokens;

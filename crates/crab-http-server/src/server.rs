@@ -223,7 +223,9 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         )
         .route(
             "/api/git-token",
-            post(auth::issue_git_token).delete(auth::revoke_git_tokens),
+            post(auth::issue_git_token)
+                .delete(auth::revoke_git_tokens)
+                .layer(axum::extract::DefaultBodyLimit::max(2048)),
         )
         .route("/api/session", get(auth::session))
         .route("/auth/login", get(auth::login))

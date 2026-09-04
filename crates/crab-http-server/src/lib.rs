@@ -8,7 +8,7 @@ mod issues;
 mod maintenance;
 mod server;
 
-pub use config::{Config, OidcConfig, RepositoryConfig};
+pub use config::{Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember};
 pub use server::serve;
 
 /// Startup and server lifecycle errors with their original sources retained.

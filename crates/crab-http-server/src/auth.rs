@@ -22,7 +22,9 @@ use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
-use crate::{OidcConfig, RepositoryConfig, config::validate_identity_url, server::Server};
+use crate::{
+    OidcConfig, RepositoryAccess, RepositoryConfig, config::validate_identity_url, server::Server,
+};
 
 type Client = CoreClient<
     EndpointSet,
@@ -40,6 +42,8 @@ const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
 pub(crate) enum AuthError {
     #[error("invalid or expired sign-in")]
     Invalid,
+    #[error("repository access denied")]
+    Forbidden,
     #[error("identity claims failed verification")]
     Verification(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("sign-in capacity exceeded")]
@@ -61,6 +65,11 @@ impl AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "repository_access_denied",
+                "You do not have the requested repository access.",
+            ),
             Self::Invalid | Self::Verification(_) => (
                 StatusCode::BAD_REQUEST,
                 "invalid_sign_in",
@@ -106,11 +115,26 @@ impl Session {
     }
 }
 
+pub(crate) struct GitToken {
+    session: Arc<Session>,
+    owner: String,
+    repository: String,
+    access: RepositoryAccess,
+    revoked: AtomicBool,
+}
+
+impl GitToken {
+    fn active(&self) -> bool {
+        self.session.active() && !self.revoked.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Principal {
     Anonymous,
     Local,
     User(Arc<Session>),
+    Git(Arc<GitToken>),
 }
 
 impl Principal {
@@ -126,13 +150,40 @@ impl Principal {
         }
     }
     pub fn can_read(&self, repository: &RepositoryConfig) -> bool {
-        match self {
-            Self::Anonymous => false,
-            Self::Local => true,
-            Self::User(session) => {
-                session.active() && repository.members.contains(&session.identity.subject)
+        self.access(repository).is_some()
+    }
+
+    pub fn can_write(&self, repository: &RepositoryConfig) -> bool {
+        self.access(repository) == Some(RepositoryAccess::Write)
+    }
+
+    fn access(&self, repository: &RepositoryConfig) -> Option<RepositoryAccess> {
+        let (session, ceiling) = match self {
+            Self::Local => return Some(RepositoryAccess::Write),
+            Self::User(session) => (session, RepositoryAccess::Write),
+            Self::Git(token)
+                if token.active()
+                    && token.owner == repository.owner
+                    && token.repository == repository.name =>
+            {
+                (&token.session, token.access)
             }
+            _ => return None,
+        };
+        if !session.active() {
+            return None;
         }
+        repository
+            .members
+            .iter()
+            .find(|member| member.subject == session.identity.subject)
+            .map(|member| {
+                if ceiling == RepositoryAccess::Read {
+                    ceiling
+                } else {
+                    member.access
+                }
+            })
     }
 
     pub fn authenticated(&self) -> bool {
@@ -140,6 +191,7 @@ impl Principal {
             Self::Anonymous => false,
             Self::Local => true,
             Self::User(session) => session.active(),
+            Self::Git(token) => token.active(),
         }
     }
 }
@@ -158,7 +210,7 @@ pub(crate) struct Authentication {
     client: Client,
     flows: Mutex<HashMap<Key, Flow>>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
-    git_tokens: Mutex<HashMap<Key, Arc<Session>>>,
+    git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     admission: Semaphore,
 }
 
@@ -529,7 +581,7 @@ async fn finish_login(
 pub(crate) async fn session(Extension(principal): Extension<Principal>) -> Json<serde_json::Value> {
     Json(match principal {
         Principal::Local => json!({"authenticated":true,"mode":"local","user":null,"csrf":null}),
-        Principal::Anonymous => {
+        Principal::Anonymous | Principal::Git(_) => {
             json!({"authenticated":false,"mode":"oidc","user":null,"csrf":null})
         }
         Principal::User(session) => {
@@ -625,7 +677,15 @@ mod tests {
         auth.sessions
             .lock()
             .await
-            .insert(key("test-token"), session);
+            .insert(key("test-token"), Arc::clone(&session));
+        let principal = Principal::Git(Arc::new(GitToken {
+            session,
+            owner: "team".into(),
+            repository: "private".into(),
+            access: RepositoryAccess::Write,
+            revoked: AtomicBool::new(false),
+        }));
+        assert!(!principal.authenticated());
         assert!(!auth.principal(&headers).await.authenticated());
         assert!(auth.sessions.lock().await.is_empty());
         headers.append(

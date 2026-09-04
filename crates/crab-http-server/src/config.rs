@@ -28,7 +28,23 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub members: Vec<String>,
+    pub members: Vec<RepositoryMember>,
+}
+
+/// A provider subject's explicit repository permission.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryMember {
+    pub subject: String,
+    pub access: RepositoryAccess,
+}
+
+/// Repository access, with write permission also allowing reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepositoryAccess {
+    Read,
+    Write,
 }
 
 impl Config {
@@ -68,8 +84,8 @@ impl Config {
         let mut names = HashSet::new();
         for repository in &self.repositories {
             let mut subjects = HashSet::new();
-            for subject in &repository.members {
-                if subject.is_empty() || !subjects.insert(subject) {
+            for member in &repository.members {
+                if member.subject.is_empty() || !subjects.insert(&member.subject) {
                     return Err(Error::Config(
                         "repository members must be unique nonempty OIDC subjects",
                     ));
@@ -144,8 +160,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repository_members_require_an_explicit_known_permission() {
+        for member in [
+            "'alice'",
+            "{subject='alice'}",
+            "{subject='alice',access='admin'}",
+            "{subject='alice',access='read',extra=true}",
+        ] {
+            let source = format!(
+                "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{member}]"
+            );
+            assert!(toml::from_str::<RepositoryConfig>(&source).is_err());
+        }
+    }
+
+    #[test]
     fn public_listeners_require_identity_and_https() {
-        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=['alice']\n";
+        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{subject='alice',access='read'}]\n";
         let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\n";
         let config: Config = toml::from_str(base).unwrap();
         assert!(config.validate().is_err());
@@ -167,7 +198,10 @@ mod tests {
         }
         let config: Config = toml::from_str(&format!(
             "{}{identity}",
-            base.replace("members=['alice']", "members=['alice','alice']")
+            base.replace(
+                "members=[{subject='alice',access='read'}]",
+                "members=[{subject='alice',access='read'},{subject='alice',access='write'}]"
+            )
         ))
         .unwrap();
         assert!(config.validate().is_err());

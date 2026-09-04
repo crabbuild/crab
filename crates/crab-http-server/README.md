@@ -124,7 +124,10 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
-members = ["provider-subject-for-alice", "provider-subject-for-bob"]
+members = [
+  { subject = "provider-subject-for-alice", access = "write" },
+  { subject = "provider-subject-for-bob", access = "read" },
+]
 ```
 
 Terminate TLS at your reverse proxy and forward the original canonical `Host` to
@@ -134,7 +137,10 @@ both issuer and public URL may use HTTP loopback addresses, with a loopback
 listener. Production identity endpoints require HTTPS. Secret files may have a
 single trailing newline; other whitespace is preserved.
 
-`members` contains the provider's stable `sub` values. An authenticated account
+`members` assigns each provider’s stable `sub` an explicit `read` or `write`
+grant. Write grants include reads; duplicate subjects and unspecified/unknown
+access values are rejected. This unreleased server configuration replaces the
+earlier string-only member list; convert each entry to a subject/access record. An authenticated account
 with no memberships sees an empty catalog and its user ID for requesting access.
 All repository read endpoints enforce membership before opening storage; absent
 and unauthorized repositories both return 404. Membership changes currently
@@ -170,15 +176,28 @@ filters and pack streaming are supported; `receive-pack` (push) is not implement
 Older protocol versions are rejected; use `git -c protocol.version=2` if your
 client configuration overrides the modern Git default.
 
-Authenticated users generate a read-only token from **Git access**. Supply `crab`
-as the Git username and the token as its password using a credential manager.
-Git requests use Basic authentication and do not require browser cookies. Tokens
-inherit repository membership and session expiry; sign-out, replacement sign-in
-and server restart invalidate them for subsequent requests. **Revoke tokens**
-revokes every token issued by the current session. At most ten tokens per session
-and 4,096 total tokens are retained as hashes in process memory. The browser keeps
-the generated token only in component memory. Tokens cannot authenticate browser
-read APIs or authorize writes.
+Authenticated users choose one repository under **Git access** and generate a
+read-only token. Supply `crab` as the Git username and the token as its password
+using a credential manager. Git requests use Basic authentication independently
+of browser cookies. Tokens are restricted to the selected owner/repository and
+their requested permission, intersected with the user's configured grant. A read
+token cannot gain write access when its owner has a write grant. Tokens cannot
+authenticate browser APIs.
+
+`POST /api/git-token` requires session CSRF/Origin and a JSON body with `owner`,
+`repository` and `access` (`read` or `write`), limited to 2 KiB. Missing fields and
+unknown permissions fail; inaccessible targets or permissions return 403 without
+opening storage. The response includes the token, target, permission and remaining
+session lifetime. The browser currently requests only read tokens. The API's
+write scope establishes authorization for the forthcoming receive path; it does
+not enable HTTP push, which remains unavailable.
+
+Sign-out, replacement sign-in and server restart invalidate tokens. **Revoke
+tokens** revokes every token issued by the current session, including retained
+principals on their next authorization check. Revocation does not undo completed
+operations. At most ten tokens per session and 4,096 total tokens are retained by
+hash in process memory. The browser keeps the generated secret only in component
+memory and clears it on a new request or repository selection.
 
 Four Git transfers may run concurrently per server process. Transfer operations
 use the shared two-hour profile with bounded objects, storage bytes and response
@@ -385,7 +404,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
-| Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read memberships; administration and provider revocation pending |
+| Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; push and branch administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues and comments with author edits and conditional writes; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
