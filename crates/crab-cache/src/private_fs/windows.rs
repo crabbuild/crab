@@ -575,11 +575,12 @@ fn validate_private_acl(file: &File, path: &Path) -> Result<()> {
     let user = current_user_sid()?;
     let system = well_known_sid(WinLocalSystemSid)?;
     let administrators = well_known_sid(WinBuiltinAdministratorsSid)?;
+    let allowed = [user, system, administrators];
     // SAFETY: GetSecurityInfo returned owner and a self-relative descriptor.
-    if owner.is_null() || unsafe { EqualSid(owner, user.as_ptr().cast_mut().cast()) } == 0 {
+    if owner.is_null() || !sid_allowed(owner, &allowed) {
         return Err(unsafe_path(
             path,
-            "cache entry is not owned by the current user",
+            "cache entry is not owned by the current user or a trusted system principal",
         ));
     }
     let mut present = 0;
@@ -593,7 +594,6 @@ fn validate_private_acl(file: &File, path: &Path) -> Result<()> {
     {
         return Err(unsafe_path(path, "cache entry has no private DACL"));
     }
-    let allowed = [user, system, administrators];
     // SAFETY: the ACL header is part of the live validated descriptor.
     let count = unsafe { (*acl).AceCount };
     for index in 0..u32::from(count) {
