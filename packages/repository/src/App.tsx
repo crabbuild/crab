@@ -5,6 +5,7 @@ import {
   CodeIcon,
   GitBranchIcon,
   HistoryIcon,
+  IssueOpenedIcon,
   RepoIcon,
   SunIcon,
 } from "@primer/octicons-react";
@@ -38,6 +39,9 @@ const History = lazy(() =>
 );
 const CommitView = lazy(() =>
   import("./content").then((module) => ({ default: module.CommitView })),
+);
+const Issues = lazy(() =>
+  import("./issues").then((module) => ({ default: module.Issues })),
 );
 type Theme = "light" | "dark" | "auto";
 
@@ -237,6 +241,7 @@ export function App() {
                     repo={repo}
                     url={url}
                     theme={resolved}
+                    csrf={session.data?.csrf ?? ""}
                   />
                 ) : (
                   <div className="notice">
@@ -261,18 +266,22 @@ function RepositoryPage({
   repo,
   url,
   theme,
+  csrf,
 }: {
   repo: Repository;
   url: URL;
   theme: "light" | "dark";
+  csrf: string;
 }) {
-  const refs = useRequest<Refs>(endpoint(repo, "refs"));
+  const view = url.searchParams.get("view") ?? "code";
+  const refs = useRequest<Refs>(
+    view === "issues" ? null : endpoint(repo, "refs"),
+  );
   const revName = url.searchParams.get("rev") ?? refs.data?.head?.name;
   const selected = refs.data?.refs.find((ref) => ref.name === revName);
   const rev = selected?.peeled ?? selected?.oid ?? revName;
   const path = url.searchParams.get("path") ?? "";
   const kind = url.searchParams.get("kind") ?? "Tree";
-  const view = url.searchParams.get("view") ?? "code";
   const [showTree, setShowTree] = useState(true);
   function selectEntry(entry: Entry) {
     navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
@@ -299,162 +308,188 @@ function RepositoryPage({
             <CodeIcon /> Code
           </Link>
           <Link
-            className={view !== "code" ? "active" : ""}
-            aria-current={view !== "code" ? "page" : undefined}
+            className={view === "commits" || view === "commit" ? "active" : ""}
+            aria-current={
+              view === "commits" || view === "commit" ? "page" : undefined
+            }
             href={repoHref(repo, { rev, view: "commits" })}
           >
             <HistoryIcon /> Commits
           </Link>
+          <Link
+            className={view === "issues" ? "active" : ""}
+            aria-current={view === "issues" ? "page" : undefined}
+            href={repoHref(repo, { view: "issues" })}
+          >
+            <IssueOpenedIcon /> Issues
+          </Link>
         </nav>
       </div>
       <div className="repo-body">
-        <Result state={refs}>
-          {(data) =>
-            !data.head ? (
-              <div className="notice">
-                <h2>This repository is empty</h2>
-                <p>Push an initial commit with Crab to start browsing.</p>
+        {view === "issues" ? (
+          <Suspense
+            fallback={
+              <div className="notice" role="status">
+                <Spinner size="small" /> Loading issues…
               </div>
-            ) : rev ? (
-              <>
-                <div className="toolbar">
-                  <div className="row">
-                    <GitBranchIcon />
-                    <label className="sr-only" htmlFor="revision">
-                      Branch or tag
-                    </label>
-                    <select
-                      id="revision"
-                      value={selected ? revName : rev}
-                      onChange={(event) =>
-                        navigate(
-                          repoHref(repo, { rev: event.target.value, view }),
-                        )
-                      }
-                    >
-                      {!selected && <option value={rev}>{short(rev)}</option>}
-                      {data.refs.map((ref) => (
-                        <option key={ref.name} value={ref.name}>
-                          {ref.name.replace(/^refs\/(heads|tags)\//, "")}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="muted">
-                      {
-                        data.refs.filter((ref) =>
-                          ref.name.startsWith("refs/heads/"),
-                        ).length
-                      }{" "}
-                      branches
-                    </span>
-                    <span className="muted">
-                      {
-                        data.refs.filter((ref) =>
-                          ref.name.startsWith("refs/tags/"),
-                        ).length
-                      }{" "}
-                      tags
-                    </span>
-                  </div>
-                  <Button onClick={refs.retry}>Refresh</Button>
+            }
+          >
+            <Issues repo={repo} url={url} csrf={csrf} />
+          </Suspense>
+        ) : (
+          <Result state={refs}>
+            {(data) =>
+              !data.head ? (
+                <div className="notice">
+                  <h2>This repository is empty</h2>
+                  <p>Push an initial commit with Crab to start browsing.</p>
                 </div>
-                <Suspense
-                  fallback={
-                    <div className="notice" role="status">
-                      <Spinner size="small" /> Loading viewer…
+              ) : rev ? (
+                <>
+                  <div className="toolbar">
+                    <div className="row">
+                      <GitBranchIcon />
+                      <label className="sr-only" htmlFor="revision">
+                        Branch or tag
+                      </label>
+                      <select
+                        id="revision"
+                        value={selected ? revName : rev}
+                        onChange={(event) =>
+                          navigate(
+                            repoHref(repo, { rev: event.target.value, view }),
+                          )
+                        }
+                      >
+                        {!selected && <option value={rev}>{short(rev)}</option>}
+                        {data.refs.map((ref) => (
+                          <option key={ref.name} value={ref.name}>
+                            {ref.name.replace(/^refs\/(heads|tags)\//, "")}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="muted">
+                        {
+                          data.refs.filter((ref) =>
+                            ref.name.startsWith("refs/heads/"),
+                          ).length
+                        }{" "}
+                        branches
+                      </span>
+                      <span className="muted">
+                        {
+                          data.refs.filter((ref) =>
+                            ref.name.startsWith("refs/tags/"),
+                          ).length
+                        }{" "}
+                        tags
+                      </span>
                     </div>
-                  }
-                >
-                  {view === "commits" ? (
-                    <History key={rev} repo={repo} rev={rev} />
-                  ) : view === "commit" ? (
-                    <CommitView key={rev} repo={repo} rev={rev} theme={theme} />
-                  ) : (
-                    <div
-                      className={
-                        showTree ? "code-layout" : "code-layout no-sidebar"
-                      }
-                    >
-                      {showTree && (
-                        <aside className="tree-sidebar">
-                          <div className="panel-header">
-                            <strong>Files</strong>
+                    <Button onClick={refs.retry}>Refresh</Button>
+                  </div>
+                  <Suspense
+                    fallback={
+                      <div className="notice" role="status">
+                        <Spinner size="small" /> Loading viewer…
+                      </div>
+                    }
+                  >
+                    {view === "commits" ? (
+                      <History key={rev} repo={repo} rev={rev} />
+                    ) : view === "commit" ? (
+                      <CommitView
+                        key={rev}
+                        repo={repo}
+                        rev={rev}
+                        theme={theme}
+                      />
+                    ) : (
+                      <div
+                        className={
+                          showTree ? "code-layout" : "code-layout no-sidebar"
+                        }
+                      >
+                        {showTree && (
+                          <aside className="tree-sidebar">
+                            <div className="panel-header">
+                              <strong>Files</strong>
+                              <Button
+                                size="small"
+                                onClick={() => setShowTree(false)}
+                              >
+                                Hide
+                              </Button>
+                            </div>
+                            <RepositoryTree
+                              key={rev}
+                              repo={repo}
+                              rev={rev}
+                              onSelect={selectEntry}
+                            />
+                          </aside>
+                        )}
+                        <div className="code-main">
+                          <div className="breadcrumb">
                             <Button
                               size="small"
-                              onClick={() => setShowTree(false)}
+                              onClick={() => setShowTree((value) => !value)}
+                              aria-expanded={showTree}
                             >
-                              Hide
+                              Files
                             </Button>
+                            <Link href={repoHref(repo, { rev })}>
+                              {repo.name}
+                            </Link>
+                            {path && (
+                              <>
+                                <span>/</span>
+                                <Link
+                                  href={repoHref(repo, {
+                                    rev,
+                                    path: parentHex(path),
+                                  })}
+                                >
+                                  …
+                                </Link>
+                                <span>/</span>
+                                <strong>
+                                  {displayHex(path).split("/").pop()}
+                                </strong>
+                              </>
+                            )}
                           </div>
-                          <RepositoryTree
-                            key={rev}
-                            repo={repo}
-                            rev={rev}
-                            onSelect={selectEntry}
-                          />
-                        </aside>
-                      )}
-                      <div className="code-main">
-                        <div className="breadcrumb">
-                          <Button
-                            size="small"
-                            onClick={() => setShowTree((value) => !value)}
-                            aria-expanded={showTree}
-                          >
-                            Files
-                          </Button>
-                          <Link href={repoHref(repo, { rev })}>
-                            {repo.name}
-                          </Link>
-                          {path && (
-                            <>
-                              <span>/</span>
-                              <Link
-                                href={repoHref(repo, {
-                                  rev,
-                                  path: parentHex(path),
-                                })}
-                              >
-                                …
-                              </Link>
-                              <span>/</span>
-                              <strong>
-                                {displayHex(path).split("/").pop()}
-                              </strong>
-                            </>
+                          <LatestCommit repo={repo} rev={rev} />
+                          {kind === "Tree" ? (
+                            <Directory
+                              key={`${rev}:${path}`}
+                              repo={repo}
+                              rev={rev}
+                              path={path}
+                              onEntry={selectEntry}
+                            />
+                          ) : kind === "Submodule" ? (
+                            <div className="notice">
+                              This entry points to a commit in a submodule.
+                            </div>
+                          ) : (
+                            <FileView
+                              key={`${rev}:${path}`}
+                              repo={repo}
+                              rev={rev}
+                              path={path}
+                              name={displayHex(path)}
+                              theme={theme}
+                            />
                           )}
                         </div>
-                        <LatestCommit repo={repo} rev={rev} />
-                        {kind === "Tree" ? (
-                          <Directory
-                            key={`${rev}:${path}`}
-                            repo={repo}
-                            rev={rev}
-                            path={path}
-                            onEntry={selectEntry}
-                          />
-                        ) : kind === "Submodule" ? (
-                          <div className="notice">
-                            This entry points to a commit in a submodule.
-                          </div>
-                        ) : (
-                          <FileView
-                            key={`${rev}:${path}`}
-                            repo={repo}
-                            rev={rev}
-                            path={path}
-                            name={displayHex(path)}
-                            theme={theme}
-                          />
-                        )}
                       </div>
-                    </div>
-                  )}
-                </Suspense>
-              </>
-            ) : null
-          }
-        </Result>
+                    )}
+                  </Suspense>
+                </>
+              ) : null
+            }
+          </Result>
+        )}
       </div>
     </>
   );

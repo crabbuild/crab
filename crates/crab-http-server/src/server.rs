@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git,
+    git, issues,
 };
 
 pub(crate) struct Repository {
@@ -72,6 +72,7 @@ pub(crate) struct Server {
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
     pub git_admission: Arc<Semaphore>,
+    pub app_admission: Semaphore,
     pub cancellation: CancellationToken,
     port: u16,
     pub auth: Option<Authentication>,
@@ -125,6 +126,7 @@ pub async fn serve(config: Config) -> Result<()> {
         cursor_key: rand::random(),
         admission: Semaphore::new(16),
         git_admission: Arc::new(Semaphore::new(4)),
+        app_admission: Semaphore::new(8),
         port,
         auth,
     });
@@ -144,6 +146,7 @@ pub async fn serve(config: Config) -> Result<()> {
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
+        .merge(issues::routes(Arc::clone(&server)))
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
@@ -265,6 +268,7 @@ mod tests {
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
             git_admission: Arc::new(Semaphore::new(1)),
+            app_admission: Semaphore::new(1),
             cancellation: CancellationToken::new(),
             port: 8788,
             auth: None,

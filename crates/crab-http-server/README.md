@@ -198,6 +198,51 @@ leaves its two native Git client repositories there for inspection.
 including why protected-view commit translation cannot be used unchanged for
 native pushes. It is implementation planning, not evidence of working writes.
 
+## Issues and comments
+
+Repository members can create issues, write Markdown comments and browse open or
+closed discussions. Authors can edit their own content and close or reopen their
+issues. Ownership uses the exact OIDC issuer and subject, not a display name.
+The local loopback mode uses a single trusted operator identity. Browser writes
+require the existing session, canonical Origin and CSRF token.
+
+`GET`/`POST /api/repos/{owner}/{name}/issues` lists or creates issues;
+`GET`/`PATCH .../issues/{number}` reads or edits one. Comments use
+`.../issues/{number}/comments` and `.../comments/{comment}` with the same methods.
+Creation requires a UUID `request_id`, a `body`, and an issue `title`. Reuse the
+same UUID and original content after a lost response to recover the completed
+write. Reusing it with different content returns 409. Edits require the current
+`version`; stale updates return 409 without replacing another writer's changes.
+
+Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
+issues also accept `state=open|closed|all`. Results are newest first. Each page
+scans at most 200 allocated numbers; an empty filtered page can still have `next`.
+Clients must follow that cursor. Titles allow 1–256 characters; bodies allow
+64 KiB. Eight discussion operations run concurrently, with a 30-second deadline
+and an 80-KiB HTTP body limit. `Server-Timing: app` reports handling latency.
+
+Data lives under `<repository-prefix>/app/v1/issues`, independently of Git refs,
+packs and metadata. Each JSON document has `schema_version: 1`; unknown versions
+are rejected. Conditional counter updates allocate numbers, immutable
+`requests/{uuid}.json` reservations make creation retries converge, and ETag
+updates protect visible issue/comment documents. Interrupted allocation can leave
+numbering gaps. A retry completes an existing reservation without overwriting a
+later edit. Comments have their own counter and reservations under each issue.
+
+The service account needs reads and conditional writes to this app prefix in
+addition to existing Git read permissions. Preserve the entire app prefix,
+including counters and reservations, in backups; restoring only visible records
+loses numbering and retry guarantees. Restart preserves discussions but invalidates
+sessions. Markdown renders without raw HTML; external images appear as links.
+Labels, assignees, deletion/moderation, edit history, notifications and pull
+requests remain unimplemented. Production backup/restore qualification is pending.
+
+The local authenticated Kubernetes/RustFS qualification created an issue and comment,
+replayed both creation requests, edited content, closed/reopened the issue and
+rejected stale edits. Both edited records survived a process restart; replaying
+the original submission IDs recovered the same records. Git refs were unchanged.
+The new discussion UI still needs browser interaction and accessibility qualification.
+
 ## Current verification
 
 ```sh
@@ -226,8 +271,8 @@ The local Kubernetes/RustFS run matched 162 directory entries, 10 commits,
 three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local run measured median tree reads of 11 ms,
 diffs of 34 ms, and one blame request of 1.5 seconds. Caches were not flushed;
-these measurements are not a production latency guarantee. Fourteen Rust transport, identity and envelope tests and six frontend navigation/model
-tests passed. Identity integration tests exercise real HTTP redirects and signed
+these measurements are not a production latency guarantee. Nineteen Rust transport, identity and discussion tests and eight frontend
+navigation, model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
 Git token scope and revocation. Thirteen shared wire tests and nineteen remote-helper
@@ -255,7 +300,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read memberships; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; push and branch administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | Pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues and comments with author edits and conditional writes; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |
