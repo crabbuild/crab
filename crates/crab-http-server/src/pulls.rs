@@ -17,6 +17,7 @@ use crate::{
     RepositoryConfig,
     app::{self, Error, Result},
     app_storage,
+    assignees::{self, Assignee},
     auth::{Identity, Principal},
     labels::{self, Label},
     server::{Repository, Server},
@@ -70,6 +71,7 @@ async fn pull_view(
         _ => vec![],
     };
     let labels = labels::catalog(repo).await?;
+    let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses);
     Ok(json!({
         "number": pull.number,
@@ -87,7 +89,9 @@ async fn pull_view(
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, &labels),
+        "assignees": assignees::selection_view(&pull.assignee_subjects, &assignees),
         "can_label": can_write,
+        "can_assign": can_write,
         "can_edit": app_storage::same_author(&pull.author, actor),
         "can_manage": pull.state != PullState::Merged
             && pull.merge_pending.is_none()
@@ -216,7 +220,7 @@ fn merge_requirements(
     }
 }
 
-fn pull_list_view(pull: &PullRequest, labels: &[Label]) -> Value {
+fn pull_list_view(pull: &PullRequest, labels: &[Label], assignees: &[Assignee]) -> Value {
     json!({
         "number": pull.number,
         "title": pull.title,
@@ -227,6 +231,7 @@ fn pull_list_view(pull: &PullRequest, labels: &[Label]) -> Value {
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, labels),
+        "assignees": assignees::selection_view(&pull.assignee_subjects, assignees),
     })
 }
 
@@ -304,6 +309,7 @@ async fn list(
     let state = params.state()?;
     let query = app::search_query(params.q.as_deref())?;
     let labels = labels::catalog(repo).await?;
+    let assignees = assignees::available(repo, &app::actor(&principal)?);
     let last = app_storage::last_number(repo, storage::ROOT).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));
     let mut items = Vec::new();
@@ -326,7 +332,7 @@ async fn list(
                     &[&pull.title, &pull.body, &pull.author.name],
                 )
             {
-                items.push(pull_list_view(&pull, &labels));
+                items.push(pull_list_view(&pull, &labels, &assignees));
             }
             if items.len() == limit || scanned == 200 {
                 break;
@@ -500,6 +506,7 @@ struct PullEdit {
     body: Option<String>,
     state: Option<PullState>,
     label_ids: Option<Vec<u64>>,
+    assignees: Option<Vec<String>>,
 }
 
 async fn edit(
@@ -516,6 +523,7 @@ async fn edit(
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
+    let assignee_change = input.assignees.is_some();
     let author = app_storage::same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
         return Err(Error::MergePending);
@@ -529,6 +537,9 @@ async fn edit(
     if label_change && !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
+    if assignee_change && !principal.can_write(&repo.config) {
+        return Err(Error::AssigneePermission);
+    }
     if input.state == Some(PullState::Merged) || (pull.merge.is_some() && input.state.is_some()) {
         return Err(Error::Invalid("Merged pull requests cannot change state"));
     }
@@ -539,10 +550,12 @@ async fn edit(
         && input.body.is_none()
         && input.state.is_none()
         && input.label_ids.is_none()
+        && input.assignees.is_none()
     {
         return Err(Error::Invalid("No pull request changes supplied"));
     }
     let labels = labels::catalog(repo).await?;
+    let assignees = assignees::available(repo, &actor);
     if let Some(value) = input.title {
         pull.title = app::title(&value)?;
     }
@@ -556,6 +569,9 @@ async fn edit(
     if let Some(value) = input.label_ids {
         pull.label_ids = labels::validate_selection(value, &labels)?;
     }
+    if let Some(value) = input.assignees {
+        pull.assignee_subjects = assignees::validate_selection(value, &assignees)?;
+    }
     pull.version = pull
         .version
         .checked_add(1)
@@ -564,6 +580,9 @@ async fn edit(
     pull.updated_at = app_storage::now()?;
     if label_change && !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
+    }
+    if assignee_change && !principal.can_write(&repo.config) {
+        return Err(Error::AssigneePermission);
     }
     app_storage::update(repo, &path, &pull, etag).await?;
     let repository = repo

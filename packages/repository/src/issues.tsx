@@ -7,12 +7,14 @@ import {
   repoHref,
   useRequest,
   type Repository,
+  type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
 import { Link, Result } from "./ui";
 import { ConflictReview, useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
-import { LabelBadges, LabelPicker } from "./discussion-labels";
+import { LabelBadges } from "./discussion-labels";
+import { AssigneeAvatars, DiscussionMetadata } from "./discussion-metadata";
 import {
   DiscussionMarkdown,
   Editor,
@@ -34,7 +36,9 @@ interface Issue extends Comment {
   title: string;
   state: "open" | "closed";
   labels: RepositoryLabel[];
+  assignees: RepositoryAssignee[];
   can_label: boolean;
+  can_assign: boolean;
 }
 interface Page<T> {
   items: T[];
@@ -180,6 +184,7 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                         {issue.author}
                       </p>
                     </div>
+                    <AssigneeAvatars assignees={issue.assignees} />
                   </li>
                 ))}
               </ul>
@@ -351,80 +356,82 @@ function IssueDetail({
           {current.author} opened this issue {timestamp(current.created_at)}
         </span>
       </p>
-      <div className="discussion-label-controls">
-        <LabelBadges labels={current.labels} />
-        {current.can_label && (
-          <LabelPicker
-            repo={repo}
-            labels={current.labels}
-            version={current.version}
-            path={`issues/${number}`}
-            csrf={csrf}
-            onSaved={resource.retry}
-          />
-        )}
-      </div>
       {resource.error && (
         <p className="notice error" role="alert">
           {resource.error}
         </p>
       )}
-      {editing ? (
-        <EditIssue
-          key={current.number}
-          issue={current}
-          repo={repo}
-          csrf={csrf}
-          onCancel={() => setEditing(false)}
-          onReviewed={(latest) =>
-            setIssue((old) =>
-              old && old.version > latest.version ? old : latest,
-            )
-          }
-          onSaved={(issue) => {
-            setIssue(issue);
-            setEditing(false);
-          }}
-        />
-      ) : (
-        <article className="discussion-card panel">
-          <header>
-            <strong>{current.author}</strong>
-            <time dateTime={new Date(current.created_at).toISOString()}>
-              {timestamp(current.created_at)}
-            </time>
-            {current.version > 1 && <span className="muted">edited</span>}
-          </header>
-          <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
-        </article>
-      )}
-      {current.can_edit && (
-        <div className="issue-state-controls">
-          <Button
-            ref={stateTrigger}
-            disabled={mutation.pending || editing}
-            onClick={async () => {
-              const updated = await mutation.run<Issue>(
-                endpoint(repo, `issues/${number}`),
-                "PATCH",
-                {
-                  version: current.version,
-                  state: current.state === "open" ? "closed" : "open",
-                },
-              );
-              if (updated) setIssue(updated);
-            }}
-          >
-            {current.state === "open" ? "Close issue" : "Reopen issue"}
-          </Button>
-          {mutation.error && (
-            <p className="notice error" role="alert">
-              {mutation.error}
-            </p>
+      <div className="discussion-detail-layout">
+        <div className="discussion-main">
+          {editing ? (
+            <EditIssue
+              key={current.number}
+              issue={current}
+              repo={repo}
+              csrf={csrf}
+              onCancel={() => setEditing(false)}
+              onReviewed={(latest) =>
+                setIssue((old) =>
+                  old && old.version > latest.version ? old : latest,
+                )
+              }
+              onSaved={(issue) => {
+                setIssue(issue);
+                setEditing(false);
+              }}
+            />
+          ) : (
+            <article className="discussion-card panel">
+              <header>
+                <strong>{current.author}</strong>
+                <time dateTime={new Date(current.created_at).toISOString()}>
+                  {timestamp(current.created_at)}
+                </time>
+                {current.version > 1 && <span className="muted">edited</span>}
+              </header>
+              <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
+            </article>
           )}
+          {current.can_edit && (
+            <div className="issue-state-controls">
+              <Button
+                ref={stateTrigger}
+                disabled={mutation.pending || editing}
+                onClick={async () => {
+                  const updated = await mutation.run<Issue>(
+                    endpoint(repo, `issues/${number}`),
+                    "PATCH",
+                    {
+                      version: current.version,
+                      state: current.state === "open" ? "closed" : "open",
+                    },
+                  );
+                  if (updated) setIssue(updated);
+                }}
+              >
+                {current.state === "open" ? "Close issue" : "Reopen issue"}
+              </Button>
+              {mutation.error && (
+                <p className="notice error" role="alert">
+                  {mutation.error}
+                </p>
+              )}
+            </div>
+          )}
+          <Comments repo={repo} issue={number} csrf={csrf} />
         </div>
-      )}
-      <Comments repo={repo} issue={number} csrf={csrf} />
+        <DiscussionMetadata
+          repo={repo}
+          assignees={current.assignees}
+          labels={current.labels}
+          canAssign={current.can_assign}
+          canLabel={current.can_label}
+          version={current.version}
+          path={`issues/${number}`}
+          csrf={csrf}
+          onSaved={resource.retry}
+        />
+      </div>
     </section>
   );
 }

@@ -190,10 +190,12 @@ impl Harness {
                 members: vec![
                     crate::RepositoryMember {
                         subject: "alice-id".into(),
+                        name: "Alice".into(),
                         access: crate::RepositoryAccess::Write,
                     },
                     crate::RepositoryMember {
                         subject: "bob-id".into(),
+                        name: "Bob".into(),
                         access: crate::RepositoryAccess::Read,
                     },
                 ],
@@ -584,6 +586,9 @@ mod issues;
 
 #[path = "auth_tests/labels.rs"]
 mod labels;
+
+#[path = "auth_tests/assignees.rs"]
+mod assignees;
 
 #[path = "auth_tests/git_tokens.rs"]
 mod git_tokens;
