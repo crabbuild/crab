@@ -30,7 +30,7 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: generation-bound pointer dependency proof, canonical pack/index
+Remaining intake work: request-bounded dependency orchestration, canonical pack/index
 publication, and HTTP streaming with a request-bound deadline. No Git binary,
 clone or local Git object database is used by quarantine or preparation. The
 test oracle uses Git independently.
@@ -150,10 +150,18 @@ records instead of following lookup offsets into another deserializer.
 Streaming visitors still support aggregate inventories above the materialization
 limit while applying the same per-record byte bound.
 
-This is content evidence, not publication authority. The publisher must select
-the shard from its pinned committed generation, acquire writer/GC fences, and
-recheck its base before publication. Pointer hints and file-index hits alone are
-insufficient. LFS dependency integration and canonical fenced publication remain
+`FileIndexLookupSession::for_snapshot` selects dependencies from an explicit
+`read_repository_snapshot` result. It reuses the canonical shard scan, including
+captured journal shards, without reading a newer manifest or opening SlateDB.
+Later manifests, journal commits and acceleration rows cannot widen the captured
+inventory. Cancellation leaves no reader checkpoints or reader handle to close.
+Ordinary current-state lookups retain the same shared anchor derivation and
+acceleration behavior.
+
+Selection and content evidence are not publication authority. The publisher must
+acquire writer/GC fences and recheck its exact base before publication. Pointer
+hints and file-index hits alone are insufficient. Request-wide admission and
+scan budgets, LFS dependency integration and canonical fenced publication remain
 pending; HTTP push is still disabled.
 
 Six focused tests cover repeated compressed content, empty files, missing or
@@ -166,6 +174,16 @@ stored bytes per proof. Ten local release proofs took 1.816–2.769 ms each; the
 are small synthetic, cache-sharing observations, not Kubernetes or production
 latency claims. Corrupting and deleting an isolated fixture xorb both caused
 verification to fail; restoring the content made it pass again.
+
+Ten file-index tests pass, including captured-state lookup after a later manifest
+and acceleration row are published, no checkpoint writes, existing scoped-reader
+behavior and committed journal candidates. A separate RustFS fixture captures
+generation 1, then publishes generation 2 before opening the snapshot-bound
+lookup. It selects only generation 1's dependency; content proof reconstructs its
+exact 16,384 bytes. The current snapshot selects only generation 2's dependency.
+All six repository objects retain identical sizes and ETags during the reads.
+Captured lookup plus content proof took 3.293 ms locally. This is an isolated
+metadata/content fixture, not a native Git push or production latency result.
 
 ## Existing code and the semantic mismatch
 

@@ -50,6 +50,21 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 Keep each SlateDB session's lifecycle explicit: every opened reader or writer
 must be closed on success and error paths.
 
+When validating dependencies against an already captured repository state, use
+`FileIndexLookupSession::for_snapshot(&layout, &snapshot)` with a snapshot returned
+by `read_repository_snapshot` for that layout. It scans only that snapshot's shard
+inventory, including its captured journal overlay. Later manifests, journals and
+file-index rows do not change its answers. This mode opens no SlateDB reader and
+writes no checkpoints, so cancelling a lookup leaves no reader to close.
+The ordinary `open`/`open_for_storage` methods continue to capture current state
+and use acceleration where storage permissions allow it.
+
+A selected shard is only a dependency candidate. Verify the file's content at
+origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
+publication base before accepting a write. Snapshot lookup retains the canonical
+scan's per-shard bounds; the composing request must also provide admission and
+operation-wide limits.
+
 ## Usage
 
 Create and validate a manifest payload without enabling any storage runtime:

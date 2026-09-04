@@ -60,6 +60,62 @@ struct CommittedShardAnchor {
     shards: HashSet<MerkleHash>,
 }
 
+impl CommittedShardAnchor {
+    fn from_snapshot(
+        snapshot: &crate::manifest_store::RepositorySnapshot,
+        router: &crab_storage::StoreLayout<crab_storage::Store>,
+    ) -> Result<Option<Self>> {
+        if snapshot.journal.shards.is_empty() {
+            return Ok(None);
+        }
+        // Captured journal transactions belong to this repository snapshot.
+        // Derive the exact anchor the next compaction will publish so
+        // candidate rows become usable at the same visibility boundary.
+        let (generation, shard_index_hash) = if snapshot.journal.transactions.is_empty() {
+            let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
+                MerkleHash::default()
+            } else {
+                MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(|error| {
+                    MetadataError::CorruptObject {
+                        path: router.manifest_path().to_string(),
+                        reason: format!("invalid shard-index hash: {error}"),
+                    }
+                })?
+            };
+            (snapshot.manifest.generation, shard_index_hash)
+        } else {
+            let generation = snapshot.manifest.generation.checked_add(1).ok_or_else(|| {
+                MetadataError::Internal("manifest generation overflow".to_owned())
+            })?;
+            let (shard_index_hash, _, _) =
+                crate::manifests::compact_shard_index(generation, &snapshot.journal.shards)?;
+            let shard_index_hash = MerkleHash::from_hex(&shard_index_hash).map_err(|error| {
+                MetadataError::CorruptObject {
+                    path: "projected repository shard inventory".to_owned(),
+                    reason: format!("invalid shard-index hash: {error}"),
+                }
+            })?;
+            (generation, shard_index_hash)
+        };
+        let shards = snapshot
+            .journal
+            .shards
+            .iter()
+            .map(|hash| {
+                MerkleHash::from_hex(hash).map_err(|error| MetadataError::CorruptObject {
+                    path: "repository shard inventory".to_owned(),
+                    reason: format!("invalid shard hash: {error}"),
+                })
+            })
+            .collect::<Result<HashSet<_>>>()?;
+        Ok(Some(Self {
+            generation,
+            shard_index_hash,
+            shards,
+        }))
+    }
+}
+
 #[derive(Debug, Default)]
 struct ManifestFallbackCache {
     found: HashMap<MerkleHash, MerkleHash>,
@@ -164,6 +220,27 @@ impl FileIndexLookupSession {
         Self::open_with_mode(store.clone(), repo_prefix, store.storage_scope().is_none()).await
     }
 
+    /// Bind canonical shard lookups to an already captured repository snapshot.
+    ///
+    /// The snapshot must come from `read_repository_snapshot` for this layout.
+    /// Later manifests, journals and file-index rows cannot widen its inventory.
+    /// This mode does not open SlateDB or write reader checkpoints; dropping a
+    /// lookup cannot leak a reader. Callers must still verify pointer content,
+    /// hold GC fences and recheck their publication base before committing.
+    pub fn for_snapshot(
+        router: &crab_storage::StoreLayout<crab_storage::Store>,
+        snapshot: &crate::manifest_store::RepositorySnapshot,
+    ) -> Result<Self> {
+        let anchor = CommittedShardAnchor::from_snapshot(snapshot, router)?;
+        Ok(Self {
+            reader: None,
+            anchor,
+            storage: router.store().clone(),
+            router: router.clone(),
+            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+        })
+    }
+
     async fn open_with_mode(
         storage: crab_storage::Store,
         repo_prefix: &str,
@@ -172,58 +249,7 @@ impl FileIndexLookupSession {
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
         let anchor = match crate::manifest_store::read_repository_snapshot(&storage, &router).await
         {
-            Ok(snapshot) if !snapshot.journal.shards.is_empty() => {
-                // Active journal transactions are the current repository state.
-                // Derive the exact anchor the next compaction will publish so
-                // candidate rows become usable at the same visibility boundary.
-                let (generation, shard_index_hash) = if snapshot.journal.transactions.is_empty() {
-                    let shard_index_hash = if snapshot.manifest.shard_index_hash.is_empty() {
-                        MerkleHash::default()
-                    } else {
-                        MerkleHash::from_hex(&snapshot.manifest.shard_index_hash).map_err(
-                            |error| MetadataError::CorruptObject {
-                                path: router.manifest_path().to_string(),
-                                reason: format!("invalid shard-index hash: {error}"),
-                            },
-                        )?
-                    };
-                    (snapshot.manifest.generation, shard_index_hash)
-                } else {
-                    let generation =
-                        snapshot.manifest.generation.checked_add(1).ok_or_else(|| {
-                            MetadataError::Internal("manifest generation overflow".to_owned())
-                        })?;
-                    let (shard_index_hash, _, _) = crate::manifests::compact_shard_index(
-                        generation,
-                        &snapshot.journal.shards,
-                    )?;
-                    let shard_index_hash =
-                        MerkleHash::from_hex(&shard_index_hash).map_err(|error| {
-                            MetadataError::CorruptObject {
-                                path: "projected repository shard inventory".to_owned(),
-                                reason: format!("invalid shard-index hash: {error}"),
-                            }
-                        })?;
-                    (generation, shard_index_hash)
-                };
-                let shards = snapshot
-                    .journal
-                    .shards
-                    .into_iter()
-                    .map(|hash| {
-                        MerkleHash::from_hex(&hash).map_err(|error| MetadataError::CorruptObject {
-                            path: "repository shard inventory".to_owned(),
-                            reason: format!("invalid shard hash: {error}"),
-                        })
-                    })
-                    .collect::<Result<HashSet<_>>>()?;
-                Some(CommittedShardAnchor {
-                    generation,
-                    shard_index_hash,
-                    shards,
-                })
-            }
-            Ok(_) => None,
+            Ok(snapshot) => CommittedShardAnchor::from_snapshot(&snapshot, &router)?,
             Err(MetadataError::Storage {
                 source: crab_storage::StorageError::NotFound { .. },
             }) => None,
@@ -418,7 +444,9 @@ impl FileIndexLookupSession {
             .iter()
             .filter(|file_hash| cache.found.contains_key(*file_hash))
             .count();
-        if repaired_files > 0 {
+        // Canonical-only sessions intentionally skip the index; finding a file
+        // there does not indicate broken acceleration that needs a rebuild.
+        if repaired_files > 0 && self.reader.is_some() {
             tracing::warn!(
                 repaired_files,
                 generation = anchor.generation,
@@ -750,6 +778,117 @@ mod tests {
             .expect("batch lookup");
         assert_eq!(got, vec![Some(shard_b), Some(shard_a)]);
         session.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn captured_snapshot_does_not_follow_later_manifests_or_index_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let router = crab_storage::StoreLayout::new(storage.clone(), "pinned/repo".to_owned());
+        let old_file = hash_from_seed(1);
+        let new_file = hash_from_seed(2);
+        let (old_body, old_shard) = shard_with_file(old_file);
+        let (new_body, new_shard) = shard_with_file(new_file);
+        seed_file_index(Arc::clone(&store), "pinned/repo", &[(old_file, old_shard)]).await;
+        for (hash, body) in [(old_shard, old_body), (new_shard, new_body)] {
+            storage
+                .put(&router.shard_path(&hash), Bytes::from(body))
+                .await
+                .unwrap();
+        }
+        let captured = crate::manifest_store::read_repository_snapshot(&storage, &router)
+            .await
+            .unwrap();
+        let (index_hash, _, index) =
+            crate::manifests::compact_shard_index(2, &[new_shard.hex()]).unwrap();
+        crate::manifest_store::upload_segmented_bulk(
+            &storage,
+            &router,
+            &crate::manifests::BulkData {
+                shard_index: index,
+                pack_index: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut current = captured.manifest.clone();
+        current.generation = 2;
+        current.shard_index_hash = index_hash;
+        current.seal_git_validation();
+        crate::manifest_store::write_manifest_cas(
+            &storage,
+            &router,
+            &current,
+            &captured.manifest_etag,
+        )
+        .await
+        .unwrap();
+        let db = slatedb::Db::open(
+            ObjectPath::from(file_index_path("pinned/repo")),
+            Arc::clone(&store),
+        )
+        .await
+        .unwrap();
+        db.put(
+            crate::key_codec::encode_committed_file_key(&new_file, 2),
+            crate::value_codec::encode_committed_file_record(&CommittedFileRecord {
+                recipe_hash: [7; 32],
+                shard_hash: new_shard,
+                committed_generation: 2,
+                shard_index_hash: MerkleHash::from_hex(&current.shard_index_hash).unwrap(),
+            }),
+        )
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        // Open after the later state is durable: only the supplied snapshot is authority.
+        let pinned = FileIndexLookupSession::for_snapshot(&router, &captured).unwrap();
+        let pinned_result = pinned.lookup_batch(&[old_file, new_file]).await;
+        pinned.close().await.unwrap();
+        let latest = FileIndexLookupSession::open(Arc::clone(&store), "pinned/repo")
+            .await
+            .unwrap();
+        let latest_result = latest.lookup_batch(&[old_file, new_file]).await;
+        latest.close().await.unwrap();
+        assert_eq!(
+            (pinned_result.unwrap(), latest_result.unwrap()),
+            (vec![Some(old_shard), None], vec![None, Some(new_shard)])
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_lookup_does_not_write_reader_checkpoints() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let router = crab_storage::StoreLayout::new(storage.clone(), "pinned/read-only".to_owned());
+        let file = hash_from_seed(1);
+        let (body, shard) = shard_with_file(file);
+        seed_file_index(Arc::clone(&store), "pinned/read-only", &[(file, shard)]).await;
+        storage
+            .put(&router.shard_path(&shard), Bytes::from(body))
+            .await
+            .unwrap();
+        let snapshot = crate::manifest_store::read_repository_snapshot(&storage, &router)
+            .await
+            .unwrap();
+        let before = store
+            .list(None)
+            .map_ok(|meta| (meta.location, (meta.e_tag, meta.size)))
+            .try_collect::<BTreeMap<_, _>>()
+            .await
+            .unwrap();
+        let session = FileIndexLookupSession::for_snapshot(&router, &snapshot).unwrap();
+        let result = session.lookup(&file).await;
+        session.close().await.unwrap();
+        result.unwrap();
+        let after = store
+            .list(None)
+            .map_ok(|meta| (meta.location, (meta.e_tag, meta.size)))
+            .try_collect::<BTreeMap<_, _>>()
+            .await
+            .unwrap();
+        assert_eq!(after, before);
     }
 
     #[tokio::test]
