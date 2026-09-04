@@ -93,6 +93,11 @@ jobs:
     name: Rust quality and tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Full workspace debug symbols exhaust hosted-runner disk during linking.
+      # Keep file/line backtraces without changing assertions or optimization.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     steps:
