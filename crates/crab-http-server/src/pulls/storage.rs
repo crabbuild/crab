@@ -70,6 +70,8 @@ pub(super) struct PullRequest {
     #[serde(default)]
     pub label_ids: Vec<u64>,
     #[serde(default)]
+    pub assignee_subjects: Vec<String>,
+    #[serde(default)]
     pub merge_pending: Option<PullMerge>,
     #[serde(default)]
     pub merge: Option<PullMerge>,
@@ -206,6 +208,7 @@ pub(super) async fn create_pull(repo: &Repository, input: NewPullRequest) -> Res
                     head_ref: input.head_ref.clone(),
                     head_oid: input.head_oid.clone(),
                     label_ids: vec![],
+                    assignee_subjects: vec![],
                     merge_pending: None,
                     merge: None,
                     review_decisions: vec![],

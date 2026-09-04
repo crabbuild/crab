@@ -445,9 +445,34 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(labeled.0, StatusCode::OK);
     assert_eq!(labeled.1["labels"][0]["name"], "ready for merge");
+    let assigned = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::PATCH,
+        &format!("{ROOT}/1"),
+        json!({"version":labeled.1["version"],"assignees":["bob-id"]}),
+    )
+    .await;
+    assert_eq!(assigned.0, StatusCode::OK);
     assert_eq!(
-        h.json(ROOT, &bob).await["items"][0]["labels"][0]["id"],
-        label.1["id"]
+        assigned.1["assignees"],
+        json!([{"subject":"bob-id","name":"Bob"}])
+    );
+    assert_eq!(
+        h.json(ROOT, &bob).await["items"][0],
+        json!({
+            "number":1,
+            "title":"Proposed change",
+            "state":"open",
+            "author":"Alice",
+            "base_ref":"refs/heads/main",
+            "head_ref":"refs/heads/feature",
+            "created_at":assigned.1["created_at"],
+            "updated_at":assigned.1["updated_at"],
+            "labels":[label.1],
+            "assignees":[{"subject":"bob-id","name":"Bob"}]
+        })
     );
     assert_eq!(
         mutate(
@@ -456,7 +481,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             bob_csrf,
             reqwest::Method::PATCH,
             &format!("{ROOT}/1"),
-            json!({"version":labeled.1["version"],"label_ids":[]}),
+            json!({"version":assigned.1["version"],"assignees":[]}),
         )
         .await
         .0,

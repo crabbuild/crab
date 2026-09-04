@@ -348,7 +348,7 @@ for (const kind of ["issue", "comment"] as const) {
     await expect(edit).toBeFocused();
     const rendered =
       kind === "issue"
-        ? page.locator(".issue-detail > .discussion-card")
+        ? page.locator(".issue-detail .discussion-main > .discussion-card")
         : page.locator("#comment-1");
     await expect(rendered).toContainText("My additions");
     await page.reload();

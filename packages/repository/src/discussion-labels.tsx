@@ -65,6 +65,7 @@ export function LabelPicker({
   path,
   csrf,
   onSaved,
+  compact = false,
 }: {
   repo: Repository;
   labels?: RepositoryLabel[];
@@ -72,6 +73,7 @@ export function LabelPicker({
   path: string;
   csrf: string;
   onSaved: () => void;
+  compact?: boolean;
 }) {
   const catalog = useRequest<LabelCatalog>(endpoint(repo, "labels"));
   const mutation = useMutation(csrf);
@@ -87,9 +89,9 @@ export function LabelPicker({
   return (
     <div className="label-picker">
       <details ref={details}>
-        <summary>
-          <TagIcon /> Labels
-          {labels.length > 0 && <span>{labels.length}</span>}
+        <summary aria-label={compact ? "Edit labels" : undefined}>
+          <TagIcon /> {!compact && "Labels"}
+          {!compact && labels.length > 0 && <span>{labels.length}</span>}
         </summary>
         <div className="label-picker-menu">
           <header>
