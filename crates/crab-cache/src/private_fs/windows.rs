@@ -44,6 +44,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SHARE_PINNED: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_PAYLOAD: u32 = SHARE_PINNED | FILE_SHARE_DELETE;
 const OPEN_NO_REPARSE: u32 = FILE_FLAG_OPEN_REPARSE_POINT;
+const WINDOWS_TO_UNIX_EPOCH_100NS: u64 = 116_444_736_000_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -88,7 +89,12 @@ impl Directory {
                         Err(CacheError::Io(error))
                             if create && error.kind() == io::ErrorKind::NotFound =>
                         {
-                            create_private_directory(&current)?;
+                            match create_private_directory(&current) {
+                                Ok(()) => {}
+                                Err(CacheError::Io(error))
+                                    if error.kind() == io::ErrorKind::AlreadyExists => {}
+                                Err(error) => return Err(error),
+                            }
                             open_validated_directory(&current)?
                         }
                         Err(error) => return Err(error),
@@ -409,6 +415,8 @@ fn open_for_delete(path: &Path) -> Result<File> {
 fn open_temporary(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options
+        .read(true)
+        .write(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
         .share_mode(SHARE_PINNED | FILE_SHARE_DELETE)
         .custom_flags(OPEN_NO_REPARSE)
@@ -449,7 +457,12 @@ fn handle_stat(file: &File) -> Result<HandleStat> {
         },
         size: standard.EndOfFile as u64,
         allocated: standard.AllocationSize as u64,
-        modified_ns: metadata.last_write_time().saturating_mul(100),
+        // Windows FILETIME counts 100 ns intervals since 1601. Catalog order
+        // uses Unix nanoseconds and SQLite integers are signed 64-bit values.
+        modified_ns: metadata
+            .last_write_time()
+            .saturating_sub(WINDOWS_TO_UNIX_EPOCH_100NS)
+            .saturating_mul(100),
         links: standard.NumberOfLinks,
         directory: standard.Directory,
         reparse: metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0,
@@ -856,14 +869,6 @@ pub(super) fn entry_names(root: &Path, path: &Path, limit: usize) -> Result<Vec<
     }
     names.sort();
     Ok(names)
-}
-
-#[cfg(test)]
-pub(super) fn remove_file(root: &Path, path: &Path) -> Result<u64> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| unsafe_path(path, "entry is outside cache root"))?;
-    Directory::root(root, false)?.remove_relative(relative)
 }
 
 pub(super) struct TemporaryFile {
