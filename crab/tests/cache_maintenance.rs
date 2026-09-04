@@ -306,7 +306,9 @@ async fn stats_commands_report_healthy_groups_when_the_other_is_unsafe() {
             let mut encoded = key.hash.as_bytes().to_vec();
             encoded.extend_from_slice(key.prefix.as_bytes());
             let encoded: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
-            range_root.join(format!("r-{}", &encoded[..2])).join(encoded)
+            range_root
+                .join(format!("r-{}", &encoded[..2]))
+                .join(encoded)
         } else {
             let hex = shard_hash.hex();
             root.join("shards").join(&hex[..2]).join(hex)
@@ -567,7 +569,9 @@ async fn verify_and_prune_commands_preserve_non_range_owners() {
     let mut encoded = key.hash.as_bytes().to_vec();
     encoded.extend_from_slice(key.prefix.as_bytes());
     let encoded: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
-    let entry_dir = range_root.join(format!("r-{}", &encoded[..2])).join(encoded);
+    let entry_dir = range_root
+        .join(format!("r-{}", &encoded[..2]))
+        .join(encoded);
     let payload = std::fs::read_dir(&entry_dir)
         .unwrap()
         .next()
