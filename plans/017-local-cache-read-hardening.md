@@ -20,8 +20,9 @@
 
 ### Mitigation of the 10/20 GiB findings
 
-This checkpoint changes Crab, not Xet. Installed-artifact qualification is
-pending; the failed scale reports below remain valid historical evidence.
+This checkpoint changes Crab, not Xet. The fresh installed 10/20 GiB matrix
+passes; the failed scale reports below remain valid historical evidence.
+This is not completion of the roadmap or merge approval.
 
 | Changed owner / entry point | Caller, callee, sibling and dependency proof |
 |---|---|
@@ -62,7 +63,52 @@ retains the input writer in another process; the filter closes its output after
 60.064 seconds. Neither fixture proves a complete cancellation/resource bound.
 The installed binary SHA-256 is
 `416d00e61b3100f6bf853647fdfdcfdcd11cca0be4e47dee8e2660922fcc9721`.
-The strict fresh 20/10 GiB matrix is running; no scale pass yet.
+Run `cache-f410-mitigate.yVnj1B` completes **112 commands / 209 checks**, with
+zero failed assertions or timeouts, `matrix_completed=true`, overall status
+`passed` and process exit zero. These are fresh high-entropy 10/20 GiB synthetic
+files against the isolated native RustFS beta.8 bucket, with the unchanged
+10 GiB cache budget. Each repository has two duplicates and one one-MiB-edited
+file, for 30/60 GiB worktrees. This is not real-model repository coverage or a
+controlled performance comparison against main.
+
+| Installed acceptance | 10 GiB / 20 GiB |
+|---|---|
+| Add, Git commit, Crab push | Pass; pointer blobs, source hashes and clean Git state verified. |
+| Duplicate after writer cache clean | Zero new xorbs / zero new xorbs. |
+| One-MiB edit | 1,188,836 / 1,169,633 new xorb bytes; both below four MiB. |
+| Both range cleanup commands | Remove all observed decoded ranges; retain pointers and unrelated sentinel. |
+| Cold clone/fetch/hydrate and corrupted-range recovery | Actual RustFS xorb responses and independent SHA-256 equality for all three files. Fetch leaves pointers. |
+| Wholly absent former cache; denied/restored origin | Denied hydration exits 7 without replacing pointers; restored fetch and hydration succeed. |
+| Healthy fresh cache | Stats exits zero, complete scan, zero issues at both sizes. |
+| Eager clone | No Git/filter errors, exact hashes; 74.157 / 454.103 seconds. |
+| Final integrity and preservation | All six readers pass fsck and finish Git-clean; remote xorb keys, sizes and ETags unchanged. |
+
+The four intentional nonzero command exits are two denied-origin hydrations
+and two stats calls on caches containing the deliberately non-private unrelated
+sentinel. Those stats report exactly that one issue, not a wholly healthy cache;
+separate wholly fresh roots have zero issues. The new harness aborts on every
+failed cleanup assertion and every hidden Git `error:`/`fatal:` on an otherwise
+successful command. No product cache creator or incomplete fresh scan is
+exempted. Both old failed reports and the new passing evidence are retained.
+
+Report SHA-256:
+`7c715dd5c72c7572465d7cd8aae3c8ddf06dd855988e13478a351d38d8212059`;
+runner:
+`94799ef8be77332f17bb7d66a649f4325056bd4c2ec32d71c3a6cc53dd891227`;
+imported matrix:
+`d645a53acd36bc77012f60d89bccb3e515cab5239cc4972a91b30ff7c2a8cb0d`.
+The report records the unrelated dirty-path manifest and exact binary hash;
+it does not claim a pristine whole worktree. Test worktrees are dehydrated,
+run-owned payload caches cleaned, and backend evidence retained. No bucket GC
+or unrelated cache deletion ran.
+
+Resource bounds remain open. Cold hydrate takes 37.885 / 78.981 seconds and
+records 2,170,535,936 / 3,202,727,936 bytes command maximum RSS. Eager clone
+records 10,741,923,840 / 8,366,800,896 bytes maximum RSS. A retained shared-host
+snapshot during 20 GiB eager checkout records substantial system-wide swap;
+these are not process-tree bounds or isolated attribution. Larger-than-cache
+fetch/hydrate still needs origin reads; no fully offline warm guarantee is
+inferred from this pass.
 
 The configured CI Clippy invocation passes locally. An extra strict
 warnings-as-errors CLI invocation does not: dependency traversal encounters
@@ -82,15 +128,32 @@ the S3 canary's report and redacted command logs separately from the provider
 contract report, on successful or failed canary execution. The earlier failed
 canary wrote those diagnostics under the runner's temporary directory, outside
 the uploaded provider directory. Upload only the report/log files, not caches
-or repositories. GCS/Azure do not run this canary and are unaffected. A new
-manual S3 run must retain the actual failure or pass; workflow syntax alone is
-not provider proof. Missing credentials and the dedicated scale runner remain
-separate environment gates.
+or repositories. GCS/Azure do not run this canary and are unaffected.
+Manual run `33844707585`, source `17fbbf8`, proves retention but remains failed:
+the provider-contract command passes, then canary command 154 (`git ls-remote`)
+returns exit 128 / `CRAB-E0030` after deliberate deletion of a committed pack.
+The preceding clone correctly fails without checking out a file. The canary
+expects refs still to be listable; its 58 earlier checks do not make this a
+pass. Both the report and redacted stderr are now downloadable from
+`provider-canary-s3-33844707585-1`.
+
+Canary report SHA-256:
+`c7b37a2e6c5560637b9e9ba6167d8312e95bd9e59872b0b860b97247979f4d30`;
+failing stderr:
+`f7da777349149e3824a34cfdf35214a75ae38bbb6148efccc8ba4da9754be8f8`.
+Protocol-v2 admission and remote-Git modules are unchanged against main, but
+the artifact alone does not establish the exact helper call path or the best
+policy fix. Next: retain legacy/v2 helper traces under the same missing-pack
+fixture, resolve the intended ls-refs contract, and complete the full canary
+with ref-preservation and failed-clone assertions intact. Do not silently
+relax admission or change the expected result just to turn the job green.
+GCS/Azure workflow variables and secret names are absent when checked; native
+NFS and dedicated-runner scale evidence remain separate gates.
 
 Is this the best fix? The shared lifetime and naming owners cover their
 sibling paths; a longer timeout or relaxed cleanup predicate would leave the
-invalid assumptions intact. Remaining work includes installed cold/eager
-qualification, Git checkout memory amplification, safe old-root rotation,
+invalid assumptions intact. Remaining work includes Git checkout memory
+amplification, safe old-root rotation,
 private spill/index lifecycle, native Windows ownership, and unresolved
 optional CI/provider gates. Unit passes are not merge approval.
 
@@ -109,7 +172,8 @@ decision/access is absent; independent mitigation and verification can proceed.
 
 **Native workflow gate finding:** macOS job `100937841297` in run
 `33845974873` fails immediate scheduler-lock reacquisition after guard drop
-(693 other tests pass). `scheduler_lock.rs` is identical on `origin/main`.
+(693 other tests pass). The failing implementation was identical to
+`origin/main`.
 A deterministic new Unix test duplicates the held descriptor, drops the guard,
 and reproduces `WorkflowLockTimeout`; this proves a release defect, not the
 exact untraced CI interleaving. fs4 0.13.1 delegates Unix locks to `flock` and
@@ -127,10 +191,19 @@ than making a no-wait caller sleep. Staging's exclusive/shared lock owners
 also depend on descriptor close, but couple that release to index/writer
 teardown; audit and prove that separate ordering before applying a similar
 change. This checkpoint does not claim all flock owners are hardened. The
-large-file matrix continues to use installed `41e74b1` (unchanged cache/read
+large-file matrix uses installed `41e74b1` (unchanged cache/read
 code); it is not execution evidence for this later workflow-only fix.
-All 12 focused scheduler-lock tests pass after the change; installed workflow
-and fresh cross-platform CI proof are still required.
+All 12 focused scheduler-lock tests pass. Installed `d8b0c67` executes two
+immediate `--force --no-wait` workflow runs, both reporting `cache_hit=false`,
+`source=Execution`, exit zero and exact output bytes. Its binary SHA-256 is
+`28414d58e543d659c88ef640f4f298667005883fbc310e5e5dbc3eebe76b8c18`;
+probe report:
+`a2d5b3455f4b73d6225847bbe2c120d40cd15230d37d8933a004188204099e28`.
+Native macOS and Linux workflow jobs on `d8b0c67` now pass in run
+`33847180642`; Windows remains in progress at this checkpoint. Fresh full CI
+proof is still required. The obsolete `9cf0914`
+CI run was cancelled after its queued status job blocked the newer run;
+that cancellation is not passing evidence.
 
 ### 10/20 GiB expansion: case-insensitive range-cache maintenance gap
 
