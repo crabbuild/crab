@@ -1,0 +1,511 @@
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json, Router,
+    extract::{Path, Query, State, rejection::JsonRejection},
+    http::StatusCode,
+    middleware,
+    response::IntoResponse,
+    routing::get,
+};
+use crab_remote_git::{RemoteGitRepository, RepositoryOptions};
+use futures_util::{StreamExt, TryStreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::{
+    app::{self, Error, Result},
+    app_storage,
+    auth::{Identity, Principal},
+    server::Server,
+};
+
+mod storage;
+use storage::{NewPullRequest, PullComment, PullRequest, PullState};
+
+pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
+    Router::new()
+        .route("/api/repos/{owner}/{name}/pulls", get(list).post(create))
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}",
+            get(detail).patch(edit),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/comments",
+            get(comments).post(comment),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/pulls/{number}/comments/{comment}",
+            get(comment_detail).patch(edit_comment),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
+        .route_layer(middleware::from_fn_with_state(server, app::admit))
+}
+
+fn pull_view(
+    pull: &PullRequest,
+    actor: &Identity,
+    can_write: bool,
+    current: Option<&(String, String)>,
+) -> Value {
+    json!({
+        "number": pull.number,
+        "title": pull.title,
+        "body": pull.body,
+        "state": pull.state,
+        "author": pull.author.name,
+        "base_ref": pull.base_ref,
+        "base_oid": current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
+        "head_ref": pull.head_ref,
+        "head_oid": current.map_or(pull.head_oid.as_str(), |value| value.1.as_str()),
+        "original_base_oid": pull.base_oid,
+        "original_head_oid": pull.head_oid,
+        "version": pull.version,
+        "created_at": pull.created_at,
+        "updated_at": pull.updated_at,
+        "can_edit": app_storage::same_author(&pull.author, actor),
+        "can_manage": can_write || app_storage::same_author(&pull.author, actor),
+        "branches_available": current.is_some(),
+    })
+}
+
+fn pull_list_view(pull: &PullRequest) -> Value {
+    json!({
+        "number": pull.number,
+        "title": pull.title,
+        "state": pull.state,
+        "author": pull.author.name,
+        "base_ref": pull.base_ref,
+        "head_ref": pull.head_ref,
+        "created_at": pull.created_at,
+        "updated_at": pull.updated_at,
+    })
+}
+
+fn comment_view(comment: &PullComment, actor: &Identity) -> Value {
+    json!({
+        "number": comment.number,
+        "body": comment.body,
+        "author": comment.author.name,
+        "version": comment.version,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+        "can_edit": app_storage::same_author(&comment.author, actor),
+    })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ListParameters {
+    before: Option<u64>,
+    limit: Option<usize>,
+    state: Option<String>,
+}
+
+impl ListParameters {
+    fn limit(&self) -> Result<usize> {
+        let limit = self.limit.unwrap_or(30);
+        if !(1..=50).contains(&limit)
+            || self
+                .before
+                .is_some_and(|value| value == 0 || value > app_storage::MAX_NUMBER)
+        {
+            return Err(Error::Invalid("Invalid pull request page"));
+        }
+        Ok(limit)
+    }
+
+    fn state(&self) -> Result<Option<PullState>> {
+        match self.state.as_deref().unwrap_or("open") {
+            "open" => Ok(Some(PullState::Open)),
+            "closed" => Ok(Some(PullState::Closed)),
+            "all" => Ok(None),
+            _ => Err(Error::Invalid(
+                "Pull request state must be open, closed or all",
+            )),
+        }
+    }
+}
+
+async fn list(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    Query(params): Query<ListParameters>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &key)?;
+    app::actor(&principal)?;
+    let limit = params.limit()?;
+    let state = params.state()?;
+    let last = app_storage::last_number(repo, storage::ROOT).await?;
+    let mut next = last.min(params.before.map_or(last, |before| before - 1));
+    let mut items = Vec::new();
+    let mut scanned = 0;
+    while next > 0 && items.len() < limit && scanned < 200 {
+        let bottom = next.saturating_sub(8);
+        let batch = futures_util::stream::iter(((bottom + 1)..=next).rev().map(|id| async move {
+            app_storage::read::<PullRequest>(repo, &storage::pull_path(id)).await
+        }))
+        .buffered(8)
+        .try_collect::<Vec<_>>()
+        .await?;
+        for entry in batch {
+            next -= 1;
+            scanned += 1;
+            if let Some((pull, _)) = entry
+                && state.is_none_or(|state| state == pull.state)
+            {
+                items.push(pull_list_view(&pull));
+            }
+            if items.len() == limit || scanned == 200 {
+                break;
+            }
+        }
+    }
+    Ok(Json(
+        json!({"items":items,"next":(next > 0).then_some(next + 1)}),
+    ))
+}
+
+fn resolve_branch(repository: &RemoteGitRepository, name: &str) -> Result<String> {
+    if !name.starts_with("refs/heads/") || name == "refs/heads/" {
+        return Err(Error::Invalid("Pull requests require branch refs"));
+    }
+    repository
+        .refs()
+        .entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.target.to_string())
+        .ok_or(Error::Invalid("Base or head branch is unavailable"))
+}
+
+fn current_branches(
+    repository: &RemoteGitRepository,
+    pull: &PullRequest,
+) -> Option<(String, String)> {
+    let base = repository
+        .refs()
+        .entries
+        .iter()
+        .find(|entry| entry.name == pull.base_ref)?;
+    let head = repository
+        .refs()
+        .entries
+        .iter()
+        .find(|entry| entry.name == pull.head_ref)?;
+    Some((base.target.to_string(), head.target.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewPull {
+    request_id: String,
+    title: String,
+    body: String,
+    base_ref: String,
+    head_ref: String,
+}
+
+async fn create(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<(String, String)>,
+    input: std::result::Result<Json<NewPull>, JsonRejection>,
+) -> Result<impl IntoResponse> {
+    let repo = app::repository(&server, &principal, &key)?;
+    let Json(input) = input?;
+    let actor = app::actor(&principal)?;
+    let title = app::title(&input.title)?;
+    app::body(&input.body, false)?;
+    let request_id = app::submission(&input.request_id)?;
+    if input.base_ref == input.head_ref {
+        return Err(Error::Invalid("Base and head branches must differ"));
+    }
+    if let Some(pull) = storage::recover_pull(
+        repo,
+        &actor,
+        &request_id,
+        &title,
+        &input.body,
+        &input.base_ref,
+        &input.head_ref,
+    )
+    .await?
+    {
+        let repository = repo
+            .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+            .await
+            .ok();
+        let current = repository
+            .as_ref()
+            .and_then(|repository| current_branches(repository, &pull));
+        return Ok((
+            StatusCode::CREATED,
+            Json(pull_view(
+                &pull,
+                &actor,
+                principal.can_write(&repo.config),
+                current.as_ref(),
+            )),
+        ));
+    }
+    let repository = repo
+        .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+        .await?;
+    let base_oid = resolve_branch(&repository, &input.base_ref)?;
+    let head_oid = resolve_branch(&repository, &input.head_ref)?;
+    if base_oid == head_oid {
+        return Err(Error::Invalid("Head branch has no commits to compare"));
+    }
+    let pull = storage::create_pull(
+        repo,
+        NewPullRequest {
+            author: actor.clone(),
+            request_id,
+            title,
+            body: input.body,
+            base_ref: input.base_ref,
+            base_oid,
+            head_ref: input.head_ref,
+            head_oid,
+        },
+    )
+    .await?;
+    let current = current_branches(&repository, &pull);
+    Ok((
+        StatusCode::CREATED,
+        Json(pull_view(
+            &pull,
+            &actor,
+            principal.can_write(&repo.config),
+            current.as_ref(),
+        )),
+    ))
+}
+
+async fn detail(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let (pull, _) = app_storage::read::<PullRequest>(repo, &storage::pull_path(app::number(id)?))
+        .await?
+        .ok_or(Error::NotFound)?;
+    let repository = repo
+        .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+        .await
+        .ok();
+    let actor = app::actor(&principal)?;
+    let current = repository
+        .as_ref()
+        .and_then(|repository| current_branches(repository, &pull));
+    Ok(Json(pull_view(
+        &pull,
+        &actor,
+        principal.can_write(&repo.config),
+        current.as_ref(),
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PullEdit {
+    version: u64,
+    title: Option<String>,
+    body: Option<String>,
+    state: Option<PullState>,
+}
+
+async fn edit(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+    input: std::result::Result<Json<PullEdit>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let Json(input) = input?;
+    let actor = app::actor(&principal)?;
+    let path = storage::pull_path(app::number(id)?);
+    let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let author = app_storage::same_author(&pull.author, &actor);
+    if (input.title.is_some() || input.body.is_some()) && !author {
+        return Err(Error::Forbidden);
+    }
+    if input.state.is_some() && !(author || principal.can_write(&repo.config)) {
+        return Err(Error::Forbidden);
+    }
+    if input.version != pull.version {
+        return Err(Error::Conflict);
+    }
+    if input.title.is_none() && input.body.is_none() && input.state.is_none() {
+        return Err(Error::Invalid("No pull request changes supplied"));
+    }
+    if let Some(value) = input.title {
+        pull.title = app::title(&value)?;
+    }
+    if let Some(value) = input.body {
+        app::body(&value, false)?;
+        pull.body = value;
+    }
+    if let Some(value) = input.state {
+        pull.state = value;
+    }
+    pull.version = pull
+        .version
+        .checked_add(1)
+        .filter(|value| *value < app_storage::MAX_NUMBER)
+        .ok_or(Error::Conflict)?;
+    pull.updated_at = app_storage::now()?;
+    app_storage::update(repo, &path, &pull, etag).await?;
+    let repository = repo
+        .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+        .await
+        .ok();
+    let current = repository
+        .as_ref()
+        .and_then(|repository| current_branches(repository, &pull));
+    Ok(Json(pull_view(
+        &pull,
+        &actor,
+        principal.can_write(&repo.config),
+        current.as_ref(),
+    )))
+}
+
+async fn comments(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+    Query(params): Query<ListParameters>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let id = app::number(id)?;
+    if app_storage::read::<PullRequest>(repo, &storage::pull_path(id))
+        .await?
+        .is_none()
+    {
+        return Err(Error::NotFound);
+    }
+    if params.state.is_some() {
+        return Err(Error::Invalid("Comments do not have a state filter"));
+    }
+    let actor = app::actor(&principal)?;
+    let limit = params.limit()?;
+    let last = app_storage::last_number(repo, &storage::comments_root(id)).await?;
+    let mut next = last.min(params.before.map_or(last, |before| before - 1));
+    let mut items = Vec::new();
+    let mut scanned = 0;
+    while next > 0 && items.len() < limit && scanned < 200 {
+        let bottom = next.saturating_sub(8);
+        let batch =
+            futures_util::stream::iter(((bottom + 1)..=next).rev().map(|number| async move {
+                app_storage::read::<PullComment>(repo, &storage::comment_path(id, number)).await
+            }))
+            .buffered(8)
+            .try_collect::<Vec<_>>()
+            .await?;
+        for entry in batch {
+            next -= 1;
+            scanned += 1;
+            if let Some((comment, _)) = entry {
+                items.push(comment_view(&comment, &actor));
+            }
+            if items.len() == limit || scanned == 200 {
+                break;
+            }
+        }
+    }
+    Ok(Json(
+        json!({"items":items,"next":(next > 0).then_some(next + 1)}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewComment {
+    request_id: String,
+    body: String,
+}
+
+async fn comment(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id)): Path<(String, String, u64)>,
+    input: std::result::Result<Json<NewComment>, JsonRejection>,
+) -> Result<impl IntoResponse> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let id = app::number(id)?;
+    if app_storage::read::<PullRequest>(repo, &storage::pull_path(id))
+        .await?
+        .is_none()
+    {
+        return Err(Error::NotFound);
+    }
+    let Json(input) = input?;
+    app::body(&input.body, true)?;
+    let actor = app::actor(&principal)?;
+    let comment = storage::create_comment(
+        repo,
+        id,
+        actor.clone(),
+        app::submission(&input.request_id)?,
+        input.body,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(comment_view(&comment, &actor))))
+}
+
+async fn comment_detail(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let path = storage::comment_path(app::number(id)?, app::number(comment)?);
+    let (comment, _) = app_storage::read::<PullComment>(repo, &path)
+        .await?
+        .ok_or(Error::NotFound)?;
+    Ok(Json(comment_view(&comment, &app::actor(&principal)?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentEdit {
+    version: u64,
+    body: String,
+}
+
+async fn edit_comment(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
+    input: std::result::Result<Json<CommentEdit>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let Json(input) = input?;
+    let actor = app::actor(&principal)?;
+    let path = storage::comment_path(app::number(id)?, app::number(comment)?);
+    let (mut comment, etag) = app_storage::read::<PullComment>(repo, &path)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if !app_storage::same_author(&comment.author, &actor) {
+        return Err(Error::Forbidden);
+    }
+    if input.version != comment.version {
+        return Err(Error::Conflict);
+    }
+    app::body(&input.body, true)?;
+    comment.body = input.body;
+    comment.version = comment
+        .version
+        .checked_add(1)
+        .filter(|value| *value < app_storage::MAX_NUMBER)
+        .ok_or(Error::Conflict)?;
+    comment.updated_at = app_storage::now()?;
+    app_storage::update(repo, &path, &comment, etag).await?;
+    Ok(Json(comment_view(&comment, &actor)))
+}

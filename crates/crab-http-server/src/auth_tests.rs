@@ -579,3 +579,6 @@ mod issues;
 
 #[path = "auth_tests/git_tokens.rs"]
 mod git_tokens;
+
+#[path = "auth_tests/pulls.rs"]
+mod pulls;
