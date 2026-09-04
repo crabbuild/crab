@@ -17,6 +17,10 @@ const MAX_REF_HEADS: usize = 1_000_000;
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_000_000;
 const REF_JOURNAL_READ_CONCURRENCY: usize = 32;
 
+#[cfg(test)]
+#[path = "ref_journal/commit_tests.rs"]
+mod commit_tests;
+
 /// One expected-old ref edit committed by a journal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +202,9 @@ pub async fn read_ref_head(
 ///
 /// Each head first points at invisible prepared state. The immutable commit
 /// marker makes every edit visible together; later head promotion is cleanup.
+/// A failed marker write is confirmed by bounded exact readback when possible.
+/// Otherwise `RefJournalCommitUncertain` retains its identity and both failures;
+/// missing markers cannot prove rejection because compaction removes them.
 pub async fn commit_ref_transaction(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -227,12 +234,31 @@ pub async fn commit_ref_transaction(
         version: REF_JOURNAL_VERSION,
         transaction_id: transaction_id.clone(),
     };
-    store
-        .put_exact(
-            &router.ref_journal_active_path(&transaction_id),
-            Bytes::from(serialize(&marker)?),
-        )
-        .await?;
+    let marker_path = router.ref_journal_active_path(&transaction_id);
+    let marker_body = Bytes::from(serialize(&marker)?);
+    if let Err(source) = store.put_exact(&marker_path, marker_body.clone()).await {
+        // A lost write response is not a rejected transaction. Confirm only the
+        // exact marker; never roll back prepared heads after attempting commit.
+        let verification = match store
+            .get_with_etag_bounded(&marker_path, marker_body.len() as u64)
+            .await
+        {
+            Ok((body, _)) if body == marker_body => Ok(()),
+            Ok(_) => Err(Some(StorageError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: "commit marker differs from the submitted transaction".to_owned(),
+            })),
+            Err(StorageError::NotFound { .. }) => Err(None),
+            Err(error) => Err(Some(error)),
+        };
+        if let Err(verification) = verification {
+            return Err(MetadataError::RefJournalCommitUncertain {
+                transaction_id,
+                source: Box::new(source),
+                verification: verification.map(Box::new),
+            });
+        }
+    }
 
     for (_, prepared_head) in prepared {
         if let Err(error) = promote_head(store, router, prepared_head, &transaction_id).await {

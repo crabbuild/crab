@@ -80,8 +80,13 @@ caller still owns the generation-owner election and any required GC fences.
 
 For journal commit, callers also own write authorization, ref namespace/policy and
 graph/dependency validation, immutable uploads, visibility proof, and ref leases.
-An error while writing the active marker can have an uncertain commit outcome;
-callers must reconcile it before reporting failure. Successful journal commit
+After a failed marker write, the metadata journal attempts bounded exact readback.
+Matching marker bytes confirm commit and allow head cleanup to continue. If the
+marker is absent, different, oversized or unreadable, `RefJournalCommitUncertain`
+retains the transaction ID, original write error and any readback error. Absence
+does not prove rejection: a compactor may already have published the generation
+and removed the active marker. No prepared-head rollback follows a marker attempt.
+Callers must reconcile an uncertain outcome before reporting failure. Successful journal commit
 means refs are durable, not that the derived catalog is ready for reads.
 
 This crate does not yet own the complete generation service: receive-to-commit,
@@ -112,6 +117,14 @@ Commit tests cover a second atomic batch over un-compacted journal state, includ
 causal parents, exact creation/update/deletion, peeled tag removal and HEAD changes.
 Stale and malformed batches leave storage unchanged, including no orphan journal
 artifacts. Existing compaction tests also enter through the shared commit function.
+
+Metadata fault tests cover lost marker replies, unavailable readback, wrong or
+oversized marker bodies and compaction before readback. CLI/protected-service
+error boundaries preserve the uncertain transaction's identity and typed sources.
+A RustFS proxy qualification drops all 55 marker-write responses across transport
+and storage retries. RustFS accepts the marker once; exact readback confirms it,
+then compaction/catalog publication and byte-identical remote reads succeed.
+The injected failure adds 22.6 seconds to commit; it is not a normal latency sample.
 
 A RustFS fixture removes its local repository before shared journal commit, rejects
 a stale retry without another active transaction, then compacts and publishes the
