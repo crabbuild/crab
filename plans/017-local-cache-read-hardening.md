@@ -56,7 +56,29 @@ Under umask `000`, all
 main/WAL/SHM files and generation replacements. A real installed baseline
 filter completes one smudge, then exits during a 65-second pause despite a live
 parent; this reproduces the invalid lifetime assumption independently of
-RustFS or memory pressure. Candidate live-parent/orphan and scale proof follow.
+RustFS or memory pressure. Installed `41e74b1` survives the same pause, completes
+a second smudge, and exits on input EOF. A separate real-parent-exit fixture
+retains the input writer in another process; the filter closes its output after
+60.064 seconds. Neither fixture proves a complete cancellation/resource bound.
+The installed binary SHA-256 is
+`416d00e61b3100f6bf853647fdfdcfdcd11cca0be4e47dee8e2660922fcc9721`.
+The strict fresh 20/10 GiB matrix is running; no scale pass yet.
+
+The configured CI Clippy invocation passes locally. An extra strict
+warnings-as-errors CLI invocation does not: dependency traversal encounters
+eight VFS lints (the offending statements also exist on main); `--no-deps`
+reports 497 CLI lints on Rust 1.98.0. The latter set has not been exhaustively
+attributed against main. No suppressions were added to manufacture a pass.
+
+**Provider evidence mitigation:** `pb-provider-qualification.yml` now retains
+the S3 canary's report and redacted command logs separately from the provider
+contract report, on successful or failed canary execution. The earlier failed
+canary wrote those diagnostics under the runner's temporary directory, outside
+the uploaded provider directory. Upload only the report/log files, not caches
+or repositories. GCS/Azure do not run this canary and are unaffected. A new
+manual S3 run must retain the actual failure or pass; workflow syntax alone is
+not provider proof. Missing credentials and the dedicated scale runner remain
+separate environment gates.
 
 Is this the best fix? The shared lifetime and naming owners cover their
 sibling paths; a longer timeout or relaxed cleanup predicate would leave the
