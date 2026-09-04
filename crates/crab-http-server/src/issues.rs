@@ -16,6 +16,7 @@ use crate::{
     app::{Error, Result, actor, body, number, repository, submission, title},
     app_storage,
     auth::{Identity, Principal},
+    labels::{self, Label},
     server::Server,
 };
 mod storage;
@@ -39,10 +40,17 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, crate::app::admit))
 }
-fn issue_view(issue: &Issue, author: &Identity, full: bool) -> Value {
+fn issue_view(
+    issue: &Issue,
+    author: &Identity,
+    labels: &[Label],
+    can_label: bool,
+    full: bool,
+) -> Value {
     json!({"number":issue.number,"title":issue.title,"body":full.then_some(&issue.body),"state":issue.state,
         "author":issue.author.name,"version":issue.version,"created_at":issue.created_at,"updated_at":issue.updated_at,
-        "can_edit":storage::same_author(&issue.author, author)})
+        "labels":labels::selection_view(&issue.label_ids, labels),
+        "can_edit":storage::same_author(&issue.author, author),"can_label":can_label})
 }
 fn comment_view(comment: &Comment, author: &Identity) -> Value {
     json!({"number":comment.number,"body":comment.body,"author":comment.author.name,"version":comment.version,
@@ -89,6 +97,8 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
     let author = actor(&principal)?;
+    let labels = labels::catalog(repo).await?;
+    let can_label = principal.can_write(&repo.config);
     let limit = params.limit()?;
     let state = params.state()?;
     let query = crate::app::search_query(params.q.as_deref())?;
@@ -116,7 +126,7 @@ async fn list(
                     &[&issue.title, &issue.body, &issue.author.name],
                 )
             {
-                items.push(issue_view(&issue, &author, false));
+                items.push(issue_view(&issue, &author, &labels, can_label, false));
             }
             if items.len() == limit || scanned == 200 {
                 break;
@@ -148,7 +158,17 @@ async fn create(
     let title = title(&input.title)?;
     body(&input.body, false)?;
     let issue = storage::create_issue(repo, author.clone(), request_id, title, input.body).await?;
-    Ok((StatusCode::CREATED, Json(issue_view(&issue, &author, true))))
+    let labels = labels::catalog(repo).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(issue_view(
+            &issue,
+            &author,
+            &labels,
+            principal.can_write(&repo.config),
+            true,
+        )),
+    ))
 }
 async fn detail(
     State(server): State<Arc<Server>>,
@@ -159,7 +179,14 @@ async fn detail(
     let (issue, _) = storage::read::<Issue>(repo, &storage::issue_path(number(id)?))
         .await?
         .ok_or(Error::NotFound)?;
-    Ok(Json(issue_view(&issue, &actor(&principal)?, true)))
+    let labels = labels::catalog(repo).await?;
+    Ok(Json(issue_view(
+        &issue,
+        &actor(&principal)?,
+        &labels,
+        principal.can_write(&repo.config),
+        true,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -169,6 +196,7 @@ struct IssueEdit {
     title: Option<String>,
     body: Option<String>,
     state: Option<IssueState>,
+    label_ids: Option<Vec<u64>>,
 }
 async fn edit(
     State(server): State<Arc<Server>>,
@@ -183,15 +211,25 @@ async fn edit(
     let (mut issue, etag) = storage::read::<Issue>(repo, &path)
         .await?
         .ok_or(Error::NotFound)?;
-    if !storage::same_author(&issue.author, &author) {
+    let label_change = input.label_ids.is_some();
+    let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
+    if author_change && !storage::same_author(&issue.author, &author) {
         return Err(Error::Forbidden);
+    }
+    if label_change && !principal.can_write(&repo.config) {
+        return Err(Error::LabelPermission);
     }
     if input.version != issue.version {
         return Err(Error::Conflict);
     }
-    if input.title.is_none() && input.body.is_none() && input.state.is_none() {
+    if input.title.is_none()
+        && input.body.is_none()
+        && input.state.is_none()
+        && input.label_ids.is_none()
+    {
         return Err(Error::Invalid("No issue changes supplied"));
     }
+    let labels = labels::catalog(repo).await?;
     if let Some(value) = input.title {
         issue.title = title(&value)?;
     }
@@ -202,14 +240,26 @@ async fn edit(
     if let Some(value) = input.state {
         issue.state = value;
     }
+    if let Some(value) = input.label_ids {
+        issue.label_ids = labels::validate_selection(value, &labels)?;
+    }
     issue.version = issue
         .version
         .checked_add(1)
         .filter(|value| *value < storage::MAX_NUMBER)
         .ok_or(Error::Conflict)?;
     issue.updated_at = storage::now()?;
+    if label_change && !principal.can_write(&repo.config) {
+        return Err(Error::LabelPermission);
+    }
     storage::update(repo, &path, &issue, etag).await?;
-    Ok(Json(issue_view(&issue, &author, true)))
+    Ok(Json(issue_view(
+        &issue,
+        &author,
+        &labels,
+        principal.can_write(&repo.config),
+        true,
+    )))
 }
 
 async fn comments(

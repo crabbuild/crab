@@ -27,6 +27,8 @@ pub(super) struct Issue {
     pub title: String,
     pub body: String,
     pub state: IssueState,
+    #[serde(default)]
+    pub label_ids: Vec<u64>,
     pub version: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -79,6 +81,7 @@ pub(super) async fn create_issue(
                     title: title.clone(),
                     body: body.clone(),
                     state: IssueState::Open,
+                    label_ids: vec![],
                     version: 1,
                     created_at: timestamp,
                     updated_at: timestamp,

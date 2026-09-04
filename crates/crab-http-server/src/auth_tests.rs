@@ -582,6 +582,9 @@ async fn confidential_client_uses_secret_file_and_authenticated_token_exchange()
 #[path = "auth_tests/issues.rs"]
 mod issues;
 
+#[path = "auth_tests/labels.rs"]
+mod labels;
+
 #[path = "auth_tests/git_tokens.rs"]
 mod git_tokens;
 

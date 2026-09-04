@@ -7,6 +7,7 @@ mod auth;
 mod config;
 mod git;
 mod issues;
+mod labels;
 mod lfs;
 mod maintenance;
 mod pulls;
