@@ -18,6 +18,144 @@
 
 ## Status
 
+### 10/20 GiB expansion: case-insensitive range-cache maintenance gap
+
+The 1 GiB passing matrix is not scale proof. The user's larger-file expansion
+uses the same installed `3f71f8d` CLI, default 10 GiB cache budget, approved
+isolated native RustFS bucket, and fresh synthetic high-entropy files. A cache
+smaller than the working set may evict ranges: Xet 1.6.0's `ChunkCache` trait
+explicitly does not guarantee a hit after a put. Warm checks at these sizes
+therefore require exact bytes with origin fallback, not all-content offline
+availability. No cache budget is raised to manufacture a pass.
+
+Initial run `cache-f410-10-20g.Z3HuC2` adds/commits/pushes two 10 GiB files,
+deduplicates a third after cleanup without new xorbs, and uploads a one-MiB
+edit below four MiB. Cold lazy clone and hydration reconstruct three 10 GiB
+files with independent SHA-256 equality. The first reader cleanup then fails
+the retained assertion: five valid decoded ranges, **335,428,225 bytes**, remain
+despite zero reported busy or unsafe entries. This run's report is failed.
+
+`CrabRangeCache::key_directory` uses a base64 key's first two characters as a
+directory prefix. APFS here resolves differently cased prefix paths to the
+same inode, retaining the first creator's spelling. The case-sensitive
+`key.starts_with(prefix)` check in `crates/crab-cache/src/clean.rs` then excludes
+valid children of the merged directory. This classifier is also used by
+`visit_xet_chunk_cache_entries` for range stats, verify, and prune. Catalog
+reservations, leases, and accounting use textual relative paths, so simply
+relaxing the deletion predicate is not a proven complete fix.
+
+The diagnostic continuation retains failed cleanup checks and runs the
+remaining byte-integrity matrix rather than stopping at the first known
+cleanup failure. Final run `cache-f410-scale-final.4pieSs` completes all
+**74 commands / 68 checks: 66 pass, two cleanup checks fail**, with no command
+timeouts. It also retains both failed 10 GiB cleanup checks from the prior
+`cache-f410-scale-diagnostics.o5NfMS` report (34 commands / 30 checks), whose
+remaining byte checks it completes. `matrix_completed` is true; overall
+status and process exit remain **failed / 1**. No production fix is claimed.
+
+Each synthetic repository ends with three files of exactly 10 or 20 GiB
+(30 or 60 GiB worktree): two exact duplicates and one one-MiB-edited original.
+The payloads are generated high-entropy bytes, not sparse or zero-filled
+files. This is local native RustFS beta.8 qualification, not real-model
+repository coverage or a controlled performance comparison against main.
+
+| Acceptance | 10 GiB / 20 GiB result |
+|---|---|
+| Add, Git commit, Crab push | Pass; committed pointer blobs and unchanged source SHA-256. |
+| Duplicate after writer cache clean | Zero new xorbs in both cases. |
+| One-MiB edit and push | **1,232,940 / 1,092,973** new xorb bytes. |
+| Cold lazy clone and hydrate | Pointers first, actual RustFS xorb bodies, all three independent SHA-256 values match. |
+| Reader cache clean / optimize cache clean | Both commands leave owned decoded ranges at both sizes: failed acceptance, not a wholly empty cache. Subsequent hydration still reconstructs exact bytes. |
+| Entire former cache out of reach; fresh clone/cache | Denied cold hydration fails and preserves pointers; restored-origin `fetch --all` reads **13,095,135,117 / 23,437,197,167** xorb body bytes and leaves pointers. Subsequent hydration matches all hashes. |
+| Corrupt retained decoded ranges | Both recover via actual RustFS reads with independent SHA-256 equality. |
+| Eager clone | Final hashes pass both sizes; 20 GiB checkout/filter errors below prevent a clean-path pass. |
+| Final integrity / origin preservation | All readers pass `fsck` and finish Git-clean. Reader/cache operations preserve remote xorb keys, sizes, and ETags in both repositories. |
+
+Retained final-report SHA-256:
+`7d6c0424068b6d0f3c6eba0a1eff3333e93e42c23313b245a87bca1aebd8fa16`;
+continuation harness:
+`6834050b5837182837a063ea5152057dc32f3a5b2e44495953cd3bda9a9ed888`;
+imported harness:
+`d645a53acd36bc77012f60d89bccb3e515cab5239cc4972a91b30ff7c2a8cb0d`;
+prior-report:
+`8211534571c26ac887f04700b35cd2f06cc337993caa18aed2a3652c2bd7a9a4`.
+Binary hash is unchanged from the installed `3f71f8d` proof below. Harnesses,
+logs, manifests, Git fixtures, and backend objects remain outside the checkout;
+verified worktrees are dehydrated through Crab. No remote cleanup or GC ran.
+
+Resource observations remain open work, not performance acceptance. The
+20 GiB cold hydrate takes 66.101 seconds and reads 46,523,623,769 xorb bytes;
+its subsequent wholly-cold-fetch hydration still reads 33,490,581,948 bytes.
+The 10 GiB eager-clone command records 10,742,087,680 bytes maximum RSS;
+the 20 GiB eager command takes 293.617 seconds and records 5,123,391,488 bytes.
+These are `/usr/bin/time -l` command measurements, not aggregate process-tree
+memory bounds or isolated component attribution. Several 60 GiB worktree
+dehydrates take 209–276 seconds; later ones take about 30 seconds. Shared-host
+activity and differing warm state preclude a throughput or regression verdict.
+
+Fresh-cache health is a separate failed acceptance: all three continuation
+`cache stats --json` calls exit 1 with `scan_complete: false`. Native `stat`
+confirms `repos` is `0755` and `buckets/<bucket-hash>/chunk-index.sqlite` is
+`0644`; the scanner reports both as unsafe paths. The earlier private-parent
+fix does not make the SQLite file or every sibling cache creator private.
+The continuation retains these diagnostic exits and issues while checking
+the unchanged 10 GiB budget; it does not reinterpret them as healthy results.
+Complete the existing Phase 4 private-tenancy acceptance across metadata
+index and shard-sync creators, including SQLite side files and fresh caches
+under permissive umasks. Do not chmod the fixture or weaken the scanner to
+manufacture passing product evidence.
+
+The 20 GiB eager-clone log adds a distinct failure: Git reports `packet write
+with format failed`, an external filter failure, and two files not filtered
+properly. Post-checkout hydration then reports recovering those two files
+(40 GiB), and the overall command exits zero. Treat this as failed clean
+checkout/smudge acceptance even if final hashes and Git status pass. The
+retained harness checks exit/bytes, so this stderr finding is an additional
+review gate, not a silently passing assertion. Root cause is not established;
+the observation alone does not prove an Xet failure or out-of-memory kill.
+Retained `logs/064.log` SHA-256 is
+`0b49b3b9fb1d399dd9ad93645eb3859bd05008fbf44bee87442d0a1320bee8fc`.
+
+Follow-up owner map: `crab/src/cmd/clone.rs::checkout_head` invokes Git, then
+`run_post_checkout_hydrate` reaches the shared hydration path. Git drives
+`crab/src/git/filter_process.rs`; inline and delayed output, direct hydration,
+and normal checkout are sibling surfaces. Capture subprocess exit/error
+provenance and per-process resource traces in an isolated rerun before
+choosing a fix. Acceptance requires 10/20 GiB eager clones with no filter or
+checkout errors, exact hashes and clean Git state, plus an explicit error
+when checkout cannot complete. Revalidate direct cold hydration and both
+smudge modes; do not infer a bounded-memory contract from final byte equality.
+
+At documentation head `ca9f12c`, required CI and real-Git/released-shape RustFS
+checks pass. Optional jobs remain skipped. The earlier manual NFS run
+`33835241904` ends cancelled: Linux/macOS/native RustFS jobs pass, Windows is
+cancelled, retained-evidence verification fails. The provider canary failure
+in `33835240121` below remains unresolved. Neither current green required CI
+nor local byte recovery overrides these open gates; this is not merge approval.
+
+#### Executable follow-up: filesystem identity for range-cache names
+
+- **Context / owners:** range key and item encoding in `crab-cache`, its shared
+  maintenance classifier, catalog path identity, and descriptor-pinned file
+  publication/removal. CLI clean/optimize, stats/verify/prune, hydration, and
+  fetch are sibling consumers. Upstream Xet's `ChunkCache` trait specifies byte
+  and range semantics, not an obligatory implementation layout; no dependency
+  patch is required to fix Crab's owner boundary.
+- **Design decision before implementation:** choose one filesystem-safe
+  canonical naming/identity contract. Prove both prefix and complete key/item
+  names cannot alias on case-insensitive filesystems. If changing disposable
+  on-disk format, explicitly resolve tagged-cache cleanup/migration; do not add
+  a fallback reader or silently broaden recursive deletion authority.
+- **Acceptance:** deterministic case-variant keys on case-sensitive and
+  case-insensitive filesystems remain distinct and byte-correct; catalog scans
+  do not duplicate or merge accounting; cleanup/verify/prune see every owned
+  range; live read leases, fills, and reservations still block deletion through
+  aliases; unknown files and unsafe paths remain untouched. Repeat the exact
+  large-file cleanup assertion and the 10/20 GiB cold clone/fetch/hydrate matrix.
+- **Stop:** no cleanup-only fix without sibling/accounting proof; no all-green
+  or merge claim while this failure remains. Is the proposed implementation
+  the best fix for filesystem identity, rather than only this directory sample?
+
 ### Fresh-root large-file qualification, 2026-09-03
 
 Resuming after external workspace cleanup requires new binaries, fixtures, and
