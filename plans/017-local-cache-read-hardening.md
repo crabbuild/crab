@@ -18,6 +18,64 @@
 
 ## Status
 
+### Approved fixture and architecture reconciliation, 2026-09-03
+
+The user explicitly approved the protected inventory updates, private-cache
+fixture corrections, and 503 warming expectation. Xet remains unchanged.
+
+Seven cache-dependent fixtures now use private child roots instead of relying
+on `TempDir` permissions. Pinned tempfile 3.27.0 creates directories with
+`0777 & !umask`; changing CI's umask would conceal the product contract.
+The tests retain replica selection, cached-proof reuse, changed-ETag
+revalidation, and rejection of cache-only publication evidence.
+
+The fresh-root clone regression exposed a production ordering bug as well:
+`PersistentChunkIndex::open_shared` creates parent directories before the
+local shard cache opens. Post-fetch shard sync now admits/creates the private
+root before opening that index. Unsafe roots skip this advisory sync without
+changing permissions, following symlinks, or writing derived state. The replica
+test starts with a missing root; a new test preserves both a non-private root
+and a symlink to a private target, including their sentinels and modes. Fetch
+and clone share this entry point. The journal-generation regression uses the
+same admitted root as its local cache. Other persistent-index consumers and
+full descriptor-relative index ownership remain separate work below; this is
+not a claim that the entire private-tenancy phase is complete.
+
+The candidate-writer test still requires all immutable origin objects to be
+warmed when the endpoint is healthy. After HTTP 503 it requires a real warm
+attempt, matching committed origin bytes, and successful commit/flush/close;
+it no longer requires requests that shared endpoint admission must suppress.
+`CacheClient::send` and `Availability` own that policy. Their existing tests
+prove suppression across every cloned client entry point and single-probe
+recovery; `CacheAwareObjectStore::put_opts` still commits origin before warming.
+
+Architecture inventory ownership:
+
+- `crab-storage/test-support` is a dev-only edge for CLI, cache-store, and VFS
+  read instrumentation; no production dependency edge changes.
+- Both local payloads and decoded ranges use the shared SQLite catalog and
+  private filesystem lifecycle (`rusqlite`, `fs4`, `libc`, `errno`). Local-cache
+  hooks bound shard-hint inspection; decoded-cache callbacks need `async-trait`.
+  Feature budgets still exclude provider/storage/server runtime and default
+  persistence. No manifest, version, lockfile, or upstream override changes.
+- Exact path-and-line exceptions admit only reviewed range-cache fixture
+  imports and SQLite child-process barriers. The rest of those files remains
+  scanned. New guardrail tests reject relocated imports, appended policy, and
+  unrelated runtime/stdio use; `make architecture-check` runs those tests in CI.
+
+Review question: is this the best fix, not merely plausible? Keep the private
+root contract and shared endpoint circuit breaker; repair caller initialization
+and fixture setup instead of weakening production policy. Reconcile explicit
+dependency costs rather than broadly excluding tests from architecture scans.
+
+Installed source `0536452` passed 63 RustFS checks / 55 commands, including
+deduplication, denied-origin warm reuse, corruption, unsafe cache bypass, and
+clean/prune/fsck. Its protocol CI now passes. This follow-up passes 33 focused
+CLI/shard-sync tests under each of umasks `022` and `077`, plus the complete
+architecture check and three guardrail self-tests. Installed follow-up proof
+and final-SHA hosted gates are required before PR readiness; earlier failures
+and the retained qualification safety incident remain in this record.
+
 ### Crab-owned reconstruction failures, 2026-09-03
 
 The user approved a Crab-side solution while keeping Xet unchanged. This

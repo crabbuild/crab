@@ -22017,10 +22017,24 @@ mod tests {
                 !expected.is_empty(),
                 "real SlateDB must publish immutable objects"
             );
-            assert!(
-                *warmed.lock().expect("captured writes") == expected,
-                "promoted writer must attempt warming its committed immutable origin bytes: {response_status}"
-            );
+            let warmed = warmed.lock().expect("captured writes");
+            if response_status == StatusCode::OK {
+                assert_eq!(
+                    *warmed, expected,
+                    "healthy warming must receive every committed immutable object"
+                );
+            } else {
+                // A 503 suppresses later warms through shared endpoint admission.
+                // Origin commits must still finish, and every attempted warm must
+                // contain exactly the already-committed immutable origin bytes.
+                assert!(!warmed.is_empty(), "the failed endpoint must be attempted");
+                assert!(
+                    warmed
+                        .iter()
+                        .all(|(key, body)| expected.get(key) == Some(body)),
+                    "failed warming must match committed immutable origin bytes"
+                );
+            }
         }
     }
 
@@ -27311,7 +27325,7 @@ mod tests {
             .await
             .expect("seed committed xorb");
         let local_cache = Arc::new(crate::cache::LocalCache::new(
-            cache_tmp.path().to_path_buf(),
+            cache_tmp.path().join("cache"),
         ));
         let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
             store.clone(),
@@ -29979,7 +29993,7 @@ mod tests {
             .await
             .expect("seed xorb object");
         let local_cache = Arc::new(crate::cache::LocalCache::new(
-            cache_tmp.path().to_path_buf(),
+            cache_tmp.path().join("cache"),
         ));
         let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
             store.clone(),
@@ -32881,7 +32895,7 @@ mod tests {
         use crate::test::git_repo::CacheDirGuard;
 
         let cache_tmp = tempfile::tempdir().expect("cache tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let _cache_guard = CacheDirGuard::new(&cache_tmp.path().join("cache"));
 
         let body = Bytes::from_static(b"existing shard bytes served from local cache");
         let shard_hash = compute_data_hash(body.as_ref());
@@ -32914,7 +32928,7 @@ mod tests {
         use crab_cache_store::CachingStore;
 
         let cache_tmp = tempfile::tempdir().expect("cache tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let _cache_guard = CacheDirGuard::new(&cache_tmp.path().join("cache"));
 
         let file_hash = MerkleHash::from([43_u64, 0, 0, 0]);
         let (shard_bytes, shard_hash, xorb_bytes, xorb_hash) = test_shard_with_file(file_hash, 43);
@@ -35059,7 +35073,7 @@ mod tests {
         use crab_staging::{StagingArea, StagingAreaReadOnly};
 
         let cache_tmp = tempfile::tempdir().expect("cache tempdir");
-        let _cache_guard = CacheDirGuard::new(cache_tmp.path());
+        let _cache_guard = CacheDirGuard::new(&cache_tmp.path().join("cache"));
 
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());

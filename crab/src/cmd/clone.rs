@@ -1704,7 +1704,8 @@ mod tests {
     #[tokio::test]
     async fn clone_shard_sync_uses_selected_replica_store() {
         let cache_tmp = tempfile::tempdir().unwrap();
-        let _cache_guard = crate::test::git_repo::CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = crate::test::git_repo::CacheDirGuard::new(&cache_root);
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".crab")).unwrap();
 
@@ -1745,13 +1746,67 @@ mod tests {
         .unwrap();
 
         assert!(
-            shard_cache_path(cache_tmp.path(), &replica_hash).exists(),
+            shard_cache_path(&cache_root, &replica_hash).exists(),
             "clone shard sync must cache the shard from the selected replica"
         );
         assert!(
-            !shard_cache_path(cache_tmp.path(), &primary_hash).exists(),
+            !shard_cache_path(&cache_root, &primary_hash).exists(),
             "clone shard sync must not silently read the primary when a replica is selected"
         );
+        assert!(crab_cache::private_cache_directory_is_safe(&cache_root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clone_shard_sync_leaves_unsafe_cache_roots_unchanged() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let store = crate::storage::store::Store::new(std::sync::Arc::new(
+            object_store::memory::InMemory::new(),
+        ));
+        let router = crate::storage::StoreLayout::new(store.clone(), "repo".to_owned());
+        write_sync_manifest_with_shard(&store, &router, 1, b"shard").await;
+
+        for symlinked in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            let mode = if symlinked { 0o700 } else { 0o755 };
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).unwrap();
+            let sentinel = target.join("sentinel");
+            std::fs::write(&sentinel, b"retain").unwrap();
+            let root = if symlinked {
+                let link = temp.path().join("cache");
+                symlink(&target, &link).unwrap();
+                link
+            } else {
+                target.clone()
+            };
+
+            crate::metadata::shard_sync::run_post_fetch_shard_sync(
+                router.clone(),
+                "repo",
+                &root,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"retain");
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(&root)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                symlinked
+            );
+        }
     }
 
     async fn write_sync_manifest_with_shard(

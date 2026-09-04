@@ -418,6 +418,25 @@ CACHE_MODULE_XET_RUNTIME_PATTERNS = {
     "xet_runtime",
 }
 CACHE_MODULE_SCAN_PATHS = ("crates/crab-cache/src",)
+# These exact test lines exercise the real range-cache contract and subprocess
+# SQLite lifetime barriers. Keep scanning the rest of each file for policy leaks.
+CACHE_MODULE_TEST_LINES = {
+    "crates/crab-cache/src/catalog/removal/tests.rs": {
+        "use xet_client::cas_types::{ChunkRange, Key};",
+    },
+    "crates/crab-cache/src/catalog/tests.rs": {
+        "use xet_client::cas_types::{ChunkRange, Key};",
+    },
+    "crates/crab-cache/src/clean.rs": {
+        "use xet_client::cas_types::{ChunkRange, Key};",
+    },
+    "crates/crab-cache/src/private_fs/platform/database/lifetime_tests.rs": {
+        'println!("writer-ready");',
+        "std::io::stdout().flush().unwrap();",
+        "std::io::stdin().read_line(&mut buffer).unwrap();",
+        "std::io::stdin().read_exact(&mut [0]).unwrap();",
+    },
+}
 CACHE_STORE_DIRECT_FORBIDDEN_PACKAGES = {
     "aws-config",
     "aws-sdk-dynamodb",
@@ -1769,7 +1788,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-xet",
             "crab-vfs",
         },
-        "dev": {"crab-cache-server", "crab-workflow"},
+        "dev": {"crab-cache-server", "crab-storage", "crab-workflow"},
     },
     "crab-auth": {"normal": {"crab-coordination", "crab-git", "crab-types"}},
     "crab-auth-server": {
@@ -1798,7 +1817,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     },
     "crab-cache-store": {
         "normal": {"crab-cache", "crab-storage", "crab-xet"},
-        "dev": {"crab-cache-server"},
+        "dev": {"crab-cache-server", "crab-storage"},
     },
     "crab-coordination": {},
     "crab-diff": {"normal": {"crab-types", "crab-xet"}},
@@ -1835,6 +1854,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-types",
             "crab-xet",
         },
+        "dev": {"crab-storage"},
     },
     "crab-workflow": {
         "normal": {"crab-coordination", "crab-storage", "crab-types"}
@@ -2846,6 +2866,8 @@ def check_cache_module_scope(root: Path, metadata: dict) -> bool:
             except UnicodeDecodeError:
                 continue
             for index, line in enumerate(text.splitlines(), start=1):
+                if line.strip() in CACHE_MODULE_TEST_LINES.get(rel(root, candidate), set()):
+                    continue
                 if any(pattern in line for pattern in CACHE_MODULE_FORBIDDEN_PATTERNS):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
                 if candidate.name != "xet_chunk_cache.rs" and any(
@@ -2870,11 +2892,19 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
         {
             "default": [],
             "active-probe": ["dep:reqwest"],
-            "local-cache": ["dep:filetime", "dep:fs4", "dep:rusqlite", "dep:tokio", "dep:tokio-util"],
+            "local-cache": [
+                "dep:errno", "dep:filetime", "dep:fs4", "dep:libc",
+                "dep:rusqlite", "rusqlite?/hooks", "dep:tokio", "dep:tokio-util",
+            ],
             "remote-client": ["active-probe", "dep:futures-util", "dep:tokio"],
             "xet-chunk-cache": [
+                "dep:async-trait",
                 "dep:base64",
                 "dep:crc32fast",
+                "dep:errno",
+                "dep:fs4",
+                "dep:libc",
+                "dep:rusqlite",
                 "dep:tokio",
                 "dep:tokio-util",
                 "dep:xet-client",
@@ -2884,15 +2914,19 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
     )
 
     for name in (
+        "async-trait",
         "base64",
         "crc32fast",
+        "errno",
         "filetime",
         "fs4",
+        "libc",
         "reqwest",
         "rusqlite",
         "tokio",
         "tokio-util",
         "xet-client",
+        "xet-runtime",
     ):
         dependency = normal_dependency(package, name)
         if dependency is None or not dependency["optional"]:
@@ -2923,7 +2957,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
                 "--depth",
                 "2",
             ],
-            required={"filetime", "fs4", "rusqlite", "tokio", "tokio-util"},
+            required={"errno", "filetime", "fs4", "libc", "rusqlite", "tokio", "tokio-util"},
             forbidden={"crab-cache-server", "crab-storage", "object_store", "reqwest", "xet-client"},
         ),
         check_tree_packages(
@@ -2963,7 +2997,7 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
         check_tree_packages(
             root,
             cargo,
-            "crab-cache/xet-chunk-cache exposes only Xet range-cache cost",
+            "crab-cache/xet-chunk-cache exposes only range-cache and private catalog cost",
             [
                 "-p",
                 "crab-cache",
@@ -2975,14 +3009,19 @@ def check_cache_feature_budget(root: Path, cargo: str, metadata: dict) -> bool:
                 "2",
             ],
             required={
+                "async-trait",
                 "base64",
                 "crc32fast",
+                "errno",
+                "fs4",
+                "libc",
+                "rusqlite",
                 "tokio",
                 "tokio-util",
                 "xet-client",
                 "xet-runtime",
             },
-            forbidden={"crab-cache-server", "crab-storage", "filetime", "object_store", "rusqlite"},
+            forbidden={"crab-cache-server", "crab-storage", "filetime", "object_store"},
         ),
     ]
 
