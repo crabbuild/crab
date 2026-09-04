@@ -1,8 +1,37 @@
 # Native Git writes: implementation boundary
 
-Status: design evidence for the next implementation stage. The HTTP application
-currently supports fetch only. None of the requirements below is implemented by
-this document or implied by the passing read tests.
+Status: native HTTP push is not yet available. Shared incoming-pack quarantine
+is implemented and qualified; publication and HTTP receive wiring remain pending.
+The passing intake tests do not prove an accepted push or an updated ref.
+
+## Implemented intake boundary
+
+`crab-git::incoming_pack::quarantine` privately spools one complete incoming pack,
+checks its SHA-1 trailer and exact entry count, and validates zlib termination,
+size declarations, canonical headers and OFS entry boundaries. It enforces caller
+limits for wire bytes, object count, individual object size, total inflation and
+delta depth, with cancellation checks between chunks and delta instructions.
+Inflated programs and decoded objects use disk spools rather than retaining the
+whole pack in memory. Dropping the quarantine removes only its private directory.
+
+Forward REF deltas resolve within the pack before external lookups. An injected
+base reader supplies unresolved thin bases; its errors retain their sources and
+its returned bytes must match the requested Git OID. The caller must enforce the
+base reader's authorization, allocation limits and I/O deadline. The generic Git
+layer has no storage, Tokio or server dependency. Incoming packs and remote reads
+share `crab-git::delta`, including overflow-checked size headers and bounded copies.
+
+Native Git fixture packs and a remote-reader integration test cover full/thin
+reconstruction. Live qualification used a 4,081-byte Kubernetes thin pack at
+`160bd16d98b7f688ce4f3b5ab0c5e4c045f36233`: 30 incoming objects plus 23 bases read
+through `crab-remote-git` from local RustFS. All 53 objects matched native Git bytes.
+The release run took 452 ms including repository open, without cache isolation.
+This measures intake, not receive-pack publication or production push latency.
+
+Remaining intake work: Git object syntax and graph connectivity, pointer dependency
+proof, normalized self-contained pack/index publication, and HTTP streaming with
+a request-bound deadline. No Git binary, clone or local Git object database is
+used by quarantine. The test oracle uses Git independently.
 
 ## Existing code and the semantic mismatch
 

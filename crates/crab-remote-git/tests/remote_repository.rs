@@ -1679,6 +1679,70 @@ async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
+    use crab_git::incoming_pack::{BaseObject, ReceiveLimits, quarantine};
+
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let base = fixture_ref_delta_base(&fixture);
+    let cancel = CancellationToken::new();
+    let generated = fixture
+        .repository
+        .generate_pack_with_bases(&[fixture.target], &[base], &cancel)
+        .await
+        .expect("generate actual thin pack");
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancel)
+        .await
+        .expect("open base read operation");
+    let handle = tokio::runtime::Handle::current();
+    let incoming = tokio::task::spawn_blocking(move || {
+        let root = tempfile::tempdir().expect("quarantine parent");
+        let limits = ReceiveLimits {
+            max_pack_bytes: 8 * 1024 * 1024,
+            max_objects: 1000,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 16 * 1024 * 1024,
+            max_delta_depth: 32,
+        };
+        let mut requested = Vec::new();
+        let received = quarantine(
+            fs::File::open(generated.path()).expect("incoming pack"),
+            root.path(),
+            limits,
+            || cancel.is_cancelled(),
+            |oid| {
+                requested.push(*oid);
+                let object = handle.block_on(operation.read_object(*oid))?;
+                Ok(Some(BaseObject {
+                    kind: object.kind,
+                    data: object.data.to_vec(),
+                }))
+            },
+        );
+        handle
+            .block_on(operation.finish(Ok(())))
+            .expect("close base operation");
+        let incoming = received.expect("quarantine received pack");
+        assert_eq!(requested, vec![base]);
+        // The parent owns the quarantine; keep both alive until verification.
+        (root, incoming)
+    })
+    .await
+    .expect("receive worker");
+    assert_eq!(
+        incoming
+            .1
+            .read_object(&fixture.target)
+            .expect("read quarantined object")
+            .expect("target exists")
+            .data,
+        fixture.expected
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
     let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
     let mut object_ids = fixture_object_ids(&fixture);

@@ -141,35 +141,7 @@ pub enum InflatedEntryError {
     SizeMismatch,
 }
 
-/// Structural failures in Git delta instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum DeltaCorruption {
-    /// Size header is absent, truncated, overflowing, or not addressable.
-    #[error("invalid delta size header")]
-    SizeHeader,
-    /// Delta declared a base size different from the supplied base.
-    #[error("declared base size does not match the base object")]
-    BaseSizeMismatch,
-    /// Copy offset or length overflows addressable memory.
-    #[error("copy range overflows")]
-    CopyOverflow,
-    /// Copy command reads beyond the base object.
-    #[error("copy range exceeds the base object")]
-    CopyOutOfBounds,
-    /// Zero is a reserved delta command.
-    #[error("delta command zero is reserved")]
-    ReservedCommand,
-    /// Insert command length overflows addressable memory.
-    #[error("insert range overflows")]
-    InsertOverflow,
-    /// Delta instruction bytes are truncated.
-    #[error("delta instruction is truncated")]
-    InstructionTruncated,
-    /// Reconstructed output exceeds or disagrees with its declaration.
-    #[error("reconstructed size does not match the delta declaration")]
-    ResultSizeMismatch,
-}
+pub use crab_git::delta::DeltaCorruption;
 
 /// Safe operator diagnostic for repository-open failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
