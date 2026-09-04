@@ -316,17 +316,7 @@ impl PendingFile {
     }
 
     pub(crate) fn lease(&self) -> Result<std::fs::File> {
-        let file = self.0.file().try_clone()?;
-        if !fs4::fs_std::FileExt::try_lock_shared(&file)? {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "cache payload is busy",
-            )
-            .into());
-        }
-        // Payload clones intentionally share this flock: rename and closing
-        // the writer must retain protection until the reservation is released.
-        Ok(file)
+        self.0.lease()
     }
 
     #[cfg(test)]
@@ -855,6 +845,18 @@ mod platform {
             &self.file
         }
 
+        pub(super) fn lease(&self) -> Result<File> {
+            let file = self.file.try_clone()?;
+            if !fs4::fs_std::FileExt::try_lock_shared(&file)? {
+                return Err(
+                    io::Error::new(io::ErrorKind::WouldBlock, "cache payload is busy").into(),
+                );
+            }
+            // Payload clones intentionally share this flock: rename and closing
+            // the writer retain protection until the reservation is released.
+            Ok(file)
+        }
+
         #[cfg(all(feature = "remote-client", feature = "local-cache"))]
         pub(super) fn into_unlinked_file(mut self) -> Result<File> {
             let file = self.file.try_clone()?;
@@ -1274,6 +1276,10 @@ mod platform {
 
         pub(super) fn file(&self) -> &File {
             &self.0
+        }
+
+        pub(super) fn lease(&self) -> Result<File> {
+            Err(unsupported(Path::new("cache")))
         }
 
         #[cfg(all(feature = "remote-client", feature = "local-cache"))]

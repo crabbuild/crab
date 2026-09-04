@@ -12,7 +12,9 @@ async fn payload(root: &Path, byte: u8, size: usize) -> PathBuf {
     crate::private_fs::atomic_write(root, &path, &data)
         .await
         .unwrap();
-    std::fs::File::open(&path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(u64::from(byte)))
         .unwrap();
@@ -241,6 +243,7 @@ fn read_only_stats_preserves_quiet_and_uncheckpointed_catalogs() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn read_only_stats_does_not_report_an_unbound_catalog_as_empty() {
     let tmp = tempfile::tempdir().unwrap();

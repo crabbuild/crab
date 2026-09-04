@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -25,10 +26,10 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileDispositionInfoEx, FileIdInfo, FileStandardInfo,
-    GetFileInformationByHandleEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    SetFileInformationByHandle,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileStandardInfo,
+    GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -409,7 +410,13 @@ fn open_for_delete(path: &Path) -> Result<File> {
         .access_mode(GENERIC_READ | DELETE)
         .share_mode(SHARE_PINNED)
         .custom_flags(OPEN_NO_REPARSE);
-    Ok(options.open(path)?)
+    match options.open(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => {
+            Err(busy("cache entry has an active publisher"))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn open_temporary(path: &Path) -> Result<File> {
@@ -418,7 +425,7 @@ fn open_temporary(path: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-        .share_mode(SHARE_PINNED | FILE_SHARE_DELETE)
+        .share_mode(SHARE_PINNED)
         .custom_flags(OPEN_NO_REPARSE)
         .create_new(true);
     Ok(options.open(path)?)
@@ -923,6 +930,12 @@ impl TemporaryFile {
         &self.file
     }
 
+    pub(super) fn lease(&self) -> Result<File> {
+        // This duplicate retains the same no-delete Windows file object. After
+        // handle-based publication it pins the destination until registration.
+        Ok(self.file.try_clone()?)
+    }
+
     #[cfg(all(feature = "remote-client", feature = "local-cache"))]
     pub(super) fn into_unlinked_file(mut self) -> Result<File> {
         delete_handle(&self.file)?;
@@ -931,22 +944,57 @@ impl TemporaryFile {
     }
 
     pub(super) fn commit(mut self) -> Result<()> {
-        let source = wide(&self.temporary_path);
-        let destination = wide(&self.destination_path);
-        // SAFETY: both terminated paths remain within the pinned private parent.
-        if unsafe {
-            MoveFileExW(
-                source.as_ptr(),
-                destination.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
+        rename_handle(&self.file, &self.destination_path)?;
         self.published = true;
         Ok(())
     }
+}
+
+fn rename_handle(file: &File, destination: &Path) -> Result<()> {
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    let name_bytes = destination
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache path is too long"))?;
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let buffer_bytes = header
+        .checked_add(name_bytes as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache path is too long"))?;
+    let buffer_bytes = u32::try_from(buffer_bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut buffer = vec![0usize; (buffer_bytes as usize).div_ceil(size_of::<usize>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the usize buffer is aligned for FILE_RENAME_INFO and has room
+    // for its fixed header followed by every UTF-16 destination code unit.
+    unsafe {
+        ptr::write(
+            info,
+            FILE_RENAME_INFO {
+                Anonymous: FILE_RENAME_INFO_0 {
+                    ReplaceIfExists: true,
+                },
+                RootDirectory: ptr::null_mut(),
+                FileNameLength: name_bytes,
+                FileName: [0],
+            },
+        );
+        ptr::copy_nonoverlapping(
+            destination.as_ptr(),
+            ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            destination.len(),
+        );
+        if SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileRenameInfo,
+            info.cast(),
+            buffer_bytes,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
 }
 
 impl Drop for TemporaryFile {
