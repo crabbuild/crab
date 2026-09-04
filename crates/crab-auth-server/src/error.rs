@@ -145,7 +145,8 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
         match error {
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
-            | crab_metadata::error::MetadataError::FileLookupLimit { .. }) => {
+            | crab_metadata::error::MetadataError::FileLookupLimit { .. }
+            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
                 Self::Io(io::Error::other(error))
             }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),
@@ -213,7 +214,8 @@ impl From<crab_read::ReadError> for AuthServerError {
             crab_read::ReadError::Metadata(
                 source @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
                 | crab_metadata::error::MetadataError::FileLookupWorker { .. }
-                | crab_metadata::error::MetadataError::FileLookupLimit { .. }),
+                | crab_metadata::error::MetadataError::FileLookupLimit { .. }
+                | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }),
             ) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
@@ -319,6 +321,31 @@ mod tests {
             matches!(&error, AuthServerError::OriginIntegrity { path, .. } if path == "xorbs/bad")
         );
         assert!(error.source().unwrap().is::<crab_cache::CacheError>());
+    }
+
+    #[test]
+    fn uncertain_journal_commit_survives_direct_and_read_boundaries() {
+        for through_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+                transaction_id: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::Io {
+                    source: io::Error::new(io::ErrorKind::ConnectionReset, "write reply lost"),
+                }),
+                verification: None,
+            };
+            let mapped = if through_read {
+                AuthServerError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                AuthServerError::from(source)
+            };
+            let AuthServerError::Io(error) = mapped else {
+                panic!("expected typed I/O error");
+            };
+            assert!(
+                matches!(error.get_ref().and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>()),
+                Some(crab_metadata::error::MetadataError::RefJournalCommitUncertain { transaction_id, .. }) if transaction_id == &"a".repeat(64))
+            );
+        }
     }
 
     #[tokio::test]

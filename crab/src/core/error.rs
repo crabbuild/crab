@@ -1965,7 +1965,8 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
                 Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
-            | crab_metadata::error::MetadataError::FileLookupWorker { .. }) => {
+            | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
                 Self::Io(std::io::Error::other(error))
             }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),
@@ -3907,6 +3908,34 @@ mod tests {
             assert!(
                 std::iter::successors(error.source(), |source| (*source).source())
                     .any(|source| source.is::<CrabError>())
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_journal_commit_survives_write_and_read_boundaries() {
+        for through_write in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+                transaction_id: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::Io {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "write reply lost",
+                    ),
+                }),
+                verification: None,
+            };
+            let mapped = if through_write {
+                CrabError::from(crab_write::WriteError::Metadata(source))
+            } else {
+                CrabError::from(crab_read::ReadError::Metadata(source))
+            };
+            let CrabError::Io(error) = mapped else {
+                panic!("expected typed I/O error");
+            };
+            assert!(
+                matches!(error.get_ref().and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>()),
+                Some(crab_metadata::error::MetadataError::RefJournalCommitUncertain { transaction_id, .. }) if transaction_id == &"a".repeat(64))
             );
         }
     }

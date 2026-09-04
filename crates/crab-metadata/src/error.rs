@@ -64,6 +64,19 @@ pub enum MetadataError {
         source: crab_storage::StorageError,
     },
 
+    /// The commit marker write failed and its exact bytes could not be confirmed.
+    #[cfg(feature = "storage")]
+    #[error(
+        "ref journal transaction {transaction_id} may have committed; verify remote refs before retrying"
+    )]
+    RefJournalCommitUncertain {
+        transaction_id: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        /// Readback failure, when the marker was not simply absent.
+        verification: Option<Box<crab_storage::StorageError>>,
+    },
+
     /// SlateDB metadata reader could not be opened.
     #[cfg(any(feature = "file-index-reader", feature = "remote-index"))]
     #[error("metadata database open failed for {db} at {path}: {source}")]
