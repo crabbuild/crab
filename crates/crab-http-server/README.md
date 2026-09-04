@@ -202,8 +202,10 @@ Kubernetes/RustFS. Crab pointer content verification is separately qualified
 against RustFS, including missing/corrupt backing objects. Captured-snapshot
 dependency selection remains pinned after later metadata updates and enforces
 per-session scan budgets. Scans and pointer proofs bound CPU work across the
-process and retain admission through cancellation. Complete receive deadlines,
-LFS integration, atomic publication and HTTP receive wiring remain pending;
+process and retain admission through cancellation. A combined dependency batch
+verifies Crab and LFS payloads from validated Git pointer blobs, including one
+deadline for selection and content reads. Complete receive deadlines, LFS HTTP
+transfer, atomic publication and HTTP receive wiring remain pending;
 these checks do not establish working pushes.
 
 ## Issues and comments

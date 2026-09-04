@@ -121,6 +121,26 @@ clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 
 ## Boundaries
 
+Dependency preflight consumes `crab-git`'s validated pointer contracts and
+delegates LFS integrity to `crab-lfs`; both are lower-level dependencies. Server
+authentication, authorization, writer coordination and publication remain with
+their composing owners.
+
+`dependency_proof::verify_dependencies` consumes the pointer list produced by
+`crab-git::receive_plan::validate`. It binds Crab shard selection to the same
+captured repository snapshot, then verifies Crab and LFS payloads at origin.
+It checks count, individual size, conflicting declarations and total unique
+file bytes before I/O; duplicate content is verified once. The batch deadline
+covers selection, admission waits and content verification. Its successful body
+traffic is bounded by the lookup budget plus pointer count times the per-content
+read limit, excluding transport retries.
+
+Pass an origin-only layout. LFS verification ignores receipts and replica
+fallback; extension transforms stay with the client, as the primary OID/size
+identify the stored bytes. Verification writes no durable evidence and is not
+publication authority. A publisher must hold GC fences and recheck the exact
+base before exposing refs. Native HTTP receive/publication remains unfinished.
+
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.
 - [`crab-cache-store`](../crab-cache-store/README.md) supplies cache-aware

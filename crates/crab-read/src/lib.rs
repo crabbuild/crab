@@ -1,5 +1,6 @@
 //! Read and hydration orchestration over Crab storage, metadata, cache, and Xet data.
 
+pub mod dependency_proof;
 mod error;
 mod fetch_admission;
 mod hidden_refs;
