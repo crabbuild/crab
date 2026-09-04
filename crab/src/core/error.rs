@@ -1935,6 +1935,13 @@ impl From<crab_lfs::LfsError> for CrabError {
 impl From<crab_metadata::error::MetadataError> for CrabError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
+            crab_metadata::error::MetadataError::FileLookupLimit { resource, maximum } => {
+                Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
+            }
+            error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
+            | crab_metadata::error::MetadataError::FileLookupWorker { .. }) => {
+                Self::Io(std::io::Error::other(error))
+            }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),
             crab_metadata::error::MetadataError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
@@ -3874,6 +3881,40 @@ mod tests {
             assert!(
                 std::iter::successors(error.source(), |source| (*source).source())
                     .any(|source| source.is::<CrabError>())
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_lookup_limit_is_a_protocol_rejection() {
+        let error = CrabError::from(crab_metadata::error::MetadataError::FileLookupLimit {
+            resource: "shard visits",
+            maximum: 4,
+        });
+        assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[tokio::test]
+    async fn metadata_lookup_worker_errors_retain_their_sources() {
+        let gate = tokio::sync::Semaphore::new(0);
+        gate.close();
+        let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
+            source: gate.acquire().await.unwrap_err(),
+        };
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let worker = crab_metadata::error::MetadataError::FileLookupWorker {
+            source: task.await.unwrap_err(),
+        };
+        for source in [admission, worker] {
+            let CrabError::Io(error) = CrabError::from(source) else {
+                panic!("expected read I/O failure");
+            };
+            assert!(
+                error
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<crab_metadata::error::MetadataError>())
+                    .is_some()
             );
         }
     }

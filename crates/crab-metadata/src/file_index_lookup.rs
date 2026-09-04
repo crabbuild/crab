@@ -5,8 +5,8 @@
 //! or `MetaDb` session lifecycle.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use futures_util::stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -22,13 +22,16 @@ use crab_xet::xorb::format::MerkleHash;
 const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
+static SHARD_SCANS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(SHARD_SEARCH_CONCURRENCY)));
 
 /// Resource limits for one snapshot-bound file lookup session.
 ///
 /// File count bounds each batch and the session's cached distinct files. Shard
 /// visits count cumulatively, including bloom misses and failed scans. Each
 /// visit reads at most one bounded body plus a 12-byte trailer and 4 KiB bloom;
-/// transport retry limits remain owned by `Store`. At most four visits overlap.
+/// transport retry limits remain owned by `Store`. At most four visits overlap
+/// across all sessions in the process, including detached blocking parsers.
 #[derive(Debug, Clone, Copy)]
 pub struct FileIndexLookupLimits {
     pub max_files: usize,
@@ -485,6 +488,12 @@ impl FileIndexLookupSession {
                 let router = self.router.clone();
                 let unresolved = unresolved.clone();
                 async move {
+                    // Admit before fetching a body. The blocking parser takes
+                    // this permit so a dropped caller cannot free capacity early.
+                    let permit = Arc::clone(&SHARD_SCANS)
+                        .acquire_owned()
+                        .await
+                        .map_err(|source| MetadataError::FileLookupAdmission { source })?;
                     let path = router.shard_path(&shard_hash);
                     if crate::bloom_prefilter::check_shard_file_bloom_any(
                         &storage,
@@ -504,24 +513,16 @@ impl FileIndexLookupSession {
                                 .min(crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64),
                         )
                         .await?;
-                    if crab_xet::hash::compute_data_hash(&body) != shard_hash {
-                        return Err(MetadataError::CorruptObject {
-                            path: path.to_string(),
-                            reason: "manifest-scoped shard body hash mismatch".to_owned(),
-                        });
-                    }
-                    let recipes =
-                        crab_xet::shard_parse::extract_file_recipes_for_hashes_with_limit(
-                            &body,
-                            &unresolved,
-                            self.limits.max_recipe_entries,
-                        )?;
-                    Ok::<_, MetadataError>(
-                        recipes
-                            .into_iter()
-                            .map(|recipe| (recipe.file_hash, shard_hash))
-                            .collect::<Vec<_>>(),
+                    spawn_shard_parse(
+                        body,
+                        path,
+                        shard_hash,
+                        unresolved,
+                        self.limits.max_recipe_entries,
+                        permit,
                     )
+                    .await
+                    .map_err(|source| MetadataError::FileLookupWorker { source })?
                 }
             }))
             .buffer_unordered(SHARD_SEARCH_CONCURRENCY.min(anchor.shards.len()).max(1));
@@ -578,6 +579,34 @@ impl FileIndexLookupSession {
                 source,
             })
     }
+}
+
+fn spawn_shard_parse(
+    body: bytes::Bytes,
+    path: ObjectPath,
+    shard_hash: MerkleHash,
+    requested: HashSet<MerkleHash>,
+    max_recipe_entries: usize,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> tokio::task::JoinHandle<Result<Vec<(MerkleHash, MerkleHash)>>> {
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if crab_xet::hash::compute_data_hash(&body) != shard_hash {
+            return Err(MetadataError::CorruptObject {
+                path: path.to_string(),
+                reason: "manifest-scoped shard body hash mismatch".to_owned(),
+            });
+        }
+        let recipes = crab_xet::shard_parse::extract_file_recipes_for_hashes_with_limit(
+            &body,
+            &requested,
+            max_recipe_entries,
+        )?;
+        Ok(recipes
+            .into_iter()
+            .map(|recipe| (recipe.file_hash, shard_hash))
+            .collect())
+    })
 }
 
 struct SharedFileIndexLookupInner {
@@ -1248,6 +1277,73 @@ mod tests {
             })
         );
         assert_eq!((timed_out, retry_rejected), (true, true));
+    }
+
+    #[test]
+    fn parser_timeout_keeps_admission_until_blocking_job_exits() {
+        use std::{sync::mpsc, time::Duration};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.block_on(async {
+            let gate = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = Arc::clone(&gate).acquire_owned().await.unwrap();
+            let file = hash_from_seed(1);
+            let (body, hash) = shard_with_file(file);
+            let job = spawn_shard_parse(
+                Bytes::from(body),
+                ObjectPath::from("shard"),
+                hash,
+                HashSet::from([file]),
+                16,
+                permit,
+            );
+            let timed_out = tokio::time::timeout(Duration::from_millis(10), job)
+                .await
+                .is_err();
+            let retained = gate.available_permits() == 0;
+            release_tx.send(()).unwrap();
+            let released = tokio::time::timeout(Duration::from_secs(5), gate.acquire_owned())
+                .await
+                .is_ok();
+            blocker.await.unwrap();
+            assert_eq!((timed_out, retained, released), (true, true, true));
+        });
+    }
+
+    #[tokio::test]
+    async fn scan_admission_waits_before_any_origin_read() {
+        use std::time::Duration;
+        let (router, snapshot, file, _) = bounded_lookup_fixture().await;
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&reads);
+        let store = router
+            .store()
+            .clone()
+            .with_read_request_observer(Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }));
+        let router = crab_storage::StoreLayout::new(store, router.repo_prefix().to_owned());
+        let session =
+            FileIndexLookupSession::for_snapshot(&router, &snapshot, lookup_limits()).unwrap();
+        let all = Arc::clone(&SHARD_SCANS)
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
+        let timed_out = tokio::time::timeout(Duration::from_millis(10), session.lookup(&file))
+            .await
+            .is_err();
+        drop(all);
+        assert_eq!((timed_out, reads.load(Ordering::Relaxed)), (true, 0));
     }
 
     #[tokio::test]
