@@ -123,8 +123,20 @@ pub async fn run_cache_clean(
     mode: OutputMode,
     cancel: &CancellationToken,
 ) -> Result<crab_cache::CacheCleanReport> {
+    let config = Config::resolve_local()?;
     let root = crate::cache::default_cache_root();
-    let report = clean_root(&root, dry_run, cancel).await?;
+    let range_root = config.effective_chunk_cache_dir();
+    validate_destructive_cache_root(&root)?;
+    validate_destructive_cache_root(&range_root)?;
+    let clean_range_separately = !existing_paths_match(&root.join("chunks"), &range_root)?;
+    let mut report = clean_root(&root, dry_run, cancel).await?;
+    if clean_range_separately {
+        let range =
+            crate::cache::prune_xet_chunk_cache_with_cancel(&range_root, 0, dry_run, false, cancel)
+                .await?;
+        report.files_removed = report.files_removed.saturating_add(range.entries_evicted);
+        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(range.bytes_freed);
+    }
     if mode.is_machine() {
         emit_json("cache.clean", "1.0", &report);
     } else {
@@ -139,6 +151,20 @@ pub async fn run_cache_clean(
         );
     }
     Ok(report)
+}
+
+fn existing_paths_match(left: &Path, right: &Path) -> Result<bool> {
+    let left = match std::fs::canonicalize(left) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let right = match std::fs::canonicalize(right) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(left == right)
 }
 
 async fn clean_root(

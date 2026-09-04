@@ -34,6 +34,50 @@ fn command_output(directory: &Path, root: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[tokio::test]
+async fn clean_commands_honor_tagged_range_cache_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = temp.path().join("cache");
+    let range_root = temp.path().join("ranges");
+    let config = temp.path().join(crab::core::config::REPO_CONFIG_REL);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        config,
+        format!(
+            "[cache]\nchunk_cache_dir = {:?}\n",
+            range_root.display().to_string()
+        ),
+    )
+    .unwrap();
+    let cache = XetChunkCacheHandle::open(&range_root, 1024 * 1024).unwrap();
+    let key = Key {
+        prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.into(),
+        hash: (*blake3::hash(b"data").as_bytes()).into(),
+    };
+    let range = ChunkRange::new(0, 1);
+    cache
+        .cache
+        .put(&key, &range, &[0, 4], b"data")
+        .await
+        .unwrap();
+
+    for args in [&["cache", "clean"][..], &["optimize", "cache", "clean"][..]] {
+        if cache.cache.get(&key, &range).await.unwrap().is_none() {
+            cache
+                .cache
+                .put(&key, &range, &[0, 4], b"data")
+                .await
+                .unwrap();
+        }
+        let output = command_output(temp.path(), &root, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(cache.cache.get(&key, &range).await.unwrap().is_none());
+    }
+}
+
 fn command(directory: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
     let output = command_output(directory, root, args);
     assert!(

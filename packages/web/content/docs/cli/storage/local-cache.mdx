@@ -155,6 +155,10 @@ private payload boundary and retain unknown and busy entries. SQLite/root
 ownership, full reservation protection, and complete resource accounting remain
 part of Plan 017; these payload safeguards do not close those gaps.
 
+For tagged configurations that still set `[cache].chunk_cache_dir`, cleanup
+also removes eligible decoded ranges from that separate directory after both
+the shared root and configured range path pass destructive-root validation.
+
 Clean, verify, and prune reject cache roots that resolve to the filesystem root,
 home directory, current directory, or its ancestors, including relative paths.
 Their `crab optimize cache` equivalents share the same checks. A missing cache

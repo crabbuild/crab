@@ -255,7 +255,9 @@ command automatically.
 ### `crab cache clean`
 
 Uses `crab-cache::clean_cache` to remove recognized private payloads under the
-single effective root. Directory traversal and deletion use pinned descriptors;
+shared root. A tagged `[cache].chunk_cache_dir` outside that root is cleaned
+through the range-maintenance path used by prune. Both roots are validated
+before deletion begins. Directory traversal and deletion use pinned descriptors;
 nonblocking parent/file locks coordinate publication and active readers.
 Unknown subtrees, live workspaces, mirrors, profiles, databases/side files, and
 temporaries are retained, with separate retained/busy/unsafe counts. It is not
