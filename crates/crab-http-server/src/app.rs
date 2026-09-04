@@ -30,6 +30,16 @@ pub(crate) enum Error {
     OwnReview,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
+    #[error("The pull request cannot be fast-forwarded from the selected commits")]
+    MergeConflict,
+    #[error("Git writes are busy")]
+    MergeBusy,
+    #[error("Write access is required to merge pull requests")]
+    MergePermission,
+    #[error("A pull request merge is in progress")]
+    MergePending,
+    #[error("Pull request merge failed")]
+    Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error(
         "This submission ID was already used for different content; check the existing discussion before submitting again"
     )]
@@ -67,6 +77,26 @@ impl IntoResponse for Error {
                 "conflict",
                 "This content changed; reload before saving your draft",
             ),
+            Self::MergeConflict => (
+                StatusCode::CONFLICT,
+                "merge_conflict",
+                "The base branch changed or cannot be fast-forwarded to this pull request. Reload and review the latest commits",
+            ),
+            Self::MergeBusy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Git writes are busy; retry this merge shortly",
+            ),
+            Self::MergePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to merge pull requests",
+            ),
+            Self::MergePending => (
+                StatusCode::CONFLICT,
+                "merge_pending",
+                "A merge is in progress. Reload the pull request and retry that merge before editing",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
@@ -76,6 +106,11 @@ impl IntoResponse for Error {
                 error.status(),
                 "invalid_request",
                 "Invalid JSON request or request body too large",
+            ),
+            Self::Merge(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "merge_failed",
+                "The merge may have completed. Reload the pull request before retrying the same submission",
             ),
             _ => (
                 StatusCode::BAD_GATEWAY,

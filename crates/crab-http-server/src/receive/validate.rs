@@ -121,7 +121,7 @@ impl VisibilitySource for Source<'_> {
 pub(super) async fn prepare(
     repository: RemoteGitRepository,
     directory: std::path::PathBuf,
-    mut input: BufReader<File>,
+    input: Option<BufReader<File>>,
     updates: Vec<RefUpdate>,
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
@@ -163,24 +163,29 @@ pub(super) async fn prepare(
         };
         let result = (|| {
             super::check_cancelled(&cancel)?;
-            let incoming = if input.fill_buf()?.is_empty()
-                && updates.iter().all(|update| update.new.is_none())
-            {
-                IncomingPack::empty(&directory)?
-            } else {
-                incoming_pack::quarantine(
-                    &mut input,
-                    &directory,
-                    ReceiveLimits {
-                        max_pack_bytes: super::MAX_BODY,
-                        max_objects: 1_000_000,
-                        max_object_bytes: GRAPH_LIMITS.max_object_bytes,
-                        max_inflated_bytes: 8 * 1024 * 1024 * 1024,
-                        max_delta_depth: 128,
-                    },
-                    || cancel.is_cancelled(),
-                    |oid| source.read(oid),
-                )?
+            let incoming = match input {
+                None => IncomingPack::empty(&directory)?,
+                Some(mut input) => {
+                    if input.fill_buf()?.is_empty()
+                        && updates.iter().all(|update| update.new.is_none())
+                    {
+                        IncomingPack::empty(&directory)?
+                    } else {
+                        incoming_pack::quarantine(
+                            input,
+                            &directory,
+                            ReceiveLimits {
+                                max_pack_bytes: super::MAX_BODY,
+                                max_objects: 1_000_000,
+                                max_object_bytes: GRAPH_LIMITS.max_object_bytes,
+                                max_inflated_bytes: 8 * 1024 * 1024 * 1024,
+                                max_delta_depth: 128,
+                            },
+                            || cancel.is_cancelled(),
+                            |oid| source.read(oid),
+                        )?
+                    }
+                }
             };
             let plan = receive_plan::validate(
                 &incoming,

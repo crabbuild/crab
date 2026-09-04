@@ -441,7 +441,14 @@ change their state. Reviews use `/pulls/{number}/reviews` and
 can comment but cannot approve or request changes on their own changes. Advancing
 the head leaves prior reviews visible with `current: false`; the state and commit
 of an existing review are immutable while its author can conditionally edit its
-body. Merge, checks and branch protection are not implemented.
+body. Repository writers can `POST /pulls/{number}/merge` with the displayed
+pull version and exact base/head IDs. The only accepted method is
+`fast_forward`: the server revalidates ancestry, pointer dependencies and Git
+visibility under the base-ref lease and both GC fences, then publishes through
+the same journal path as native Git push. A persisted merge marker blocks
+concurrent pull edits and lets the same request resume after a lost response or
+restart. A completed merge retains its pre-merge comparison even if the source
+branch is deleted. Merge commits, checks and branch protection are not implemented.
 
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
@@ -452,20 +459,23 @@ and an 80-KiB HTTP body limit. `Server-Timing: app` reports handling latency.
 
 Data lives under `<repository-prefix>/app/v1/issues` and `app/v1/pulls`,
 independently of Git refs, packs and metadata. Each JSON document has
-`schema_version: 1`; unknown versions are rejected. Conditional counter updates allocate numbers, immutable
+`schema_version: 1`; unknown versions are rejected. Conditional counter updates
+allocate numbers, immutable
 `requests/{uuid}.json` reservations make creation retries converge, and ETag
-updates protect visible issue, comment and review documents. Interrupted allocation can leave
-numbering gaps. A retry completes an existing reservation without overwriting a
-later edit. Comments and reviews have their own counters and reservations under
-their parent discussion.
+updates protect visible issue, comment, review and merge documents. Interrupted
+allocation can leave numbering gaps. A retry completes an existing reservation
+without overwriting a later edit. Comments and reviews have their own counters
+and reservations under their parent discussion. Merge reservations and pending
+state preserve the exact actor, method, pull version and commit IDs.
 
 The service account needs reads and conditional writes to this app prefix in
 addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Labels, assignees, deletion/moderation, edit history, notifications, merge and
-checks remain unimplemented. Production backup/restore qualification is pending.
+Labels, assignees, deletion/moderation, edit history, notifications, merge
+commits and checks remain unimplemented. Production backup/restore qualification
+is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
 replayed both creation requests, edited content, closed/reopened the issue and
@@ -493,6 +503,16 @@ both review records and marked both outdated. Initial pull and review writes too
 560.8 ms on localhost with shared caches. These are observations, not production
 latency guarantees.
 
+A fast-forward merge qualification pushed a dedicated branch with native Git,
+created pull request 3, and merged its exact head through the HTTP API into the
+same RustFS-backed repository. An independent depth-one clone read the merged
+commit and file from `main`. After deleting the source branch and restarting the
+server, the pull remained merged and its exact one-file comparison remained
+available. Pull creation, merge and idempotent merge replay took 34.1, 391.2 and
+1.0 ms; after restart, pull detail and exact changes took 25.4 and 55.8 ms of
+server work on localhost with shared caches. These are observations, not
+production latency guarantees.
+
 ## Current verification
 
 ```sh
@@ -519,10 +539,11 @@ adapt the file inputs for the fixture.
 
 The local Kubernetes/RustFS run matched 162 directory entries, 10 commits,
 three exact blobs including a PNG, six changed files' diff inputs, and one line
-of first-parent blame against native Git. The latest mixed first/repeated local run measured median tree reads of 11 ms,
-diffs of 34 ms, and one blame request of 1.5 seconds. Caches were not flushed;
-these measurements are not a production latency guarantee. Nineteen Rust transport, identity and discussion tests and eight frontend
-navigation, model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
+of first-parent blame against native Git. The latest mixed first/repeated local
+run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
+of 1.5 seconds. Caches were not flushed; these measurements are not a production
+latency guarantee. Thirty-nine Rust server tests and eight frontend navigation,
+model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
 Git token scope and revocation. Thirteen shared wire tests and nineteen remote-helper
@@ -594,7 +615,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push and tag lifecycle have scoped RustFS proof; protected branches and administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments and commit-bound review decisions with author edits, conditional writes and live exact-branch comparison; merge, checks and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews and recoverable fast-forward merge with canonical ref publication; merge commits, checks and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |
