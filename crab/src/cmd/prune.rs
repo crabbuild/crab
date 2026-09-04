@@ -63,7 +63,11 @@ pub async fn run_prune_with_cancel(
     let root = crate::cache::default_cache_root();
     super::cache::validate_destructive_cache_root(&root)?;
     let config = Config::resolve_local()?;
-    let cache = LocalCache::with_limits(root, config.cache.max_bytes, config.cache.max_bytes);
+    let cache = LocalCache::with_limits(
+        root,
+        config.effective_chunk_cache_max_bytes(),
+        config.effective_shard_cache_max_bytes(),
+    );
     let local_prune = cache.prune_with_options(PruneOptions {
         dry_run: args.dry_run,
         record_entries: args.verbose || args.mode == OutputMode::Jsonl,
@@ -76,7 +80,7 @@ pub async fn run_prune_with_cancel(
     check_cancelled(cancel)?;
     let xet = prune_xet_chunk_cache_with_cancel(
         &config.effective_chunk_cache_dir(),
-        config.cache.max_bytes,
+        config.effective_chunk_cache_max_bytes(),
         args.dry_run,
         args.verbose || args.mode == OutputMode::Jsonl,
         cancel,

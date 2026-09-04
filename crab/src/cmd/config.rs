@@ -69,6 +69,7 @@ const INTERNAL_KEYS: &[&str] = &[
     "cache.service_mode",
     "cache.push_warming",
     "cache.max_bytes",
+    "cache.chunk_cache_dir",
     "cache.service_auth",
     "cache.service_token_path",
     "cache.service_ca_cert",
@@ -579,6 +580,7 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
         "remote.url"
         | "auth.aws_profile"
         | "cache.service_url"
+        | "cache.chunk_cache_dir"
         | "cache.service_token_path"
         | "cache.service_ca_cert"
         | "cache.service_client_cert"
@@ -838,6 +840,7 @@ mod tests {
         run_internal_config_set("cache.service_mode", "CACHE+DEDUP", &path).unwrap();
         run_internal_config_set("cache.push_warming", "true", &path).unwrap();
         run_internal_config_set("cache.max_bytes", "536870912", &path).unwrap();
+        run_internal_config_set("cache.chunk_cache_dir", "/var/cache/crab/chunks", &path).unwrap();
         run_internal_config_set("cache.service_auth", "PSK", &path).unwrap();
         run_internal_config_set("cache.service_auth", "mTLS", &path).unwrap();
         run_internal_config_set(
@@ -873,6 +876,10 @@ mod tests {
         assert_eq!(
             table["cache"]["max_bytes"],
             toml::Value::Integer(536_870_912)
+        );
+        assert_eq!(
+            table["cache"]["chunk_cache_dir"],
+            toml::Value::String("/var/cache/crab/chunks".into())
         );
         assert_eq!(
             table["cache"]["service_auth"],

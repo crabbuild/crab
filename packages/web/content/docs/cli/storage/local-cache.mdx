@@ -97,9 +97,14 @@ on every directory maintained by Crab.
 
 Range and object caches receive this budget. Unified admission, all-family
 accounting, and automatic maintenance are still being completed in Plan 017;
-do not treat it as a proven hard limit on total disk usage yet. The old
-`chunk_cache_bytes`, `shard_cache_bytes`, and `[cache].chunk_cache_dir` fields
-are no longer supported.
+do not treat it as a proven hard limit on total disk usage yet.
+
+Configurations written by tagged v1.0.1/v1.1.0 releases remain readable:
+`chunk_cache_bytes` and `shard_cache_bytes` retain their family-specific caps
+when `cache.max_bytes` is absent, and `[cache].chunk_cache_dir` retains its
+decoded-range-only path behavior. Prefer `cache.max_bytes` and
+`CRAB_CACHE_DIR` for new configuration. Removing the tagged keys requires a
+future documented migration; they are not silently reinterpreted.
 
 Within one process, all live decoded-range handles for the same canonical cache
 directory must resolve the same `max_bytes` value. A conflicting caller bypasses

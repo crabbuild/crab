@@ -2032,12 +2032,15 @@ configuration to:
 max_bytes = 10737418240
 ```
 
-The default is 10 GiB. Delete the top-level `chunk_cache_bytes` and
-`shard_cache_bytes` settings and `[cache].chunk_cache_dir`; they describe
-implementation layers rather than a product resource. Do not migrate or
-alias unshipped settings. Configuration must reject unknown cache keys, so
-`max_size` and typos fail with an actionable parse error rather than silently
-doing nothing.
+The default is unlimited. `cache.max_bytes` is the canonical optional product
+cap. The top-level `chunk_cache_bytes` and `shard_cache_bytes` settings and
+`[cache].chunk_cache_dir` describe implementation layers, but they shipped in
+v1.0.1/v1.1.0 and must remain readable during the tagged upgrade window.
+Absent `cache.max_bytes`, retain their family-specific cap/path semantics;
+`cache.max_bytes` overrides both legacy caps. Remove the tagged keys only with
+an explicit doctor migration and documented release window. Configuration must
+still reject unknown cache keys, so `max_size` and typos fail with an actionable
+parse error rather than silently doing nothing.
 
 The budget covers every disposable payload and index under the cache root.
 Credentials, profiles, retained qualification evidence, and authoritative

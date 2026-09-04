@@ -28626,6 +28626,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let pipeline = PushPipeline::new(
@@ -28819,6 +28820,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let ro = Arc::new(
@@ -28942,6 +28944,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let pipeline = PushPipeline::new(
@@ -29047,6 +29050,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let pipeline = PushPipeline::new(
@@ -29150,6 +29154,7 @@ mod tests {
                 service_ca_cert: None,
                 service_client_cert: None,
                 service_client_key: None,
+                ..CacheConfig::default()
             },
         )
         .expect("caching store");
@@ -29254,6 +29259,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let pipeline = PushPipeline::new(
@@ -34083,6 +34089,7 @@ mod tests {
             service_ca_cert: None,
             service_client_cert: None,
             service_client_key: None,
+            ..CacheConfig::default()
         };
         let caching_store = CachingStore::new(store.clone(), &cache_config).expect("caching store");
         let pipeline = PushPipeline::new(

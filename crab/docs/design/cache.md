@@ -52,8 +52,9 @@ It is not part of the cache root and must never be removed by cache eviction.
 ## Current cache families
 
 The default root is `~/.cache/crab/`. `CRAB_CACHE_DIR` overrides the root.
-`[cache].chunk_cache_dir` can currently move only the xet decoded-range cache,
-which means a process may use two roots.
+Tagged v1.0.1/v1.1.0 configurations may still use
+`[cache].chunk_cache_dir` to move only the decoded-range cache, which means a
+process may use two roots. New configuration should use `CRAB_CACHE_DIR`.
 
 ```text
 ~/.cache/crab/
@@ -71,9 +72,9 @@ which means a process may use two roots.
 
 | Family | Producer/consumer | Validation | Current capacity policy |
 |---|---|---|---|
-| Decoded xorb ranges | Xet `FileReconstructor`; fetch, smudge, mount, worktree when attached | Range header/CRC in the pinned Xet disk-cache format | `chunk_cache_bytes`, 256 MiB default; upstream cache evicts on put |
-| Full xorbs | `CachingStore`; push and selected whole-object reads | Xorb identity, footer, payload, and compressed chunks | Shares `LocalCache` 10 GiB chunk/xorb default; pruned only when requested |
-| Full shards | `CachingStore`, shard sync, read paths | Content hash and shard parsing | Unbounded by default; optional `shard_cache_bytes`; pruned only when requested |
+| Decoded xorb ranges | Xet `FileReconstructor`; fetch, smudge, mount, worktree when attached | Range header/CRC in Crab's pinned decoded-range format | Unlimited by default; optional shared `cache.max_bytes`; tagged `chunk_cache_bytes` remains a family-specific compatibility cap |
+| Full xorbs | `CachingStore`; push and selected whole-object reads | Xorb identity, footer, payload, and compressed chunks | Unlimited by default; optional shared `cache.max_bytes` |
+| Full shards | `CachingStore`, shard sync, read paths | Content hash and shard parsing | Unlimited by default; optional shared `cache.max_bytes`; tagged `shard_cache_bytes` remains a family-specific compatibility cap |
 | Persistent chunk index | shard sync and push dedup classification | SQLite schema/generation plus remote candidate revalidation | No unified byte budget |
 | Remote xorb proof/index | push proof and xorb metadata lookup | Origin identity token and payload digest | No unified byte budget |
 | Local xorb placement rows | written with full-xorb installs | Xorb verification | No production lookup caller |
@@ -197,15 +198,9 @@ of cache state.
 ## Current configuration
 
 ```toml
-# Top-level decoded-range and LocalCache chunk/xorb ceiling.
-chunk_cache_bytes = 268435456
-
-# Optional top-level complete-shard ceiling. Omit for the current unbounded default.
-shard_cache_bytes = 1073741824
-
 [cache]
-# Optional decoded-range-only root.
-chunk_cache_dir = "/fast-disk/crab-ranges"
+# Optional shared payload budget. Omit or use "unlimited" for unlimited retention.
+max_bytes = 10737418240
 
 # Optional organization cache service.
 service_url = "https://cache.example.internal"
@@ -215,9 +210,12 @@ service_auth = "none"
 ```
 
 `[cache].max_size` is not a supported field and configuration parsing rejects
-it. Plan 017 Phase 3 hard-cuts the layer-specific roots/budgets to one
-`[cache].max_bytes` product contract after all families participate in the same
-lifecycle.
+it. The shipped `chunk_cache_bytes`, `shard_cache_bytes`, and
+`[cache].chunk_cache_dir` keys remain readable for tagged-install upgrades.
+When `cache.max_bytes` is present, it overrides both legacy family caps;
+`chunk_cache_dir` retains its tagged decoded-range-only path behavior. Removing
+those keys requires an explicit doctor migration and a documented upgrade
+window.
 
 ## Current maintenance commands
 
@@ -248,9 +246,11 @@ ownership remain open, including index-row cleanup after payload deletion.
 
 ### `crab prune`
 
-Applies `chunk_cache_bytes` independently to decoded ranges and to the
-LocalCache chunk/xorb group. It applies `shard_cache_bytes` when configured.
-Normal LocalCache writes do not invoke this command automatically.
+Applies `cache.max_bytes` to decoded ranges and LocalCache payload families.
+For tagged configuration compatibility, absent `cache.max_bytes`, it applies
+`chunk_cache_bytes` to decoded ranges and the chunk/xorb group and
+`shard_cache_bytes` to shards. Normal LocalCache writes do not invoke this
+command automatically.
 
 ### `crab cache clean`
 

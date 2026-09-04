@@ -623,6 +623,11 @@ pub(crate) const CACHE_SERVICE_URL_ENV: &str = "CRAB_CACHE_SERVICE_URL";
 pub struct CacheConfig {
     /// Product-wide disk-retention budget; `None` is unlimited.
     pub max_bytes: Option<u64>,
+    /// Tagged compatibility override for the decoded-range cache directory.
+    pub chunk_cache_dir: Option<PathBuf>,
+    pub(crate) legacy_chunk_max_bytes: Option<u64>,
+    pub(crate) legacy_shard_max_bytes: Option<u64>,
+    pub(crate) unified_budget_configured: bool,
     /// Cache service URL (e.g., `"https://crab-cache.internal:8443"`).
     pub service_url: Option<String>,
     /// Service mode: cache, dedup, or both.
@@ -644,6 +649,10 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_bytes: None,
+            chunk_cache_dir: None,
+            legacy_chunk_max_bytes: None,
+            legacy_shard_max_bytes: None,
+            unified_budget_configured: false,
             service_url: None,
             service_mode: ServiceMode::CacheAndDedup,
             push_warming: true,
@@ -1409,6 +1418,11 @@ pub struct ConfigOverlay {
     pub operation_timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
 
+    // Tagged v1.0.1/v1.1.0 configuration compatibility. New configuration
+    // uses `[cache].max_bytes`, but rejecting these breaks existing installs.
+    pub chunk_cache_bytes: Option<u64>,
+    pub shard_cache_bytes: Option<u64>,
+
     pub gc_grace_period_secs: Option<u64>,
     pub gc_delete_concurrency: Option<usize>,
     pub gc_list_concurrency: Option<usize>,
@@ -1677,6 +1691,9 @@ where
 pub struct CacheOverlay {
     #[serde(default, deserialize_with = "deserialize_cache_budget")]
     pub max_bytes: Option<Option<u64>>,
+    /// Tagged compatibility path. New configuration should use
+    /// `CRAB_CACHE_DIR` so every cache family shares one root.
+    pub chunk_cache_dir: Option<String>,
     pub service_url: Option<String>,
     pub service_mode: Option<String>,
     pub push_warming: Option<bool>,
@@ -2094,6 +2111,16 @@ impl Config {
         if let Some(v) = overlay.max_retries {
             self.max_retries = v;
         }
+        if overlay.chunk_cache_bytes.is_some() || overlay.shard_cache_bytes.is_some() {
+            self.cache.max_bytes = None;
+            self.cache.unified_budget_configured = false;
+        }
+        if let Some(v) = overlay.chunk_cache_bytes {
+            self.cache.legacy_chunk_max_bytes = Some(v);
+        }
+        if let Some(v) = overlay.shard_cache_bytes {
+            self.cache.legacy_shard_max_bytes = Some(v);
+        }
         if let Some(v) = overlay.gc_grace_period_secs {
             self.gc_grace_period = Duration::from_secs(v);
         }
@@ -2388,6 +2415,10 @@ impl Config {
     fn apply_cache_overlay(&mut self, overlay: CacheOverlay) {
         if let Some(max_bytes) = overlay.max_bytes {
             self.cache.max_bytes = max_bytes;
+            self.cache.unified_budget_configured = true;
+        }
+        if let Some(dir) = overlay.chunk_cache_dir {
+            self.cache.chunk_cache_dir = Some(PathBuf::from(dir));
         }
         if let Some(url) = overlay.service_url {
             self.cache.service_url = Some(url);
@@ -2646,10 +2677,33 @@ impl Config {
         }
     }
 
-    /// Resolve the decoded-range family beneath the single cache root.
+    /// Resolve the decoded-range family, preserving the tagged path override.
     #[must_use]
     pub fn effective_chunk_cache_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.cache.chunk_cache_dir {
+            return dir.clone();
+        }
         crate::cache::default_cache_root().join("chunks")
+    }
+
+    /// Resolve the decoded-range/object budget across canonical and tagged keys.
+    #[must_use]
+    pub fn effective_chunk_cache_max_bytes(&self) -> Option<u64> {
+        if self.cache.unified_budget_configured {
+            self.cache.max_bytes
+        } else {
+            self.cache.legacy_chunk_max_bytes
+        }
+    }
+
+    /// Resolve the shard budget across canonical and tagged keys.
+    #[must_use]
+    pub fn effective_shard_cache_max_bytes(&self) -> Option<u64> {
+        if self.cache.unified_budget_configured {
+            self.cache.max_bytes
+        } else {
+            self.cache.legacy_shard_max_bytes
+        }
     }
 
     /// Build a [`crate::metadata::MetaDbConfig`] for a session
@@ -3814,14 +3868,36 @@ storage_provider = "gcs"
     }
 
     #[test]
-    fn overlay_cache_rejects_retired_and_unknown_settings() {
-        for input in [
-            "chunk_cache_bytes = 1024\n",
-            "shard_cache_bytes = 1024\n",
-            "[cache]\nchunk_cache_dir = 'ranges'\n",
-            "[cache]\nmax_size = 1024\n",
-            "[cache]\nmax_byte = 1024\n",
-        ] {
+    fn tagged_cache_settings_remain_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "chunk_cache_bytes = 1024\nshard_cache_bytes = 2048\n[cache]\nchunk_cache_dir = 'ranges'\n",
+        )
+        .unwrap();
+        let config =
+            Config::resolve_local_from(Some(config_path), PathBuf::from("/nonexistent")).unwrap();
+        assert_eq!(config.effective_chunk_cache_dir(), Path::new("ranges"));
+        assert_eq!(config.effective_chunk_cache_max_bytes(), Some(1024));
+        assert_eq!(config.effective_shard_cache_max_bytes(), Some(2048));
+    }
+
+    #[test]
+    fn canonical_cache_budget_overrides_tagged_settings() {
+        let mut config = Config::default();
+        let overlay = toml::from_str(
+            "chunk_cache_bytes = 1024\nshard_cache_bytes = 2048\n[cache]\nmax_bytes = 'unlimited'\n",
+        )
+        .unwrap();
+        config.apply_overlay(overlay, "test".into()).unwrap();
+        assert_eq!(config.effective_chunk_cache_max_bytes(), None);
+        assert_eq!(config.effective_shard_cache_max_bytes(), None);
+    }
+
+    #[test]
+    fn overlay_cache_rejects_unknown_settings() {
+        for input in ["[cache]\nmax_size = 1024\n", "[cache]\nmax_byte = 1024\n"] {
             let error = toml::from_str::<ConfigOverlay>(input)
                 .expect_err("cache policy must not accept ineffective settings");
             assert!(
