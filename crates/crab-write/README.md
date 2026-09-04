@@ -1,7 +1,7 @@
 # crab-write
 
-Shared Git publication mechanics for Crab. This crate owns catalog publication and
-ref-journal compaction extracted from CLI push, reader repair and generation-owner
+Shared Git publication mechanics for Crab. This crate owns catalog publication,
+ref-journal commit and compaction extracted from CLI push, reader repair and generation-owner
 paths. Those CLI callers use these implementations; HTTP receive can compose it without depending
 on the CLI or another server.
 
@@ -55,6 +55,16 @@ points await lease release on success and error; an operation error remains the
 primary error when release also fails. A cancellation result does not roll back
 transactions that were already committed.
 
+`journal::commit_edits` is the CLI's shared journal commit path. It validates a
+complete batch and checks each expected old OID against a caller-supplied snapshot
+before writing anything. It then reads per-ref causal parents and uses the metadata
+journal's prepared heads and single atomic active marker. The supplied snapshot
+must be captured while holding every edited ref lease, with those leases retained
+and renewed through completion; passing an earlier snapshot is not a concurrency
+check. Existing committed journal edits count toward the old-value comparison,
+even before generation compaction. The function preserves exact new OIDs, tag
+peeling, HEAD changes, uploaded pack/shard references and visibility evidence.
+
 ## Caller responsibilities
 
 For the lower-level `catalog::publish_inventory`, the caller must supply the
@@ -68,7 +78,13 @@ Await journal and catalog lifecycle operations to completion; do not abort their
 future to enforce a deadline. They own stateful writes and lease cleanup. The
 caller still owns the generation-owner election and any required GC fences.
 
-This crate does not yet own the complete generation service: journal commit,
+For journal commit, callers also own write authorization, ref namespace/policy and
+graph/dependency validation, immutable uploads, visibility proof, and ref leases.
+An error while writing the active marker can have an uncertain commit outcome;
+callers must reconcile it before reporting failure. Successful journal commit
+means refs are durable, not that the derived catalog is ready for reads.
+
+This crate does not yet own the complete generation service: receive-to-commit,
 catalog/visibility readiness composition, index receipts and restart repair still need a
 shared composing path before HTTP push can acknowledge a fully readable generation.
 
@@ -91,6 +107,17 @@ lease, cancellation while waiting, manifest failure and retry, and repeat calls
 with no active transactions. Shared renewal tests prove that lease loss drains
 the operation and preserves its primary error; existing CLI tests also cover a
 completed operation racing a stalled backend renewal.
+
+Commit tests cover a second atomic batch over un-compacted journal state, including
+causal parents, exact creation/update/deletion, peeled tag removal and HEAD changes.
+Stale and malformed batches leave storage unchanged, including no orphan journal
+artifacts. Existing compaction tests also enter through the shared commit function.
+
+A RustFS fixture removes its local repository before shared journal commit, rejects
+a stale retry without another active transaction, then compacts and publishes the
+catalog. Exact commit/tree/blob bytes match through `crab-remote-git`. The shared
+commit took 7 ms, compaction 22 ms and catalog lifecycle 22 ms for this small fixture;
+these are component timings with shared caches, not HTTP push benchmarks.
 
 A separate RustFS round trip commits a native Git fixture through the ref journal,
 removes its local repository, verifies that a busy reader skips compaction, then

@@ -1,8 +1,13 @@
-//! Fold committed ref transactions into generations under the manifest lease.
+//! Commit ref edits and fold committed transactions into generations.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crab_coordination::{PushLock, PushLockAcquireContext};
+use crab_metadata::{
+    manifest_store::RepositorySnapshot,
+    manifests::PackManifestEntry,
+    ref_journal::{self, RefJournalCommitResult, RefJournalEdit, RefJournalTransaction},
+};
 use crab_storage::{Store, StoreLayout};
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
@@ -13,6 +18,51 @@ use crate::{Result, WriteError};
 const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 // Yield the manifest lease after a bounded wave count, even under continuous writes.
 const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = 5;
+
+/// Commit a validated batch against a snapshot captured while holding every edited ref lease.
+///
+/// The caller owns authorization, ref/graph/dependency validation, GC fencing,
+/// immutable artifact and visibility evidence uploads, and lease renewal through
+/// completion. This function checks expected old values, reads causal parents,
+/// and publishes through the journal's atomic active marker. It does not publish
+/// a readable catalog or release leases. Await completion without dropping the
+/// future; a storage error at the marker may require commit-outcome recovery.
+pub async fn commit_edits(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    snapshot: &RepositorySnapshot,
+    edits: Vec<RefJournalEdit>,
+    head: Option<String>,
+    packs: Vec<PackManifestEntry>,
+    shards: Vec<String>,
+) -> Result<RefJournalCommitResult> {
+    let parents = edits
+        .iter()
+        .map(|edit| (edit.ref_name.clone(), None))
+        .collect();
+    // Validate the whole batch before any I/O; one invalid or stale edit must
+    // not leave immutable transaction bodies or prepared heads for its siblings.
+    let mut transaction = RefJournalTransaction::new(parents, edits, head, packs, shards)?;
+    for edit in &transaction.edits {
+        if snapshot.journal.refs.get(&edit.ref_name) != edit.old_oid.as_ref() {
+            return Err(WriteError::RefChanged {
+                ref_name: edit.ref_name.clone(),
+                path: router
+                    .ref_journal_head_path(&ref_journal::ref_name_hash(&edit.ref_name))
+                    .to_string(),
+            });
+        }
+    }
+    let mut expected_heads = Vec::with_capacity(transaction.edits.len());
+    for edit in &transaction.edits {
+        let observed = ref_journal::read_ref_head(store, router, &edit.ref_name).await?;
+        transaction
+            .parents
+            .insert(edit.ref_name.clone(), observed.visible_transaction.clone());
+        expected_heads.push(observed);
+    }
+    Ok(ref_journal::commit_ref_transaction(store, router, &transaction, &expected_heads).await?)
+}
 
 fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
