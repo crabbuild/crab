@@ -199,8 +199,9 @@ including why protected-view commit translation cannot be used unchanged for
 native pushes. Quarantine, graph/ref validation, self-contained pack/index
 preparation and per-ref visibility planning are qualified against native Git and
 Kubernetes/RustFS. Crab pointer content verification is separately qualified
-against RustFS, including missing/corrupt backing objects. Generation-bound
-dependency selection, LFS integration, atomic publication and HTTP receive
+against RustFS, including missing/corrupt backing objects. Captured-snapshot
+dependency selection remains pinned after later metadata updates. Request-wide
+dependency budgets, LFS integration, atomic publication and HTTP receive
 wiring remain pending; these checks do not establish working pushes.
 
 ## Issues and comments

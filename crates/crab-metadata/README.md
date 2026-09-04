@@ -71,6 +71,12 @@ The snapshot digest does not replace the manifest's Git-only validation digest.
 Callers bind the repository namespace separately and revalidate the snapshot;
 neither digest reserves physical dependencies against GC.
 
+A selected shard is only a dependency candidate. Verify the file's content at
+origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
+publication base before accepting a write. Snapshot lookup retains the canonical
+scan's per-shard bounds; the composing request must also provide admission and
+operation-wide limits.
+
 ## Usage
 
 Create and validate a manifest payload without enabling any storage runtime:
