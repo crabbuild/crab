@@ -6,6 +6,20 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// A file lookup could not acquire process-wide execution capacity.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup admission closed")]
+    FileLookupAdmission {
+        #[source]
+        source: tokio::sync::AcquireError,
+    },
+    /// A file lookup's blocking parser failed to join.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup worker failed")]
+    FileLookupWorker {
+        #[source]
+        source: tokio::task::JoinError,
+    },
     /// A snapshot-bound file lookup exhausted its caller-owned budget.
     #[cfg(feature = "file-index-reader")]
     #[error("file lookup exceeds {resource} limit ({maximum})")]

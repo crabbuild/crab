@@ -1,6 +1,10 @@
 //! Bounded origin verification of Crab pointer content from an explicit shard.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crab_storage::{StorageError, Store, StoreLayout};
@@ -13,7 +17,10 @@ use crab_xet::{
     },
     xorb::{format::MAX_XORB_SIZE, parser::XorbParser},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
+
+static POINTER_PROOFS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(4)));
 
 type Result<T> = std::result::Result<T, PointerProofError>;
 
@@ -31,6 +38,8 @@ pub struct PointerProofLimits {
 /// A rejected content proof never changes canonical data or creates a receipt.
 #[derive(Debug, thiserror::Error)]
 pub enum PointerProofError {
+    #[error("pointer proof admission closed")]
+    Admission(#[from] tokio::sync::AcquireError),
     #[error("pointer proof storage read failed")]
     Storage(#[from] StorageError),
     #[error("pointer proof data validation failed")]
@@ -55,6 +64,8 @@ pub enum PointerProofError {
 /// aggregate successful-body budget (transport retries are separately bounded
 /// by `Store`). CPU work runs on blocking workers.
 /// Cancellation or deadline drops cancel pending workers at chunk boundaries.
+/// Four proofs may run in the process at once; workers retain admission until
+/// they exit even when their caller is cancelled. Deadlines include queue time.
 ///
 /// The caller must supply an origin-only store without cache/read routing,
 /// prove `shard_hash` belongs to its pinned committed generation,
@@ -70,10 +81,17 @@ pub async fn verify_crab_pointer(
 ) -> Result<ExtractedFileRecipe> {
     let cancel = cancel.child_token();
     let _guard = cancel.clone().drop_guard();
+    let proof = async {
+        if pointer.size > limits.max_file_bytes {
+            return Err(PointerProofError::Limit("file bytes"));
+        }
+        let permit = Arc::new(Arc::clone(&POINTER_PROOFS).acquire_owned().await?);
+        verify_content(layout, pointer, shard_hash, limits, &cancel, &permit).await
+    };
     tokio::select! {
         biased;
         () = cancel.cancelled() => Err(PointerProofError::Cancelled),
-        result = tokio::time::timeout(limits.max_duration, verify_content(layout, pointer, shard_hash, limits, &cancel)) => {
+        result = tokio::time::timeout(limits.max_duration, proof) => {
             result.map_err(|_| PointerProofError::Deadline)?
         }
     }
@@ -91,11 +109,9 @@ async fn verify_content(
     shard_hash: MerkleHash,
     limits: PointerProofLimits,
     cancel: &CancellationToken,
+    permit: &Arc<OwnedSemaphorePermit>,
 ) -> Result<ExtractedFileRecipe> {
     check(cancel)?;
-    if pointer.size > limits.max_file_bytes {
-        return Err(PointerProofError::Limit("file bytes"));
-    }
     let (body, _) = layout
         .store()
         .get_with_etag_bounded(
@@ -109,7 +125,7 @@ async fn verify_content(
     let mut read_bytes = body.len() as u64;
     let pointer_owned = pointer.clone();
     let worker_cancel = cancel.clone();
-    let (mut proof, terms) = tokio::task::spawn_blocking(move || {
+    let (mut proof, terms) = spawn_proof(permit, move || {
         parse_file(
             body,
             &pointer_owned,
@@ -146,7 +162,7 @@ async fn verify_content(
                 .await?;
             read_bytes += body.len() as u64;
             let worker_cancel = cancel.clone();
-            let parser = tokio::task::spawn_blocking(move || {
+            let parser = spawn_proof(permit, move || {
                 check(&worker_cancel)?;
                 let parser = XorbParser::parse(body)?;
                 if parser.hash() != term.xorb_hash {
@@ -164,7 +180,7 @@ async fn verify_content(
             .ok_or(PointerProofError::Integrity("missing verified xorb"))?;
         let worker_cancel = cancel.clone();
         (proof, last_xorb) =
-            tokio::task::spawn_blocking(move || {
+            spawn_proof(permit, move || {
                 for index in term.chunk_index_start..term.chunk_index_end {
                     check(&worker_cancel)?;
                     let (expected_hash, expected_size) =
@@ -197,6 +213,19 @@ async fn verify_content(
         return Err(PointerProofError::Integrity("whole-file hash mismatch"));
     }
     Ok(proof.recipe)
+}
+
+fn spawn_proof<T: Send + 'static>(
+    permit: &Arc<OwnedSemaphorePermit>,
+    task: impl FnOnce() -> Result<T> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T>> {
+    let permit = Arc::clone(permit);
+    tokio::task::spawn_blocking(move || {
+        // The request and all of its blocking jobs share one permit. Dropping
+        // a JoinHandle detaches a job, so ownership must stay inside the job.
+        let _permit = permit;
+        task()
+    })
 }
 
 fn parse_file(

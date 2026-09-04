@@ -80,16 +80,21 @@ visits, each fetched shard body and expanded recipe entries. The inventory must
 fit the visit budget before the session is created. A complete scan reserves its
 visits before dispatch; failures and cancellation consume that reservation, and
 cannot create cached absences. Cached results need no further shard visits.
-At most four shard reads overlap. Excluding transport retries, total shard-body
+At most four shard scans overlap across all sessions in a process. Capacity is
+acquired before origin reads and moves into the blocking hash/recipe parser.
+Dropping or timing out the caller leaves that capacity held until the worker
+exits, so detached jobs cannot evade the bound. Hashing/parsing does not block
+async workers. Excluding transport retries, total shard-body
 bytes are bounded by `max_shard_visits * max_shard_bytes`; each visit also permits
 one HEAD and at most a 12-byte trailer plus a 4 KiB bloom prefilter read.
 
 A selected shard is only a dependency candidate. Verify the file's content at
 origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
-publication base before accepting a write. The composing request must also own
-process-wide admission and deadlines. Shard parsing remains synchronous and
-bounded by the supplied body and recipe limits; deadline/admission integration
-with CPU workers remains part of the native HTTP receive implementation.
+publication base before accepting a write. The composing request must still own
+an overall deadline and admission for the other receive stages. A timed-out
+lookup may finish its current bounded parser in the background, retaining its
+permit until completion. Pointer content proofs have their own four-operation
+process bound and include admission queue time in their deadline.
 
 ## Usage
 

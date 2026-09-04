@@ -30,7 +30,7 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: dependency admission/deadlines, canonical pack/index
+Remaining intake work: complete receive admission/deadlines, canonical pack/index
 publication, and HTTP streaming with a request-bound deadline. No Git binary,
 clone or local Git object database is used by quarantine or preparation. The
 test oracle uses Git independently.
@@ -163,15 +163,25 @@ cumulative shard visits, individual shard-body bytes and recipe expansion. The
 inventory must fit before session allocation. Each scan reserves its complete
 visit count before dispatch; failure or cancellation does not refund the count
 or cache incomplete absence results. Successful cached results need no new I/O.
-Four reads may overlap. Full-body traffic is bounded by visits times the body
-cap, plus each visit's HEAD and at most 4,108 bloom/trailer bytes, excluding the
+Four scans may overlap across all sessions in a process. Full-body traffic is
+bounded by visits times the body cap, plus each visit's HEAD and at most 4,108
+bloom/trailer bytes, excluding the
 transport's separately bounded retries. Current-state readers retain their
-existing scan policy. No config or environment setting is added.
+existing query and inventory limits. No config or environment setting is added.
+
+Scan admission is acquired before origin reads and retained by the blocking
+hash/recipe parser. Caller cancellation or timeout does not release capacity
+while a detached parser still owns buffers and CPU work. Hashing and extraction
+run off async workers. Pointer content proofs independently admit four operations
+per process; their deadline includes queue time, and every blocking job shares
+the request's permit until it exits. A caller can return promptly on timeout
+while the remaining bounded job stays accounted for. These stage bounds do not
+replace admission and an overall deadline for the complete receive operation.
 
 Selection and content evidence are not publication authority. The publisher must
 acquire writer/GC fences and recheck its exact base before publication. Pointer
-hints and file-index hits alone are insufficient. Process-wide admission,
-deadline integration with CPU workers, LFS dependencies and fenced publication remain
+hints and file-index hits alone are insufficient. Admission/deadline integration
+for the remaining receive stages, LFS dependencies and fenced publication remain
 pending; HTTP push is still disabled.
 
 Six focused tests cover repeated compressed content, empty files, missing or
@@ -204,6 +214,21 @@ rejections. The failed body read keeps its visit charged; all six repository
 objects remain unchanged. Lookup, cached/budget checks and content proof took
 3.168 ms locally. Process-wide admission and CPU deadline behavior are not proven
 by this small fixture.
+
+The admitted CPU version passes 18 file-index tests and eight pointer-proof
+tests. New cases prove admission precedes origin reads, proof deadlines include
+queue time, and detached blocking jobs retain capacity until exit. An isolated
+RustFS fixture repeats pinned selection and resource rejection checks, then
+verifies 32 concurrent content proofs against the exact file identity. Those
+proofs complete in 14.780 ms total; selection and one content proof take 3.430 ms.
+All six repository objects retain their sizes and ETags. This synthetic,
+cache-sharing fixture does not qualify native push or production throughput.
+
+The CLI and protected-service error boundaries handle lookup limits and preserve
+the typed source of admission/worker failures. This also fixes the missing CLI
+match arm exposed by CI after the lookup-limit variant was introduced. Two CLI
+error tests and one protected-service error test pass; CLI compilation and the
+architecture gates also pass.
 
 ## Existing code and the semantic mismatch
 
