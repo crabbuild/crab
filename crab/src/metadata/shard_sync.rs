@@ -14,11 +14,9 @@
 //! missing or corrupt.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -36,8 +34,6 @@ use crab_xet::hash::compute_data_hash;
 use crab_xet::shard::{MDBMinimalShard, MDBShardFile, new_shard_file_cache};
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::{MerkleHash, XorbRef};
-
-static SHARD_GEN_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Statistics from a shard sync operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -105,7 +101,7 @@ fn load_cached_generation(path: &Path) -> Option<CachedShardListGen> {
 /// — the next sync will simply do a full download.
 fn save_cached_generation(path: &Path, cached: &CachedShardListGen) {
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
+        && let Err(e) = crab_cache::ensure_private_cache_directory(parent)
     {
         warn!(path = %parent.display(), error = %e, "failed to create cache directory for shard-list generation");
         return;
@@ -123,37 +119,13 @@ fn save_cached_generation(path: &Path, cached: &CachedShardListGen) {
 }
 
 fn write_cached_generation_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = cached_generation_tmp_path(path);
-    let write_result = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(data)?;
-        file.flush()?;
-        drop(file);
-        std::fs::rename(&tmp, path)
-    })();
-
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-fn cached_generation_tmp_path(path: &Path) -> PathBuf {
-    let seq = SHARD_GEN_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    match path.file_name() {
-        Some(name) => {
-            let mut tmp_name = OsString::from(".");
-            tmp_name.push(name);
-            tmp_name.push(format!(".{pid}.{seq}.tmp"));
-            match path.parent() {
-                Some(parent) => parent.join(tmp_name),
-                None => PathBuf::from(tmp_name),
-            }
-        }
-        None => path.with_extension(format!("tmp.{pid}.{seq}")),
-    }
+    // NamedTempFile creates privately and owns cleanup only for its own file.
+    // Persisting in the same directory preserves that mode across replacement.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(data)?;
+    file.flush()?;
+    file.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 /// Cross-client shard synchronizer.
@@ -1083,8 +1055,8 @@ pub async fn run_post_fetch_shard_sync(
         return Ok(SyncStats::default());
     }
 
-    // The index creates its parent directories using the process umask. Admit
-    // the shared private root first so a cold sync cannot disable shard caching.
+    // Admit the shared private root before opening the derived index so a
+    // cold sync cannot consume local state beneath an unsafe cache root.
     // Reject unsafe roots without changing them or opening the derived index.
     if let Err(error) = crab_cache::ensure_private_cache_directory(cache_dir) {
         warn!(error = %error, "post-fetch shard sync: private cache unavailable, skipping");
@@ -1572,6 +1544,33 @@ mod tests {
         let saved = load_cached_generation(&gen_path).unwrap();
         assert_eq!(saved.generation, 7);
         assert_eq!(saved.shard_hashes, vec![hash.hex()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cached_generation_creates_private_directories_and_replacements() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("repos/repo/shard-list-gen.json");
+        for generation in [1, 2] {
+            save_cached_generation(
+                &path,
+                &CachedShardListGen {
+                    generation,
+                    shard_hashes: vec![],
+                },
+            );
+            let modes: Vec<_> = [
+                dir.path().join("repos"),
+                dir.path().join("repos/repo"),
+                path.clone(),
+            ]
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777)
+            .collect();
+            assert_eq!(modes, [0o700, 0o700, 0o600]);
+        }
     }
 
     #[test]

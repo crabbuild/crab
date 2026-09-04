@@ -18,6 +18,53 @@
 
 ## Status
 
+### Mitigation of the 10/20 GiB findings
+
+This checkpoint changes Crab, not Xet. Installed-artifact qualification is
+pending; the failed scale reports below remain valid historical evidence.
+
+| Changed owner / entry point | Caller, callee, sibling and dependency proof |
+|---|---|
+| Decoded-range filesystem identity | `CrabRangeCache::key_directory`, item codec and `clean::range_entry_kind` now use lowercase hex under distinct `r-xx` buckets. `get`/`put`, catalog maintenance, clean, stats, verify and prune agree on the same textual identity. Existing reservation, reader and publication ownership is unchanged. Xet 1.6.0's `ChunkCache` trait specifies exact decoded bytes/ranges, not filenames. |
+| Filter lifetime | Main Crab and LFS filter entry points use the shared parent-aware reader. Input silence polls again while the original parent is alive; reparenting ends a silent session even with an inherited open pipe. Git's `apply_multi_file_filter` buffers returned content before subsequent commands, so large output consumption is not proof of parent death. Windows has no such Unix idle reader and is unchanged. |
+| Clone failure reporting | `run_clone_in` reaches `checkout_head` before post-checkout hydration. A failed checkout now returns an error; unborn HEAD remains a valid empty clone, matching the adjacent LFS setup contract. This does not hide the smudge bug behind a second checkout path. |
+| Persistent-index creation | Both `open_shared` and `open_or_create` reach private file precreation before SQLite opens a fresh index. SQLite 3.49.1's Unix `findCreateFileMode` derives WAL/journal mode from the main file; new main/WAL/SHM modes are tested. Existing files are neither chmodded nor truncated. This is not descriptor-pinned metadata I/O. |
+| Shard-generation publication | Incremental clone/fetch sync's generation writer now creates private directories and uses `NamedTempFile` for atomic replacement. The dependency creates files with `create_new` and Unix mode `0600`; its owner also removes the handwritten temporary-name counter and cleanup path. Large-index shard spill still uses Xet's separate path-based writer and remains explicit follow-up work. |
+
+Current `origin/main` still has the 60-second silent-input shutdown and the
+permissive metadata creators. The PR's Crab-owned range implementation is not
+on main. These comparisons explain ownership, not an assertion that every
+observed scale failure predates this PR.
+
+**Format decision:** lowercase-only full key and item encodings prevent
+case-fold collisions, not just prefix collisions. `r-xx` cannot alias an old
+two-character Base64 bucket. No fallback reader or recursive legacy deletion
+is added. v1.1.0's cache was disposable and its CLI could remove its contents;
+no remote format changes. The current fixed-layout cleaner retains older
+Base64 files as unknown. Stop all cache users and rotate the decoded-range
+directory to a retained backup before adopting the new layout on an old root;
+verify cold recovery before reclaiming the backup. Existing unsafe permissions
+are also not silently repaired. Automated safe upgrade/doctor handling remains
+open rather than claiming old roots have been cleaned or repaired.
+
+**Focused proof so far:** 31 decoded-range tests pass with both all features
+and only `xet-chunk-cache`, including formerly case-colliding keys with
+independent bytes, catalog totals and protected leases through clean/prune.
+Strict all-target cache Clippy passes. All 42 filter and 32 clone tests pass.
+Under umask `000`, all
+26 persistent-index and 26 shard-sync tests pass, including private
+main/WAL/SHM files and generation replacements. A real installed baseline
+filter completes one smudge, then exits during a 65-second pause despite a live
+parent; this reproduces the invalid lifetime assumption independently of
+RustFS or memory pressure. Candidate live-parent/orphan and scale proof follow.
+
+Is this the best fix? The shared lifetime and naming owners cover their
+sibling paths; a longer timeout or relaxed cleanup predicate would leave the
+invalid assumptions intact. Remaining work includes installed cold/eager
+qualification, Git checkout memory amplification, safe old-root rotation,
+private spill/index lifecycle, native Windows ownership, and unresolved
+optional CI/provider gates. Unit passes are not merge approval.
+
 ### 10/20 GiB expansion: case-insensitive range-cache maintenance gap
 
 The 1 GiB passing matrix is not scale proof. The user's larger-file expansion

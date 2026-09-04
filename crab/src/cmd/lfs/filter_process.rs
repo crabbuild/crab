@@ -65,7 +65,7 @@ async fn run_lfs_filter_process_async(skip: bool) -> Result<()> {
         #[cfg(unix)]
         Some((
             std::io::stdin().as_raw_fd(),
-            crate::git::filter_process::FILTER_IDLE_TIMEOUT,
+            crate::git::filter_process::FILTER_PARENT_POLL_INTERVAL,
         )),
     )
     .await

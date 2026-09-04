@@ -3292,7 +3292,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 #[cfg(unix)]
                 Some((
                     std::io::stdin().as_raw_fd(),
-                    crab::git::filter_process::FILTER_IDLE_TIMEOUT,
+                    crab::git::filter_process::FILTER_PARENT_POLL_INTERVAL,
                 )),
             )
             .await?;

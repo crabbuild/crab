@@ -1,9 +1,9 @@
-//! Shared handle over xet-core's on-disk xorb-range cache.
+//! Shared handle over Crab's on-disk decoded xorb-range cache.
 //!
 //! The cache stores contiguous chunk ranges keyed by xorb hash and is shared
 //! across every reconstructor instance opened in a process. Callers provide the
 //! resolved directory and byte budget; owner-specific config stays above this
-//! Module.
+//! module.
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,7 +11,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use base64::Engine as _;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -42,8 +41,10 @@ impl CrabRangeCache {
         let mut bytes = Vec::with_capacity(key.hash.as_bytes().len() + key.prefix.len());
         bytes.extend_from_slice(key.hash.as_bytes());
         bytes.extend_from_slice(key.prefix.as_bytes());
-        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
-        self.root.join(&encoded[..2]).join(encoded)
+        let encoded = encode_range_name(&bytes);
+        // A distinct bucket namespace cannot inherit a differently cased
+        // Base64 directory from an older cache on a case-insensitive disk.
+        self.root.join(format!("r-{}", &encoded[..2])).join(encoded)
     }
 
     async fn read_entry(
@@ -281,9 +282,7 @@ impl ChunkCache for CrabRangeCache {
 }
 
 pub(crate) fn decode_range_item_name(name: &std::ffi::OsStr) -> Option<(u32, u32, u64, u32)> {
-    let encoded = base64::engine::general_purpose::URL_SAFE
-        .decode(name.to_str()?)
-        .ok()?;
+    let encoded = decode_range_name(name.to_str()?)?;
     let bytes: [u8; RANGE_ITEM_NAME_BYTES] = encoded.try_into().ok()?;
     Some((
         u32::from_le_bytes(bytes[0..4].try_into().ok()?),
@@ -299,7 +298,33 @@ fn encode_range_item_name(range: &ChunkRange, len: u64, crc: u32) -> String {
     bytes.extend_from_slice(&range.end.to_le_bytes());
     bytes.extend_from_slice(&len.to_le_bytes());
     bytes.extend_from_slice(&crc.to_le_bytes());
-    base64::engine::general_purpose::URL_SAFE.encode(bytes)
+    encode_range_name(&bytes)
+}
+
+fn encode_range_name(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    encoded
+}
+
+pub(crate) fn decode_range_name(name: &str) -> Option<Vec<u8>> {
+    if !name.len().is_multiple_of(2)
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    name.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
 }
 
 /// Resolved handle over the xet-core chunk cache.
@@ -694,7 +719,7 @@ fn verify_xet_chunk_cache_entry(
         .parent()
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .and_then(|name| base64::engine::general_purpose::URL_SAFE.decode(name).ok());
+        .and_then(decode_range_name);
     if let Some(key) = key.filter(|key| key.get(32..) == Some(CHUNK_HASH_PREFIX.as_bytes())) {
         return Ok(start == 0 && end == 1 && key[..32] == hasher.finalize().as_bytes()[..]);
     }
@@ -798,10 +823,8 @@ mod tests {
         name.extend_from_slice(&1u32.to_le_bytes());
         name.extend_from_slice(&u64::try_from(body.len()).unwrap().to_le_bytes());
         name.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
-        let name = base64::engine::general_purpose::URL_SAFE.encode(name);
-        let dir = cache_dir
-            .join("AA")
-            .join(base64::engine::general_purpose::URL_SAFE.encode([0u8; 32]));
+        let name = encode_range_name(&name);
+        let dir = cache_dir.join("r-00").join(encode_range_name(&[0u8; 32]));
         let path = dir.join(name);
         crate::private_fs::atomic_write(cache_dir, &path, &body)
             .await
@@ -1248,10 +1271,8 @@ mod tests {
         name.extend_from_slice(&8u32.to_le_bytes());
         name.extend_from_slice(&u64::try_from(body.len()).unwrap().to_le_bytes());
         name.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
-        let name = base64::engine::general_purpose::URL_SAFE.encode(name);
-        let dir = cache_dir
-            .join("AA")
-            .join(base64::engine::general_purpose::URL_SAFE.encode([0u8; 32]));
+        let name = encode_range_name(&name);
+        let dir = cache_dir.join("r-00").join(encode_range_name(&[0u8; 32]));
         let path = dir.join(name);
         crate::private_fs::atomic_write(&cache_dir, &path, &body)
             .await

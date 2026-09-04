@@ -95,18 +95,13 @@ enum SmudgeInput {
     PassthroughFile(tempfile::TempPath),
 }
 
-/// How long the filter process will wait for the next command before
-/// assuming git has exited without closing stdin (SIGKILL, crash, IDE
-/// integration dropping the pipe) and shutting down cleanly.
+/// Interval for checking whether a silent filter's parent has exited.
 ///
-/// Git dispatches filter commands back-to-back; a real session never
-/// sees an inter-command gap this large. Without it, a blocking
-/// `read_exact` on stdin parks the OS thread forever when the pipe's
-/// write end stays open after git is gone — the orphaned filter process
-/// keeps holding the staging flock, which then stalls every subsequent
-/// `git add`/`crab add` for the full lock budget. See `read_ready`.
+/// Git can spend arbitrarily long consuming a large smudge result. Silence
+/// alone must not terminate its filter; reparenting identifies an orphan even
+/// when another process still holds the input pipe open.
 #[cfg(unix)]
-pub const FILTER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub const FILTER_PARENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs the long-running filter protocol v2 loop.
 ///
@@ -226,7 +221,7 @@ where
     let result = tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         let input: Box<dyn Read + Send> = match idle {
-            Some((fd, timeout)) => Box::new(IdleRead::new(input, fd, timeout)),
+            Some((fd, interval)) => Box::new(ParentRead::new(input, fd, interval)),
             None => Box::new(input),
         };
         #[cfg(not(unix))]
@@ -290,9 +285,8 @@ where
                 // StagingChunkStager attached to the CleanSession, or a
                 // background task that outlived the loop. Those clones keep
                 // the staging flock alive until they drop, so log the strong
-                // count to make leaks diagnosable. The idle-timeout guard in
-                // the loop ensures this process itself always exits, which
-                // releases any leaked flock via fd close.
+                // count to make leaks diagnosable. EOF or parent exit ends
+                // the filter session and releases leaked flocks via fd close.
                 tracing::warn!(
                     strong_count = Arc::strong_count(&arc),
                     "staging area still referenced; flock held until clones drop"
@@ -1658,56 +1652,46 @@ fn smudge_by_blob_classification(
 // in the filter protocol. The filter protocol uses text mode (lines end
 // with \n) and flush packets as delimiters.
 
-/// Poll a file descriptor for readability with a timeout.
-///
-/// Used to bound the blocking stdin read in the filter-process loop so a
-/// git process that exits without closing stdin (SIGKILL, crash, IDE pipe
-/// leak) does not leave the filter parked in `read_exact` forever holding
-/// the staging flock. Returns `true` if the fd is readable (data or EOF
-/// pending), `false` on timeout. Retries on `EINTR`.
+// Keep a live parent's session open across slow checkout writes, while
+// releasing staging ownership after reparenting even if stdin remains open.
 #[cfg(unix)]
-struct IdleRead<R> {
+struct ParentRead<R> {
     inner: R,
     fd: std::os::fd::RawFd,
-    timeout: std::time::Duration,
-    timed_out: bool,
+    interval: std::time::Duration,
+    parent: libc::pid_t,
+    finished: bool,
 }
 
 #[cfg(unix)]
-impl<R> IdleRead<R> {
-    fn new(inner: R, fd: std::os::fd::RawFd, timeout: std::time::Duration) -> Self {
+impl<R> ParentRead<R> {
+    fn new(inner: R, fd: std::os::fd::RawFd, interval: std::time::Duration) -> Self {
         Self {
             inner,
             fd,
-            timeout,
-            timed_out: false,
+            interval,
+            // SAFETY: getppid has no arguments or memory preconditions.
+            parent: unsafe { libc::getppid() },
+            finished: false,
         }
     }
 }
 
 #[cfg(unix)]
-impl<R: Read> Read for IdleRead<R> {
+impl<R: Read> Read for ParentRead<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.timed_out {
+        if self.finished || buf.is_empty() {
             return Ok(0);
         }
-        match read_ready(self.fd, self.timeout) {
-            Ok(true) => self.inner.read(buf),
-            Ok(false) => {
-                tracing::info!(
-                    timeout_secs = self.timeout.as_secs(),
-                    "filter-process idle timeout; git likely exited, shutting down"
-                );
-                self.timed_out = true;
-                Ok(0)
+        loop {
+            if read_ready(self.fd, self.interval)? {
+                return self.inner.read(buf);
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "stdin poll failed; exiting filter-process"
-                );
-                self.timed_out = true;
-                Ok(0)
+            // SAFETY: getppid has no arguments or memory preconditions.
+            if unsafe { libc::getppid() } != self.parent {
+                tracing::info!("filter-process parent exited, shutting down");
+                self.finished = true;
+                return Ok(0);
             }
         }
     }
@@ -1727,7 +1711,7 @@ fn read_ready(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io::Resul
     };
     loop {
         // SAFETY: `poll` is FFI-safe with the above struct; timeout is a
-        // bounded `c_int` of milliseconds (FILTER_IDLE_TIMEOUT ≤ 60s).
+        // bounded `c_int` of milliseconds (FILTER_PARENT_POLL_INTERVAL ≤ 60s).
         #[expect(
             clippy::cast_possible_truncation,
             reason = "timeout fits in c_int for any value ≤ ~24 days"
@@ -4108,69 +4092,44 @@ size 1048576\n";
         }
     }
 
-    /// The idle-timeout guard must exit the loop when git stops sending
-    /// commands without closing stdin (SIGKILL, crash, IDE pipe leak).
-    /// Without it, the process parks in `read_exact` forever holding the
-    /// staging flock. We feed a complete command, leave the pipe open but
-    /// silent, and assert the loop returns within a few seconds — far
-    /// below "forever".
     #[cfg(unix)]
     #[test]
-    fn idle_timeout_exits_when_pipe_stays_open_but_silent() {
-        use std::io::BufReader;
-        use std::os::unix::io::AsRawFd;
+    fn live_parent_survives_silence_until_input_or_eof() {
+        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
-        use std::sync::mpsc;
         use std::time::Duration;
 
-        let (read_end, mut write_end) = UnixStream::pair().expect("socketpair");
-
-        // Feed a complete handshake + one clean command so the loop
-        // processes at least one command before going idle.
-        let mut input = build_handshake_input();
-        input.extend(pkt_text("command=clean"));
-        input.extend(pkt_text("pathname=test.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(b"content"));
-        input.extend(pkt_flush());
-        write_end
-            .write_all(&input)
-            .expect("write handshake+command");
-        write_end.flush().expect("flush");
-
-        read_end.set_nonblocking(false).expect("set blocking");
-
-        // Capture the fd before moving the stream into the idle wrapper.
-        // The wrapper times out only when the buffered reader needs more
-        // bytes from the pipe, so prefetched command bytes stay visible.
-        let read_fd = read_end.as_raw_fd();
-        let idle_timeout = Duration::from_millis(200);
-
-        let (tx, rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let mut output: Vec<u8> = Vec::new();
-            let ctx = AppContext::default();
-            let input = IdleRead::new(read_end, read_fd, idle_timeout);
-            let result = run_filter_loop(
-                BufReader::new(input),
-                &mut output,
-                ctx,
-                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-                None,
-                None,
-                None,
-                None,
-                Arc::new(std::sync::Mutex::new(None)),
-            );
-            let _ = tx.send(result);
+        let (read_end, mut write_end) = UnixStream::pair().unwrap();
+        let mut reader = ParentRead::new(
+            read_end.try_clone().unwrap(),
+            read_end.as_raw_fd(),
+            Duration::from_millis(10),
+        );
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            write_end.write_all(b"next command").unwrap();
         });
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        writer.join().unwrap();
+        assert_eq!(bytes, b"next command");
+    }
 
-        // If the idle guard is missing, recv blocks forever and the test
-        // times out at the harness level.
-        let result = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("filter loop did not exit within 5s — idle timeout missing?");
-        thread.join().expect("loop thread panicked");
-        result.expect("loop should exit cleanly on idle timeout");
+    #[cfg(unix)]
+    #[test]
+    fn changed_parent_ends_silent_session_with_open_pipe() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (read_end, _write_end) = UnixStream::pair().unwrap();
+        let mut reader = ParentRead::new(
+            read_end.try_clone().unwrap(),
+            read_end.as_raw_fd(),
+            Duration::from_millis(10),
+        );
+        // Model the saved identity of a parent that has since exited.
+        reader.parent = 0;
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
     }
 }

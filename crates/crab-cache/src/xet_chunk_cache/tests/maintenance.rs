@@ -3,6 +3,102 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use super::*;
 
 #[tokio::test]
+async fn case_distinct_keys_keep_separate_accounting_and_maintenance_owners() {
+    use crate::catalog::CacheCatalog;
+
+    for clean in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let cache = CrabRangeCache {
+            root: root.join("chunks"),
+            capacity: 1024 * 1024,
+            catalog: CacheCatalog::new(root.clone(), 1024 * 1024),
+        };
+        let range = ChunkRange::new(0, 1);
+        let mut keys = Vec::new();
+        // These hashes formerly selected Base64 buckets AB and Ab.
+        for (first, second) in [(0, 0x10), (1, 0xb0)] {
+            let mut hash = [0u8; 32];
+            hash[..2].copy_from_slice(&[first, second]);
+            let key = Key {
+                prefix: String::new(),
+                hash: hash.into(),
+            };
+            cache.put(&key, &range, &[0, 1], &[second]).await.unwrap();
+            keys.push(key);
+        }
+        assert_ne!(cache.key_directory(&keys[0]), cache.key_directory(&keys[1]));
+        assert_eq!(xet_chunk_cache_stats(&cache.root).await.unwrap().entries, 2);
+        assert_eq!(verify_xet_chunk_cache(&cache.root).await.unwrap().valid, 2);
+        assert_eq!(
+            CacheCatalog::read_only_stats(&root).unwrap().total_bytes,
+            26
+        );
+        for (key, expected) in keys.iter().zip([0x10, 0xb0]) {
+            assert_eq!(
+                cache.get(key, &range).await.unwrap().unwrap().data,
+                [expected]
+            );
+        }
+
+        let path = fs::read_dir(cache.key_directory(&keys[0]))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let lease = cache.catalog.lease(&path).await.unwrap();
+        if clean {
+            assert_eq!(
+                crate::clean_cache(&root, false, &CancellationToken::new())
+                    .await
+                    .unwrap()
+                    .files_removed,
+                1
+            );
+        } else {
+            assert_eq!(
+                prune_xet_chunk_cache(&cache.root, 0, false, false)
+                    .await
+                    .unwrap()
+                    .entries_evicted,
+                1
+            );
+        }
+        assert_eq!(
+            CacheCatalog::read_only_stats(&root).unwrap().total_bytes,
+            13
+        );
+        assert_eq!(
+            cache.get(&keys[0], &range).await.unwrap().unwrap().data,
+            [0x10]
+        );
+        drop(lease);
+        assert_eq!(
+            crate::clean_cache(&root, false, &CancellationToken::new())
+                .await
+                .unwrap()
+                .files_removed,
+            1
+        );
+        assert_eq!(CacheCatalog::read_only_stats(&root).unwrap().total_bytes, 0);
+    }
+}
+
+#[test]
+fn range_name_encoding_is_injective_after_case_folding() {
+    let mut names = std::collections::HashSet::new();
+    for byte in 0..=u8::MAX {
+        let name = encode_range_name(&[byte]);
+        assert!(names.insert(name.to_lowercase()));
+        assert_eq!(decode_range_name(&name), Some(vec![byte]));
+    }
+    for malformed in ["AB", "aB", "a", "..", "00/11"] {
+        assert_eq!(decode_range_name(malformed), None);
+    }
+}
+
+#[tokio::test]
 async fn maintenance_preserves_unknown_live_and_unpublished_entries() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("chunks");

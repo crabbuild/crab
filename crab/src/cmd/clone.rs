@@ -686,6 +686,22 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
 fn checkout_head(target: &Path, remote_url: &str, mode: OutputMode) -> Result<()> {
     scrub_git_pack_appledouble_files(target)?;
 
+    // An unborn clone has nothing to check out. Other checkout failures must
+    // stop before hydration can conceal a broken Git/filter operation.
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .current_dir(target)
+        .output()?;
+    if head.status.code() == Some(1) {
+        return Ok(());
+    }
+    if !head.status.success() {
+        return Err(CrabError::Protocol(format!(
+            "failed to inspect cloned repository HEAD: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        )));
+    }
+
     // Git's branch-status chatter is not part of a clone JSON envelope.
     // Keep stderr diagnostics and the existing human-readable checkout output.
     let stdout = if mode.is_machine() {
@@ -1482,6 +1498,44 @@ mod tests {
             .output()
             .unwrap();
         assert!(!process.status.success());
+    }
+
+    #[test]
+    fn checkout_propagates_required_filter_failure() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let source = tempfile::tempdir().unwrap();
+        git_in(source.path(), &["init"]);
+        git_in(source.path(), &["config", "user.email", "test@example.com"]);
+        git_in(source.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(source.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::fs::write(source.path().join("data.bin"), b"data").unwrap();
+        git_in(source.path(), &["add", "."]);
+        git_in(source.path(), &["commit", "-m", "fixture"]);
+        let target = tempfile::tempdir().unwrap();
+        git_in(
+            target.path(),
+            &[
+                "clone",
+                "--no-checkout",
+                source.path().to_str().unwrap(),
+                ".",
+            ],
+        );
+        git_in(target.path(), &["config", "filter.crab.process", "false"]);
+        git_in(target.path(), &["config", "filter.crab.required", "true"]);
+
+        assert!(matches!(
+            checkout_head(target.path(), "crab://bucket/repo"),
+            Err(CrabError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn checkout_accepts_unborn_repository() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let target = tempfile::tempdir().unwrap();
+        git_in(target.path(), &["init"]);
+        checkout_head(target.path(), "crab://bucket/repo").unwrap();
     }
 
     #[test]

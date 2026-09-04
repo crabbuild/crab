@@ -17,7 +17,6 @@ local-cache = ["dep:errno", "dep:filetime", "dep:fs4", "dep:libc", "dep:rusqlite
 remote-client = ["active-probe", "dep:futures-util", "dep:tokio"]
 xet-chunk-cache = [
     "dep:async-trait",
-    "dep:base64",
     "dep:crc32fast",
     "dep:errno",
     "dep:fs4",
@@ -32,7 +31,6 @@ xet-chunk-cache = [
 [dependencies]
 async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, features = ["rayon"] }
-base64 = { version = "0.22", optional = true }
 bytes = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }

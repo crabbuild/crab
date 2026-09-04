@@ -74,6 +74,18 @@ temporaries. Active readers and concurrent publishers are skipped. Output shows
 removed file/byte totals and retained, busy, and unsafe entry counts; a retained
 subtree counts once without inspecting its contents. Empty directories remain.
 
+Decoded ranges use lowercase hexadecimal key/item names under
+`chunks/r-<two-hex-digits>/`. The distinct bucket prefix prevents collisions
+with older Base64 directories on case-insensitive filesystems. Readers,
+catalog accounting, cleanup, verification, and pruning use the same names.
+
+Older Base64 range layouts are not read or automatically deleted. After
+stopping all processes using the cache, move only the decoded-range directory
+to a retained backup to start fresh; Crab repopulates it from origin. Verify
+cold recovery before reclaiming that backup, and preserve any unrelated files.
+Do not remove repository staging or Git state. This is disposable local-cache
+rotation, not an origin format migration or a dependency patch.
+
 Clean, verify, and prune reject filesystem roots, the home directory, the current
 directory, and its ancestors before payload maintenance. The shared private-I/O
 boundary separately rejects symlinked or non-private roots. The corresponding
@@ -85,7 +97,7 @@ does not establish that all automatic maintenance is qualified.
 ### crab cache verify
 
 Hash-check chunks and shards, validate xorb metadata, payload digests, and compressed chunks, and
-validate xet-core range filenames, lengths, offset headers, and CRCs while
+validate Crab range filenames, lengths, offset headers, and CRCs while
 streaming the inventory. Corrupt entries are evicted; Xorb index rows are
 removed with corrupt xorb bodies. Filesystem read or removal failures fail the
 command rather than producing a false clean report.

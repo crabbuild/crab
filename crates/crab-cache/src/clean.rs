@@ -106,19 +106,19 @@ fn hex(value: &str, len: usize) -> bool {
 
 #[cfg(feature = "xet-chunk-cache")]
 pub(crate) fn range_entry_kind(parts: &[&str]) -> EntryKind {
-    use base64::Engine as _;
-    let base64 = base64::engine::general_purpose::URL_SAFE;
     let valid_key = |prefix: &str, key: &str| {
-        prefix.len() == 2
-            && key.starts_with(prefix)
-            && base64.decode(key).is_ok_and(|bytes| bytes.len() >= 32)
+        prefix.strip_prefix("r-").is_some_and(|bucket| {
+            hex(bucket, 2)
+                && key.starts_with(bucket)
+                && crate::xet_chunk_cache::decode_range_name(key)
+                    .is_some_and(|bytes| bytes.len() >= 32)
+        })
     };
     match parts {
         ["chunks", prefix]
-            if prefix.len() == 2
-                && prefix
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+            if prefix
+                .strip_prefix("r-")
+                .is_some_and(|bucket| hex(bucket, 2)) =>
         {
             EntryKind::Directory
         }
