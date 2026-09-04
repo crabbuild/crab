@@ -107,6 +107,13 @@ def deterministic_bytes(size: int, seed: str) -> bytes:
     return bytes(result[:size])
 
 
+def make_private_fixture_tree(root: Path) -> None:
+    """Give a disposable cache the ownership contract required by Crab."""
+    root.chmod(0o700)
+    for path in root.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+
+
 @contextmanager
 def hold_cache_lock(path: Path):
     """Hold the native lock used by Crab without replacing its inode."""
@@ -3020,7 +3027,11 @@ class ProtocolV2PartialCloneSmoke:
     def mirror_oversized_header_check(self, source: Path, destination: str) -> None:
         """Corrupt only a disposable cache; a large header must not hide a pointer."""
         cache = self.run_root / "mirror-oversized-header.git"
-        self.run_git(self.run_root, ["clone", "--mirror", str(source), str(cache)])
+        self.run_git(
+            self.run_root,
+            ["clone", "--mirror", "--no-hardlinks", str(source), str(cache)],
+        )
+        make_private_fixture_tree(cache)
         oid = self.git_value(source, ["rev-parse", "HEAD:mirror-data.bin"], name="capture pointer OID before oversized-header fault")
         object_path = cache / "objects" / oid[:2] / oid[2:]
         original = object_path.read_bytes()
@@ -3029,6 +3040,7 @@ class ProtocolV2PartialCloneSmoke:
         large_file = self.artifacts / "oversized-header-blob.bin"
         large_file.write_bytes(deterministic_bytes(65536, "oversized-header"))
         large_oid = self.git_value(cache, ["hash-object", "-w", str(large_file)], name="create oversized-header cache fixture")
+        make_private_fixture_tree(cache)
         replacement = (cache / "objects" / large_oid[:2] / large_oid[2:]).read_bytes()
         before = self.git_value(source, ["ls-remote", "--refs", destination], name="capture remote refs before oversized-header fault")
         plan = self.run_root / "oversized-header-plan.json"
@@ -3039,6 +3051,7 @@ class ProtocolV2PartialCloneSmoke:
         object_path.unlink()
         try:
             object_path.write_bytes(replacement)
+            object_path.chmod(0o600)
             result = self.run_cmd(
                 "mirror rejects pointer disguised by oversized blob header",
                 args + ["--write-plan", str(plan)], self.run_root, check=False,
@@ -3065,6 +3078,7 @@ class ProtocolV2PartialCloneSmoke:
             if object_path.exists():
                 object_path.unlink()
             object_path.write_bytes(original)
+            object_path.chmod(0o600)
         repaired = self.run_cmd("mirror verifies restored cache object", args, self.run_root)
         self.check(
             "mirror-restored-cache-resumes-complete-pointer-proof",

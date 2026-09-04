@@ -68,6 +68,20 @@ class EvidenceLogsTest(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.runner.temp_disk_bytes()
 
+    @unittest.skipIf(RUNNER.os.name == "nt", "Unix mode contract")
+    def test_private_fixture_tree_restricts_directories_and_files(self) -> None:
+        root = Path(self.directory.name) / "cache.git"
+        nested = root / "objects" / "ab"
+        nested.mkdir(parents=True)
+        payload = nested / ("ab" * 32)
+        payload.write_bytes(b"fixture")
+
+        RUNNER.make_private_fixture_tree(root)
+
+        self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(nested.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(payload.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
