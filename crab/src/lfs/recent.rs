@@ -248,7 +248,7 @@ pub(crate) fn git_config_u64_in(
     })
 }
 
-fn git_config_bool_in(
+pub(crate) fn git_config_bool_in(
     repo_root: &Path,
     key: &str,
     default: bool,

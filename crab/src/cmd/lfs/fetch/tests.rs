@@ -18,6 +18,58 @@ fn cancelled_remote_selection_does_not_fall_back_to_a_ref() {
 mod all;
 
 #[test]
+fn fetch_and_pull_resolve_each_path_override_independently() {
+    let config = LfsConfig {
+        fetch_include: Some("models".to_owned()),
+        fetch_exclude: Some("models/private".to_owned()),
+        ..LfsConfig::default()
+    };
+    let entries = vec![
+        ("models/a.bin".to_owned(), pointer(b"a")),
+        ("models/private/b.bin".to_owned(), pointer(b"b")),
+        ("other/c.bin".to_owned(), pointer(b"c")),
+    ];
+    let cache = tempfile::tempdir().unwrap();
+    for (include, exclude, expected) in [
+        (None, None, vec!["models/a.bin"]),
+        (Some("other"), None, vec!["other/c.bin"]),
+        (
+            None,
+            Some("other"),
+            vec!["models/a.bin", "models/private/b.bin"],
+        ),
+        (Some(""), None, vec!["models/a.bin", "other/c.bin"]),
+        (None, Some(""), vec!["models/a.bin", "models/private/b.bin"]),
+        (
+            Some(""),
+            Some(""),
+            vec!["models/a.bin", "models/private/b.bin", "other/c.bin"],
+        ),
+    ] {
+        let (include, exclude) = resolve_fetch_filters(&config, include, exclude).unwrap();
+        let transfers = plan_fetch_transfers(
+            &entries,
+            include.as_ref(),
+            exclude.as_ref(),
+            cache.path(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            transfers
+                .iter()
+                .map(|transfer| transfer.path.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            checkout_paths_for_pull(&entries, include.as_ref(), exclude.as_ref()),
+            expected
+        );
+    }
+}
+
+#[test]
 fn cancelled_fetch_and_pull_stop_before_repository_resolution() {
     let cancel = CancellationToken::new();
     cancel.cancel();

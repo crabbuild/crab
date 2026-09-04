@@ -706,6 +706,19 @@ Those remain separate qualification gaps.
 
 ### Recent Commit Selection
 
+Ordinary fetch honors Git's typed `lfs.fetchrecentalways` boolean through the
+same supervised Git-config reader as recent-ref selection. Explicit `--recent`
+also enables this selection; `--all` bypasses configured recent and path
+defaults. Pull does not fetch historical versions solely because recent-always
+is enabled.
+
+Fetch and pull resolve include/exclude overrides independently against their
+LFS configuration, then use the shared LFS pattern compiler. Empty patterns
+clear a restriction rather than constructing an empty generic path matcher.
+The same empty-pattern contract applies to standalone and process smudge.
+The real-Git RustFS LFS selection qualification compares cold-cache inventories
+and checked-out bytes with native Git LFS for these settings and overrides.
+
 Recent commit selection resolves each requested revision to one commit before
 walking its history. Each tip supplies its own cutoff; prune adds
 `lfs.pruneoffsetdays` only when the commit window is enabled. One streamed

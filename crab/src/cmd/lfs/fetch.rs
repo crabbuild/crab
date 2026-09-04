@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::emit_json;
 use crate::lfs::batch::{BatchResolver, PatternFilter};
+use crate::lfs::config::LfsConfig;
+use crate::lfs::fetch_filter::compile_fetch_filter;
 use crab_git::lfs_pointer::{LfsPointer, hex_encode};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -53,10 +55,20 @@ pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Re
         Path::new("."),
         cancel,
     ))?;
-    let entries = if options.stdin && refs.is_empty() && !options.all && !options.recent {
+    // Bulk history is deliberately independent of configured recent/path
+    // selection, matching Git LFS's backup and migration contract.
+    let recent = !options.all
+        && (options.recent
+            || crate::lfs::recent::git_config_bool_in(
+                Path::new("."),
+                "lfs.fetchrecentalways",
+                false,
+                cancel,
+            )?);
+    let entries = if options.stdin && refs.is_empty() && !options.all && !recent {
         Vec::new()
     } else {
-        collect_lfs_pointers(Path::new("."), options.all, options.recent, &refs, cancel)?
+        collect_lfs_pointers(Path::new("."), options.all, recent, &refs, cancel)?
     };
     check_cancelled(cancel)?;
 
@@ -72,16 +84,15 @@ pub fn run_lfs_fetch(options: LfsFetchOptions, cancel: &CancellationToken) -> Re
         return Ok(());
     }
 
-    let inc_filter = options
-        .include
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
-    let exc_filter = options
-        .exclude
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
+    let (inc_filter, exc_filter) = if options.all {
+        (None, None)
+    } else {
+        resolve_fetch_filters(
+            &ctx.config,
+            options.include.as_deref(),
+            options.exclude.as_deref(),
+        )?
+    };
 
     let transfers = plan_fetch_transfers(
         &entries,
@@ -184,6 +195,19 @@ fn validate_fetch_options(options: &LfsFetchOptions) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn resolve_fetch_filters(
+    config: &LfsConfig,
+    include: Option<&str>,
+    exclude: Option<&str>,
+) -> Result<(Option<PatternFilter>, Option<PatternFilter>)> {
+    // Preserve explicit empty overrides until compilation: clearing one
+    // restriction must not reinstate its configured value or clear the other.
+    Ok((
+        compile_fetch_filter(include.or(config.fetch_include.as_deref()))?,
+        compile_fetch_filter(exclude.or(config.fetch_exclude.as_deref()))?,
+    ))
 }
 
 fn remote_and_refs_from_options(
@@ -376,16 +400,11 @@ pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Resu
         return Ok(());
     }
 
-    let inc_filter = options
-        .include
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
-    let exc_filter = options
-        .exclude
-        .as_deref()
-        .map(PatternFilter::new)
-        .transpose()?;
+    let (inc_filter, exc_filter) = resolve_fetch_filters(
+        &ctx.config,
+        options.include.as_deref(),
+        options.exclude.as_deref(),
+    )?;
 
     super::block_on_runtime(async {
         let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);

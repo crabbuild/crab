@@ -279,13 +279,22 @@ crab lfs fetch [OPTIONS] [REMOTE] [REF...]
 
 `--json` cannot be combined with `--prune`, matching Git LFS. JSON transfer
 actions describe Crab's object-store path instead of a Git LFS HTTP endpoint.
-`--recent` includes the requested refs plus refs selected by
+Fetch and pull use `lfs.fetchinclude` / `lfs.fetchexclude` from resolved LFS
+configuration unless the corresponding command-line option overrides it.
+An explicitly empty `--include ''` or `--exclude ''` clears only that
+restriction. Directory patterns use the same LFS path rules as smudge.
+
+`--recent`, or `lfs.fetchrecentalways=true` for ordinary fetch, includes the
+requested refs plus refs selected by
 `lfs.fetchrecentrefsdays` / `lfs.fetchrecentremoterefs` and commits selected by
 `lfs.fetchrecentcommitsdays`.
+`--all` ignores configured path filters and recent-always, preserving its
+complete-history selection. Pull still selects only current paths, even when
+recent-always is enabled.
 
 With `--stdin`, refs come only from the input stream; command-line refs cannot
-be mixed with it. Empty input selects no refs unless `--all` or `--recent`
-explicitly requests broader selection. An empty successful `--json` fetch
+be mixed with it. Empty input selects no refs unless `--all` or recent selection
+is enabled. An empty successful `--json` fetch
 returns an empty transfer list. Explicit `--prune` still runs after an empty
 fetch. Input framing and limits are shared with [push](#crab-lfs-push).
 
