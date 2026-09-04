@@ -72,9 +72,9 @@ pub struct IncomingObject {
 
 /// Verified pack objects retained in a private directory until this value is dropped.
 ///
-/// Pack integrity and delta identities are verified. Git graph connectivity,
-/// object syntax, pointer dependencies and ref policy must still be checked by
-/// the publisher. No refs, canonical objects or repository metadata are written.
+/// Pack integrity and delta identities are verified. Use [`crate::receive_plan`]
+/// for object syntax, graph connectivity and exact ref checks before publication;
+/// pointer payloads still need storage proof. No canonical repository data is written.
 pub struct IncomingPack {
     directory: tempfile::TempDir,
     objects: BTreeMap<ObjectId, IncomingObject>,
@@ -91,6 +91,10 @@ impl IncomingPack {
     #[must_use]
     pub fn received_objects(&self) -> u32 {
         self.received_objects
+    }
+
+    pub(crate) fn object(&self, oid: &ObjectId) -> Option<&IncomingObject> {
+        self.objects.get(oid)
     }
 
     /// Reads an object from this quarantine; unknown identities return `None`.
@@ -438,7 +442,7 @@ fn read_region(file: &mut File, offset: u64, size: usize) -> Result<Vec<u8>> {
     file.read_exact(&mut data)?;
     Ok(data)
 }
-fn object_id(kind: Kind, data: &[u8]) -> ObjectId {
+pub(crate) fn object_id(kind: Kind, data: &[u8]) -> ObjectId {
     let mut hash = Sha1::new();
     hash.update(gix_object::encode::loose_header(kind, data.len() as u64));
     hash.update(data);
