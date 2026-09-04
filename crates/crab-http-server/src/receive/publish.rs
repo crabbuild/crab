@@ -230,7 +230,7 @@ async fn publish(
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
     let protected = input.publication == Publication::NativePush
         && request.updates.iter().any(|update| {
-            entry.config.protects(&update.name) && (update.old.is_some() || has_branch)
+            entry.config.protection(&update.name).is_some() && (update.old.is_some() || has_branch)
         });
     if protected {
         if request.report_status {

@@ -836,6 +836,16 @@ main {
   margin-top: 3px;
   color: var(--fgColor-accent);
 }
+.merge-blocked-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--fgColor-danger);
+}
+.merge-blocked-note svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
 .merge-action .notice {
   margin-bottom: 0;
 }

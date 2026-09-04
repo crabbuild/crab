@@ -38,6 +38,8 @@ pub(crate) enum Error {
     MergePermission,
     #[error("A pull request merge is in progress")]
     MergePending,
+    #[error("Protected branch review requirements are not satisfied")]
+    MergeBlocked,
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error(
@@ -96,6 +98,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "merge_pending",
                 "A merge is in progress. Reload the pull request and retry that merge before editing",
+            ),
+            Self::MergeBlocked => (
+                StatusCode::CONFLICT,
+                "merge_blocked",
+                "Required approvals are missing or a reviewer requested changes on the current head",
             ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,

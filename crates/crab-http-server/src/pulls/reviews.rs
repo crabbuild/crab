@@ -160,6 +160,7 @@ async fn create(
     if let Some(review) =
         storage::recover_review(repo, id, &actor, &request_id, &input.body, input.state).await?
     {
+        storage::record_review_decision(repo, id, &review).await?;
         let (_, head) = pull_and_head(&server, repo, id).await?;
         return Ok((
             StatusCode::CREATED,
@@ -188,6 +189,7 @@ async fn create(
         },
     )
     .await?;
+    storage::record_review_decision(repo, id, &review).await?;
     Ok((
         StatusCode::CREATED,
         Json(review_view(&review, &actor, Some(&head))),

@@ -76,6 +76,13 @@ interface PullRequest extends PullSummary {
     head_oid: string;
     created_at: number;
   } | null;
+  merge_requirements: {
+    protected: boolean;
+    required_approvals: number;
+    approvals: number;
+    changes_requested: number;
+    satisfied: boolean;
+  };
 }
 
 type ReviewState = "commented" | "approved" | "changes_requested";
@@ -504,7 +511,12 @@ function PullDetail({
                     theme={theme}
                   />
                   {data.state === "open" && (
-                    <ReviewForm repo={repo} pull={data} csrf={csrf} />
+                    <ReviewForm
+                      repo={repo}
+                      pull={data}
+                      csrf={csrf}
+                      refresh={pull.retry}
+                    />
                   )}
                 </>
               ) : null
@@ -644,6 +656,10 @@ function MergePanel({
   const mutation = useMutation(csrf);
   const submission = useSubmission();
   const pending = pull.merge_pending;
+  const requirements = pull.merge_requirements;
+  const protection = repo.protected_branches.find(
+    (rule) => rule.branch === branch(pull.base_ref),
+  );
   if (pull.merge)
     return (
       <>
@@ -686,13 +702,15 @@ function MergePanel({
         <strong>
           {pending
             ? `${pending.author} started a fast-forward merge`
-            : "This branch can be checked for a fast-forward merge"}
+            : !requirements.satisfied
+              ? "Merging is blocked"
+              : "This branch can be checked for a fast-forward merge"}
         </strong>
         <p>
           Crab verifies ancestry, dependency content, visibility, and the exact
           branch tips again while holding the base ref lock.
         </p>
-        {repo.protected_branches.includes(branch(pull.base_ref)) && (
+        {protection && (
           <p className="protected-branch-note">
             <ShieldLockIcon />
             <span>
@@ -737,6 +755,15 @@ function MergePanel({
                 ? "Retry merge"
                 : "Merge pull request"}
           </Button>
+        ) : repo.access === "write" ? (
+          <p className="merge-blocked-note">
+            <XCircleFillIcon />
+            <span>
+              {requirements.changes_requested > 0
+                ? `${requirements.changes_requested} current change request${requirements.changes_requested === 1 ? "" : "s"} must be resolved.`
+                : `${Math.max(0, requirements.required_approvals - requirements.approvals)} more approving review${requirements.required_approvals - requirements.approvals === 1 ? " is" : "s are"} required.`}
+            </span>
+          </p>
         ) : (
           <p className="muted">Write access is required to merge.</p>
         )}
@@ -823,10 +850,12 @@ function ReviewForm({
   repo,
   pull,
   csrf,
+  refresh,
 }: {
   repo: Repository;
   pull: PullRequest;
   csrf: string;
+  refresh: () => void;
 }) {
   const [body, setBody] = useState("");
   const [state, setState] = useState<ReviewState>("commented");
@@ -844,10 +873,12 @@ function ReviewForm({
           "POST",
           { ...input, request_id: submission(input) },
         );
-        if (created)
+        if (created) {
+          refresh();
           navigate(
             repoHref(repo, { view: "pulls", pull: String(pull.number) }),
           );
+        }
       }}
     >
       <h3>Submit your review</h3>

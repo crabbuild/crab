@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    RepositoryConfig,
     app::{self, Error, Result},
     app_storage,
     auth::{Identity, Principal},
@@ -49,6 +50,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 fn pull_view(
     pull: &PullRequest,
     actor: &Identity,
+    config: &RepositoryConfig,
     can_write: bool,
     current: Option<&(String, String)>,
 ) -> Value {
@@ -61,6 +63,7 @@ fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
+    let requirements = merge_requirements(pull, config, head_oid);
     json!({
         "number": pull.number,
         "title": pull.title,
@@ -85,8 +88,16 @@ fn pull_view(
             && !app_storage::same_author(&pull.author, actor),
         "can_merge": pull.state == PullState::Open
             && can_write
-            && (current.is_some() || pull.merge_pending.is_some()),
+            && (pull.merge_pending.is_some()
+                || (current.is_some() && requirements.satisfied)),
         "branches_available": branches_available,
+        "merge_requirements": {
+            "protected": requirements.protected,
+            "required_approvals": requirements.required_approvals,
+            "approvals": requirements.approvals,
+            "changes_requested": requirements.changes_requested,
+            "satisfied": requirements.satisfied,
+        },
         "merge": pull.merge.as_ref().map(|merge| json!({
             "author": merge.author.name,
             "method": merge.method,
@@ -103,6 +114,51 @@ fn pull_view(
             "created_at": merge.created_at,
         })),
     })
+}
+
+struct MergeRequirements {
+    protected: bool,
+    required_approvals: usize,
+    approvals: usize,
+    changes_requested: usize,
+    satisfied: bool,
+}
+
+fn merge_requirements(
+    pull: &PullRequest,
+    config: &RepositoryConfig,
+    head_oid: &str,
+) -> MergeRequirements {
+    let Some(rule) = config.protection(&pull.base_ref) else {
+        return MergeRequirements {
+            protected: false,
+            required_approvals: 0,
+            approvals: 0,
+            changes_requested: 0,
+            satisfied: true,
+        };
+    };
+    let mut approvals = 0;
+    let mut changes_requested = 0;
+    for decision in &pull.review_decisions {
+        if decision.commit_oid != head_oid {
+            continue;
+        }
+        match decision.state {
+            storage::ReviewState::Approved => approvals += 1,
+            storage::ReviewState::ChangesRequested => changes_requested += 1,
+            storage::ReviewState::Commented => {}
+        }
+    }
+    let required_approvals = usize::from(rule.required_approvals);
+    MergeRequirements {
+        protected: true,
+        required_approvals,
+        approvals,
+        changes_requested,
+        satisfied: required_approvals == 0
+            || (changes_requested == 0 && approvals >= required_approvals),
+    }
 }
 
 fn pull_list_view(pull: &PullRequest) -> Value {
@@ -297,6 +353,7 @@ async fn create(
             Json(pull_view(
                 &pull,
                 &actor,
+                &repo.config,
                 principal.can_write(&repo.config),
                 current.as_ref(),
             )),
@@ -330,6 +387,7 @@ async fn create(
         Json(pull_view(
             &pull,
             &actor,
+            &repo.config,
             principal.can_write(&repo.config),
             current.as_ref(),
         )),
@@ -356,6 +414,7 @@ async fn detail(
     Ok(Json(pull_view(
         &pull,
         &actor,
+        &repo.config,
         principal.can_write(&repo.config),
         current.as_ref(),
     )))
@@ -429,6 +488,7 @@ async fn edit(
     Ok(Json(pull_view(
         &pull,
         &actor,
+        &repo.config,
         principal.can_write(&repo.config),
         current.as_ref(),
     )))
