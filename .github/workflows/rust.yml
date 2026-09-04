@@ -28,6 +28,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
       docs: ${{ steps.filter.outputs.docs }}
+      repo_docs: ${{ steps.filter.outputs.repo_docs }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,7 +47,7 @@ jobs:
           set -euo pipefail
 
           if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${EVENT_NAME}" == "merge_group" ]]; then
-            printf 'rust=true\nweb=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'rust=true\nweb=true\ndocs=true\nrepo_docs=true\n' >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -55,27 +56,54 @@ jobs:
             base="$(git rev-parse "${HEAD_SHA}^" 2>/dev/null || true)"
           fi
           if [[ -z "${base}" ]]; then
-            printf 'rust=true\nweb=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'rust=true\nweb=true\ndocs=true\nrepo_docs=true\n' >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
           files="$(git diff --name-only "${base}" "${HEAD_SHA}")"
-          rust=false
-          web=false
-          docs=false
-          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
-            rust=true
-          fi
-          while IFS= read -r file; do
-            case "${file}" in
-              packages/web/content/*) docs=true ;;
-              packages/web/*) web=true ;;
-            esac
-          done <<< "${files}"
-          if [[ "${rust}" == false && "${web}" == false && "${docs}" == false ]]; then
-            rust=true
-          fi
-          printf 'rust=%s\nweb=%s\ndocs=%s\n' "${rust}" "${web}" "${docs}" >> "${GITHUB_OUTPUT}"
+          classify_files() {
+            local changed_files="$1"
+            local rust=false
+            local web=false
+            local docs=false
+            local repo_docs=false
+            while IFS= read -r file; do
+              case "${file}" in
+                Cargo.toml|Cargo.lock|crates/*|.github/workflows/*) rust=true ;;
+                crab/docs/*) repo_docs=true ;;
+                crab/*) rust=true ;;
+                packages/web/content/*) docs=true ;;
+                packages/web/*) web=true ;;
+              esac
+            done <<< "${changed_files}"
+            if [[ "${rust}" == false && "${web}" == false && "${docs}" == false && "${repo_docs}" == false ]]; then
+              rust=true
+            fi
+            printf '%s %s %s %s\n' "${rust}" "${web}" "${docs}" "${repo_docs}"
+          }
+
+          assert_classification() {
+            local changed_files="$1"
+            local expected="$2"
+            local actual
+            actual="$(classify_files "${changed_files}")"
+            if [[ "${actual}" != "${expected}" ]]; then
+              printf 'classification failed for %s: expected %s, got %s\n' \
+                "${changed_files}" "${expected}" "${actual}" >&2
+              exit 1
+            fi
+          }
+
+          assert_classification 'crab/docs/design/layout.md' 'false false false true'
+          assert_classification 'crab/src/main.rs' 'true false false false'
+          assert_classification 'packages/web/content/docs/index.mdx' 'false false true false'
+          assert_classification 'packages/web/app/page.tsx' 'false true false false'
+          assert_classification $'crab/docs/design/layout.md\ncrab/src/main.rs' 'true false false true'
+          assert_classification 'README.md' 'true false false false'
+
+          read -r rust web docs repo_docs < <(classify_files "${files}")
+          printf 'rust=%s\nweb=%s\ndocs=%s\nrepo_docs=%s\n' \
+            "${rust}" "${web}" "${docs}" "${repo_docs}" >> "${GITHUB_OUTPUT}"
 
   actionlint:
     name: Workflow syntax
@@ -222,11 +250,49 @@ jobs:
       - name: Check documentation links
         run: npm run check:links
 
+  repo-docs:
+    name: Repository documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.repo_docs == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check documentation diff
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA:-${EVENT_BEFORE:-}}"
+          if [[ -z "${base}" || "${base}" =~ ^0+$ ]]; then
+            base="$(git rev-parse "${HEAD_SHA}^" 2>/dev/null || true)"
+          fi
+          if [[ -z "${base}" ]]; then
+            echo "Unable to determine documentation diff base" >&2
+            exit 1
+          fi
+          git diff --check "${base}" "${HEAD_SHA}" -- crab/docs/
+
+      - name: Validate JSON evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            python3 -m json.tool "${file}" >/dev/null
+          done < <(find crab/docs -type f -name '*.json' -print0)
+
   status:
     name: Required CI status
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, actionlint, rust, web, docs]
+    needs: [changes, actionlint, rust, web, docs, repo-docs]
     if: always()
     steps:
       - name: Fail when a selected gate failed
@@ -235,7 +301,8 @@ jobs:
           needs.actionlint.result != 'success' ||
           (needs.rust.result != 'success' && needs.rust.result != 'skipped') ||
           (needs.web.result != 'success' && needs.web.result != 'skipped') ||
-          (needs.docs.result != 'success' && needs.docs.result != 'skipped')
+          (needs.docs.result != 'success' && needs.docs.result != 'skipped') ||
+          (needs.repo-docs.result != 'success' && needs.repo-docs.result != 'skipped')
         run: exit 1
 
       - name: Report selected gates
@@ -243,3 +310,4 @@ jobs:
           echo "Rust gate: ${{ needs.rust.result }}"
           echo "Web gate: ${{ needs.web.result }}"
           echo "Docs gate: ${{ needs.docs.result }}"
+          echo "Repository docs gate: ${{ needs.repo-docs.result }}"
