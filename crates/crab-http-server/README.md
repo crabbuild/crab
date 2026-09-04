@@ -128,6 +128,43 @@ same-origin frontend. Anonymous repository APIs return 401. Failed callbacks
 return to a sign-in error state without exposing provider response bodies or tokens.
 No cloud credentials are sent to the browser.
 
+## Git HTTP reads
+
+The Clone menu exposes `/git/{owner}/{name}` for native Git protocol-v2 fetches.
+The HTTP transport uses the same framing parser, visibility planner and bounded
+transfer profile as the Crab remote helper. `ls-refs`, shallow/deepen requests,
+filters and pack streaming are supported; `receive-pack` (push) is not implemented.
+Older protocol versions are rejected; use `git -c protocol.version=2` if your
+client configuration overrides the modern Git default.
+
+Authenticated users generate a read-only token from **Git access**. Supply `crab`
+as the Git username and the token as its password using a credential manager.
+Git requests use Basic authentication and do not require browser cookies. Tokens
+inherit repository membership and session expiry; sign-out, replacement sign-in
+and server restart invalidate them for subsequent requests. **Revoke tokens**
+revokes every token issued by the current session. At most ten tokens per session
+and 4,096 total tokens are retained as hashes in process memory. The browser keeps
+the generated token only in component memory. Tokens cannot authenticate browser
+read APIs or authorize writes.
+
+Four Git transfers may run concurrently per server process. Transfer operations
+use the shared two-hour profile with bounded objects, storage bytes and response
+size, independently of the interactive API's 30-second/8-MiB limits. Disconnects
+cancel pack production. Pack generation can use temporary files: set `TMPDIR` to
+a writable directory on the workspace volume for large qualification runs. The
+server still creates no clone or local Git object database. Multi-instance global
+admission, write hosting and production transfer qualification remain pending.
+
+Native Git qualification against Kubernetes in local RustFS passed ref discovery,
+`clone --depth=1 --filter=blob:none --no-checkout`, an exact recursive tree comparison
+(31,328 blob entries), lazy retrieval of the 4,236-byte README, and `fetch --deepen=1`
+(three reachable commits). Ref discovery took 296 ms, filtered clone 8.6 seconds,
+lazy README retrieval 175 ms, and deepening 7.5 seconds. These are individual local
+measurements without cache flushing, not throughput or production guarantees.
+The qualification client creates its own clone; the HTTP server reads the bucket
+from an empty working directory. HTTP responses end with flush and HTTP EOF;
+unlike the stdio helper, they must not send a response-end (`0002`) packet.
+
 ## Current verification
 
 ```sh
@@ -156,10 +193,13 @@ The local Kubernetes/RustFS run matched 162 directory entries, 10 commits,
 three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local run measured median tree reads of 11 ms,
 diffs of 34 ms, and one blame request of 1.5 seconds. Caches were not flushed;
-these measurements are not a production latency guarantee. Ten Rust transport, identity and envelope tests and six frontend navigation/model
+these measurements are not a production latency guarantee. Twelve Rust transport, identity and envelope tests and six frontend navigation/model
 tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
-and logout CSRF rejection, plus confidential-client secret-file authentication. The local test issuer is not a production identity service. Dark/light
+and logout CSRF rejection, plus confidential-client secret-file authentication,
+Git token scope and revocation. Thirteen shared wire tests and nineteen remote-helper
+tests cover the extracted framing/parser path and existing helper contracts.
+The local test issuer is not a production identity service. Dark/light
 rendering, highlighted source and an actual split diff were inspected in browser.
 
 The authenticated Kubernetes/RustFS run matched the same data checks. Its median

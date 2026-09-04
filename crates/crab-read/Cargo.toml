@@ -24,12 +24,13 @@ crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
 globset = { workspace = true }
+gix-packetline = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-ignore = { workspace = true }
 gix-object = { workspace = true }
 object_store = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 xet-client = { workspace = true }

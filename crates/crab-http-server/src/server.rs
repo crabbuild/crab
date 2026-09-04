@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
+    git,
 };
 
 pub(crate) struct Repository {
@@ -70,6 +71,7 @@ pub(crate) struct Server {
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
+    pub git_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     port: u16,
     pub auth: Option<Authentication>,
@@ -122,6 +124,7 @@ pub async fn serve(config: Config) -> Result<()> {
         options,
         cursor_key: rand::random(),
         admission: Semaphore::new(16),
+        git_admission: Arc::new(Semaphore::new(4)),
         port,
         auth,
     });
@@ -142,6 +145,17 @@ pub async fn serve(config: Config) -> Result<()> {
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/git/{owner}/{name}/info/refs", get(git::advertise))
+        .route(
+            "/git/{owner}/{name}/git-upload-pack",
+            post(git::upload_pack).layer(axum::extract::DefaultBodyLimit::max(
+                crab_read::upload_pack_wire::MAX_REQUEST_BYTES + 4 * 65_536,
+            )),
+        )
+        .route(
+            "/api/git-token",
+            post(auth::issue_git_token).delete(auth::revoke_git_tokens),
+        )
         .route("/api/session", get(auth::session))
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::callback))
@@ -186,24 +200,37 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
     if !valid_host {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let git_request = request.uri().path().starts_with("/git/");
     let principal = match &server.auth {
+        Some(auth) if git_request => auth.git_principal(request.headers()).await,
         Some(auth) => auth.principal(request.headers()).await,
         None => Principal::Local,
     };
     let protected =
         request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
-    let denied = protected && !principal.authenticated();
+    let denied = (protected || git_request) && !principal.authenticated();
     let unsafe_method = !matches!(
         *request.method(),
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
-    let rejected_mutation = unsafe_method
+    let rejected_mutation = !git_request
+        && unsafe_method
         && server
             .auth
             .as_ref()
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
     request.extensions_mut().insert(principal);
-    let mut response = if denied {
+    let mut response = if denied && git_request {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(
+                "www-authenticate",
+                "Basic realm=\"Crab Git\", charset=\"UTF-8\"",
+            )],
+            "Use a Git access token from your signed-in Crab account",
+        )
+            .into_response()
+    } else if denied {
         (StatusCode::UNAUTHORIZED, Json(json!({"error":{"code":"sign_in_required","message":"Sign in to access repositories"}}))).into_response()
     } else if rejected_mutation {
         (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"csrf_rejected","message":"Reload the page before trying again"}}))).into_response()
@@ -239,6 +266,7 @@ mod tests {
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
+            git_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
             port: 8788,
             auth: None,

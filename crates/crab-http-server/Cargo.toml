@@ -10,6 +10,9 @@ publish = false
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+crab-read = { workspace = true }
+base64 = "0.22"
+futures-util = { workspace = true }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 rand = "0.9"
@@ -20,7 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
 toml = { workspace = true }
 
 [dev-dependencies]
