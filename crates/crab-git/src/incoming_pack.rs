@@ -85,6 +85,15 @@ pub struct IncomingPack {
 }
 
 impl IncomingPack {
+    /// Create an empty quarantine for a receive request containing only deletions.
+    pub fn empty(directory: &Path) -> Result<Self> {
+        Ok(Self {
+            directory: tempfile::tempdir_in(directory)?,
+            objects: BTreeMap::new(),
+            received_objects: 0,
+        })
+    }
+
     /// Returns all unique objects, including any verified external thin-pack bases.
     pub fn objects(&self) -> impl Iterator<Item = &IncomingObject> {
         self.objects.values()

@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git, issues, maintenance,
+    git, issues, maintenance, receive,
 };
 
 pub(crate) struct Repository {
@@ -34,6 +34,10 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    pub(crate) async fn invalidate(&self) {
+        *self.pinned.lock().await = None;
+    }
+
     pub async fn open(
         &self,
         server: &Server,
@@ -120,6 +124,7 @@ pub(crate) struct Server {
     pub app_admission: Semaphore,
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
+    pub receives: tokio_util::task::TaskTracker,
     port: u16,
     pub auth: Option<Authentication>,
 }
@@ -186,6 +191,7 @@ pub async fn serve(config: Config) -> Result<()> {
         repositories,
         runtime: Arc::clone(&runtime),
         cancellation: cancellation.clone(),
+        receives: tokio_util::task::TaskTracker::new(),
         options,
         cursor_key: rand::random(),
         admission: Semaphore::new(16),
@@ -205,8 +211,11 @@ pub async fn serve(config: Config) -> Result<()> {
             cancellation.cancel();
         })
         .await;
-    // Listener errors also stop and drain owned publication before the read runtime closes.
+    // Axum has drained its connections, so no handler can register a new
+    // receive after the tracker becomes empty. Close readers only after that drain.
     server.cancellation.cancel();
+    server.receives.close();
+    server.receives.wait().await;
     let maintenance = server.finish_maintenance().await;
     runtime.shutdown().await;
     result.map_err(crate::Error::from).and(maintenance)
@@ -217,6 +226,10 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .merge(issues::routes(Arc::clone(&server)))
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
+        .route(
+            "/git/{owner}/{name}/git-receive-pack",
+            post(receive::receive),
+        )
         .route(
             "/git/{owner}/{name}/git-upload-pack",
             post(git::upload_pack).layer(axum::extract::DefaultBodyLimit::max(git::MAX_BODY_BYTES)),
@@ -249,6 +262,7 @@ async fn catalog(
         json!({"repositories": server.repositories.values().filter(|repository| principal.can_read(&repository.config)).map(|repository| json!({
         "owner": repository.config.owner, "name": repository.config.name,
         "description": repository.config.description,
+        "access": if principal.can_write(&repository.config) { "write" } else { "read" },
     })).collect::<Vec<_>>()}),
     )
 }
@@ -345,6 +359,7 @@ mod tests {
             app_admission: Semaphore::new(1),
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
+            receives: tokio_util::task::TaskTracker::new(),
             port: 8788,
             auth: None,
         }));
@@ -397,6 +412,10 @@ mod tests {
         runtime.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "receive_tests.rs"]
+mod receive_tests;
 
 #[cfg(test)]
 #[path = "auth_tests.rs"]

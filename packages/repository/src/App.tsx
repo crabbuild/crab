@@ -198,7 +198,7 @@ export function App() {
               </Button>
             </div>
           ) : (
-            <Result state={catalog}>
+            <Result state={catalog} showTiming={false}>
               {(data) =>
                 url.pathname === "/" ? (
                   <div className="catalog">
@@ -344,7 +344,7 @@ function RepositoryPage({
             <Issues repo={repo} url={url} csrf={csrf} />
           </Suspense>
         ) : (
-          <Result state={refs}>
+          <Result state={refs} showTiming={false}>
             {(data) =>
               !data.head ? (
                 <div className="notice">

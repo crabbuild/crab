@@ -1,10 +1,11 @@
 # Native Git writes: implementation boundary
 
-Status: native HTTP push is not yet available. Shared incoming-pack quarantine,
-exact graph/ref validation, self-contained pack preparation and ref visibility
-planning are qualified; publication and HTTP receive wiring remain pending.
-Crab pointer content verification is qualified separately against RustFS.
-The passing intake tests do not prove an accepted push or an updated ref.
+Status: native HTTP receive is composed and has an isolated RustFS integration
+proof for standard repository publication. Exact branch/tag creates, fast-forward
+updates and deletions work; forced rewrites are rejected atomically. See
+[Native Git push](README.md#native-git-push) for limits and remaining qualification.
+Shared intake/graph/dependency proofs below are historical component evidence;
+only the HTTP integration tests establish an accepted native push.
 
 ## Implemented receive framing and authorization
 
@@ -12,15 +13,14 @@ The passing intake tests do not prove an accepted push or an updated ref.
 bytes, advertises supported capabilities and encodes known atomic outcomes.
 Native Git tests cover branch/tag creation, deletion without a pack, empty packs
 and visible rejection/unpack failures. HTTP receive admission and publication
-must still compose this framing with the intake and commit boundaries below.
+now compose this framing with the intake and commit boundaries below.
 
 Repository members now have explicit `read`/`write` grants. Git tokens bind one
 owner/repository and requested permission to a browser session; effective access
 intersects the grant and token scope. Revocation invalidates retained principals
-on their next authorization check. The browser offers scoped read tokens; the
-token API permits explicit write scope only for a configured writer. The future
-receive endpoint must check `Principal::can_write` before intake and publication.
-These permissions do not make HTTP push available.
+on their next authorization check. The browser defaults to scoped read tokens
+and offers write scope only for a configured writer; the token API enforces the
+same grant. Receive checks `Principal::can_write` before intake and publication.
 
 The RustFS browser smoke signs in, creates a token, reads the exact Kubernetes tip
 through Git HTTP, rejects another repository mapping and observes 401 after
@@ -52,8 +52,8 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: complete receive admission/deadlines, canonical pack/index
-publication, and HTTP streaming with a request-bound deadline. No Git binary,
+HTTP composition now supplies receive admission/deadlines, canonical pack/index
+publication, and streaming with a request-bound deadline. No Git binary,
 clone or local Git object database is used by quarantine or preparation. The
 test oracle uses Git independently.
 
@@ -342,7 +342,7 @@ protected-view behavior remains independently owned and unchanged.
   both repository authorization and the token requested by the user. Adding
   writes must not silently upgrade credentials already issued for reads.
 
-## Publication sequence to implement
+## Publication sequence and remaining recovery requirements
 
 1. Authenticate and authorize the repository before receiving a pack. Parse a
    bounded ref-command batch. Validate ref names and capabilities, preserve the

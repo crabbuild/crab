@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { displayHex, endpoint, parentHex, repoHref, request } from "./api";
 
-const repo = { owner: "team", name: "repo.name", description: "" };
+const repo = {
+  owner: "team",
+  name: "repo.name",
+  description: "",
+  access: "read" as const,
+};
 afterEach(() => vi.unstubAllGlobals());
 
 describe("byte-preserving repository navigation", () => {

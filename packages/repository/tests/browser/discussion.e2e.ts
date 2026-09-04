@@ -25,7 +25,9 @@ async function openDiscussion(page: Page) {
       };
     } else if (path === "/api/repos") {
       json = {
-        repositories: [{ owner: "team", name: "project", description: "" }],
+        repositories: [
+          { owner: "team", name: "project", description: "", access: "write" },
+        ],
       };
     } else if (path === "/api/repos/team/project/issues/1") {
       if (request.method() === "PATCH") {

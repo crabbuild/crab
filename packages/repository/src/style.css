@@ -609,6 +609,7 @@ main {
 }
 .git-access summary,
 .clone-menu summary {
+  color: var(--fgColor-default);
   cursor: pointer;
   border: 1px solid var(--borderColor-default);
   border-radius: 6px;

@@ -8,7 +8,7 @@ operator's own object storage. A read-only browser is not the completion bar.
 
 Requires Node 22.12+ for building the React app, Rust, and an existing Crab
 repository. Runtime needs the resulting Rust binary, object-storage credentials,
-and writable temporary space for catalog index sidecars. Use the standard
+and writable temporary space for catalog sidecars and incoming pack preparation. Use the standard
 `TMPDIR` on a suitable volume when the system temporary directory is small or
 read-only. The server does not clone repositories, execute Git, or write a local
 Git object database.
@@ -176,12 +176,13 @@ No cloud credentials are sent to the browser.
 The Clone menu exposes `/git/{owner}/{name}` for native Git protocol-v2 fetches.
 The HTTP transport uses the same framing parser, visibility planner and bounded
 transfer profile as the Crab remote helper. `ls-refs`, shallow/deepen requests,
-filters and pack streaming are supported; `receive-pack` (push) is not implemented.
+filters and pack streaming are supported. Native push uses the separate
+`receive-pack` protocol described below.
 Older protocol versions are rejected; use `git -c protocol.version=2` if your
 client configuration overrides the modern Git default.
 
 Authenticated users choose one repository under **Git access** and generate a
-read-only token. Supply `crab` as the Git username and the token as its password
+read token, or a read/write token when their membership permits writes. Supply `crab` as the Git username and the token as its password
 using a credential manager. Git requests use Basic authentication independently
 of browser cookies. Tokens are restricted to the selected owner/repository and
 their requested permission, intersected with the user's configured grant. A read
@@ -203,9 +204,9 @@ See [Git credential contexts](https://git-scm.com/docs/gitcredentials#_configura
 `repository` and `access` (`read` or `write`), limited to 2 KiB. Missing fields and
 unknown permissions fail; inaccessible targets or permissions return 403 without
 opening storage. The response includes the token, target, permission and remaining
-session lifetime. The browser currently requests only read tokens. The API's
-write scope establishes authorization for the forthcoming receive path; it does
-not enable HTTP push, which remains unavailable.
+session lifetime. The catalog includes the effective `access` for each repository.
+The browser defaults to read and offers write only for configured writers.
+Changing repository or permission clears the displayed token.
 
 Sign-out, replacement sign-in and server restart invalidate tokens. **Revoke
 tokens** revokes every token issued by the current session, including retained
@@ -220,7 +221,7 @@ size, independently of the interactive API's 30-second/8-MiB limits. Disconnects
 cancel pack production. Pack generation can use temporary files: set `TMPDIR` to
 a writable directory on the workspace volume for large qualification runs. The
 server still creates no clone or local Git object database. Multi-instance global
-admission, write hosting and production transfer qualification remain pending.
+admission and production transfer qualification remain pending.
 
 Native Git qualification against Kubernetes in local RustFS passed ref discovery,
 `clone --depth=1 --filter=blob:none --no-checkout`, an exact recursive tree comparison
@@ -232,7 +233,7 @@ The qualification client creates its own clone; the HTTP server reads the bucket
 from an empty working directory. HTTP responses end with flush and HTTP EOF;
 unlike the stdio helper, they must not send a response-end (`0002`) packet.
 
-Git can gzip buffered requests or send an empty authentication probe followed by
+Git fetch can gzip buffered requests or send an empty authentication probe followed by
 a chunked request when a batch exceeds its HTTP buffer. Both forms are supported.
 Authentication and membership checks precede the probe response; probes do not
 open repository storage. A transfer slot is acquired before buffering the body,
@@ -261,7 +262,7 @@ python3 crates/crab-http-server/tests/verify_git_transport.py \
 The work directory must already exist on the workspace volume. This verifier
 leaves its two native Git client repositories there for inspection.
 
-[Native write design](WRITE-DESIGN.md) records the remaining receive-pack boundary,
+[Native write design](WRITE-DESIGN.md) records the receive-pack boundaries,
 including why protected-view commit translation cannot be used unchanged for
 native pushes. Quarantine, graph/ref validation, self-contained pack/index
 preparation and per-ref visibility planning are qualified against native Git and
@@ -271,9 +272,61 @@ dependency selection remains pinned after later metadata updates and enforces
 per-session scan budgets. Scans and pointer proofs bound CPU work across the
 process and retain admission through cancellation. A combined dependency batch
 verifies Crab and LFS payloads from validated Git pointer blobs, including one
-deadline for selection and content reads. Complete receive deadlines, LFS HTTP
-transfer, atomic publication and HTTP receive wiring remain pending;
-these checks do not establish working pushes.
+deadline for selection and content reads. LFS HTTP transfer and production
+write/recovery qualification remain pending.
+
+## Native Git push
+
+`POST /git/{owner}/{name}/git-receive-pack` accepts exact native Git commits,
+branch/tag creation, fast-forward updates and deletions in one atomic batch.
+Non-fast-forward updates are rejected, including forced refspecs. Existing Crab
+repositories must be initialized before serving them. The local loopback operator
+can push; authenticated team pushes require a repository-scoped write token.
+Read tokens are never upgraded implicitly.
+
+The server streams requests to private temporary files, validates full/thin packs,
+resolves bases only from the repository's committed visibility, proves graph and
+pointer dependencies, and publishes through the shared journal. It uses sorted
+ref leases, the shared namespace lease for creates/deletes, and both GC fence
+domains. It preserves submitted object IDs and uses no Git executable or clone.
+Requests share the four transfer slots with fetch. Each receive has a five-minute
+cooperative deadline, a 2-GiB wire/prepared-pack limit, one million incoming objects,
+64-MiB individual objects and an 8-GiB inflation budget. Graph and dependency reads
+have further bounds. Temporary disk needs can exceed the wire limit. Buffered and
+chunked native pushes are supported; receive requires identity content encoding.
+
+Disconnects and deadlines signal cancellation; owned workers retain admission
+until cleanup finishes. A known commit is never reported as a ref rejection due
+to later cleanup or indexing failure. If the response is lost or returns 503,
+inspect remote refs before retrying: publication may have committed. Subsequent
+reads run catalog repair for committed journal work. This is not yet durable
+application-level push receipt or complete disaster-recovery support.
+
+Native Git integration and an isolated RustFS run cover initial branch and
+annotated-tag pushes, updates, atomic rewrite rejection, existing-object tags,
+deletion, API visibility and independent fetch. Remote objects are compared byte
+for byte after removing client repositories. The deletion flow also exposed and
+fixed a shared catalog bug: removed tips must be looked up even when no surviving
+ref or new evidence mentions them. These small-repository tests are not Kubernetes
+push throughput or production qualification. Protected branches, protected-view
+and active-active publication coexistence, LFS upload endpoints, and restart/fault
+qualification remain unfinished; use this development server with standard Crab
+repository publication only.
+
+To repeat the isolated receive qualification, source your private RustFS environment
+and choose a fresh prefix (the test creates a manifest and will not overwrite one):
+
+```sh
+QUALIFICATION_BUCKET=my-test-bucket \
+QUALIFICATION_PREFIX=qualification/http-receive-my-run \
+TMPDIR="$HOME/Workspace/Github/crab-qualification/scratch" \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo test -p crab-http-server --locked native_http_push_rustfs -- --ignored --nocapture
+```
+
+Create the temporary directory first and use this checkout's own target directory.
+The test removes its Git client directories and retains the isolated object-storage
+repository for inspection.
 
 ## Issues and comments
 
@@ -420,7 +473,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; push and branch administration pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push and tag lifecycle have scoped RustFS proof; protected branches and administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues and comments with author edits and conditional writes; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |

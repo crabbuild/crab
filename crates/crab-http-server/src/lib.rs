@@ -6,6 +6,7 @@ mod config;
 mod git;
 mod issues;
 mod maintenance;
+mod receive;
 mod server;
 
 pub use config::{Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember};

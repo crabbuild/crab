@@ -21,6 +21,7 @@ test.beforeEach(async ({ page }) => {
               owner: "team",
               name: "project",
               description: "A repository for our team.",
+              access: "write",
             },
           ],
         },
