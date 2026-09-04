@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     app::{Error, Result, actor, body, number, repository, submission, title},
     app_storage,
+    assignees::{self, Assignee},
     auth::{Identity, Principal},
     labels::{self, Label},
     server::Server,
@@ -44,13 +45,16 @@ fn issue_view(
     issue: &Issue,
     author: &Identity,
     labels: &[Label],
-    can_label: bool,
+    assignees: &[Assignee],
+    can_manage_metadata: bool,
     full: bool,
 ) -> Value {
     json!({"number":issue.number,"title":issue.title,"body":full.then_some(&issue.body),"state":issue.state,
         "author":issue.author.name,"version":issue.version,"created_at":issue.created_at,"updated_at":issue.updated_at,
         "labels":labels::selection_view(&issue.label_ids, labels),
-        "can_edit":storage::same_author(&issue.author, author),"can_label":can_label})
+        "assignees":assignees::selection_view(&issue.assignee_subjects, assignees),
+        "can_edit":storage::same_author(&issue.author, author),
+        "can_label":can_manage_metadata,"can_assign":can_manage_metadata})
 }
 fn comment_view(comment: &Comment, author: &Identity) -> Value {
     json!({"number":comment.number,"body":comment.body,"author":comment.author.name,"version":comment.version,
@@ -98,7 +102,8 @@ async fn list(
     let repo = repository(&server, &principal, &key)?;
     let author = actor(&principal)?;
     let labels = labels::catalog(repo).await?;
-    let can_label = principal.can_write(&repo.config);
+    let assignees = assignees::available(repo, &author);
+    let can_manage_metadata = principal.can_write(&repo.config);
     let limit = params.limit()?;
     let state = params.state()?;
     let query = crate::app::search_query(params.q.as_deref())?;
@@ -126,7 +131,14 @@ async fn list(
                     &[&issue.title, &issue.body, &issue.author.name],
                 )
             {
-                items.push(issue_view(&issue, &author, &labels, can_label, false));
+                items.push(issue_view(
+                    &issue,
+                    &author,
+                    &labels,
+                    &assignees,
+                    can_manage_metadata,
+                    false,
+                ));
             }
             if items.len() == limit || scanned == 200 {
                 break;
@@ -159,12 +171,14 @@ async fn create(
     body(&input.body, false)?;
     let issue = storage::create_issue(repo, author.clone(), request_id, title, input.body).await?;
     let labels = labels::catalog(repo).await?;
+    let assignees = assignees::available(repo, &author);
     Ok((
         StatusCode::CREATED,
         Json(issue_view(
             &issue,
             &author,
             &labels,
+            &assignees,
             principal.can_write(&repo.config),
             true,
         )),
@@ -180,10 +194,13 @@ async fn detail(
         .await?
         .ok_or(Error::NotFound)?;
     let labels = labels::catalog(repo).await?;
+    let author = actor(&principal)?;
+    let assignees = assignees::available(repo, &author);
     Ok(Json(issue_view(
         &issue,
-        &actor(&principal)?,
+        &author,
         &labels,
+        &assignees,
         principal.can_write(&repo.config),
         true,
     )))
@@ -197,6 +214,7 @@ struct IssueEdit {
     body: Option<String>,
     state: Option<IssueState>,
     label_ids: Option<Vec<u64>>,
+    assignees: Option<Vec<String>>,
 }
 async fn edit(
     State(server): State<Arc<Server>>,
@@ -212,12 +230,16 @@ async fn edit(
         .await?
         .ok_or(Error::NotFound)?;
     let label_change = input.label_ids.is_some();
+    let assignee_change = input.assignees.is_some();
     let author_change = input.title.is_some() || input.body.is_some() || input.state.is_some();
     if author_change && !storage::same_author(&issue.author, &author) {
         return Err(Error::Forbidden);
     }
     if label_change && !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
+    }
+    if assignee_change && !principal.can_write(&repo.config) {
+        return Err(Error::AssigneePermission);
     }
     if input.version != issue.version {
         return Err(Error::Conflict);
@@ -226,10 +248,12 @@ async fn edit(
         && input.body.is_none()
         && input.state.is_none()
         && input.label_ids.is_none()
+        && input.assignees.is_none()
     {
         return Err(Error::Invalid("No issue changes supplied"));
     }
     let labels = labels::catalog(repo).await?;
+    let assignees = assignees::available(repo, &author);
     if let Some(value) = input.title {
         issue.title = title(&value)?;
     }
@@ -243,6 +267,9 @@ async fn edit(
     if let Some(value) = input.label_ids {
         issue.label_ids = labels::validate_selection(value, &labels)?;
     }
+    if let Some(value) = input.assignees {
+        issue.assignee_subjects = assignees::validate_selection(value, &assignees)?;
+    }
     issue.version = issue
         .version
         .checked_add(1)
@@ -252,11 +279,15 @@ async fn edit(
     if label_change && !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
+    if assignee_change && !principal.can_write(&repo.config) {
+        return Err(Error::AssigneePermission);
+    }
     storage::update(repo, &path, &issue, etag).await?;
     Ok(Json(issue_view(
         &issue,
         &author,
         &labels,
+        &assignees,
         principal.can_write(&repo.config),
         true,
     )))

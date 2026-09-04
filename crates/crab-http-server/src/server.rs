@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Config, RepositoryConfig, Result, api, assets,
+    Config, RepositoryConfig, Result, api, assets, assignees,
     auth::{self, Authentication, Principal},
     git, issues, labels, lfs, maintenance, pulls, receive, statuses,
 };
@@ -225,6 +225,7 @@ pub async fn serve(config: Config) -> Result<()> {
 
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
+        .merge(assignees::routes(Arc::clone(&server)))
         .merge(issues::routes(Arc::clone(&server)))
         .merge(labels::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))

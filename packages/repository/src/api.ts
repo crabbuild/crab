@@ -27,6 +27,10 @@ export interface RepositoryLabel {
   created_at: number;
   updated_at: number;
 }
+export interface RepositoryAssignee {
+  subject: string;
+  name: string;
+}
 export interface Ref {
   name: string;
   oid: string;

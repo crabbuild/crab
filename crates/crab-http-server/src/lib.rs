@@ -3,6 +3,7 @@ mod api;
 mod app;
 mod app_storage;
 mod assets;
+mod assignees;
 mod auth;
 mod config;
 mod git;

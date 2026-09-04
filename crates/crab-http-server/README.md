@@ -139,8 +139,8 @@ protected_branches = [
   { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
 ]
 members = [
-  { subject = "provider-subject-for-alice", access = "write" },
-  { subject = "provider-subject-for-bob", access = "read" },
+  { subject = "provider-subject-for-alice", name = "Alice", access = "write" },
+  { subject = "provider-subject-for-bob", name = "Bob", access = "read" },
 ]
 ```
 
@@ -151,10 +151,11 @@ both issuer and public URL may use HTTP loopback addresses, with a loopback
 listener. Production identity endpoints require HTTPS. Secret files may have a
 single trailing newline; other whitespace is preserved.
 
-`members` assigns each provider’s stable `sub` an explicit `read` or `write`
-grant. Write grants include reads; duplicate subjects and unspecified/unknown
-access values are rejected. This unreleased server configuration replaces the
-earlier string-only member list; convert each entry to a subject/access record. An authenticated account
+`members` assigns each provider’s stable `sub`, display `name` and explicit
+`read` or `write` grant. Names are used in assignment controls. Write grants
+include reads; duplicate subjects or names and unspecified/unknown
+access values are rejected. This unreleased server configuration requires all
+three fields. An authenticated account
 with no memberships sees an empty catalog and its user ID for requesting access.
 All repository read endpoints enforce membership before opening storage; absent
 and unauthorized repositories both return 404. Membership changes currently
@@ -480,6 +481,16 @@ deletion tombstones prevent a replay from resurrecting a deleted label. Deletes
 are idempotent when retried with the deleted label's version. The React application
 provides repository label management, GitHub-style colored badges and label pickers
 on issue and pull detail views.
+
+`GET /api/repos/{owner}/{name}/assignees` lists the repository member directory.
+Issue and pull `PATCH` requests replace the complete assignment with `assignees`
+and the discussion's current `version`. The server accepts at most 10 distinct,
+configured member subjects, and only repository writers can change the set. The
+stored subjects remain stable while responses resolve current configured display
+names. Removing a member from configuration removes that person from subsequent
+responses. Local loopback repositories expose the single local operator. The
+React issue and pull conversation views present assignees and labels together in
+a responsive metadata rail.
 
 Repository writers can `POST /pulls/{number}/merge` with the displayed
 pull version and exact base/head IDs. The only accepted method is

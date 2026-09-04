@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-test("repository labels can be managed and assigned to an issue", async ({
+test("repository metadata can be managed and assigned to an issue", async ({
   page,
 }) => {
   let labels: Array<Record<string, unknown>> = [];
   let selected: number[] = [];
+  let assigned: string[] = [];
   let issueVersion = 1;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -50,6 +51,16 @@ test("repository labels can be managed and assigned to an issue", async ({
       }
       return route.fulfill({ json: { items: labels, can_manage: true } });
     }
+    if (path === "/api/repos/team/project/assignees")
+      return route.fulfill({
+        json: {
+          items: [
+            { subject: "operator", name: "Local operator" },
+            { subject: "maintainer", name: "Repository maintainer" },
+          ],
+          can_manage: true,
+        },
+      });
     if (path === "/api/repos/team/project/labels/1") {
       if (request.method() === "DELETE") {
         labels = [];
@@ -70,9 +81,11 @@ test("repository labels can be managed and assigned to an issue", async ({
       if (request.method() === "PATCH") {
         const input = request.postDataJSON() as {
           version: number;
-          label_ids: number[];
+          label_ids?: number[];
+          assignees?: string[];
         };
-        selected = input.label_ids;
+        if (input.label_ids) selected = input.label_ids;
+        if (input.assignees) assigned = input.assignees;
         issueVersion += 1;
       }
       return route.fulfill({
@@ -87,9 +100,14 @@ test("repository labels can be managed and assigned to an issue", async ({
           updated_at: 1_700_000_000_000,
           can_edit: true,
           can_label: true,
+          can_assign: true,
           labels: labels.filter((label) =>
             selected.includes(label.id as number),
           ),
+          assignees: [
+            { subject: "operator", name: "Local operator" },
+            { subject: "maintainer", name: "Repository maintainer" },
+          ].filter((assignee) => assigned.includes(assignee.subject)),
         },
       });
     }
@@ -113,12 +131,16 @@ test("repository labels can be managed and assigned to an issue", async ({
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
   await page.goto("/team/project?view=issues&issue=1");
-  await page.locator(".label-picker summary").click();
+  await page.getByLabel("Edit labels").click();
   await page.getByRole("checkbox", { name: "kind/bug" }).check();
   await page.getByRole("button", { name: "Apply labels" }).click();
-  await expect(page.locator(".discussion-label-controls")).toContainText(
-    "kind/bug",
-  );
+  const metadata = page.getByRole("complementary", { name: "Metadata" });
+  await expect(metadata).toContainText("kind/bug");
+  await expect(metadata).toContainText("No one assigned");
+  await metadata.getByLabel("Edit assignees").click();
+  await page.getByRole("checkbox", { name: "Repository maintainer" }).check();
+  await page.getByRole("button", { name: "Apply assignees" }).click();
+  await expect(metadata).toContainText("Repository maintainer");
 
   await page.goto("/team/project?view=labels");
   page.once("dialog", (dialog) => dialog.accept());

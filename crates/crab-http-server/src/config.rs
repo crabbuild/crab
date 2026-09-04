@@ -49,6 +49,7 @@ pub struct BranchProtection {
 #[serde(deny_unknown_fields)]
 pub struct RepositoryMember {
     pub subject: String,
+    pub name: String,
     pub access: RepositoryAccess,
 }
 
@@ -97,10 +98,21 @@ impl Config {
         let mut names = HashSet::new();
         for repository in &self.repositories {
             let mut subjects = HashSet::new();
+            let mut member_names = HashSet::new();
             for member in &repository.members {
-                if member.subject.is_empty() || !subjects.insert(&member.subject) {
+                if member.subject.trim() != member.subject
+                    || member.subject.is_empty()
+                    || member.subject.chars().count() > 512
+                    || member.subject.chars().any(char::is_control)
+                    || !subjects.insert(&member.subject)
+                    || member.name.trim() != member.name
+                    || member.name.is_empty()
+                    || member.name.chars().count() > 160
+                    || member.name.chars().any(char::is_control)
+                    || !member_names.insert(member.name.to_lowercase())
+                {
                     return Err(Error::Config(
-                        "repository members must be unique nonempty OIDC subjects",
+                        "repository members require unique OIDC subjects of at most 512 characters and unique names of at most 160 characters",
                     ));
                 }
             }
@@ -209,13 +221,38 @@ mod tests {
         for member in [
             "'alice'",
             "{subject='alice'}",
-            "{subject='alice',access='admin'}",
-            "{subject='alice',access='read',extra=true}",
+            "{subject='alice',name='Alice',access='admin'}",
+            "{subject='alice',name='Alice',access='read',extra=true}",
         ] {
             let source = format!(
                 "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{member}]"
             );
             assert!(toml::from_str::<RepositoryConfig>(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn repository_members_require_bounded_unique_subjects_and_names() {
+        for members in [
+            "[{subject='',name='Alice',access='read'}]".into(),
+            "[{subject=' alice',name='Alice',access='read'}]".into(),
+            format!(
+                "[{{subject='{}',name='Alice',access='read'}}]",
+                "a".repeat(513)
+            ),
+            "[{subject='alice',name='',access='read'}]".into(),
+            "[{subject='alice',name=' Alice',access='read'}]".into(),
+            format!(
+                "[{{subject='alice',name='{}',access='read'}}]",
+                "a".repeat(161)
+            ),
+            "[{subject='alice',name='Alice',access='read'},{subject='bob',name='alice',access='write'}]".into(),
+        ] {
+            let source = format!(
+                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers={members}"
+            );
+            let config: Config = toml::from_str(&source).unwrap();
+            assert!(config.validate().is_err(), "{members}");
         }
     }
 
@@ -267,7 +304,7 @@ mod tests {
 
     #[test]
     fn public_listeners_require_identity_and_https() {
-        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{subject='alice',access='read'}]\n";
+        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{subject='alice',name='Alice',access='read'}]\n";
         let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\n";
         let config: Config = toml::from_str(base).unwrap();
         assert!(config.validate().is_err());
@@ -290,8 +327,8 @@ mod tests {
         let config: Config = toml::from_str(&format!(
             "{}{identity}",
             base.replace(
-                "members=[{subject='alice',access='read'}]",
-                "members=[{subject='alice',access='read'},{subject='alice',access='write'}]"
+                "members=[{subject='alice',name='Alice',access='read'}]",
+                "members=[{subject='alice',name='Alice',access='read'},{subject='alice',name='Alice 2',access='write'}]"
             )
         ))
         .unwrap();

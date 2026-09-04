@@ -18,12 +18,14 @@ import {
   useRequest,
   type Refs,
   type Repository,
+  type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
 import { ComparisonView } from "./content";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
-import { LabelBadges, LabelPicker } from "./discussion-labels";
+import { LabelBadges } from "./discussion-labels";
+import { AssigneeAvatars, DiscussionMetadata } from "./discussion-metadata";
 import {
   DiscussionMarkdown,
   Editor,
@@ -52,6 +54,7 @@ interface PullSummary {
   created_at: number;
   updated_at: number;
   labels: RepositoryLabel[];
+  assignees: RepositoryAssignee[];
 }
 
 interface PullRequest extends PullSummary {
@@ -59,6 +62,7 @@ interface PullRequest extends PullSummary {
   version: number;
   can_edit: boolean;
   can_label: boolean;
+  can_assign: boolean;
   base_oid: string;
   head_oid: string;
   original_base_oid: string | null;
@@ -293,6 +297,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                         <code>{branch(pull.base_ref)}</code>
                       </p>
                     </div>
+                    <AssigneeAvatars assignees={pull.assignees} />
                   </li>
                 ))}
               </ul>
@@ -527,19 +532,6 @@ function PullDetail({
                   </span>
                 )}
               </div>
-              <div className="discussion-label-controls">
-                <LabelBadges labels={data.labels} />
-                {data.can_label && (
-                  <LabelPicker
-                    repo={repo}
-                    labels={data.labels}
-                    version={data.version}
-                    path={`pulls/${number}`}
-                    csrf={csrf}
-                    onSaved={pull.retry}
-                  />
-                )}
-              </div>
             </div>
             <nav className="pull-tabs" aria-label="Pull request">
               <Link
@@ -591,12 +583,25 @@ function PullDetail({
                 </>
               ) : null
             ) : (
-              <PullConversation
-                repo={repo}
-                pull={data}
-                csrf={csrf}
-                refresh={pull.retry}
-              />
+              <div className="discussion-detail-layout">
+                <PullConversation
+                  repo={repo}
+                  pull={data}
+                  csrf={csrf}
+                  refresh={pull.retry}
+                />
+                <DiscussionMetadata
+                  repo={repo}
+                  assignees={data.assignees}
+                  labels={data.labels}
+                  canAssign={data.can_assign}
+                  canLabel={data.can_label}
+                  version={data.version}
+                  path={`pulls/${number}`}
+                  csrf={csrf}
+                  onSaved={pull.retry}
+                />
+              </div>
             )}
           </>
         )}

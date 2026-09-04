@@ -50,6 +50,8 @@ pub(crate) enum Error {
     LabelConflict,
     #[error("Repository label not found")]
     LabelNotFound,
+    #[error("Write access is required to manage assignees")]
+    AssigneePermission,
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error(
@@ -144,6 +146,11 @@ impl IntoResponse for Error {
                 StatusCode::NOT_FOUND,
                 "not_found",
                 "Repository label not found",
+            ),
+            Self::AssigneePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage assignees",
             ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
