@@ -155,6 +155,30 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     success(path, &["commit", "-m", "first commit"]).await;
     let first = success(path, &["rev-parse", "HEAD"]).await;
     success(path, &["tag", "-a", "v1", "-m", "first tag"]).await;
+    success(path, &["push", &url, "refs/tags/v1"]).await;
+    let response = reqwest::get(format!("http://127.0.0.1:{port}/api/repos/team/repo/refs"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tag_only: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(tag_only["head"].is_null());
+    assert_eq!(tag_only["unborn_head"], "refs/heads/main");
+    let reader = tempfile::tempdir().unwrap();
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "clone", "--bare", &url, "."],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["symbolic-ref", "HEAD"]).await,
+        "refs/heads/main"
+    );
+    assert_eq!(
+        success(reader.path(), &["show", "refs/tags/v1:README.md"]).await,
+        "first content"
+    );
+    reader.close().unwrap();
     success(path, &["push", "--atomic", &url, branch, "refs/tags/v1"]).await;
     std::fs::write(path.join("README.md"), "second content\n").unwrap();
     success(path, &["commit", "-am", "second commit"]).await;

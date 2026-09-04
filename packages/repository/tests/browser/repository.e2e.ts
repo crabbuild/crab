@@ -146,3 +146,33 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     "light",
   );
 });
+
+test("tag-only repositories browse files without inventing a default branch", async ({
+  page,
+}) => {
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/refs",
+    (route) =>
+      route.fulfill({
+        json: {
+          head: null,
+          unborn_head: "refs/heads/main",
+          refs: [{ name: "refs/tags/v1", oid }],
+          generation: 1,
+        },
+      }),
+  );
+  await page.goto("/team/project");
+  await expect(page.getByLabel("Branch or tag", { exact: true })).toHaveValue(
+    "refs/tags/v1",
+  );
+  await expect(
+    page.getByText("This repository is empty", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("table")).toBeVisible();
+  await page
+    .getByRole("table")
+    .getByRole("link", { name: "README.md", exact: true })
+    .click();
+  await expect(page.locator(".file-panel")).toBeVisible();
+});

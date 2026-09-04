@@ -284,7 +284,10 @@ function RepositoryPage({
   const refs = useRequest<Refs>(
     view === "issues" ? null : endpoint(repo, "refs"),
   );
-  const revName = url.searchParams.get("rev") ?? refs.data?.head?.name;
+  const revName =
+    url.searchParams.get("rev") ??
+    refs.data?.head?.name ??
+    refs.data?.refs[0]?.name;
   const selected = refs.data?.refs.find((ref) => ref.name === revName);
   const rev = selected?.peeled ?? selected?.oid ?? revName;
   const path = url.searchParams.get("path") ?? "";
@@ -346,7 +349,7 @@ function RepositoryPage({
         ) : (
           <Result state={refs} showTiming={false}>
             {(data) =>
-              !data.head ? (
+              !data.refs.length ? (
                 <div className="notice">
                   <h2>This repository is empty</h2>
                   <p>Push an initial commit with Crab to start browsing.</p>
@@ -356,7 +359,11 @@ function RepositoryPage({
                   <div className="toolbar">
                     <div className="row">
                       <span className="branch-picker">
-                        <GitBranchIcon />
+                        {revName?.startsWith("refs/tags/") ? (
+                          <TagIcon />
+                        ) : (
+                          <GitBranchIcon />
+                        )}
                         <label className="sr-only" htmlFor="revision">
                           Branch or tag
                         </label>
@@ -540,25 +547,29 @@ function RepositoryPage({
                                 <IssueOpenedIcon /> Issues
                               </Link>
                             </div>
-                            <div className="about-section">
-                              <h3>Branches</h3>
-                              <div className="about-links">
-                                {data.refs
-                                  .filter((ref) =>
-                                    ref.name.startsWith("refs/heads/"),
-                                  )
-                                  .slice(0, 5)
-                                  .map((ref) => (
-                                    <Link
-                                      key={ref.name}
-                                      href={repoHref(repo, { rev: ref.name })}
-                                    >
-                                      <GitBranchIcon />
-                                      {ref.name.slice("refs/heads/".length)}
-                                    </Link>
-                                  ))}
+                            {data.refs.some((ref) =>
+                              ref.name.startsWith("refs/heads/"),
+                            ) && (
+                              <div className="about-section">
+                                <h3>Branches</h3>
+                                <div className="about-links">
+                                  {data.refs
+                                    .filter((ref) =>
+                                      ref.name.startsWith("refs/heads/"),
+                                    )
+                                    .slice(0, 5)
+                                    .map((ref) => (
+                                      <Link
+                                        key={ref.name}
+                                        href={repoHref(repo, { rev: ref.name })}
+                                      >
+                                        <GitBranchIcon />
+                                        {ref.name.slice("refs/heads/".length)}
+                                      </Link>
+                                    ))}
+                                </div>
                               </div>
-                            </div>
+                            )}
                           </aside>
                         )}
                       </div>

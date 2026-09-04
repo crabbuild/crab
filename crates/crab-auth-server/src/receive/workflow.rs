@@ -798,9 +798,13 @@ mod tests {
         source_git_dir: &Path,
     ) -> Result<(String, Vec<StagedWrite>)> {
         let pack = pack_entry_for_bytes(&pack_bytes, vec![ref_tip.clone()], object_count);
-        let segment =
-            segmented::build_segment(SegmentKind::Pack, generation, false, &[pack.clone()])?
-                .ok_or_else(|| invalid("test pack segment missing"))?;
+        let segment = segmented::build_segment(
+            SegmentKind::Pack,
+            generation,
+            false,
+            std::slice::from_ref(&pack),
+        )?
+        .ok_or_else(|| invalid("test pack segment missing"))?;
         let index = segmented::append_segment(SegmentIndex::default(), segment.reference.clone());
         let index_object = segmented::build_index_object(SegmentKind::Pack, index)?;
 

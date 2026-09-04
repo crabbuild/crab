@@ -35,18 +35,9 @@ pub fn manifest_ref_advertisement(
         })
         .collect::<Vec<_>>();
 
-    let head_symref = if refs.iter().any(|entry| entry.ref_name == manifest.head) {
-        Some(manifest.head.clone())
-    } else if let Some(first) = refs.first() {
-        tracing::warn!(
-            manifest_head = %manifest.head,
-            fallback = %first.ref_name,
-            "manifest HEAD does not match any live ref; falling back to first ref"
-        );
-        Some(first.ref_name.clone())
-    } else {
-        None
-    };
+    // Preserve the actual symbolic target, including an unborn branch. Hidden
+    // targets stay hidden; substituting a visible ref would invent a new HEAD.
+    let head_symref = (!hidden_refs.is_match(&manifest.head)).then(|| manifest.head.clone());
 
     ManifestRefAdvertisement { refs, head_symref }
 }
@@ -82,10 +73,7 @@ mod tests {
 
         assert_eq!(advertisement.refs.len(), 1);
         assert_eq!(advertisement.refs[0].ref_name, "refs/heads/main");
-        assert_eq!(
-            advertisement.head_symref.as_deref(),
-            Some("refs/heads/main")
-        );
+        assert_eq!(advertisement.head_symref, None);
     }
 
     #[test]
@@ -100,6 +88,17 @@ mod tests {
 
         assert!(advertisement.refs.is_empty());
         assert_eq!(advertisement.head_symref, None);
+    }
+
+    #[test]
+    fn advertisement_preserves_unborn_head_alongside_tags() {
+        let manifest =
+            manifest_with_refs("refs/heads/unborn", &[("refs/tags/v1", &"a".repeat(40))]);
+        let advertisement = manifest_ref_advertisement(&manifest, &[]);
+        assert_eq!(
+            advertisement.head_symref.as_deref(),
+            Some("refs/heads/unborn")
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ silently disagreeing about keys, generations, hashes, or serialization.
 .crab/chunk_index_db/             bucket-global chunk receipts and placements
 ```
 
-`Manifest` is version 2 and contains the complete ref map, HEAD, generation,
+`Manifest` is version 1 and contains the complete ref map, HEAD, generation,
 and content hashes for larger metadata objects. `seal_git_validation` binds
 the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
@@ -138,3 +138,14 @@ assert_eq!(indexes.chunk_index_path, ".crab/chunk_index_db/");
   this crate owns the metadata it consumes.
 - [`crab-coordination`](../crab-coordination/README.md) decides when a new
   manifest generation is authoritative.
+
+## Unborn default branches
+
+A manifest or replayed ref journal may retain a symbolic `refs/heads/...` HEAD
+that has no commit while tags or other branches exist. The validation digest still
+binds HEAD and every ref; an unresolved non-branch HEAD remains invalid for a
+nonempty repository. Read-side name and object validation remains mandatory.
+
+This extends the readable states of the existing serialized schema. Deploy the
+updated readers and publication services together: v1.0.1 and v1.1.0 reject this
+state. Existing manifests with resolved HEADs require no migration.
