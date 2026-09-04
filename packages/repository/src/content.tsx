@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
-import { Label, SegmentedControl } from "@primer/react";
+import { IconButton, Label, SegmentedControl } from "@primer/react";
+import { CopyIcon, DownloadIcon } from "@primer/octicons-react";
 import {
   endpoint,
   repoHref,
@@ -23,11 +24,17 @@ type Props = {
 };
 const themes = { light: "github-light", dark: "github-dark" } as const;
 
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
+  return `${(bytes / 1024).toFixed(2)} KB`;
+}
+
 export function FileView({ repo, rev, path, name, theme }: Props) {
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );
   const [showBlame, setShowBlame] = useState(false);
+  const [copied, setCopied] = useState(false);
   const blame = useRequest<Blame>(
     showBlame ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
   );
@@ -64,18 +71,36 @@ export function FileView({ repo, rev, path, name, theme }: Props) {
                 {content.text === null
                   ? "Binary"
                   : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
-                <span aria-hidden="true">·</span>{" "}
-                {content.size.toLocaleString()} bytes{" "}
-                <span aria-hidden="true">·</span> {content.mode}
+                <span aria-hidden="true">·</span> {formatSize(content.size)}
               </span>
             </div>
-            <div className="row">
+            <div className="file-actions">
+              <a href={endpoint(repo, "blob", { rev, path_hex: path })}>Raw</a>
+              {content.text !== null && (
+                <IconButton
+                  icon={CopyIcon}
+                  aria-label={
+                    copied ? "File contents copied" : "Copy file contents"
+                  }
+                  size="small"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(content.text ?? "");
+                      setCopied(true);
+                    } catch {
+                      setCopied(false);
+                    }
+                  }}
+                />
+              )}
               <a
-                className="button-link"
+                className="file-icon-button"
                 href={endpoint(repo, "blob", { rev, path_hex: path })}
                 download={name.split("/").pop()}
+                aria-label="Download raw file"
+                title="Download raw file"
               >
-                Download
+                <DownloadIcon />
               </a>
             </div>
           </div>

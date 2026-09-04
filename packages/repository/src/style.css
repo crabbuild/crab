@@ -188,8 +188,17 @@ main {
   height: min(62vh, 720px);
   min-height: 280px;
   color: var(--fgColor-default);
-  --tree-bg: var(--bgColor-default);
-  --tree-fg: var(--fgColor-default);
+  --trees-accent-override: var(--focus-outlineColor);
+  --trees-bg-override: var(--bgColor-default);
+  --trees-bg-muted-override: var(--control-transparent-bgColor-hover);
+  --trees-border-color-override: var(--borderColor-default);
+  --trees-fg-override: var(--fgColor-default);
+  --trees-fg-muted-override: var(--fgColor-muted);
+  --trees-font-family-override: var(--fontStack-sansSerif);
+  --trees-font-size-override: 14px;
+  --trees-item-margin-x-override: 0px;
+  --trees-item-padding-x-override: 6px;
+  --trees-selected-bg-override: var(--control-transparent-bgColor-selected);
 }
 .tree-hint {
   font-size: 12px;
@@ -1272,6 +1281,19 @@ main {
 .clone-menu summary:hover {
   background: var(--button-primary-bgColor-hover);
 }
+.clone-menu.compact summary {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  color: var(--button-default-fgColor-rest);
+  background: var(--button-default-bgColor-rest);
+  border-color: var(--button-default-borderColor-rest);
+}
+.clone-menu.compact summary:hover {
+  background: var(--button-default-bgColor-hover);
+}
 .clone-menu summary::-webkit-details-marker {
   display: none;
 }
@@ -2320,27 +2342,67 @@ main {
   padding-inline: 7px;
 }
 .tree-sidebar-controls {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--borderColor-muted);
+  padding: 12px 16px 8px;
 }
 .ref-controls.compact {
-  display: block;
+  display: flex;
+  gap: 8px;
 }
 .ref-controls.compact .revision-picker-anchor {
-  width: 100%;
+  flex: 1;
+  width: auto;
   max-width: none;
 }
-.ref-controls.compact .ref-summary {
-  justify-content: space-between;
-  padding-top: 10px;
+.tree-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  margin: 0 16px 12px;
+  padding: 0 10px;
+  color: var(--fgColor-muted);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.tree-search:focus-within {
+  border-color: var(--focus-outlineColor);
+  box-shadow: 0 0 0 1px var(--focus-outlineColor);
+}
+.tree-search input {
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  color: var(--fgColor-default);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font: inherit;
+}
+.tree-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.tree-search kbd,
+.file-search-opener kbd {
+  min-width: 20px;
+  padding: 0 5px;
+  color: var(--fgColor-muted);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: 5px;
+  font: 11px/18px var(--fontStack-monospace);
+  text-align: center;
 }
 .repo-file-workspace {
   max-width: none;
   padding: 0;
 }
 .repo-file-workspace .code-layout {
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 356px minmax(0, 1fr);
   gap: 0;
+}
+.repo-file-workspace .code-layout.no-sidebar {
+  grid-template-columns: minmax(0, 1fr);
 }
 .repo-file-workspace .tree-sidebar {
   position: sticky;
@@ -2352,9 +2414,10 @@ main {
 .repo-file-workspace .repository-tree {
   height: min(68vh, 760px);
   min-height: 360px;
+  border-top: 1px solid var(--borderColor-muted);
 }
 .repo-file-workspace .code-main {
-  padding: 20px 24px 32px;
+  padding: 20px 20px 32px;
 }
 .repo-file-workspace .breadcrumb {
   min-height: 36px;
@@ -2371,6 +2434,80 @@ main {
   align-items: center;
   gap: 12px;
   min-width: 0;
+}
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+.file-actions > a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  color: var(--fgColor-default);
+  background: var(--button-default-bgColor-rest);
+  border: 1px solid var(--button-default-borderColor-rest);
+  text-decoration: none;
+  font-size: 14px;
+}
+.file-actions > a:first-child {
+  border-radius: var(--borderRadius-medium) 0 0 var(--borderRadius-medium);
+}
+.file-actions > :not(:first-child) {
+  margin-left: -1px;
+}
+.file-actions > a:last-child {
+  width: 34px;
+  padding: 0;
+  border-radius: 0 var(--borderRadius-medium) var(--borderRadius-medium) 0;
+}
+.file-actions > a:hover {
+  background: var(--button-default-bgColor-hover);
+}
+.file-navigation {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(220px, 320px) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  margin-bottom: 16px;
+}
+.file-navigation .breadcrumb {
+  min-width: 0;
+  min-height: 32px;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.file-navigation .breadcrumb > * {
+  flex: none;
+}
+.file-navigation .breadcrumb > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-search-opener {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  color: var(--fgColor-muted);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.file-search-opener span {
+  flex: 1;
+}
+.file-search-opener:hover {
+  background: var(--control-transparent-bgColor-hover);
 }
 .file-metadata {
   font-family: var(--fontStack-monospace);
@@ -2394,6 +2531,18 @@ main {
   }
   .repo-file-workspace .code-main {
     padding: 16px;
+  }
+  .file-navigation {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+  }
+  .file-navigation .file-search-opener {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+  .file-navigation .file-search-opener span,
+  .file-navigation .file-search-opener kbd {
+    display: none;
   }
   .ref-controls:not(.compact) .ref-summary {
     display: none;
@@ -2431,10 +2580,18 @@ main {
   .repo-file-workspace .code-main {
     padding: 0;
   }
+  .repo-file-workspace .breadcrumb {
+    overflow-x: auto;
+    overflow-wrap: normal;
+    white-space: nowrap;
+  }
   .file-view-controls {
     align-items: flex-start;
     flex-direction: column;
     gap: 6px;
+  }
+  .file-panel > .panel-header {
+    align-items: flex-end;
   }
   .file-metadata {
     white-space: normal;

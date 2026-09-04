@@ -751,18 +751,24 @@ of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
 latency guarantee. Forty-four Rust server tests, eight frontend navigation,
-model and Markdown tests, and fifteen Chromium tests passed. Identity integration tests exercise real HTTP redirects and signed
-Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
-and logout CSRF rejection, plus confidential-client secret-file authentication,
-Git token scope and revocation. Thirteen shared wire tests and nineteen remote-helper
-tests cover the extracted framing/parser path and existing helper contracts.
+model and Markdown tests, and sixteen Chromium tests passed. Identity integration
+tests exercise real HTTP redirects and signed Ed25519 tokens, including key
+rotation, replay, invalid claims, outsider access and logout CSRF rejection, plus
+confidential-client secret-file authentication, Git token scope and revocation.
+Thirteen shared wire tests and nineteen remote-helper tests cover the extracted
+framing/parser path and existing helper contracts.
 The local test issuer is not a production identity service. Highlighted source
 and an actual split diff were inspected in browser. The repository file view was
 also compared at 1,512 by 950 pixels with GitHub's current public Crab file view
 and the supplied signed-in GitHub reference. Light, dark and 390-pixel captures
 verify the same repository identity/navigation hierarchy, full-height file pane,
 branch controls, breadcrumbs, latest-commit row and Code/Blame toolbar without
-horizontal page overflow.
+horizontal page overflow. A second supplied GitHub comparison tightened the
+file workspace around a 356-pixel pane, 32-pixel tree rows, GitHub-style folder
+and file icons, compact branch/search controls, segmented path breadcrumbs and
+the matching collapsed navigation row. Direct links now load every ancestor
+from object storage, expand the path, select the active file and center it in
+the virtualized tree. The `T` shortcut focuses file search in either pane state.
 
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue

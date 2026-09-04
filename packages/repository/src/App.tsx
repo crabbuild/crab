@@ -15,7 +15,6 @@ import {
   displayHex,
   endpoint,
   navigate,
-  parentHex,
   repoHref,
   useLocation,
   useRequest,
@@ -27,6 +26,7 @@ import {
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
+import { FileBreadcrumb, FileNavigation } from "./file-navigation";
 import { IssuesWorkspace } from "./issues-navigation";
 import {
   RepositoryRefControls,
@@ -318,13 +318,40 @@ function RepositoryPage({
   const [showTree, setShowTree] = useState(Boolean(path));
   useEffect(() => setShowTree(Boolean(path)), [path]);
   const overview = view === "code" && !path && !showTree;
-  const fileWorkspace = view === "code" && showTree;
+  const fileWorkspace = view === "code" && !overview;
   const issuesView = view === "issues" || view === "labels";
   const issueNavigation =
     view === "labels" || (view === "issues" && !url.searchParams.has("issue"));
   function selectEntry(entry: Entry) {
     navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
   }
+  function focusFileSearch() {
+    setShowTree(true);
+    window.setTimeout(
+      () => document.getElementById("repository-tree-search")?.focus(),
+      0,
+    );
+  }
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        view !== "code" ||
+        event.key.toLowerCase() !== "t" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)))
+      )
+        return;
+      event.preventDefault();
+      focusFileSearch();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  });
   return (
     <>
       <div className="repo-header">
@@ -474,7 +501,7 @@ function RepositoryPage({
                               <Button
                                 size="small"
                                 onClick={() => setShowTree(false)}
-                                aria-label="Browse files"
+                                aria-label="Close file tree"
                                 aria-expanded={true}
                               >
                                 <SidebarCollapseIcon />
@@ -489,54 +516,48 @@ function RepositoryPage({
                                   navigate(repoHref(repo, { rev: name, view }))
                                 }
                                 compact
+                                onSearch={() =>
+                                  document
+                                    .getElementById("repository-tree-search")
+                                    ?.focus()
+                                }
                               />
                             </div>
                             <RepositoryTree
                               key={rev}
                               repo={repo}
                               rev={rev}
+                              activePath={path ? displayHex(path) : undefined}
+                              activePathHex={path || undefined}
                               onSelect={selectEntry}
                             />
                           </aside>
                         )}
                         <div className="code-main">
-                          {!showTree && (
-                            <RepositoryToolbar
-                              repo={repo}
-                              refs={data}
-                              revision={revisionLabel(data, revName ?? rev)}
-                              view={view}
-                              onRefresh={refs.retry}
-                              onBrowse={() => setShowTree(true)}
-                            />
-                          )}
-                          {!overview && (
-                            <div className="breadcrumb">
-                              <Link href={repoHref(repo, { rev })}>
-                                {repo.name}
-                              </Link>
-                              {path && (
-                                <>
-                                  <span>/</span>
-                                  {parentHex(path) && (
-                                    <>
-                                      <Link
-                                        href={repoHref(repo, {
-                                          rev,
-                                          path: parentHex(path),
-                                        })}
-                                      >
-                                        {displayHex(parentHex(path))}
-                                      </Link>
-                                      <span>/</span>
-                                    </>
-                                  )}
-                                  <strong>
-                                    {displayHex(path).split("/").pop()}
-                                  </strong>
-                                </>
-                              )}
-                            </div>
+                          {!showTree &&
+                            (overview ? (
+                              <RepositoryToolbar
+                                repo={repo}
+                                refs={data}
+                                revision={revisionLabel(data, revName ?? rev)}
+                                view={view}
+                                onRefresh={refs.retry}
+                                onBrowse={() => setShowTree(true)}
+                              />
+                            ) : (
+                              <FileNavigation
+                                repo={repo}
+                                refs={data}
+                                revision={revisionLabel(data, revName ?? rev)}
+                                rev={rev}
+                                path={path}
+                                view={view}
+                                onOpenTree={() => setShowTree(true)}
+                                onSearch={focusFileSearch}
+                              />
+                            ))}
+                          {!overview && showTree && (
+                            <FileBreadcrumb repo={repo} rev={rev} path={path} />
                           )}
                           {kind !== "Tree" && (
                             <LatestCommit repo={repo} rev={rev} />
