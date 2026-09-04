@@ -95,6 +95,9 @@ async function openDiscussion(page: Page) {
     page.getByRole("heading", { name: "Keyboard discussion #1" }),
   ).toBeVisible();
   await expect(
+    page.getByRole("complementary", { name: "Issue navigation" }),
+  ).toHaveCount(0);
+  await expect(
     page.getByRole("button", { name: "Edit comment", exact: true }),
   ).toBeVisible();
   return {

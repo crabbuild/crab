@@ -76,6 +76,40 @@ test.beforeEach(async ({ page }) => {
           text: "Hello, team!",
         },
       });
+    if (url.pathname.endsWith("/issues"))
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              number: 42,
+              author: "Alice",
+              body: null,
+              title: "Keep object storage reads bounded",
+              state:
+                url.searchParams.get("state") === "closed" ? "closed" : "open",
+              labels: [
+                {
+                  id: 1,
+                  name: "kind/bug",
+                  color: "d1242f",
+                  description: "Something is not working",
+                  version: 1,
+                  created_at: 1_700_000_000_000,
+                  updated_at: 1_700_000_000_000,
+                },
+              ],
+              assignees: [{ subject: "alice", name: "Alice" }],
+              version: 1,
+              created_at: 1_700_000_000_000,
+              updated_at: 1_700_000_000_000,
+              can_edit: true,
+              can_label: true,
+              can_assign: true,
+            },
+          ],
+          next: null,
+        },
+      });
     return route.fulfill({
       status: 404,
       json: { error: { message: "Fixture route unavailable" } },
@@ -146,6 +180,45 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
   await expect(page.getByLabel("Appearance", { exact: true })).toHaveValue(
     "light",
   );
+});
+
+test("issues follow the GitHub list hierarchy in both themes and on mobile", async ({
+  page,
+}) => {
+  await page.goto("/team/project?view=issues");
+  const navigation = page.getByRole("complementary", {
+    name: "Issue navigation",
+  });
+  await expect(
+    navigation.getByRole("link", { name: "Issues", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "All issues" })).toBeVisible();
+  await expect(page.getByPlaceholder("Search all issues")).toBeVisible();
+  await expect(page.locator(".issue-list-panel")).toContainText(
+    "Keep object storage reads bounded",
+  );
+  await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
+
+  await page.getByRole("link", { name: "Closed", exact: true }).click();
+  await expect(page).toHaveURL(/state=closed/);
+  await expect(
+    page.getByRole("link", { name: "Closed", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  for (const [width, theme] of [
+    [1440, "dark"],
+    [390, "light"],
+  ] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByLabel("Appearance", { exact: true }).selectOption(theme);
+    const geometry = await page.evaluate(() => ({
+      viewport: innerWidth,
+      page: document.documentElement.scrollWidth,
+    }));
+    expect(geometry.page).toBeLessThanOrEqual(geometry.viewport);
+    await expect(navigation).toBeVisible();
+    await expect(page.locator(".issue-list-panel")).toBeVisible();
+  }
 });
 
 test("tag-only repositories browse files without inventing a default branch", async ({

@@ -181,7 +181,6 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
           <h2>Labels</h2>
           <p className="muted">Organize issues and pull requests.</p>
         </div>
-        <Link href={repoHref(repo, { view: "issues" })}>Back to issues</Link>
       </div>
       <Result state={catalog}>
         {(data) => (

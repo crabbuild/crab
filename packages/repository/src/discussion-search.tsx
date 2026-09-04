@@ -37,6 +37,15 @@ export function DiscussionSearch({
           onChange={(event) => setDraft(event.target.value)}
         />
       </div>
+      <Button
+        className="discussion-search-submit"
+        type="submit"
+        size="small"
+        aria-label="Search"
+        title={label}
+      >
+        <SearchIcon />
+      </Button>
       {value && (
         <Button
           type="button"
@@ -49,9 +58,6 @@ export function DiscussionSearch({
           Clear
         </Button>
       )}
-      <Button type="submit" size="small">
-        Search
-      </Button>
     </form>
   );
 }
