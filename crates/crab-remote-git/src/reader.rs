@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_git::pack::VerifiedPackIdentity;
+use crab_git::{delta, pack::VerifiedPackIdentity};
 use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::OperationBudget;
 use crate::pack::PackStreamVerifier;
 use crate::{BudgetDimension, RemoteGitRuntime, RepositoryIdentity};
-use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result, delta};
+use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result};
 
 /// Resource limits applied to one remote Git object read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1109,7 +1109,7 @@ impl RemoteGitReader {
             .runtime
             .spawn_blocking(move || {
                 let parsed = delta::parse(&instructions, maximum)?;
-                delta::apply(&base_data, parsed, &token)
+                delta::apply(&base_data, parsed, || token.is_cancelled())
             })
             .await
             .map_err(|source| Error::DecodeTask { source })?
@@ -2011,7 +2011,7 @@ impl PackedEntryResolver {
                 result_size,
                 max_inflated_bytes,
             )?;
-            let data = delta::apply(&base.data, parsed, cancellation)
+            let data = delta::apply(&base.data, parsed, || cancellation.is_cancelled())
                 .map_err(|error| map_delta_error(error, oid))?;
             added_bytes = added_bytes
                 .checked_add(base_bytes)
@@ -2325,7 +2325,8 @@ fn inspect_entry(
     check_cancelled(cancellation)?;
     let delta =
         delta::parse(&packed.inflated, usize::MAX).map_err(|error| map_delta_error(error, oid))?;
-    delta::validate(&delta, cancellation).map_err(|error| map_delta_error(error, oid))?;
+    delta::validate(&delta, || cancellation.is_cancelled())
+        .map_err(|error| map_delta_error(error, oid))?;
     let base_size = delta.base_size as u64;
     let result_size = delta.result_size as u64;
     match packed.header {

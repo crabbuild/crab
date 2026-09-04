@@ -1,10 +1,12 @@
 //! Low-dependency Git contracts and repository mechanics for Crab.
 
 pub mod batch;
+pub mod delta;
 pub mod discover;
 #[cfg(feature = "facade")]
 pub mod facade;
 pub mod filter_attr_cache;
+pub mod incoming_pack;
 pub mod lfs_pointer;
 pub mod odb_adapter;
 pub mod pack;

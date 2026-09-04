@@ -30,6 +30,9 @@ The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository
   identity and local Git layout;
+- `incoming_pack` for bounded full/thin-pack quarantine, with injected authorized
+  base lookup and automatic private spool cleanup; `delta` for the shared bounded
+  decoder used by incoming packs and remote reads;
 - `pack`, `pack_locator`, `walk`, `odb_adapter`, and `repack` for immutable
   Git objects and pack mechanics;
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
@@ -116,3 +119,19 @@ I/O, cancellation or child-exit failure, and enforce aggregate inventory limits.
 Errors preserve the distinction between malformed Git input, invalid refs,
 pack corruption, and unsupported fetch conditions so higher layers can make a
 user-facing decision without re-parsing error strings.
+
+## Incoming pack boundary
+
+`incoming_pack::quarantine` accepts a reader, an existing temporary directory,
+explicit resource bounds, a cancellation probe and a thin-base lookup. Invoke it
+on a blocking worker. Input reads and base lookups need caller-owned deadlines;
+base lookup must authorize access before returning bounded object bytes. The
+returned `IncomingPack` retains decoded objects in a private spool, exposes exact
+object IDs/kinds/bytes, and removes its files when dropped.
+
+This is an integrity boundary, not a Git publisher. It validates the complete pack
+checksum, compressed streams, entry framing and delta reconstruction. Callers
+must separately validate object syntax, graph connectivity, pointer dependencies
+and ref policy, and publish metadata under the existing writer fences. Storage
+credentials, canonical writes and receive-pack protocol responses belong above
+this crate. HTTP push remains unavailable until those layers are implemented.
