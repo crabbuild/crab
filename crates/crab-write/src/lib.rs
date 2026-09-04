@@ -6,6 +6,8 @@ pub mod journal;
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    #[error("generation {generation} has no verified Git visibility proof")]
+    VisibilityUnavailable { generation: u64 },
     #[error("ref {ref_name} no longer matches its expected old value at {path}")]
     RefChanged { ref_name: String, path: String },
     #[error("publication coordination failed")]
