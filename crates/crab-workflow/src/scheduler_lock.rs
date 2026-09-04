@@ -21,8 +21,9 @@
 //!
 //! # Drop behavior
 //!
-//! On drop the `File` handle is closed; the kernel releases the
-//! advisory flock automatically. The lockfile is deliberately
+//! On drop the guard explicitly unlocks before closing its handle,
+//! so a descriptor inherited by a concurrent fork cannot prolong ownership.
+//! The lockfile is deliberately
 //! retained so a waiter cannot acquire the inode and then have its
 //! pathname unlinked by the previous holder. The next holder
 //! overwrites the diagnostic PID before returning.
@@ -59,7 +60,7 @@ const POLL_MULTIPLIER: u32 = 2;
 ///
 /// Holding this value means the current process is the sole
 /// scheduler running against the target `workflow_root`. Dropping
-/// it releases the advisory lock (via closing the file descriptor)
+/// it releases the advisory lock before closing the file descriptor
 /// while retaining the lockfile for the next holder to reuse.
 ///
 /// Does NOT implement `Clone` or `Copy` — the lock is exclusive by
@@ -67,7 +68,7 @@ const POLL_MULTIPLIER: u32 = 2;
 #[must_use = "dropping the lock releases it; bind to a variable to hold the lock"]
 #[derive(Debug)]
 pub struct SchedulerLock {
-    /// Held for the lifetime of the guard. Closing this fd releases
+    /// Held for the lifetime of the guard. Dropping the guard releases
     /// the flock; we keep it private so callers can't accidentally
     /// drop it independently of the guard.
     file: Option<File>,
@@ -195,10 +196,14 @@ impl Drop for SchedulerLock {
         #[cfg(windows)]
         remove_pid_sidecar(&pid_path, &self.path);
 
-        // Close the fd so the kernel drops the flock. Keep the
-        // lockfile in place: removing it after release can unlink a
-        // new holder's pathname.
-        self.file.take();
+        // A concurrent fork may retain the open-file description until exec.
+        // Release this guard's ownership explicitly; closing only its copy can
+        // otherwise leave a completed workflow blocking the next invocation.
+        if let Some(file) = self.file.take()
+            && let Err(error) = LockFileExt::unlock(&file)
+        {
+            warn!(path = %self.path.display(), %error, "workflow scheduler unlock failed");
+        }
     }
 }
 
@@ -354,6 +359,22 @@ mod tests {
 
         // Re-acquire: should succeed.
         let _next = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_releases_lock_with_a_duplicated_descriptor() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workflow");
+        let guard = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        // A concurrent fork can retain this open-file description until exec,
+        // even though the descriptor is close-on-exec. Model it without timing.
+        let duplicate = guard.file.as_ref().unwrap().try_clone().unwrap();
+        drop(guard);
+        let next = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        drop(duplicate);
+        assert!(SchedulerLock::try_acquire(&root).unwrap().is_none());
+        drop(next);
     }
 
     // --- Two-tokio-task contention tests ---

@@ -107,6 +107,31 @@ creating a second implementation roadmap:
 Stop at the source-compatibility or environment boundary when its required
 decision/access is absent; independent mitigation and verification can proceed.
 
+**Native workflow gate finding:** macOS job `100937841297` in run
+`33845974873` fails immediate scheduler-lock reacquisition after guard drop
+(693 other tests pass). `scheduler_lock.rs` is identical on `origin/main`.
+A deterministic new Unix test duplicates the held descriptor, drops the guard,
+and reproduces `WorkflowLockTimeout`; this proves a release defect, not the
+exact untraced CI interleaving. fs4 0.13.1 delegates Unix locks to `flock` and
+provides explicit `unlock`; a duplicate can retain the open-file description
+across close. The guard now unlocks before closing; Windows PID-sidecar removal
+still precedes release. Existing immediate-reacquisition assertions are not
+relaxed. The new test also verifies that dropping the old duplicate cannot
+release the next guard's lock.
+
+Owner/caller map: single-stage, named-stage and DAG `crab run` plus workflow
+journal GC all use `SchedulerLock`. The lockfile remains linked; no unlink,
+timeout increase, dependency patch or alternate lock path is added. Is this
+the best fix? Explicit owner release addresses the descriptor lifetime rather
+than making a no-wait caller sleep. Staging's exclusive/shared lock owners
+also depend on descriptor close, but couple that release to index/writer
+teardown; audit and prove that separate ordering before applying a similar
+change. This checkpoint does not claim all flock owners are hardened. The
+large-file matrix continues to use installed `41e74b1` (unchanged cache/read
+code); it is not execution evidence for this later workflow-only fix.
+All 12 focused scheduler-lock tests pass after the change; installed workflow
+and fresh cross-platform CI proof are still required.
+
 ### 10/20 GiB expansion: case-insensitive range-cache maintenance gap
 
 The 1 GiB passing matrix is not scale proof. The user's larger-file expansion
