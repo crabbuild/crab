@@ -1244,7 +1244,7 @@ impl RemoteGitReader {
     }
 
     async fn read_packed_entry(
-        &self,
+        self: &Arc<Self>,
         oid: gix_hash::ObjectId,
         locator: GitObjectLocator,
         max_object_bytes: u64,
@@ -1270,6 +1270,7 @@ impl RemoteGitReader {
         let work_runtime = Arc::clone(&self.runtime);
         let cache_key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
         let work_cache_key = cache_key.clone();
+        let reader = Arc::clone(self);
         let max_inflated = self.limits.max_inflated_entry_bytes;
         let pack_offset = locator.location.pack_offset;
         let entry_len = locator.location.entry_len;
@@ -1282,6 +1283,24 @@ impl RemoteGitReader {
                 max_object_bytes,
                 cancellation,
                 move |shared_cancellation| async move {
+                    // An earlier flight can populate the cache while this caller
+                    // waits for lookup/admission. Recheck before another origin read.
+                    if let Some(object) = reader
+                        .verified_cached_object(&work_cache_key, max_object_bytes)
+                        .await?
+                    {
+                        let header = match object.kind {
+                            gix_object::Kind::Commit => Header::Commit,
+                            gix_object::Kind::Tree => Header::Tree,
+                            gix_object::Kind::Blob => Header::Blob,
+                            gix_object::Kind::Tag => Header::Tag,
+                        };
+                        return Ok(PackedEntry {
+                            header,
+                            inflated: object.data.clone(),
+                            charged_budget: None,
+                        });
+                    }
                     let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
                     let bytes = tokio::select! {
                         biased;
@@ -1485,8 +1504,7 @@ impl RemoteGitReader {
             let store = self.store.clone();
             let path = path.clone();
             let work_runtime = Arc::clone(&self.runtime);
-            let source_size = self
-                .runtime
+            self.runtime
                 .load_pack_index_size_singleflight(
                     cache_key.clone(),
                     cancellation,
@@ -1502,11 +1520,7 @@ impl RemoteGitReader {
                         Ok(metadata.size)
                     },
                 )
-                .await?;
-            self.runtime
-                .insert_pack_index_source_size(cache_key.clone(), source_size)
-                .await;
-            source_size
+                .await?
         };
         check_limit(
             "pack index bytes",
@@ -2659,6 +2673,142 @@ mod tests {
             .expect_err("corrupt cache entry must fail");
         assert!(matches!(error, Error::CacheCorrupt { .. }));
         assert!(runtime.cached_object(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_packed_read_rechecks_verified_cache_and_caller_limits() {
+        for scenario in ["valid", "corrupt", "object_limit", "budget_limit"] {
+            let runtime = Arc::new(
+                RemoteGitRuntime::new(
+                    crate::RuntimeOptions {
+                        max_object_flights: 1,
+                        ..Default::default()
+                    },
+                    Arc::new(crate::NoopMetrics),
+                )
+                .unwrap(),
+            );
+            let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let blocker_runtime = Arc::clone(&runtime);
+            let blocker_started = Arc::clone(&started);
+            let blocker_release = Arc::clone(&release);
+            let blocker_key = crate::runtime::ObjectCacheKey::new(
+                &identity,
+                1,
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            );
+            let blocker = tokio::spawn(async move {
+                blocker_runtime
+                    .read_packed_singleflight(
+                        blocker_key,
+                        1024,
+                        1024,
+                        &CancellationToken::new(),
+                        move |_| async move {
+                            blocker_started.notify_one();
+                            blocker_release.notified().await;
+                            Ok(PackedEntry {
+                                header: Header::Tree,
+                                inflated: Bytes::new(),
+                                charged_budget: None,
+                            })
+                        },
+                    )
+                    .await
+            });
+            started.notified().await;
+            let reader = Arc::new(
+                RemoteGitReader::from_pinned(
+                    Store::new(Arc::new(InMemory::new())),
+                    "repository",
+                    [],
+                    ReaderLimits::default(),
+                    Arc::clone(&runtime),
+                    identity.clone(),
+                    1,
+                )
+                .unwrap(),
+            );
+            let data = Bytes::from_static(b"cached base");
+            let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, &data)
+                .unwrap();
+            let key = crate::runtime::ObjectCacheKey::new(&identity, 1, oid);
+            let budget = OperationBudget::new(
+                crate::OperationLimits {
+                    max_inflated_bytes: if scenario == "budget_limit" { 1 } else { 1024 },
+                    ..Default::default()
+                },
+                Arc::clone(&runtime),
+                1,
+            );
+            let cancel = CancellationToken::new();
+            let read = reader.read_packed_entry(
+                oid,
+                GitObjectLocator {
+                    ordinal: 0,
+                    pack_id: MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+                    location: GitObjectLocation {
+                        pack_offset: 12,
+                        entry_len: 20,
+                        crc32: 0,
+                    },
+                    metadata: Default::default(),
+                },
+                if scenario == "object_limit" { 1 } else { 1024 },
+                &budget,
+                &cancel,
+            );
+            tokio::pin!(read);
+            assert!(futures_util::poll!(read.as_mut()).is_pending());
+            // The object arrives after the caller missed it and queued for admission.
+            runtime
+                .insert_object(
+                    key.clone(),
+                    Arc::new(GitObject {
+                        oid,
+                        kind: gix_object::Kind::Blob,
+                        data: if scenario == "corrupt" {
+                            Bytes::from_static(b"corrupt")
+                        } else {
+                            data.clone()
+                        },
+                    }),
+                )
+                .await;
+            release.notify_one();
+            blocker.await.unwrap().unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+                .await
+                .unwrap();
+            if scenario == "valid" {
+                let packed = result.unwrap();
+                assert_eq!((packed.header, packed.inflated), (Header::Blob, data));
+            } else {
+                let error = result.err().unwrap();
+                let mut error = &error;
+                while let Error::SharedRead { source } = error {
+                    error = source;
+                }
+                match scenario {
+                    "corrupt" => {
+                        assert!(matches!(error, Error::CacheCorrupt { .. }));
+                        assert!(runtime.cached_object(&key).await.is_none());
+                    }
+                    "object_limit" => assert!(matches!(
+                        error,
+                        Error::LimitExceeded {
+                            limit: "decoded object bytes",
+                            ..
+                        }
+                    )),
+                    "budget_limit" => assert!(matches!(error, Error::LimitExceeded { .. })),
+                    _ => unreachable!(),
+                }
+            }
+            runtime.shutdown().await;
+        }
     }
 
     #[test]
