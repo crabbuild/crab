@@ -205,6 +205,34 @@ jobs:
             echo "No managed OpenAPI baseline exists on ${base_ref}; accepting the initial contract."
           fi
 
+  repository-ui:
+    name: Repository browser interactions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.rust == 'true'
+    defaults:
+      run:
+        working-directory: packages/repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm run test:browser
+      - name: Retain failed browser traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-browser-failures
+          path: packages/repository/node_modules/.cache/browser-tests
+          include-hidden-files: true
+
   web:
     name: Web quality and tests
     runs-on: ubuntu-latest

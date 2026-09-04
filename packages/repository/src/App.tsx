@@ -47,6 +47,10 @@ type Theme = "light" | "dark" | "auto";
 
 export function App() {
   const location = useLocation();
+  useEffect(() => {
+    if (document.activeElement === document.body)
+      document.getElementById("main")?.focus();
+  }, [location]);
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = localStorage.getItem("crab-theme");
     return saved === "light" || saved === "dark" ? saved : "auto";
