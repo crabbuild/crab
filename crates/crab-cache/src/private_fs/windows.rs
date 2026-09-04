@@ -19,11 +19,11 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
     GetLengthSid, GetSecurityDescriptorDacl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SetFileSecurityW, TOKEN_QUERY,
-    TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    CreateDirectoryW, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileDispositionInfoEx, FileIdInfo, FileStandardInfo,
@@ -72,14 +72,43 @@ pub(super) struct Directory {
 impl Directory {
     pub(super) fn root(path: &Path, create: bool) -> Result<Self> {
         let absolute = std::path::absolute(path)?;
-        if create {
-            create_private_directories(&absolute)?;
+        let mut current = PathBuf::new();
+        let mut chain = Vec::new();
+        for component in absolute.components() {
+            match component {
+                Component::Prefix(_) => current.push(component.as_os_str()),
+                Component::RootDir => {
+                    current.push(component.as_os_str());
+                    chain.push(Arc::new(open_validated_directory(&current)?));
+                }
+                Component::Normal(name) => {
+                    current.push(name);
+                    let file = match open_validated_directory(&current) {
+                        Ok(file) => file,
+                        Err(CacheError::Io(error))
+                            if create && error.kind() == io::ErrorKind::NotFound =>
+                        {
+                            create_private_directory(&current)?;
+                            open_validated_directory(&current)?
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    chain.push(Arc::new(file));
+                }
+                Component::CurDir | Component::ParentDir => {
+                    return Err(unsafe_path(
+                        &absolute,
+                        "cache root contains an unsafe path component",
+                    ));
+                }
+            }
         }
-        let file = open_directory(&absolute)?;
-        validate_handle(&file, &absolute, true)?;
-        validate_private_acl(&file, &absolute)?;
+        let file = chain
+            .last()
+            .ok_or_else(|| unsafe_path(&absolute, "cache root has no directory component"))?;
+        validate_private_acl(file, &absolute)?;
         Ok(Self {
-            chain: Arc::new(vec![Arc::new(file)]),
+            chain: Arc::new(chain),
             path: absolute,
         })
     }
@@ -97,14 +126,13 @@ impl Directory {
         component_name(name)?;
         let path = self.path.join(name);
         if create {
-            match std::fs::create_dir(&path) {
-                Ok(()) => apply_private_acl(&path)?,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error.into()),
+            match create_private_directory(&path) {
+                Ok(()) => {}
+                Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
             }
         }
-        let file = open_directory(&path)?;
-        validate_handle(&file, &path, true)?;
+        let file = open_validated_directory(&path)?;
         validate_private_acl(&file, &path)?;
         let mut chain = self.chain.as_ref().clone();
         chain.push(Arc::new(file));
@@ -347,6 +375,12 @@ fn open_directory(path: &Path) -> Result<File> {
     Ok(options.open(path)?)
 }
 
+fn open_validated_directory(path: &Path) -> Result<File> {
+    let file = open_directory(path)?;
+    validate_handle(&file, path, true)?;
+    Ok(file)
+}
+
 fn open_file(path: &Path, create: bool, exclusive: bool, share: u32) -> Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -450,21 +484,6 @@ fn delete_handle(file: &File) -> Result<()> {
         Err(io::Error::last_os_error().into())
     } else {
         Ok(())
-    }
-}
-
-fn create_private_directories(path: &Path) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| unsafe_path(path, "missing cache parent"))?;
-    create_private_directories(parent)?;
-    match std::fs::create_dir(path) {
-        Ok(()) => apply_private_acl(path),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -613,7 +632,7 @@ impl Drop for LocalDescriptor {
     }
 }
 
-fn apply_private_acl(path: &Path) -> Result<()> {
+fn private_descriptor() -> Result<LocalDescriptor> {
     let user = current_user_sid()?;
     let mut sid_string = ptr::null_mut();
     // SAFETY: the copied current-user SID is valid and output is LocalAlloc-owned.
@@ -642,20 +661,24 @@ fn apply_private_acl(path: &Path) -> Result<()> {
     {
         return Err(io::Error::last_os_error().into());
     }
-    let descriptor = LocalDescriptor(descriptor);
+    Ok(LocalDescriptor(descriptor))
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    let descriptor = private_descriptor()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
     let path = wide(path);
-    // SAFETY: the path and descriptor remain live for the synchronous call.
-    if unsafe {
-        SetFileSecurityW(
-            path.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor.0,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error().into());
+    // SAFETY: path, attributes, and the protected descriptor remain live for
+    // the synchronous creation call.
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        Err(io::Error::last_os_error().into())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 struct LocalWide(*mut u16);
