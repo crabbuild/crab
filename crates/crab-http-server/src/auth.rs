@@ -141,6 +141,7 @@ impl Principal {
     pub(crate) fn identity(&self) -> Option<Identity> {
         match self {
             Self::User(session) if session.active() => Some(session.identity.clone()),
+            Self::Git(token) if token.active() => Some(token.session.identity.clone()),
             Self::Local => Some(Identity {
                 issuer: "urn:crab:local".into(),
                 subject: "operator".into(),

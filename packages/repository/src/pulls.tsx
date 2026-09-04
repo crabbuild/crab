@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@primer/react";
 import {
   CheckCircleFillIcon,
+  ClockIcon,
   CodeReviewIcon,
   CommentIcon,
   GitMergeIcon,
@@ -81,6 +82,15 @@ interface PullRequest extends PullSummary {
     required_approvals: number;
     approvals: number;
     changes_requested: number;
+    checks_satisfied: boolean;
+    checks: Array<{
+      context: string;
+      state: "error" | "failure" | "pending" | "success" | null;
+      description: string | null;
+      target_url: string | null;
+      author: string | null;
+      updated_at: number | null;
+    }>;
     satisfied: boolean;
   };
 }
@@ -660,6 +670,10 @@ function MergePanel({
   const protection = repo.protected_branches.find(
     (rule) => rule.branch === branch(pull.base_ref),
   );
+  const reviewsSatisfied =
+    requirements.required_approvals === 0 ||
+    (requirements.changes_requested === 0 &&
+      requirements.approvals >= requirements.required_approvals);
   if (pull.merge)
     return (
       <>
@@ -720,6 +734,7 @@ function MergePanel({
             </span>
           </p>
         )}
+        <RequiredChecks requirements={requirements} refresh={refresh} />
         {pull.can_merge ? (
           <Button
             variant="primary"
@@ -755,7 +770,7 @@ function MergePanel({
                 ? "Retry merge"
                 : "Merge pull request"}
           </Button>
-        ) : repo.access === "write" ? (
+        ) : repo.access === "write" && !reviewsSatisfied ? (
           <p className="merge-blocked-note">
             <XCircleFillIcon />
             <span>
@@ -764,12 +779,85 @@ function MergePanel({
                 : `${Math.max(0, requirements.required_approvals - requirements.approvals)} more approving review${requirements.required_approvals - requirements.approvals === 1 ? " is" : "s are"} required.`}
             </span>
           </p>
-        ) : (
+        ) : repo.access === "read" ? (
           <p className="muted">Write access is required to merge.</p>
-        )}
+        ) : null}
         <Failure message={mutation.error} />
       </div>
     </>
+  );
+}
+
+function RequiredChecks({
+  requirements,
+  refresh,
+}: {
+  requirements: PullRequest["merge_requirements"];
+  refresh: () => void;
+}) {
+  if (!requirements.checks.length) return null;
+  const unsuccessful = requirements.checks.some(
+    (check) => check.state === "error" || check.state === "failure",
+  );
+  const waiting = requirements.checks.some(
+    (check) => check.state === null || check.state === "pending",
+  );
+  const SummaryIcon = unsuccessful
+    ? XCircleFillIcon
+    : waiting
+      ? ClockIcon
+      : CheckCircleFillIcon;
+  return (
+    <div
+      className={`required-checks ${unsuccessful ? "failure" : waiting ? "pending" : "success"}`}
+    >
+      <div className="required-checks-summary">
+        <SummaryIcon />
+        <strong>
+          {unsuccessful
+            ? "Some required checks were not successful"
+            : waiting
+              ? "Required checks are waiting"
+              : "All required checks have passed"}
+        </strong>
+        <Button size="small" onClick={refresh}>
+          Refresh checks
+        </Button>
+      </div>
+      <ul>
+        {requirements.checks.map((check) => {
+          const CheckIcon =
+            check.state === "success"
+              ? CheckCircleFillIcon
+              : check.state === "failure" || check.state === "error"
+                ? XCircleFillIcon
+                : ClockIcon;
+          return (
+            <li key={check.context} className={check.state ?? "expected"}>
+              <CheckIcon />
+              <span>
+                <strong>{check.context}</strong>
+                <small>
+                  {check.description ??
+                    (check.state === null
+                      ? "Expected — Waiting for status to be reported."
+                      : check.state === "pending"
+                        ? "In progress"
+                        : check.state === "success"
+                          ? "Successful"
+                          : "Unsuccessful")}
+                </small>
+              </span>
+              {check.target_url && (
+                <a href={check.target_url} target="_blank" rel="noreferrer">
+                  Details
+                </a>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

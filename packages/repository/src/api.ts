@@ -12,7 +12,11 @@ export interface Repository {
   name: string;
   description: string;
   access: "read" | "write";
-  protected_branches: Array<{ branch: string; required_approvals: number }>;
+  protected_branches: Array<{
+    branch: string;
+    required_approvals: number;
+    required_checks: string[];
+  }>;
 }
 export interface Ref {
   name: string;

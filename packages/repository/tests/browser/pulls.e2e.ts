@@ -15,6 +15,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   let branchesAvailable = true;
   let mergePending = false;
   let mergeRequest = "";
+  let checkState: "success" | null = null;
   const comments: Array<Record<string, unknown>> = [];
   const reviews: Array<Record<string, unknown>> = [];
   const pull = () => {
@@ -39,14 +40,28 @@ test("pull request creation, discussion, and files follow the GitHub review flow
       can_decide: true,
       can_merge:
         state === "open" &&
-        (mergePending || (branchesAvailable && approvals >= 1)),
+        (mergePending ||
+          (branchesAvailable && approvals >= 1 && checkState === "success")),
       branches_available: state === "merged" || branchesAvailable,
       merge_requirements: {
         protected: true,
         required_approvals: 1,
         approvals,
         changes_requested: 0,
-        satisfied: approvals >= 1,
+        checks_satisfied: checkState === "success",
+        checks: [
+          {
+            context: "ci/test",
+            state: checkState,
+            description:
+              checkState === "success" ? "Tests passed in 42s" : null,
+            target_url:
+              checkState === "success" ? "https://ci.example.test/42" : null,
+            author: checkState === "success" ? "CI service" : null,
+            updated_at: checkState === "success" ? 1_700_000_040_000 : null,
+          },
+        ],
+        satisfied: approvals >= 1 && checkState === "success",
       },
       merge:
         state === "merged"
@@ -87,7 +102,13 @@ test("pull request creation, discussion, and files follow the GitHub review flow
               name: "project",
               description: "A repository for our team.",
               access: "write",
-              protected_branches: [{ branch: "main", required_approvals: 1 }],
+              protected_branches: [
+                {
+                  branch: "main",
+                  required_approvals: 1,
+                  required_checks: ["ci/test"],
+                },
+              ],
             },
           ],
         },
@@ -185,6 +206,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     }
     if (/\/pulls\/\d+\/reviews$/.test(path)) {
       if (request.method() === "POST") {
+        checkState = "success";
         reviews.push({
           number: 1,
           author: "Bob",
@@ -269,6 +291,12 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-merge-note")).toContainText(
     "1 more approving review is required",
   );
+  await expect(page.locator(".required-checks")).toContainText(
+    "Required checks are waiting",
+  );
+  await expect(page.locator(".required-checks")).toContainText(
+    "Expected — Waiting for status to be reported.",
+  );
   await expect(
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toHaveCount(0);
@@ -285,6 +313,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await page.getByRole("button", { name: "Submit review" }).click();
   await expect(page.locator(".review-event")).toContainText(
     "Bob approved these changes",
+  );
+  await expect(page.locator(".required-checks")).toContainText(
+    "All required checks have passed",
   );
   await expect(
     page.getByRole("button", { name: "Merge pull request", exact: true }),

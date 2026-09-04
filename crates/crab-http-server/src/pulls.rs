@@ -18,7 +18,8 @@ use crate::{
     app::{self, Error, Result},
     app_storage,
     auth::{Identity, Principal},
-    server::Server,
+    server::{Repository, Server},
+    statuses::{self, CommitStatus, StatusState},
 };
 
 mod merge;
@@ -47,13 +48,13 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
-fn pull_view(
+async fn pull_view(
     pull: &PullRequest,
     actor: &Identity,
-    config: &RepositoryConfig,
+    repo: &Repository,
     can_write: bool,
     current: Option<&(String, String)>,
-) -> Value {
+) -> Result<Value> {
     let base_oid = pull.merge.as_ref().map_or_else(
         || current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
         |merge| merge.base_oid.as_str(),
@@ -63,8 +64,12 @@ fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
-    let requirements = merge_requirements(pull, config, head_oid);
-    json!({
+    let statuses = match repo.config.protection(&pull.base_ref) {
+        Some(rule) if !rule.required_checks.is_empty() => statuses::latest(repo, head_oid).await?,
+        _ => vec![],
+    };
+    let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses);
+    Ok(json!({
         "number": pull.number,
         "title": pull.title,
         "body": pull.body,
@@ -96,6 +101,15 @@ fn pull_view(
             "required_approvals": requirements.required_approvals,
             "approvals": requirements.approvals,
             "changes_requested": requirements.changes_requested,
+            "checks_satisfied": requirements.checks_satisfied,
+            "checks": requirements.checks.iter().map(|check| json!({
+                "context": check.context,
+                "state": check.state,
+                "description": check.description,
+                "target_url": check.target_url,
+                "author": check.author,
+                "updated_at": check.updated_at,
+            })).collect::<Vec<_>>(),
             "satisfied": requirements.satisfied,
         },
         "merge": pull.merge.as_ref().map(|merge| json!({
@@ -113,7 +127,7 @@ fn pull_view(
             "head_oid": merge.head_oid,
             "created_at": merge.created_at,
         })),
-    })
+    }))
 }
 
 struct MergeRequirements {
@@ -121,13 +135,25 @@ struct MergeRequirements {
     required_approvals: usize,
     approvals: usize,
     changes_requested: usize,
+    checks_satisfied: bool,
+    checks: Vec<RequiredCheck>,
     satisfied: bool,
+}
+
+struct RequiredCheck {
+    context: String,
+    state: Option<StatusState>,
+    description: Option<String>,
+    target_url: Option<String>,
+    author: Option<String>,
+    updated_at: Option<u64>,
 }
 
 fn merge_requirements(
     pull: &PullRequest,
     config: &RepositoryConfig,
     head_oid: &str,
+    statuses: &[CommitStatus],
 ) -> MergeRequirements {
     let Some(rule) = config.protection(&pull.base_ref) else {
         return MergeRequirements {
@@ -135,6 +161,8 @@ fn merge_requirements(
             required_approvals: 0,
             approvals: 0,
             changes_requested: 0,
+            checks_satisfied: true,
+            checks: vec![],
             satisfied: true,
         };
     };
@@ -151,13 +179,36 @@ fn merge_requirements(
         }
     }
     let required_approvals = usize::from(rule.required_approvals);
+    let checks = rule
+        .required_checks
+        .iter()
+        .map(|context| {
+            let status = statuses
+                .iter()
+                .find(|status| statuses::same_context(&status.context, context));
+            RequiredCheck {
+                context: context.clone(),
+                state: status.map(|status| status.state),
+                description: status.and_then(|status| status.description.clone()),
+                target_url: status.and_then(|status| status.target_url.clone()),
+                author: status.map(|status| status.author.name.clone()),
+                updated_at: status.map(|status| status.created_at),
+            }
+        })
+        .collect::<Vec<_>>();
+    let checks_satisfied = checks
+        .iter()
+        .all(|check| check.state == Some(StatusState::Success));
+    let reviews_satisfied =
+        required_approvals == 0 || (changes_requested == 0 && approvals >= required_approvals);
     MergeRequirements {
         protected: true,
         required_approvals,
         approvals,
         changes_requested,
-        satisfied: required_approvals == 0
-            || (changes_requested == 0 && approvals >= required_approvals),
+        checks_satisfied,
+        checks,
+        satisfied: reviews_satisfied && checks_satisfied,
     }
 }
 
@@ -350,13 +401,16 @@ async fn create(
             .and_then(|repository| current_branches(repository, &pull));
         return Ok((
             StatusCode::CREATED,
-            Json(pull_view(
-                &pull,
-                &actor,
-                &repo.config,
-                principal.can_write(&repo.config),
-                current.as_ref(),
-            )),
+            Json(
+                pull_view(
+                    &pull,
+                    &actor,
+                    repo,
+                    principal.can_write(&repo.config),
+                    current.as_ref(),
+                )
+                .await?,
+            ),
         ));
     }
     let repository = repo
@@ -384,13 +438,16 @@ async fn create(
     let current = current_branches(&repository, &pull);
     Ok((
         StatusCode::CREATED,
-        Json(pull_view(
-            &pull,
-            &actor,
-            &repo.config,
-            principal.can_write(&repo.config),
-            current.as_ref(),
-        )),
+        Json(
+            pull_view(
+                &pull,
+                &actor,
+                repo,
+                principal.can_write(&repo.config),
+                current.as_ref(),
+            )
+            .await?,
+        ),
     ))
 }
 
@@ -411,13 +468,16 @@ async fn detail(
     let current = repository
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
-    Ok(Json(pull_view(
-        &pull,
-        &actor,
-        &repo.config,
-        principal.can_write(&repo.config),
-        current.as_ref(),
-    )))
+    Ok(Json(
+        pull_view(
+            &pull,
+            &actor,
+            repo,
+            principal.can_write(&repo.config),
+            current.as_ref(),
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -485,13 +545,16 @@ async fn edit(
     let current = repository
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
-    Ok(Json(pull_view(
-        &pull,
-        &actor,
-        &repo.config,
-        principal.can_write(&repo.config),
-        current.as_ref(),
-    )))
+    Ok(Json(
+        pull_view(
+            &pull,
+            &actor,
+            repo,
+            principal.can_write(&repo.config),
+            current.as_ref(),
+        )
+        .await?,
+    ))
 }
 
 async fn comments(

@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git, issues, lfs, maintenance, pulls, receive,
+    git, issues, lfs, maintenance, pulls, receive, statuses,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -227,6 +227,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .merge(issues::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))
+        .merge(statuses::routes(Arc::clone(&server)))
         .route(
             "/git/{owner}/{name}/info/lfs/objects/batch",
             post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
@@ -302,8 +303,10 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
         return StatusCode::FORBIDDEN.into_response();
     }
     let git_request = request.uri().path().starts_with("/git/");
+    let status_request = status_api_path(request.uri().path());
+    let token_request = status_request && request.headers().contains_key("authorization");
     let principal = match &server.auth {
-        Some(auth) if git_request => auth.git_principal(request.headers()).await,
+        Some(auth) if git_request || token_request => auth.git_principal(request.headers()).await,
         Some(auth) => auth.principal(request.headers()).await,
         None => Principal::Local,
     };
@@ -316,6 +319,7 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
     );
     let rejected_mutation = !git_request
         && unsafe_method
+        && !matches!(principal, Principal::Git(_))
         && server
             .auth
             .as_ref()
@@ -351,6 +355,26 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
     ).into_response()
 }
 
+fn status_api_path(path: &str) -> bool {
+    let mut segments = path.split('/');
+    segments.next() == Some("")
+        && segments.next() == Some("api")
+        && segments.next() == Some("repos")
+        && segments.next().is_some_and(|value| !value.is_empty())
+        && segments.next().is_some_and(|value| !value.is_empty())
+        && match segments.next() {
+            Some("statuses") => {
+                segments.next().is_some_and(|value| !value.is_empty()) && segments.next().is_none()
+            }
+            Some("commits") => {
+                segments.next().is_some_and(|value| !value.is_empty())
+                    && segments.next() == Some("status")
+                    && segments.next().is_none()
+            }
+            _ => false,
+        }
+}
+
 #[cfg(test)]
 #[path = "maintenance_tests.rs"]
 mod maintenance_tests;
@@ -361,6 +385,25 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn repository_tokens_are_only_considered_on_exact_status_routes() {
+        assert!(status_api_path(
+            "/api/repos/team/repo/statuses/0123456789012345678901234567890123456789"
+        ));
+        assert!(status_api_path(
+            "/api/repos/team/repo/commits/0123456789012345678901234567890123456789/status"
+        ));
+        for path in [
+            "/api/repos/team/repo/pulls/1",
+            "/api/repos/team/repo/statuses/oid/extra",
+            "/api/repos/team/repo/commits/oid/statuses",
+            "/api/repos//repo/commits/oid/statuses",
+            "/api/repos/team/repo/commits//statuses",
+        ] {
+            assert!(!status_api_path(path), "{path}");
+        }
+    }
 
     #[tokio::test]
     async fn transport_enforces_host_and_preserves_asset_cache_policy() {

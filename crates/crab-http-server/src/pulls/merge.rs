@@ -19,6 +19,7 @@ use crate::{
     auth::Principal,
     receive::{self, ReceiveError},
     server::Server,
+    statuses,
 };
 use storage::{MergeMethod, NewPullMerge, PullMerge, PullRequest, PullState};
 
@@ -138,13 +139,14 @@ async fn finish(
         }
     }
     let pull = storage::complete_merge(repo, pull.number, record).await?;
-    Ok(pull_view(
+    pull_view(
         &pull,
         &app::actor(principal)?,
-        &repo.config,
+        repo,
         principal.can_write(&repo.config),
         None,
-    ))
+    )
+    .await
 }
 
 async fn execute(
@@ -178,13 +180,7 @@ async fn execute(
         }
         return Ok((
             StatusCode::OK,
-            Json(pull_view(
-                &pull,
-                &candidate.author,
-                &repo.config,
-                true,
-                None,
-            )),
+            Json(pull_view(&pull, &candidate.author, repo, true, None).await?),
         ));
     }
     if let Some(record) = &pull.merge_pending {
@@ -213,7 +209,15 @@ async fn execute(
     {
         return Err(Error::MergeConflict);
     }
-    if !merge_requirements(&pull, &repo.config, &candidate.head_oid).satisfied {
+    // This read orders merge admission before any later status update. Once the
+    // merge reservation exists, retries recover that admitted publication.
+    let statuses = match repo.config.protection(&pull.base_ref) {
+        Some(rule) if !rule.required_checks.is_empty() => {
+            statuses::latest(repo, &candidate.head_oid).await?
+        }
+        _ => vec![],
+    };
+    if !merge_requirements(&pull, &repo.config, &candidate.head_oid, &statuses).satisfied {
         return Err(Error::MergeBlocked);
     }
     let record = storage::reserve_merge(repo, id, &candidate).await?;
