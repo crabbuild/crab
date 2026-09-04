@@ -223,10 +223,10 @@ writers, guessed descriptor-less reads, or silent fallback.
 
 ```text
 Git / Crab CLI
-    |-- direct repository: scoped cloud identity ---------------------.
-    |                                                               |
+    |-- direct repository: scoped cloud identity --------------------.
+    |                                                                |
     `-- managed repository: identity + policy API                    |
-            |-- repository catalog / membership / audit             |
+            |-- repository catalog / membership / audit              |
             |-- read grant ------------------------------------------+--> object storage
             `-- protected push session --> verifier/finalizer helper-'
 
