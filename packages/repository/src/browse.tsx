@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "@primer/react";
-import { FileDirectoryIcon, FileIcon } from "@primer/octicons-react";
+import { FileDirectoryFillIcon, FileIcon } from "@primer/octicons-react";
 import {
   endpoint,
   repoHref,
@@ -17,11 +17,13 @@ export function Directory({
   rev,
   path,
   onEntry,
+  header,
 }: {
   repo: Repository;
   rev: string;
   path: string;
   onEntry: (entry: Entry) => void;
+  header: ReactNode;
 }) {
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursors[cursors.length - 1];
@@ -31,16 +33,16 @@ export function Directory({
   return (
     <Result state={state}>
       {(page) => (
-        <section className="panel">
-          <div className="panel-header">
-            <strong>Files</strong>
-            <span className="muted">Page {cursors.length}</span>
-          </div>
+        <section
+          className="panel directory-panel"
+          aria-label="Folders and files"
+        >
+          {header}
           {page.items.length === 0 ? (
             <div className="notice">This directory is empty.</div>
           ) : (
             <table className="file-table">
-              <thead className="sr-only">
+              <thead>
                 <tr>
                   <th>Name</th>
                   <th>Type</th>
@@ -48,56 +50,69 @@ export function Directory({
                 </tr>
               </thead>
               <tbody>
-                {page.items.map((entry) => (
-                  <tr key={entry.path_hex}>
-                    <td>
-                      <Link
-                        href={repoHref(repo, {
-                          rev,
-                          path: entry.path_hex,
-                          kind: entry.kind,
-                        })}
-                        onClick={() => onEntry(entry)}
-                      >
-                        {entry.kind === "Tree" ? (
-                          <FileDirectoryIcon className="folder-icon" />
-                        ) : (
-                          <FileIcon className="file-icon" />
-                        )}
-                        {entry.path.split("/").pop()}
-                      </Link>
-                    </td>
-                    <td className="muted">
-                      {entry.kind === "Tree"
-                        ? "Directory"
-                        : entry.kind === "Blob"
-                          ? "File"
-                          : entry.kind}
-                    </td>
-                    <td>
-                      <code className="muted">{short(entry.oid)}</code>
-                    </td>
-                  </tr>
-                ))}
+                {[...page.items]
+                  .sort(
+                    (left, right) =>
+                      Number(right.kind === "Tree") -
+                        Number(left.kind === "Tree") ||
+                      (left.path < right.path
+                        ? -1
+                        : left.path > right.path
+                          ? 1
+                          : 0),
+                  )
+                  .map((entry) => (
+                    <tr key={entry.path_hex}>
+                      <td>
+                        <Link
+                          href={repoHref(repo, {
+                            rev,
+                            path: entry.path_hex,
+                            kind: entry.kind,
+                          })}
+                          onClick={() => onEntry(entry)}
+                        >
+                          {entry.kind === "Tree" ? (
+                            <FileDirectoryFillIcon className="folder-icon" />
+                          ) : (
+                            <FileIcon className="file-icon" />
+                          )}
+                          {entry.path.split("/").pop()}
+                        </Link>
+                      </td>
+                      <td className="muted">
+                        {entry.kind === "Tree"
+                          ? "Directory"
+                          : entry.kind === "Blob"
+                            ? "File"
+                            : entry.kind}
+                      </td>
+                      <td>
+                        <code className="muted">{short(entry.oid)}</code>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           )}
-          <div className="pagination">
-            <Button
-              disabled={cursors.length === 1}
-              onClick={() => setCursors((value) => value.slice(0, -1))}
-            >
-              Previous
-            </Button>
-            <Button
-              disabled={!page.next}
-              onClick={() =>
-                setCursors((value) => [...value, page.next ?? undefined])
-              }
-            >
-              Next
-            </Button>
-          </div>
+          {(page.next || cursors.length > 1) && (
+            <div className="pagination">
+              <Button
+                disabled={cursors.length === 1}
+                onClick={() => setCursors((value) => value.slice(0, -1))}
+              >
+                Previous
+              </Button>
+              <Button
+                disabled={!page.next}
+                onClick={() =>
+                  setCursors((value) => [...value, page.next ?? undefined])
+                }
+              >
+                Next
+              </Button>
+            </div>
+          )}
         </section>
       )}
     </Result>
