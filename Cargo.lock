@@ -2233,9 +2233,12 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "clap",
+ "crab-coordination",
+ "crab-metadata",
  "crab-read",
  "crab-remote-git",
  "crab-storage",
+ "crab-write",
  "flate2",
  "futures-util",
  "http-body-util",
@@ -2251,6 +2254,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

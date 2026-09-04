@@ -10,6 +10,11 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> crab_http_server::Result<()> {
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .map_err(|source| crab_http_server::Error::Logging { source })?;
     let arguments = Arguments::parse();
     let config = crab_http_server::Config::read(&arguments.config)?;
     crab_http_server::serve(config).await

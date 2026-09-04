@@ -417,10 +417,26 @@ all three exact Git objects remotely readable. Repeating the pass keeps the same
 generation. Observed readiness time was 69 ms for that small fixture, with shared
 caches; this is not an HTTP push or production latency benchmark.
 
-The HTTP server still needs generation-owner election and GC fence composition,
-index receipts, restart repair for missing evidence, and receive-to-commit wiring.
-A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
-visibility or coexist correctly with native CLI writers.
+The HTTP server now owns an on-demand read-readiness job under generation-owner
+election and global/repository GC writer fences. API refresh and Git upload-pack
+retry their authoritative open after this job. Per-repository retained tasks
+coalesce requests, global admission bounds publication to two repositories, and
+request cancellation cannot drop a stateful publisher. Server shutdown cancels
+and drains jobs before the read runtime closes. Existing owners and GC sweeps
+remain authoritative; missing visibility remains an explicit failure.
+
+Five server tests cover journal-aware cache refresh, missing-proof failure without
+rollback, competing owners, both GC domains, cancellation/retry/shutdown cleanup,
+and exclusion of non-members from API/Git-triggered publication. All 24 server
+tests pass. A sandboxed RustFS run verifies initial API publication and native Git
+fetch after a second journal commit, with exact commit/tree/blob bytes and no
+server clone. Publication uses temporary index sidecars. A denied temporary write
+returns 503 and closes the writer; a restarted server with writable temporary
+space repairs that generation. Owner and GC leases are reacquirable afterward.
+
+Index receipts, restart reconstruction of missing evidence, and receive-to-commit
+wiring remain unfinished. A raw manifest PUT or journal-only endpoint cannot
+meet immediate read/fetch visibility or coexist correctly with native CLI writers.
 
 ## Evidence required before exposing push
 
