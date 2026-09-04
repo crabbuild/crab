@@ -60,18 +60,24 @@ large-file content.
 
 ## Behavior
 
-On the first run, Crab creates a persistent bare mirror cache with:
+On the first run, Crab creates a persistent bare mirror cache. The cache root
+and files created by child Git processes are private to the current user; an
+existing cache that does not meet that ownership boundary is refused.
+
+Crab initializes the cache, records a mirror refspec, and fetches an exact
+source advertisement:
 
 ```bash
-git clone --mirror -- <SOURCE> <CACHE>
+git -C <CACHE> init --bare --object-format=sha1
+git -C <CACHE> config remote.origin.url <SOURCE>
+git -C <CACHE> config remote.origin.fetch '+refs/*:refs/*'
+git -C <CACHE> config remote.origin.mirror true
+git -C <CACHE> fetch --no-auto-gc --prune origin '+refs/*:refs/*'
 ```
 
-On later runs, Crab updates that cache with:
-
-```bash
-git remote set-url origin <SOURCE>
-git remote update --prune origin
-```
+On later runs, Crab replaces those three owned settings and repeats the exact
+advertisement and fetch. It does not retain extra source URLs or refspecs from
+an earlier invocation.
 
 It then points a `crab` Git remote at `DESTINATION` and compares source refs
 with destination refs:

@@ -8,6 +8,9 @@ use crate::git::process::{self, MAX_CAPTURE_BYTES, capture_output};
 use std::io::Write as _;
 use std::process::{ChildStdin, Command, ExitStatus};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 pub(super) struct SystemCommandRunner {
     cancel: CancellationToken,
 }
@@ -36,6 +39,17 @@ impl CommandRunner for SystemCommandRunner {
             process.env_remove(key);
         }
         process.envs(command.envs.iter().map(|(key, value)| (key, value)));
+        #[cfg(unix)]
+        if command.private_files {
+            // SAFETY: this async-signal-safe call changes only the child after
+            // fork, before exec. The parent process mask is never modified.
+            unsafe {
+                process.pre_exec(|| {
+                    libc::umask(0o077);
+                    Ok(())
+                });
+            }
+        }
         let input = command.stdin.is_some() || !command.verify_blobs.is_empty();
         let write_stdin = input.then_some(|mut stdin: ChildStdin| {
             if let Some(input) = &command.stdin {

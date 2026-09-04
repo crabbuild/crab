@@ -7,6 +7,7 @@
 //! ├── shards/{h[:2]}/{h}
 //! ├── xorbs/{h[:2]}/{h}
 //! ├── xorb-index/index.db
+//! ├── hints/shard-hints.sqlite
 //! ├── manifests/{name}.json
 //! ├── manifests/{name}.etag
 //! └── stages/{h[:2]}/{h}
@@ -33,8 +34,8 @@ pub mod xet_chunk_cache;
 
 pub use crab_cache::ShardHintCache;
 pub use crab_cache::{
-    CacheKey, CacheStats, CachedXorbCandidate, LocalCache, PruneObjectKind, PruneOptions,
-    PruneStats, PrunedCacheObject, VerifyReport, default_cache_root,
+    CacheKey, CacheStats, LocalCache, PruneObjectKind, PruneOptions, PruneStats, PrunedCacheObject,
+    VerifyReport, default_cache_root,
 };
 pub use crab_vfs::ChunkCache;
 pub use hydrated_pointer::{HydratedEntry, HydratedPointerCache};

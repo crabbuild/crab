@@ -235,16 +235,23 @@ fn physical_ownership_survives_alias_removal_and_cleanup_never_follows_links() {
     assert!(owner.path().join("keep").exists());
 }
 
+#[cfg(feature = "local-cache")]
 #[tokio::test]
-async fn local_cache_clean_uses_the_same_directory_admission() {
+async fn payload_cleanup_uses_the_same_directory_admission() {
     let dir = TestRoot::new();
-    let cache = crate::LocalCache::new(dir.path().to_owned());
-    let owner =
-        CacheUseGuard::acquire(&dir.path().join("mirror.git"), &CancellationToken::new()).unwrap();
-    std::fs::write(dir.path().join("keep"), b"data").unwrap();
-    assert_busy(cache.clean().await);
-    assert!(dir.path().join("keep").exists());
+    let cache = crate::LocalCache::new(dir.path().join("private"));
+    let key = crate::CacheKey::Chunk(crab_xet::hash::compute_data_hash(b"data"));
+    cache.put(&key, b"data").await.unwrap();
+    let owner = CacheUseGuard::acquire(&cache.root().join("mirror.git"), &CancellationToken::new())
+        .unwrap();
+    let sentinel = cache.root().join("keep");
+    std::fs::write(&sentinel, b"user data").unwrap();
+    assert_busy(crate::clean_cache(cache.root(), false, &CancellationToken::new()).await);
+    assert!(cache.contains(&key).await);
     drop(owner);
-    cache.clean().await.unwrap();
-    assert!(!dir.path().join("keep").exists());
+    crate::clean_cache(cache.root(), false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!cache.contains(&key).await);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"user data");
 }

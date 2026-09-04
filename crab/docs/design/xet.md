@@ -1831,7 +1831,7 @@ only 1.1 GiB is available.
 
 Free up space or change cache location:
   crab cache prune        # evict old entries
-  crab cache clean        # remove everything (safe)
+  crab cache clean        # remove eligible payloads; retain live/unknown state
   export CRAB_CACHE_DIR=/path/to/bigger/disk
 
 Error code: CRAB-E0060

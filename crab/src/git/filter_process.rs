@@ -24,7 +24,7 @@ use crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE;
 use crab_git::pointer_detect::{PointerKind, classify};
 use crab_lfs::LfsObjectStore;
 use crab_staging::StagingArea;
-use crab_xet::hash::MerkleHash;
+use crab_types::pointer::{MAX_POINTER_SIZE, Pointer};
 
 use bytes::Bytes;
 
@@ -95,18 +95,13 @@ enum SmudgeInput {
     PassthroughFile(tempfile::TempPath),
 }
 
-/// How long the filter process will wait for the next command before
-/// assuming git has exited without closing stdin (SIGKILL, crash, IDE
-/// integration dropping the pipe) and shutting down cleanly.
+/// Interval for checking whether a silent filter's parent has exited.
 ///
-/// Git dispatches filter commands back-to-back; a real session never
-/// sees an inter-command gap this large. Without it, a blocking
-/// `read_exact` on stdin parks the OS thread forever when the pipe's
-/// write end stays open after git is gone — the orphaned filter process
-/// keeps holding the staging flock, which then stalls every subsequent
-/// `git add`/`crab add` for the full lock budget. See `read_ready`.
+/// Git can spend arbitrarily long consuming a large smudge result. Silence
+/// alone must not terminate its filter; reparenting identifies an orphan even
+/// when another process still holds the input pipe open.
 #[cfg(unix)]
-pub const FILTER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub const FILTER_PARENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs the long-running filter protocol v2 loop.
 ///
@@ -136,7 +131,7 @@ pub async fn run_filter_process<R, W>(
     ctx: AppContext,
     lfs_store: Option<Arc<LfsObjectStore>>,
     prefetch: Option<Arc<PrefetchQueue>>,
-    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::HydrationRuntime>>,
     #[cfg(unix)] idle: Option<(std::os::fd::RawFd, std::time::Duration)>,
 ) -> Result<()>
 where
@@ -169,7 +164,7 @@ pub async fn run_filter_process_with_lfs_loader<R, W>(
     lfs_store: Option<Arc<LfsObjectStore>>,
     lfs_store_loader: Option<LfsStoreLoader>,
     prefetch: Option<Arc<PrefetchQueue>>,
-    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::HydrationRuntime>>,
     #[cfg(unix)] idle: Option<(std::os::fd::RawFd, std::time::Duration)>,
 ) -> Result<()>
 where
@@ -226,7 +221,7 @@ where
     let result = tokio::task::spawn_blocking(move || {
         #[cfg(unix)]
         let input: Box<dyn Read + Send> = match idle {
-            Some((fd, timeout)) => Box::new(IdleRead::new(input, fd, timeout)),
+            Some((fd, interval)) => Box::new(ParentRead::new(input, fd, interval)),
             None => Box::new(input),
         };
         #[cfg(not(unix))]
@@ -290,9 +285,8 @@ where
                 // StagingChunkStager attached to the CleanSession, or a
                 // background task that outlived the loop. Those clones keep
                 // the staging flock alive until they drop, so log the strong
-                // count to make leaks diagnosable. The idle-timeout guard in
-                // the loop ensures this process itself always exits, which
-                // releases any leaked flock via fd close.
+                // count to make leaks diagnosable. EOF or parent exit ends
+                // the filter session and releases leaked flocks via fd close.
                 tracing::warn!(
                     strong_count = Arc::strong_count(&arc),
                     "staging area still referenced; flock held until clones drop"
@@ -388,7 +382,7 @@ struct SpeculationState {
 /// speculation is strictly best-effort.
 async fn init_speculation(
     concurrency: usize,
-    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::HydrationRuntime>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
 ) -> Option<SpeculationState> {
     let worktree_ctx = crate::git::worktree::WorktreeContext::resolve().ok()?;
@@ -429,16 +423,7 @@ async fn init_speculation(
     let hydrate_fn: Arc<dyn crate::speculation::driver::HydrateFn> = if let Some(h) = hydrator {
         Arc::new(move |path: String| {
             let h = Arc::clone(&h);
-            Box::pin(async move {
-                // Read the pointer from disk and reconstruct.
-                let content = tokio::fs::read(&path).await.map_err(|e| {
-                    CrabError::Internal(format!(
-                        "speculation: failed to read pointer at {path}: {e}"
-                    ))
-                })?;
-                h.reconstruct_from_pointer(&content).await?;
-                Ok(())
-            })
+            Box::pin(async move { warm_pointer_cache(Path::new(&path), &h).await })
                 as std::pin::Pin<
                     Box<dyn std::future::Future<Output = crate::core::error::Result<()>> + Send>,
                 >
@@ -458,12 +443,7 @@ async fn init_speculation(
     let is_hydrated_fn: Arc<dyn Fn(&str) -> bool + Send + Sync> =
         Arc::new(move |rel_path: &str| {
             let full = repo_root_owned.join(rel_path);
-            // If the file doesn't exist or can't be read, treat as not hydrated.
-            let Ok(bytes) = std::fs::read(&full) else {
-                return false;
-            };
-            // A file is hydrated if it's NOT a recognized pointer.
-            matches!(classify(&bytes), PointerKind::NotAPointer)
+            path_is_hydrated(&full)
         });
 
     // Cache-pressure callback: when the chunk cache is ≥80% full,
@@ -519,6 +499,39 @@ async fn init_speculation(
         _rollup_handle: rollup_handle,
         _decay_handle: decay_handle,
     })
+}
+
+async fn warm_pointer_cache(
+    path: &Path,
+    hydrator: &crate::cmd::hydrate::HydrationRuntime,
+) -> Result<()> {
+    // The file may have been hydrated since prediction; never collect its
+    // payload merely to decide whether it is a pointer.
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = tokio::io::AsyncReadExt::take(file, MAX_POINTER_SIZE as u64 + 1);
+    let mut content = Vec::new();
+    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut content).await?;
+    let pointer = Pointer::parse(&content)?;
+    // Warming needs verified cache fills, not a retained whole file.
+    hydrator.reconstruct_to_writer(&pointer, io::sink()).await?;
+    Ok(())
+}
+
+fn path_is_hydrated(path: &Path) -> bool {
+    // classify rejects this many bytes, so a bounded prefix preserves its
+    // Crab/LFS size rules even if the worktree file is growing concurrently.
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    matches!(classify(&bytes), PointerKind::NotAPointer)
 }
 
 /// Spawn a background task that runs decay once every 24 hours.
@@ -699,7 +712,7 @@ fn run_filter_loop<R: BufRead, W: Write>(
     staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
     lfs_store: Option<Arc<LfsObjectStore>>,
     prefetch: Option<Arc<PrefetchQueue>>,
-    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::HydrationRuntime>>,
     handle: Option<tokio::runtime::Handle>,
     speculation: Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
 ) -> Result<()> {
@@ -725,7 +738,7 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     staging_cell: Arc<std::sync::Mutex<LazyStaging>>,
     lfs_store: LfsStoreSource,
     prefetch: Option<Arc<PrefetchQueue>>,
-    hydrator: Option<Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crate::cmd::hydrate::HydrationRuntime>>,
     handle: Option<tokio::runtime::Handle>,
     speculation: Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
 ) -> Result<()> {
@@ -768,10 +781,6 @@ fn run_filter_loop_with_lfs_source<R: BufRead, W: Write>(
     // path is effective immediately (no cold-start penalty).
     session.load_bloom_from_cache();
 
-    // Load the `file_hash → shard_hash` map populated by previous pushes
-    // so emitted pointers carry `shard-hint` and hydration can skip the
-    // file-index GET.
-    session.load_shard_hints_from_cache();
     let mut file_index_checker_attempted = false;
 
     // Configure LFS support: set the current worktree root for
@@ -907,12 +916,18 @@ fn install_clean_file_index_checker(
         }
     };
 
+    let shard_hint_scope = crate::cache::shard_hints::ShardHintScope::new(
+        &selection.store.bucket_identity(),
+        selection.router.global_prefix(),
+    );
+
     let router = file_index_checker_router(
         selection.store,
         selection.router.repo_prefix().to_owned(),
         ctx,
         handle,
     );
+    session.load_shard_hints_from_cache(&shard_hint_scope);
     session.set_file_index_checker(Box::new(super::clean::StoreFileIndexChecker::new(
         router,
         handle.clone(),
@@ -1072,7 +1087,7 @@ fn dispatch_command<R: Read, W: Write>(
     staging_cell: &Arc<std::sync::Mutex<LazyStaging>>,
     lfs_store: &LfsStoreSource,
     prefetch: Option<&Arc<PrefetchQueue>>,
-    hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<&Arc<crate::cmd::hydrate::HydrationRuntime>>,
     handle: Option<&tokio::runtime::Handle>,
     speculation: &Arc<std::sync::Mutex<Option<Arc<SpeculationState>>>>,
 ) -> Result<()> {
@@ -1191,12 +1206,10 @@ fn dispatch_command<R: Read, W: Write>(
                 && let (Some(pf), Some(h)) = (prefetch, handle)
                 && let PointerKind::Crab(pointer) = classify(&content)
             {
-                let file_hash = MerkleHash::from(pointer.file_hash);
-                let shard_hint = pointer.shard_hint.map(MerkleHash::from);
                 let pathname = cmd.pathname.clone();
                 let pf = pf.clone();
                 h.block_on(async move {
-                    pf.submit_with_hint(pathname, file_hash, shard_hint).await;
+                    pf.submit(pathname, pointer).await;
                 });
 
                 write_delayed_response(output)?;
@@ -1373,13 +1386,13 @@ fn try_stream_lfs_smudge(
 }
 
 fn reconstruct_crab_to_temp(
-    hydrator: &crate::cmd::hydrate::ShardHydrator,
+    hydrator: &crate::cmd::hydrate::HydrationRuntime,
     handle: &tokio::runtime::Handle,
     pointer_bytes: &[u8],
 ) -> Result<tempfile::TempPath> {
-    let root = crate::cache::default_cache_root().join("smudge");
-    std::fs::create_dir_all(&root).map_err(CrabError::Io)?;
-    let path = tempfile::NamedTempFile::new_in(root)
+    // Git has not consumed this output yet; it is operation state, not an
+    // evictable cache entry. A disabled cache must not disable smudging.
+    let path = tempfile::NamedTempFile::new()
         .map_err(CrabError::Io)?
         .into_temp_path();
     handle.block_on(hydrator.reconstruct_from_pointer_to_path(pointer_bytes, &path))?;
@@ -1400,7 +1413,7 @@ fn smudge_content(
     lazy: bool,
     lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
-    hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<&Arc<crate::cmd::hydrate::HydrationRuntime>>,
     handle: Option<&tokio::runtime::Handle>,
 ) -> Result<SmudgeOutput> {
     // Resolve filter from .gitattributes before blob classification.
@@ -1513,7 +1526,7 @@ fn smudge_by_blob_classification(
     lazy: bool,
     lfs_store: &LfsStoreSource,
     session: &super::clean::CleanSession,
-    hydrator: Option<&Arc<crate::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<&Arc<crate::cmd::hydrate::HydrationRuntime>>,
     handle: Option<&tokio::runtime::Handle>,
 ) -> Result<SmudgeOutput> {
     match classify(content) {
@@ -1639,56 +1652,46 @@ fn smudge_by_blob_classification(
 // in the filter protocol. The filter protocol uses text mode (lines end
 // with \n) and flush packets as delimiters.
 
-/// Poll a file descriptor for readability with a timeout.
-///
-/// Used to bound the blocking stdin read in the filter-process loop so a
-/// git process that exits without closing stdin (SIGKILL, crash, IDE pipe
-/// leak) does not leave the filter parked in `read_exact` forever holding
-/// the staging flock. Returns `true` if the fd is readable (data or EOF
-/// pending), `false` on timeout. Retries on `EINTR`.
+// Keep a live parent's session open across slow checkout writes, while
+// releasing staging ownership after reparenting even if stdin remains open.
 #[cfg(unix)]
-struct IdleRead<R> {
+struct ParentRead<R> {
     inner: R,
     fd: std::os::fd::RawFd,
-    timeout: std::time::Duration,
-    timed_out: bool,
+    interval: std::time::Duration,
+    parent: libc::pid_t,
+    finished: bool,
 }
 
 #[cfg(unix)]
-impl<R> IdleRead<R> {
-    fn new(inner: R, fd: std::os::fd::RawFd, timeout: std::time::Duration) -> Self {
+impl<R> ParentRead<R> {
+    fn new(inner: R, fd: std::os::fd::RawFd, interval: std::time::Duration) -> Self {
         Self {
             inner,
             fd,
-            timeout,
-            timed_out: false,
+            interval,
+            // SAFETY: getppid has no arguments or memory preconditions.
+            parent: unsafe { libc::getppid() },
+            finished: false,
         }
     }
 }
 
 #[cfg(unix)]
-impl<R: Read> Read for IdleRead<R> {
+impl<R: Read> Read for ParentRead<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.timed_out {
+        if self.finished || buf.is_empty() {
             return Ok(0);
         }
-        match read_ready(self.fd, self.timeout) {
-            Ok(true) => self.inner.read(buf),
-            Ok(false) => {
-                tracing::info!(
-                    timeout_secs = self.timeout.as_secs(),
-                    "filter-process idle timeout; git likely exited, shutting down"
-                );
-                self.timed_out = true;
-                Ok(0)
+        loop {
+            if read_ready(self.fd, self.interval)? {
+                return self.inner.read(buf);
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "stdin poll failed; exiting filter-process"
-                );
-                self.timed_out = true;
-                Ok(0)
+            // SAFETY: getppid has no arguments or memory preconditions.
+            if unsafe { libc::getppid() } != self.parent {
+                tracing::info!("filter-process parent exited, shutting down");
+                self.finished = true;
+                return Ok(0);
             }
         }
     }
@@ -1708,7 +1711,7 @@ fn read_ready(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io::Resul
     };
     loop {
         // SAFETY: `poll` is FFI-safe with the above struct; timeout is a
-        // bounded `c_int` of milliseconds (FILTER_IDLE_TIMEOUT ≤ 60s).
+        // bounded `c_int` of milliseconds (FILTER_PARENT_POLL_INTERVAL ≤ 60s).
         #[expect(
             clippy::cast_possible_truncation,
             reason = "timeout fits in c_int for any value ≤ ~24 days"
@@ -2121,6 +2124,62 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
     use std::sync::MutexGuard;
+
+    #[tokio::test]
+    async fn speculative_warm_verifies_bytes_without_materializing_worktree() {
+        for corrupt_origin in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (hydrator, pointer, counted) = crate::read::test_support::stored_file(
+                &root.path().join("cache"),
+                Bytes::from(vec![42; 4 * 1024 * 1024]),
+                corrupt_origin,
+            )
+            .await
+            .unwrap();
+            let path = root.path().join("model.bin");
+            let pointer_bytes = pointer.serialize();
+            std::fs::write(&path, &pointer_bytes).unwrap();
+            let result = warm_pointer_cache(&path, &hydrator).await;
+            if corrupt_origin {
+                assert_eq!(result.unwrap_err().code(), "CRAB-E0020");
+            } else {
+                result.unwrap();
+                let reads = counted.counts().body_requests();
+                counted.set_body_reads_enabled(false);
+                warm_pointer_cache(&path, &hydrator).await.unwrap();
+                assert_eq!(counted.counts().body_requests(), reads);
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), pointer_bytes);
+        }
+    }
+
+    #[test]
+    fn speculative_pointer_probe_preserves_pointer_size_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        assert!(!path_is_hydrated(&path));
+        let crab = Pointer {
+            file_hash: [1; 32],
+            size: 8 * 1024 * 1024,
+            shard_hint: None,
+        };
+        let lfs = crab_git::lfs_pointer::LfsPointer {
+            oid: [2; 32],
+            size: 8 * 1024 * 1024,
+            extensions: Vec::new(),
+        };
+        for (pointer, limit) in [
+            (crab.serialize(), MAX_POINTER_SIZE + 1),
+            (lfs.serialize(), crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE),
+        ] {
+            std::fs::write(&path, &pointer).unwrap();
+            assert!(!path_is_hydrated(&path));
+            let mut full_content = pointer;
+            full_content.resize(limit, b'\n');
+            std::fs::write(&path, &full_content).unwrap();
+            assert!(path_is_hydrated(&path));
+        }
+    }
 
     fn output_bytes(output: &SmudgeOutput) -> Vec<u8> {
         match output {
@@ -4033,69 +4092,44 @@ size 1048576\n";
         }
     }
 
-    /// The idle-timeout guard must exit the loop when git stops sending
-    /// commands without closing stdin (SIGKILL, crash, IDE pipe leak).
-    /// Without it, the process parks in `read_exact` forever holding the
-    /// staging flock. We feed a complete command, leave the pipe open but
-    /// silent, and assert the loop returns within a few seconds — far
-    /// below "forever".
     #[cfg(unix)]
     #[test]
-    fn idle_timeout_exits_when_pipe_stays_open_but_silent() {
-        use std::io::BufReader;
-        use std::os::unix::io::AsRawFd;
+    fn live_parent_survives_silence_until_input_or_eof() {
+        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
-        use std::sync::mpsc;
         use std::time::Duration;
 
-        let (read_end, mut write_end) = UnixStream::pair().expect("socketpair");
-
-        // Feed a complete handshake + one clean command so the loop
-        // processes at least one command before going idle.
-        let mut input = build_handshake_input();
-        input.extend(pkt_text("command=clean"));
-        input.extend(pkt_text("pathname=test.bin"));
-        input.extend(pkt_flush());
-        input.extend(pkt_data(b"content"));
-        input.extend(pkt_flush());
-        write_end
-            .write_all(&input)
-            .expect("write handshake+command");
-        write_end.flush().expect("flush");
-
-        read_end.set_nonblocking(false).expect("set blocking");
-
-        // Capture the fd before moving the stream into the idle wrapper.
-        // The wrapper times out only when the buffered reader needs more
-        // bytes from the pipe, so prefetched command bytes stay visible.
-        let read_fd = read_end.as_raw_fd();
-        let idle_timeout = Duration::from_millis(200);
-
-        let (tx, rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let mut output: Vec<u8> = Vec::new();
-            let ctx = AppContext::default();
-            let input = IdleRead::new(read_end, read_fd, idle_timeout);
-            let result = run_filter_loop(
-                BufReader::new(input),
-                &mut output,
-                ctx,
-                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
-                None,
-                None,
-                None,
-                None,
-                Arc::new(std::sync::Mutex::new(None)),
-            );
-            let _ = tx.send(result);
+        let (read_end, mut write_end) = UnixStream::pair().unwrap();
+        let mut reader = ParentRead::new(
+            read_end.try_clone().unwrap(),
+            read_end.as_raw_fd(),
+            Duration::from_millis(10),
+        );
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            write_end.write_all(b"next command").unwrap();
         });
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        writer.join().unwrap();
+        assert_eq!(bytes, b"next command");
+    }
 
-        // If the idle guard is missing, recv blocks forever and the test
-        // times out at the harness level.
-        let result = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("filter loop did not exit within 5s — idle timeout missing?");
-        thread.join().expect("loop thread panicked");
-        result.expect("loop should exit cleanly on idle timeout");
+    #[cfg(unix)]
+    #[test]
+    fn changed_parent_ends_silent_session_with_open_pipe() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (read_end, _write_end) = UnixStream::pair().unwrap();
+        let mut reader = ParentRead::new(
+            read_end.try_clone().unwrap(),
+            read_end.as_raw_fd(),
+            Duration::from_millis(10),
+        );
+        // Model the saved identity of a parent that has since exited.
+        reader.parent = 0;
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
     }
 }

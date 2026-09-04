@@ -341,3 +341,132 @@ receipt metadata only.
   order-dependent and would conceal a producer invariant violation.
 - Always retain both a segment and prepared body: rejected; direct preparation
   must not double local writes merely to manufacture a fallback.
+
+## Local read/cache hardening track
+
+Generated from a read/cache/dedup/hydration audit at commit `63bfc8c` on
+2026-09-02. This is a standalone P1 track. It consumes the current v1
+xorb/shard and committed-placement contracts but does not change their remote
+formats or the authoritative add/push lifecycle from Plans 011-016.
+
+| Plan | Title | Priority | Effort | Depends on | Status |
+|---|---|---|---|---|---|
+| [017](017-local-cache-read-hardening.md) | Harden local cache, deduplication, and hydration | P1 | XL | Current v1 layouts and chunk-index generation contract | IN PROGRESS (Phase 0 delivered) |
+
+Plan 017 is split into eight phases, each delivered in bounded PRs: observable contract/docs, canonical
+read runtime, cache-failure isolation, unified budget, private tenancy,
+operability/state cleanup, concurrency/startup, and production qualification.
+Each phase has its own context, acceptance criteria, proof, and STOP conditions.
+
+Qualification tooling is now in progress: the maintained cache-service smoke
+uses fresh dedicated buckets and create-only scoped fixtures. Report-audit
+consolidation now delegates to the packaged verifier in source-tree and
+retained-bundle layouts; both entry points pass. Stricter cold/warm/restart
+evidence validation remains local; the incomplete Rust test fixture awaits an
+approved input update. See Plan 017 for retained passes, failures, and the unresolved
+shared-bucket fixture incident. The installed HTTP-503 outage workload now
+proves add/push/dedup and cold/warm hydration, including a focused 128 MiB run;
+slow-service bounds and versioned outage release-gate coverage remain open.
+The latest installed candidate also fixes late cache-body failure escaping
+metadata reads: anonymous budgeted completion restores origin fallback, proven
+with a failing previous binary, a 128 MiB fault workload, and a full smoke.
+The harness now lets Crab create private client roots; platform and resource
+acceptance for response completion remain open.
+Body completion is pushed in draft PR 147 as `04d271b`. Continued installed
+128 MiB qualification passes byte identity under refused connections and
+single header/body stalls, but each stall adds about 30 seconds; sustained
+connection stalls exceed a 100-second harness deadline. Plan 017 retains the
+failure and executable classification, suppression/recovery, and evidence
+slices. The diagnostic pass is not an aggregate latency guarantee.
+Follow-up `9dffbe6` shares service failure suppression/recovery across client
+clones while preserving request-local errors and partial-batch dedup. The
+installed candidate reduces failed metadata service attempts from 51 to one;
+sustained-stall hydration completes in 30.4 seconds with verified bytes, and
+the full 1,204-check RustFS smoke passes. Same-process push recovery now has
+installed proof, and `0657359` retains timed-out command records. The
+maintained recovery stage covers successful negotiation, one failed metadata
+PUT, cooldown without requests, recovered cache HITs, and fresh clone/hydrate
+byte identity. Its 128 MiB run passes; the pre-suppression binary fails the
+cooldown gate. Versioned evidence enforcement, other read surfaces, resource
+bounds, and the other phase acceptance items remain open. The existing CLI
+warming test's outage expectation remains red pending approval; no assertion
+was weakened. See Plan 017 for exact artifact/source identities and limits.
+This is not phase acceptance or release proof.
+
+The next Phase 5 slice makes both stats entry points read-only: missing roots
+stay missing, the product root is pinned before range inspection, chunk bytes
+are counted, and range/object-group failures leave the other report visible
+while returning nonzero. Full disk accounting, individual-family errors,
+versioned JSON, and doctor health remain open. The catalog library now uses an
+exclusively locked, write-denying SQLite inspection boundary; quiet/retained WAL,
+busy state, native writer exclusion, and post-crash inspection have native macOS
+tests. Shared health wiring, inspection resource bounds, and other native OS
+qualification remain open; this does not complete Phase 5.
+
+### Release gates
+
+- One reusable hydrator/store client serves fetch, explicit hydrate, smudge,
+  clone auto-hydrate, mount, worktree, VFS, and authenticated reads.
+- Fetch followed by disabled-origin explicit hydrate reconstructs identical
+  bytes with zero xorb body GETs, without creating a duplicate full-xorb copy.
+- Disposable cache corruption, permissions, schema, and write failures never
+  block valid origin data; invalid origin data still fails closed.
+- One effective root and one 10 GiB-by-default product budget cover every
+  disposable local cache family.
+- Cache contents are private to one OS user; diagnostics are complete,
+  read-only when inspecting, and actionable.
+- Multi-process fill and startup work are bounded, cancel-safe, and qualified
+  on RustFS plus supported real providers and operating systems.
+
+## Product-readiness coordination
+
+[Plan 018: Close Crab's product-readiness gaps](018-product-readiness-roadmap.md)
+coordinates the existing cache, write-durability, GC, provider, and scale
+tracks. Status: DESIGN READY FOR REVIEW; implementation acceptance remains
+open. It distinguishes current implementation from missing qualification and
+does not replace the owning subsystem plans.
+
+Its seven phases cover the support/evidence contract, local read/cache safety,
+recovery and maintenance, provider/security boundaries, self-service
+diagnostics, the resource envelope, and evidence-gated release/canary. Each
+phase specifies context, work, dependencies, ownership, acceptance criteria,
+proof, and STOP conditions. Plan 017's working-tree snapshot records partial
+cache implementation separately from accepted phase delivery.
+Plan 018 also includes a dependency-ordered kickoff queue and a per-phase
+acceptance record. Start with the supported-journey/evidence inventory; private
+filesystem access and live-state ownership precede destructive cache eviction.
+Use Plan 018 for the product-wide priorities and release cuts; use Plan 017
+for cache/read implementation details and its current evidence ledger. Both
+distinguish partial implementation from acceptance. Disk capacity and read
+memory are separate resource contracts. Source-preserving reconstruction now
+has shared and CLI failure-path proof; remaining diagnostic classes and real
+restore/service qualification remain open.
+The current read-memory slice has fallible allocation, exact-length checks,
+and cancellation ownership; configured admission and returned-result lifetime
+accounting remain open. Plan 017 records the VFS startup/private-chunk-cache
+repair and real warm-range proof separately from remaining file-window cache
+ownership and native mount gates. Neither shared unit-test success nor a
+zero-test feature selection qualifies mounted reads.
+Object/range stats/prune/verify and targeted object eviction now share pinned
+private scans and locked conditional deletion. Full-file xorb checks also
+validate the footer payload digest. Plan 017 keeps database/root authority,
+reservation coverage, effective ACLs, and native OS qualification
+as explicit remaining slices; this is not complete cache-maintenance acceptance.
+
+Current database checkpoint: Plan 017's descriptor-bound SQLite owner passes
+both original rollback/connection-drop root-replacement tests unchanged. WAL,
+writer-exclusion, and recovery fixtures have focused native macOS proof;
+maintenance's attributed read-to-write race is fixed and the reservation test
+passes 200 repetitions at that checkpoint. Catalog maintenance and reserved
+fills now retain one root through inventory, publication, registration, and
+owner release; publication leases survive explicit object/range maintenance.
+Main-file replacement, other index owners, non-mutating inspection, physical
+accounting, and native-platform acceptance remain explicit gates. Plan 018
+keeps that unfinished work in the first safety
+delivery cut; focused green tests do not establish full phase acceptance.
+
+The integrated warm-read fixture also exposed Xet's detached cache-write race.
+The shared hydrator now waits for operation-owned write attempts before success
+and cancels pending puts on cancellation/drop. The original blocked-origin,
+reopened-runtime fixture passes unchanged; cache failures remain best-effort.
+Separate-process fetch/hydrate and provider acceptance are still required.

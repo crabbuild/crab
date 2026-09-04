@@ -55,6 +55,13 @@ pub enum RetryClass {
 )]
 pub fn retry_class(err: &CrabError) -> RetryClass {
     match err {
+        CrabError::Read(error) => error.retry_class(),
+        CrabError::HydrationFailed { source, .. } => match retry_class(source) {
+            // A batch has already completed or discarded its individual writes;
+            // the storage retry loop cannot inspect an inner writer's errno.
+            RetryClass::InspectErrno => RetryClass::Fatal,
+            class => class,
+        },
         CrabError::NetworkTransient(_) => RetryClass::Transient,
         CrabError::Throttled { retry_after } => RetryClass::Throttled {
             retry_after: *retry_after,
@@ -121,6 +128,9 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         // Cache service errors are non-retryable at the store level;
         // the CachingStore handles fallback to origin.
         CrabError::CacheService { .. } => RetryClass::Fatal,
+        // The read boundary already exhausted cache repair and origin transport
+        // retries. Repeating it would only redownload the same invalid object.
+        CrabError::OriginIntegrity { .. } => RetryClass::Fatal,
         // Incomplete shard reconstruction signals a bug in the push
         // pipeline — the placement map doesn't cover every chunk.
         // Retrying the same push will hit the same gap.
@@ -279,7 +289,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
 // `error_map` helper (e.g., because the call site used the blanket
 // `#[from]`). Apply the same transient-vs-permanent split here so those
 // paths still retry correctly.
-fn classify_storage(err: &object_store::Error) -> RetryClass {
+pub(crate) fn classify_storage(err: &object_store::Error) -> RetryClass {
     match err {
         object_store::Error::Generic { .. } => RetryClass::Transient,
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {
@@ -438,6 +448,24 @@ mod tests {
     #[test]
     fn classifies_network_transient_as_transient() {
         assert_eq!(retry_class(&transient_err()), RetryClass::Transient);
+    }
+
+    #[test]
+    fn hydration_batch_preserves_retry_class_except_writer_replay() {
+        for (source, expected) in [
+            (transient_err(), RetryClass::Transient),
+            (CrabError::NoCredentials, RetryClass::Fatal),
+            (
+                CrabError::Io(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                RetryClass::Fatal,
+            ),
+        ] {
+            let failure = CrabError::HydrationFailed {
+                failed: 1,
+                source: std::sync::Arc::new(source),
+            };
+            assert_eq!(retry_class(&failure), expected);
+        }
     }
 
     #[test]

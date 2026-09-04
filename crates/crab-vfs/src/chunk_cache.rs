@@ -1,41 +1,21 @@
-//! Chunk-hash keyed cache, backed by xet-core's on-disk `DiskCache`.
+//! Chunk-hash adapter over Crab's shared decoded-range cache.
 //!
-//! This is an adapter, not a standalone LRU. The caller-facing API is
-//! still keyed by a single chunk's [`MerkleHash`] and returns `Bytes`,
-//! but every entry is stored in xet-core's `DiskCache` as a one-chunk
-//! [`ChunkRange`] under the prefix `CRAB_CHUNK_PREFIX`. Sharing the
-//! same on-disk directory as the xorb-range reconstruction cache means:
-//!
-//! - one eviction budget (`chunk_cache_bytes`) covers every cached byte;
-//! - the `CacheManager` singleton hands out the same `Arc<dyn ChunkCache>`
-//!   for a given directory, so every call site that opens the cache at
-//!   the same path shares state.
-//!
-//! The old self-written LRU lived here with ~600 lines of index scan,
-//! blake3 verify-once, and LRU bookkeeping. All of that is replaced by
-//! `DiskCache`'s own CRC32 + range-indexed on-disk layout — simpler, and
-//! proven by the reconstruction path.
+//! Directory validation, disk layout, and capacity belong to `crab-cache`.
+//! An unavailable cache stores nothing and always misses; mounted reads must
+//! not depend on disposable storage. Whole-pointer reads use `crab-read`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::{debug, warn};
 use xet_client::cas_types::{ChunkRange, Key};
-use xet_client::chunk_cache::ChunkCache as XetChunkCacheTrait;
+use xet_client::chunk_cache::error::ChunkCacheError;
+use xet_client::chunk_cache::{CacheRange, ChunkCache as XetChunkCacheTrait};
 
-use crate::core::error::{CrabError, Result};
+use crate::core::error::Result;
 use crab_xet::xorb::format::MerkleHash;
-
-/// Prefix used for crab chunk-hash keyed entries in xet-core's cache.
-///
-/// The `Key` type in `xet_client::cas_types` carries both a `prefix` and
-/// a `hash`. Reconstruction-path entries use xorb hashes keyed under the
-/// empty-or-xorb prefix used by `FileReconstructor`; we use a distinct
-/// prefix so the two keyspaces don't collide even when their hashes
-/// happen to match.
-const CRAB_CHUNK_PREFIX: &str = "crab-chunk";
 
 /// Default chunk cache ceiling: 4 GiB.
 ///
@@ -43,20 +23,37 @@ const CRAB_CHUNK_PREFIX: &str = "crab-chunk";
 /// behave the same when they pass `None`.
 const DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Chunk-hash keyed cache backed by xet-core's [`DiskCache`].
-///
-/// Thread-safe — the inner `Arc<dyn ChunkCache>` handles all locking.
-/// Calls bridge sync to async via `block_in_place` + `block_on`; this
-/// is safe on crab's multi-thread tokio runtime. See
-/// [`crate::core::context::AppContext`] for the runtime setup.
+/// Optional chunk storage using the shared Xet cache contract.
 pub struct ChunkCache {
-    /// Directory backing the underlying `DiskCache`.
     dir: PathBuf,
-    /// Configured eviction budget.
     max_bytes: u64,
-    /// Shared trait-object handle. Same `Arc` as the one returned to
-    /// any other subsystem opening the same directory.
     inner: Arc<dyn XetChunkCacheTrait>,
+}
+
+// Xet allows a miss immediately after a put. Keeping this stateless handle
+// preserves the tagged xet_handle API without giving cache failure authority
+// over reads or creating a replacement cache directory.
+struct UnavailableCache;
+
+#[async_trait::async_trait]
+impl XetChunkCacheTrait for UnavailableCache {
+    async fn get(
+        &self,
+        _key: &Key,
+        _range: &ChunkRange,
+    ) -> std::result::Result<Option<CacheRange>, ChunkCacheError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _key: &Key,
+        _range: &ChunkRange,
+        _chunk_byte_indices: &[u32],
+        _data: &[u8],
+    ) -> std::result::Result<(), ChunkCacheError> {
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for ChunkCache {
@@ -69,33 +66,31 @@ impl std::fmt::Debug for ChunkCache {
 }
 
 impl ChunkCache {
-    /// Open (or create) the chunk cache at `dir` with the given byte budget.
+    /// Open optional chunk storage, bypassing an unsafe or unavailable cache.
     ///
-    /// Goes through the xet-core `CacheManager` singleton so callers that
-    /// open the same directory share the same underlying `DiskCache`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CrabError::Internal`] if the directory cannot be
-    /// created or the underlying cache fails to initialize (invalid
-    /// size, disk errors during index rebuild).
+    /// The `Result` signature is retained from release tags v1.0.1/v1.1.0;
+    /// cache-only initialization failures now return a non-storing handle.
     pub fn open(dir: PathBuf, max_bytes: Option<u64>) -> Result<Self> {
         let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
 
-        let inner = crab_cache::XetChunkCacheHandle::open(dir.clone(), max_bytes)
-            .map_err(|e| {
-                CrabError::Internal(format!(
-                    "failed to initialize chunk cache at {}: {e}",
-                    dir.display(),
-                ))
-            })?
-            .cache;
-
-        debug!(
-            dir = %dir.display(),
-            max_bytes,
-            "chunk cache opened (xet-core backed)"
-        );
+        let inner: Arc<dyn XetChunkCacheTrait> =
+            match crab_cache::XetChunkCacheHandle::open(dir.clone(), max_bytes) {
+                Ok(handle) => {
+                    debug!(dir = %dir.display(), max_bytes, "chunk cache opened");
+                    handle.cache
+                }
+                Err(error) => {
+                    warn!(
+                        family = "decoded-range",
+                        operation = "open",
+                        path = %dir.display(),
+                        recovery = "use-verified-origin",
+                        %error,
+                        "VFS chunk cache unavailable"
+                    );
+                    Arc::new(UnavailableCache)
+                }
+            };
 
         Ok(Self {
             dir,
@@ -136,7 +131,10 @@ impl ChunkCache {
         let key = make_key(&hash);
         let range = ChunkRange::new(0, 1);
         // xet-core expects offsets[0] = 0 and offsets[last] = data.len().
-        let indices: [u32; 2] = [0, data.len() as u32];
+        let Ok(len) = u32::try_from(data.len()) else {
+            return;
+        };
+        let indices = [0, len];
 
         let Some(result) =
             block_on_async(async { self.inner.put(&key, &range, &indices, &data).await })
@@ -169,11 +167,7 @@ impl ChunkCache {
         self.max_bytes
     }
 
-    /// Shared trait-object handle — useful for subsystems that want to
-    /// pass the same cache to `FileReconstructor::with_chunk_cache`.
-    ///
-    /// Because `CacheManager` dedupes by directory, this `Arc` points
-    /// at the same `DiskCache` any other caller gets for the same path.
+    /// Return the shared cache handle, which always misses if storage is unavailable.
     pub fn xet_handle(&self) -> Arc<dyn XetChunkCacheTrait> {
         Arc::clone(&self.inner)
     }
@@ -182,32 +176,26 @@ impl ChunkCache {
 /// Build a crab-prefixed xet-core key for a chunk hash.
 fn make_key(hash: &MerkleHash) -> Key {
     Key {
-        prefix: CRAB_CHUNK_PREFIX.to_owned(),
+        prefix: crab_cache::xet_chunk_cache::CHUNK_HASH_PREFIX.to_owned(),
         hash: *hash,
     }
 }
 
 /// Run an async future to completion from a sync context.
 ///
-/// Assumes a multi-thread tokio runtime (verified at
-/// [`crate::main`] runtime construction). Returns `None` if called
-/// outside any runtime — callers treat that as a cache miss and fall
-/// back to the network path rather than panicking.
+/// Requires a multi-thread runtime; other contexts bypass this optional cache.
 fn block_on_async<F, T>(fut: F) -> Option<T>
 where
     F: std::future::Future<Output = T>,
 {
     let Ok(handle) = Handle::try_current() else {
-        // No runtime (should not happen in production paths, but keep
-        // the cache layer non-fatal for unit tests outside #[tokio::test]).
         return None;
     };
+    if handle.runtime_flavor() != RuntimeFlavor::MultiThread {
+        return None;
+    }
     Some(tokio::task::block_in_place(|| handle.block_on(fut)))
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
@@ -221,9 +209,7 @@ mod tests {
 
     fn temp_cache(max_bytes: u64) -> (tempfile::TempDir, ChunkCache) {
         let dir = tempfile::tempdir().unwrap();
-        // A fresh subdir per test so `CacheManager` doesn't hand us a
-        // stale singleton from a prior test in the same process.
-        let cache = ChunkCache::open(dir.path().join("chunks"), Some(max_bytes)).unwrap();
+        let cache = ChunkCache::open(dir.path().join("cache/chunks"), Some(max_bytes)).unwrap();
         (dir, cache)
     }
 
@@ -234,8 +220,7 @@ mod tests {
         let hash = make_hash(data);
 
         cache.put(hash, Bytes::from_static(data));
-        let got = cache.get(&hash).expect("cached");
-        assert_eq!(&got[..], data);
+        assert_eq!(cache.get(&hash).as_deref(), Some(&data[..]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -266,14 +251,13 @@ mod tests {
         cache.put(hash, Bytes::from_static(data));
 
         // No panic, and the entry is still retrievable.
-        let got = cache.get(&hash).expect("still cached");
-        assert_eq!(&got[..], data);
+        assert_eq!(cache.get(&hash).as_deref(), Some(&data[..]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn persistence_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("chunks");
+        let cache_dir = dir.path().join("cache/chunks");
 
         let data = b"persistent chunk";
         let hash = make_hash(data);
@@ -281,29 +265,138 @@ mod tests {
         {
             let cache = ChunkCache::open(cache_dir.clone(), Some(1024 * 1024)).unwrap();
             cache.put(hash, Bytes::from_static(data));
-            let got = cache.get(&hash).expect("first read");
-            assert_eq!(&got[..], data);
+            assert_eq!(cache.get(&hash).as_deref(), Some(&data[..]));
         }
 
-        // Dropping the first handle decrements the CacheManager weak
-        // refcount; reopening via the same path rebuilds the on-disk
-        // index and should find the previously stored chunk.
+        // Reopening after the final handle drops must reuse persisted bytes,
+        // not depend on a live process-local handle.
         {
             let cache = ChunkCache::open(cache_dir, Some(1024 * 1024)).unwrap();
-            let got = cache.get(&hash).expect("second read after reopen");
-            assert_eq!(&got[..], data);
+            assert_eq!(cache.get(&hash).as_deref(), Some(&data[..]));
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn shared_singleton_for_same_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("shared");
+        let cache_dir = dir.path().join("cache/chunks");
 
         let first = ChunkCache::open(cache_dir.clone(), Some(1024 * 1024)).unwrap();
         let second = ChunkCache::open(cache_dir, Some(1024 * 1024)).unwrap();
 
-        // Both handles should point at the same underlying DiskCache.
         assert!(Arc::ptr_eq(&first.xet_handle(), &second.xet_handle()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conflicting_live_budget_bypasses_only_the_second_vfs_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache/chunks");
+        let first = ChunkCache::open(cache_dir.clone(), Some(1024 * 1024)).unwrap();
+        let second = ChunkCache::open(cache_dir, Some(512 * 1024)).unwrap();
+        let data = b"first cache remains available";
+        let hash = make_hash(data);
+
+        first.put(hash, Bytes::from_static(data));
+
+        assert_eq!(first.get(&hash).as_deref(), Some(&data[..]));
+        assert!(second.get(&hash).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn valid_record_checksum_does_not_authorize_wrong_chunk_bytes() {
+        let (_dir, cache) = temp_cache(1024 * 1024);
+        let hash = make_hash(b"expected");
+        cache
+            .xet_handle()
+            .put(&make_key(&hash), &ChunkRange::new(0, 1), &[0, 5], b"wrong")
+            .await
+            .unwrap();
+
+        assert!(cache.get(&hash).is_none());
+        cache.put(hash, Bytes::from_static(b"expected"));
+        assert_eq!(cache.get(&hash).unwrap().as_ref(), b"expected");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_storage_is_non_storing_and_preserves_outside_state() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        for kind in ["file", "symlink", "permissions"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("cache");
+            let outside = tmp.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("sentinel"), b"unchanged").unwrap();
+            match kind {
+                "file" => std::fs::write(&root, b"not a directory").unwrap(),
+                "symlink" => symlink(&outside, &root).unwrap(),
+                _ => {
+                    std::fs::create_dir(&root).unwrap();
+                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+            }
+
+            let cache = ChunkCache::open(root.join("chunks"), Some(1024)).unwrap();
+            let hash = make_hash(b"value");
+            cache.put(hash, Bytes::from_static(b"value"));
+            assert!(cache.get(&hash).is_none(), "{kind}");
+            let handle = cache.xet_handle();
+            let key = make_key(&hash);
+            let range = ChunkRange::new(0, 1);
+            handle.put(&key, &range, &[0, 5], b"value").await.unwrap();
+            assert!(handle.get(&key, &range).await.unwrap().is_none());
+            assert_eq!(
+                std::fs::read(outside.join("sentinel")).unwrap(),
+                b"unchanged"
+            );
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+            assert!(!root.join("chunks").exists());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_runtime_bypasses_sync_cache_without_panicking() {
+        let (_dir, cache) = temp_cache(1024);
+        let hash = make_hash(b"value");
+        cache.put(hash, Bytes::from_static(b"value"));
+        assert!(cache.get(&hash).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_creation_ignores_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "CRAB_VFS_PRIVATE_CACHE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "chunk_cache::tests::private_creation_ignores_permissive_umask",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+
+        // SAFETY: only this test runs in the dedicated child process.
+        unsafe { libc::umask(0) };
+        let (_dir, cache) = temp_cache(1024);
+        for path in [cache.dir(), cache.dir().parent().unwrap()] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 }

@@ -142,7 +142,22 @@ impl PersistentChunkIndex {
     /// `MetadataError::Sqlite` on SQLite failures.
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let path = normalize_index_path(path)?;
-        let existed = path.exists();
+        // SQLite's Unix VFS defaults new databases to 0644 and derives WAL
+        // permissions from the main file. Establish private mode before any
+        // connection writes bytes; never chmod or truncate an existing index.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let created = match options.open(&path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+            Err(error) => return Err(error.into()),
+        };
+        let existed = created.is_none();
         if existed {
             let readonly = Connection::open_with_flags(
                 &path,
@@ -620,7 +635,17 @@ fn validate_schema(conn: &Connection, path: &Path) -> Result<()> {
 
 fn normalize_index_path(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
+    let mut directories = std::fs::DirBuilder::new();
+    directories.recursive(true);
+    // A cold index open can create the shared cache root before payload caching.
+    // Use private creation modes so cleanup does not reject our own root under
+    // a permissive umask; never change permissions on existing directories.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        directories.mode(0o700);
+    }
+    directories.create(parent)?;
 
     let parent = parent.canonicalize()?;
     let file_name = path.file_name().ok_or_else(|| {
@@ -1101,6 +1126,64 @@ mod tests {
 
         let reopened = PersistentChunkIndex::open_or_create(&path).unwrap();
         assert_eq!(reopened.get(&hash(1)).unwrap(), Some(xorb_ref(100, 0)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cold_index_creates_private_database_and_sqlite_side_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for shared in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("chunk-index.sqlite");
+            let index = if shared {
+                PersistentChunkIndex::open_shared(&path).unwrap()
+            } else {
+                Arc::new(PersistentChunkIndex::open_or_create(&path).unwrap())
+            };
+            index
+                .install_shard(hash(1), &[(hash(2), xorb_ref(3, 0))])
+                .unwrap();
+            let modes: Vec<_> = [
+                "chunk-index.sqlite",
+                "chunk-index.sqlite-wal",
+                "chunk-index.sqlite-shm",
+            ]
+            .into_iter()
+            .map(|name| {
+                std::fs::metadata(dir.path().join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777
+            })
+            .collect();
+            assert_eq!(modes, [0o600; 3], "shared={shared}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cold_index_open_creates_private_ancestors_without_changing_existing_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for shared in [false, true] {
+            let dir = TempDir::new().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            let root = dir.path().join("cache");
+            let parent = root.join("buckets").join("bucket");
+            let path = parent.join("chunk-index.sqlite");
+            if shared {
+                drop(PersistentChunkIndex::open_shared(&path).unwrap());
+            } else {
+                drop(PersistentChunkIndex::open_or_create(&path).unwrap());
+            }
+            let modes: Vec<_> = [dir.path(), &root, &root.join("buckets"), &parent]
+                .into_iter()
+                .map(|path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777)
+                .collect();
+            assert_eq!(modes, [0o755, 0o700, 0o700, 0o700], "shared={shared}");
+        }
     }
 
     #[test]

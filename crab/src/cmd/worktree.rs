@@ -842,19 +842,7 @@ async fn run_post_create_prefetch(
         tracing::debug!(replica = %name, "selected read replica for worktree prefetch");
     }
     let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-    let mut hydrator = crate::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        selection.router,
-        &config,
-    )?;
-    match crate::cache::xet_chunk_cache_from_config(&config) {
-        Ok(handle) => {
-            hydrator = hydrator.with_xet_chunk_cache(handle.cache);
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "worktree prefetch: failed to open xet-core chunk cache");
-        }
-    }
+    let hydrator = crate::read::build_cli_hydrator(caching_store, selection.router, &config)?;
 
     let summary = hydrator.prefetch_batch(&candidates, cancel).await?;
     if summary.failed > 0 {

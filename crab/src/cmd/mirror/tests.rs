@@ -1,4 +1,5 @@
 use super::*;
+use crab_cache::lifecycle::CacheUseGuard;
 
 pub(super) fn base_args(cache_dir: PathBuf) -> MirrorArgs {
     MirrorArgs {
@@ -367,7 +368,7 @@ fn existing_cache_updates_origin_and_existing_crab_remote()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
-    std::fs::create_dir_all(&cache)?;
+    crab_cache::ensure_private_cache_directory(&cache)?;
     std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let args = base_args(cache);
     let mut runner = RecordingRunner {
@@ -455,7 +456,7 @@ fn matching_refs_skip_lfs_scan_and_git_push_by_default()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
-    std::fs::create_dir_all(&cache)?;
+    crab_cache::ensure_private_cache_directory(&cache)?;
     std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let args = base_args(cache);
     let mut runner = RecordingRunner {
@@ -496,7 +497,7 @@ fn force_lfs_check_runs_full_lfs_verification_without_git_push()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let cache = temp.path().join("cache.git");
-    std::fs::create_dir_all(&cache)?;
+    crab_cache::ensure_private_cache_directory(&cache)?;
     std::fs::write(cache.join("HEAD"), "ref: refs/heads/main\n")?;
     let mut args = base_args(cache);
     args.force_lfs_check = true;

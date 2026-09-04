@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
-use crab_cache::lifecycle::CacheUseGuard;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +28,7 @@ mod process;
 mod reconcile;
 mod types;
 
-use cache::prepare_cache;
+use cache::{acquire_cache, prepare_cache};
 use process::SystemCommandRunner;
 
 pub use hook::mirror_hook_status;
@@ -212,7 +211,7 @@ fn run_mirror_with_runner(
 
     // Hold the same ownership as inspection/apply until LFS and ref publication
     // finish; a refresh during either operation could change the selected refs.
-    let cache = CacheUseGuard::acquire(&cache_dir, cancel)?;
+    let cache = acquire_cache(&args, &cache_dir, cancel)?;
     let cache_dir = cache.path();
     let created_cache = prepare_cache(&args, &cache, cancel, &options, runner)?;
     check_cancelled(cancel)?;
@@ -839,9 +838,11 @@ fn git_command_from_vec(
     options: &MirrorExecution,
     replay_output: bool,
 ) -> ProcessCommand {
+    let private_files = current_dir.is_some();
     let mut command = ProcessCommand::new("git", args)
         .current_dir(current_dir)
         .env_remove(GIT_ENV_REMOVALS)
+        .private_files(private_files)
         .replay_output(replay_output);
     if let Some(path) = &options.helper_path {
         command = command.env("PATH", path.clone());
@@ -879,6 +880,8 @@ struct ProcessCommand {
     env_remove: Vec<String>,
     stdin: Option<String>,
     verify_blobs: Vec<crab_git::batch::BlobHeader>,
+    #[cfg(unix)]
+    private_files: bool,
     replay_output: bool,
 }
 
@@ -892,6 +895,8 @@ impl ProcessCommand {
             env_remove: Vec::new(),
             stdin: None,
             verify_blobs: Vec::new(),
+            #[cfg(unix)]
+            private_files: false,
             replay_output: false,
         }
     }
@@ -928,6 +933,16 @@ impl ProcessCommand {
 
     fn verify_blobs(mut self, blobs: Vec<crab_git::batch::BlobHeader>) -> Self {
         self.verify_blobs = blobs;
+        self
+    }
+
+    fn private_files(mut self, private: bool) -> Self {
+        #[cfg(unix)]
+        {
+            self.private_files = private;
+        }
+        #[cfg(not(unix))]
+        let _ = private;
         self
     }
 

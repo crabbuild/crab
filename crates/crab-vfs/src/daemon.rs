@@ -2262,6 +2262,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_startup_preserves_unavailable_cache_and_keeps_registry_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("cache");
+        std::fs::write(&cache_path, b"retain cache sentinel").unwrap();
+
+        for _ in 0..2 {
+            let daemon =
+                DaemonService::new(dir.path().to_path_buf(), CancellationToken::new()).unwrap();
+            daemon.start().await.unwrap();
+            assert!(daemon.list_repos().await.unwrap().is_empty());
+            daemon.stop().await.unwrap();
+        }
+        assert_eq!(
+            std::fs::read(&cache_path).unwrap(),
+            b"retain cache sentinel"
+        );
+        assert!(dir.path().join("config/repos.sqlite").is_file());
+    }
+
+    #[tokio::test]
     async fn daemon_remove_nonexistent_repo() {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();

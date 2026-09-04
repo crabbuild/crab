@@ -68,6 +68,7 @@ const INTERNAL_KEYS: &[&str] = &[
     "cache.service_url",
     "cache.service_mode",
     "cache.push_warming",
+    "cache.max_bytes",
     "cache.chunk_cache_dir",
     "cache.service_auth",
     "cache.service_token_path",
@@ -506,6 +507,24 @@ fn run_internal_config_set(key: &str, value: &str, path: &Path) -> Result<()> {
             let b = parse_bool(value, key, path)?;
             section_table.insert(field.to_owned(), toml::Value::Boolean(b));
         }
+        "cache.max_bytes" => {
+            let budget = if value == "unlimited" {
+                toml::Value::String(value.to_owned())
+            } else {
+                let bytes = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|bytes| *bytes >= 0)
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: format!(
+                            "{key}: expected nonnegative bytes or \"unlimited\", got \"{value}\""
+                        ),
+                        origin: path.display().to_string(),
+                    })?;
+                toml::Value::Integer(bytes)
+            };
+            section_table.insert(field.to_owned(), budget);
+        }
         "push.lock_ttl_secs"
         | "push.lock_heartbeat_interval"
         | "push.lock_wait_secs"
@@ -796,6 +815,23 @@ mod tests {
     }
 
     #[test]
+    fn cache_cap_can_be_removed_without_losing_other_settings() {
+        let dir = setup_dir();
+        let path = internal_config_path(dir.path());
+        run_internal_config_set("checkout.lazy", "true", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "1024", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "unlimited", &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for invalid in ["-1", "invalid", "9223372036854775808"] {
+            assert!(run_internal_config_set("cache.max_bytes", invalid, &path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let table = read_toml(&path).unwrap();
+        assert_eq!(table["cache"]["max_bytes"].as_str(), Some("unlimited"));
+        assert_eq!(table["checkout"]["lazy"].as_bool(), Some(true));
+    }
+
+    #[test]
     fn set_cache_service_config_keys() {
         let dir = setup_dir();
         let path = internal_config_path(dir.path());
@@ -803,6 +839,7 @@ mod tests {
         run_internal_config_set("cache.service_url", "https://cache.internal:8443", &path).unwrap();
         run_internal_config_set("cache.service_mode", "CACHE+DEDUP", &path).unwrap();
         run_internal_config_set("cache.push_warming", "true", &path).unwrap();
+        run_internal_config_set("cache.max_bytes", "536870912", &path).unwrap();
         run_internal_config_set("cache.chunk_cache_dir", "/var/cache/crab/chunks", &path).unwrap();
         run_internal_config_set("cache.service_auth", "PSK", &path).unwrap();
         run_internal_config_set("cache.service_auth", "mTLS", &path).unwrap();
@@ -836,6 +873,10 @@ mod tests {
             toml::Value::String("cache+dedup".into())
         );
         assert_eq!(table["cache"]["push_warming"], toml::Value::Boolean(true));
+        assert_eq!(
+            table["cache"]["max_bytes"],
+            toml::Value::Integer(536_870_912)
+        );
         assert_eq!(
             table["cache"]["chunk_cache_dir"],
             toml::Value::String("/var/cache/crab/chunks".into())

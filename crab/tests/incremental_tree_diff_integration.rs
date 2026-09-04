@@ -41,7 +41,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use crab::cmd::dehydrate::{DehydrateArgs, run_dehydrate_in};
-use crab::cmd::hydrate::{HydrateArgs, ShardHydrator, run_hydrate_in};
+use crab::cmd::hydrate::{HydrateArgs, HydrationRuntime, run_hydrate_in};
 use crab::core::config::{CacheConfig, Config};
 use crab::core::context::AppContext;
 use crab::core::error::CrabError;
@@ -677,7 +677,7 @@ fn dehydrate_args(patterns: &[&str]) -> DehydrateArgs {
     }
 }
 
-fn shard_hydrator(store: Store, prefix: &str, cache_root: &Path) -> ShardHydrator {
+fn shard_hydrator(store: Store, prefix: &str, cache_root: &Path) -> HydrationRuntime {
     let cache = Arc::new(crab::cache::LocalCache::new(cache_root.to_path_buf()));
     let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
         store.clone(),
@@ -685,8 +685,12 @@ fn shard_hydrator(store: Store, prefix: &str, cache_root: &Path) -> ShardHydrato
         cache,
     )
     .expect("build caching store");
-    ShardHydrator::new_from_cli_layout(caching_store, StoreLayout::new(store, prefix.to_owned()))
-        .expect("build shard hydrator")
+    crab::read::build_cli_hydrator(
+        caching_store,
+        StoreLayout::new(store, prefix.to_owned()),
+        &crab::core::config::Config::default(),
+    )
+    .expect("build shard hydrator")
 }
 
 async fn push_ref_from_git_dir(

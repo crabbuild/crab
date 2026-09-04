@@ -14,6 +14,32 @@ pub enum CacheError {
     #[error("cache I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Cache path ownership, type, or permissions are unsafe for private data.
+    #[error("unsafe cache path {path}: {reason}")]
+    UnsafeRoot { path: String, reason: String },
+
+    /// One live process tried to assign conflicting budgets to the same cache root.
+    #[error(
+        "cache budget conflict at {path}: active budget is {active}, requested {requested}",
+        active = active_bytes.map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} bytes")),
+        requested = requested_bytes.map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} bytes"))
+    )]
+    BudgetConflict {
+        path: String,
+        active_bytes: Option<u64>,
+        requested_bytes: Option<u64>,
+    },
+
+    /// SQLite cooperatively interrupted an inspection after its query deadline.
+    #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
+    #[error("cache inspection timed out after {timeout_ms} ms at {path}")]
+    InspectionTimeout {
+        path: String,
+        timeout_ms: u64,
+        #[source]
+        source: rusqlite::Error,
+    },
+
     /// The cache service returned an invalid or unsupported response.
     #[error("cache service error: {reason}")]
     Service { reason: String },
@@ -109,7 +135,7 @@ pub enum CacheError {
     CorruptObject { path: String, reason: String },
 
     /// The local cache index could not be opened, queried, or updated.
-    #[cfg(feature = "local-cache")]
+    #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
     #[error("cache index error at {path}: {source}")]
     Index {
         path: String,

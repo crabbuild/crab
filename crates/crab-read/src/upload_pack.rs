@@ -2340,7 +2340,7 @@ mod tests {
             peeled: Some(oid('1')),
         };
         assert!(!shallow_closure_tags_are_complete(
-            &[annotated.clone()],
+            std::slice::from_ref(&annotated),
             &["refs/tags/annotated".to_owned()],
             &selected,
         ));

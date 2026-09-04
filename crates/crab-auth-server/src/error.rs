@@ -4,6 +4,9 @@ pub type Result<T> = std::result::Result<T, AuthServerError>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AuthServerError {
+    #[error("{0}")]
+    Read(#[source] Box<crab_read::ReadError>),
+
     #[error("authentication failed for {path}")]
     AuthFailed { path: String },
 
@@ -32,6 +35,13 @@ pub enum AuthServerError {
     #[error("corrupt object {path}: {reason}")]
     CorruptObject { path: String, reason: String },
 
+    #[error("origin object at {path} failed integrity verification: {source}")]
+    OriginIntegrity {
+        path: String,
+        #[source]
+        source: crab_cache::CacheError,
+    },
+
     #[error("hash mismatch: requested {requested}, actual {actual}")]
     HashMismatch { requested: String, actual: String },
 
@@ -43,6 +53,12 @@ pub enum AuthServerError {
 
     #[error("Git visibility traversal task failed")]
     GitVisibilityJoin {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+
+    #[error("view content repacking task failed")]
+    ViewRepackJoin {
         #[source]
         source: tokio::task::JoinError,
     },
@@ -148,6 +164,9 @@ impl From<crab_cache_store::CacheStoreError> for AuthServerError {
     fn from(error: crab_cache_store::CacheStoreError) -> Self {
         match error {
             crab_cache_store::CacheStoreError::Storage(source) => Self::from(source),
+            crab_cache_store::CacheStoreError::OriginIntegrity { path, source } => {
+                Self::OriginIntegrity { path, source }
+            }
             crab_cache_store::CacheStoreError::Cache(source) => Self::Internal(source.to_string()),
         }
     }
@@ -185,6 +204,7 @@ impl From<crab_lfs::LfsError> for AuthServerError {
 impl From<crab_read::ReadError> for AuthServerError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
+            crab_read::ReadError::CacheStore(source) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::NotFound { path } => Self::NotFound { path },
@@ -207,7 +227,7 @@ impl From<crab_read::ReadError> for AuthServerError {
                 example_chunk_hash,
                 example_chunk_index,
             },
-            other => Self::Internal(other.to_string()),
+            other => Self::Read(Box::new(other)),
         }
     }
 }
@@ -253,5 +273,41 @@ impl From<crab_types::pointer::PointerParseError> for AuthServerError {
 impl From<io::Error> for AuthServerError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_availability_failure_retains_nested_source() {
+        use std::error::Error;
+
+        let source = io::Error::new(io::ErrorKind::PermissionDenied, "restore denied");
+        let error = AuthServerError::from(crab_read::ReadError::availability(source));
+        let nested = std::iter::successors(error.source(), |source| (*source).source())
+            .find_map(|source| source.downcast_ref::<io::Error>())
+            .unwrap();
+        assert_eq!(nested.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn shared_origin_integrity_retains_the_source_error() {
+        use std::error::Error as _;
+
+        let error = AuthServerError::from(crab_read::ReadError::from(
+            crab_cache_store::CacheStoreError::OriginIntegrity {
+                path: "xorbs/bad".into(),
+                source: crab_cache::CacheError::CorruptObject {
+                    path: "xorb".into(),
+                    reason: "invalid footer".into(),
+                },
+            },
+        ));
+        assert!(
+            matches!(&error, AuthServerError::OriginIntegrity { path, .. } if path == "xorbs/bad")
+        );
+        assert!(error.source().unwrap().is::<crab_cache::CacheError>());
     }
 }

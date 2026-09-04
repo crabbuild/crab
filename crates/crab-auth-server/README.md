@@ -40,6 +40,12 @@ and `--deny-path` rules, a scope hash, and a source repository URL. It builds
 the view's Git workspace and Crab metadata and reports the resulting prefixes,
 source generation, and cache status.
 
+View repacking verifies source bytes into an operation-owned anonymous file,
+then chunks them incrementally off the async runtime. Cancellation propagates
+to reconstruction and the chunking worker. This avoids retaining a whole
+decoded source file; export parsing, accumulated xorb results, and temporary
+disk still require separate resource qualification.
+
 Both binaries emit structured JSON with safe error handling. `Doctor` reports
 the Git version and helper readiness. Cleanup is attempted after receive
 verification and commit, but cleanup warnings do not turn a successful

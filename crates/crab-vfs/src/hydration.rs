@@ -1463,9 +1463,62 @@ mod tests {
     use object_store::memory::InMemory;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn canonical_ranges_survive_unavailable_chunk_storage_and_reuse_warm_bytes() {
+        use crate::test_support::StoredPointer;
+
+        let content = Bytes::from(
+            (0..READ_THROUGH_WINDOW_SIZE as usize + 17)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        for window_cache_enabled in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let stored =
+                StoredPointer::new(&tmp.path().join("shared-cache"), content.clone()).await;
+            let unavailable = tmp.path().join("unavailable");
+            std::fs::write(&unavailable, b"preserve me").unwrap();
+            let chunks =
+                Arc::new(ChunkCache::open(unavailable.join("chunks"), Some(1024)).unwrap());
+            let window_root = window_cache_enabled.then(|| tmp.path().join("windows"));
+            let service = crate::pipeline::create_hydration(
+                chunks,
+                Arc::new(VerifiedSet::new(16)),
+                CancellationToken::new(),
+                Some(stored.context.store_layout.clone()),
+                Some(stored.context.hydrator.clone()),
+                window_root,
+            )
+            .unwrap();
+
+            assert_eq!(
+                service.read_range(&stored.pointer, 0, 1).await.unwrap(),
+                content.slice(..1)
+            );
+            assert_eq!(stored.xorb_body_requests(), 1);
+            stored.origin.block_body_reads_for(&stored.xorb_path);
+
+            for (offset, size) in [
+                (7, 17),
+                (READ_THROUGH_WINDOW_SIZE - 4, 32),
+                (0, content.len() as u32 + 7),
+                (stored.pointer.size, 20),
+            ] {
+                let end = (offset + u64::from(size)).min(stored.pointer.size);
+                let bytes = service
+                    .read_range(&stored.pointer, offset, size)
+                    .await
+                    .unwrap();
+                assert_eq!(bytes, content.slice(offset as usize..end as usize));
+            }
+            assert_eq!(stored.xorb_body_requests(), 1);
+            assert_eq!(std::fs::read(&unavailable).unwrap(), b"preserve me");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn store_backed_xorb_fetcher_reads_warmed_local_xorb_range() {
         let cache_dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(LocalCache::new(cache_dir.path().to_path_buf()));
+        let cache = Arc::new(LocalCache::new(cache_dir.path().join("cache")));
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store, "repo".to_owned());
 
@@ -1804,7 +1857,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn prefetch_next_read_window_skips_when_window_cache_is_unavailable() {
-        let service = test_service_without_read_window_cache();
+        let (_cache_dir, service) = test_service_without_read_window_cache();
         let mut pointer = test_pointer();
         pointer.size = READ_THROUGH_WINDOW_SIZE * 2;
 
@@ -1818,7 +1871,7 @@ mod tests {
 
     #[test]
     fn read_window_prefetch_claims_each_window_once_until_failure() {
-        let service = test_service_without_read_window_cache();
+        let (_cache_dir, service) = test_service_without_read_window_cache();
         let key = ReadWindowKey {
             file_hash: [0xAB; 32],
             start: READ_THROUGH_WINDOW_SIZE,
@@ -1835,7 +1888,7 @@ mod tests {
 
     #[test]
     fn read_window_prefetch_claims_compact_when_key_set_fills() {
-        let service = test_service_without_read_window_cache();
+        let (_cache_dir, service) = test_service_without_read_window_cache();
 
         for i in 0..=MAX_READ_WINDOW_PREFETCH_KEYS {
             let key = ReadWindowKey {
@@ -1859,14 +1912,11 @@ mod tests {
         }
     }
 
-    fn test_service_without_read_window_cache() -> Arc<HydrationService> {
-        HydrationService::new(
+    fn test_service_without_read_window_cache() -> (tempfile::TempDir, Arc<HydrationService>) {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let service = HydrationService::new(
             Arc::new(
-                ChunkCache::open(
-                    tempfile::tempdir().unwrap().path().join("chunks"),
-                    Some(1024 * 1024),
-                )
-                .unwrap(),
+                ChunkCache::open(cache_dir.path().join("cache/chunks"), Some(1024 * 1024)).unwrap(),
             ),
             Arc::new(VerifiedSet::new(16)),
             Arc::new(NoopFileIndexResolver),
@@ -1876,7 +1926,8 @@ mod tests {
             None,
             Some(1),
             CancellationToken::new(),
-        )
+        );
+        (cache_dir, service)
     }
 
     struct NoopFileIndexResolver;

@@ -11,6 +11,16 @@ meta:
 
 As you work with different branches and files, Crab's local cache accumulates chunks, xorbs, and shards. Pruning evicts the least-recently-used cache objects until the cache fits its configured budgets, freeing disk space without touching the remote store.
 
+Retention is unlimited by default, so prune does nothing until you set a cap:
+
+```bash
+crab config set cache.max_bytes 10737418240  # 10 GiB
+```
+
+Use `crab config set cache.max_bytes unlimited` to remove the cap. Explicit
+`crab cache clean` can remove eligible payloads without a cap; it preserves
+unknown files, live owners, and retained metadata rather than wiping the root.
+
 ```mermaid
 flowchart TD
     Walk[Walk local cache objects] --> Sort[Sort by last access time]

@@ -1193,11 +1193,15 @@ enum OptimizeCmd {
 
 #[derive(Subcommand)]
 enum OptimizeCacheCmd {
-    /// Print cache statistics.
-    Stats,
+    /// Inspect local cache usage and availability without changing cache state.
+    Stats {
+        /// Structured JSON output (single envelope, including partial failures).
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
-    /// Clear the local cache.
+    /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean,
     /// Evict local cache objects until configured budgets are satisfied.
     Prune {
@@ -1439,9 +1443,8 @@ impl OptimizeCmd {
                 | OptimizeCacheCmd::Warm { json, jsonl, .. } => {
                     OutputMode::from_flags(*json, *jsonl)
                 }
-                OptimizeCacheCmd::Stats | OptimizeCacheCmd::Verify | OptimizeCacheCmd::Clean => {
-                    OutputMode::Text
-                }
+                OptimizeCacheCmd::Stats { json } => OutputMode::from_flags(*json, false),
+                OptimizeCacheCmd::Verify | OptimizeCacheCmd::Clean => OutputMode::Text,
             },
             Self::Indexes(command) => match command {
                 OptimizeIndexesCmd::Diagnose { json, .. }
@@ -1475,7 +1478,7 @@ impl OptimizeCmd {
                 crab::cmd::tier::TierCommand::Rollback { .. } => "tier.rollback",
             },
             Self::Cache(command) => match command {
-                OptimizeCacheCmd::Stats => "cache.stats",
+                OptimizeCacheCmd::Stats { .. } => "cache.stats",
                 OptimizeCacheCmd::Verify => "cache.verify",
                 OptimizeCacheCmd::Clean => "cache.clean",
                 OptimizeCacheCmd::Prune { .. } => "prune",
@@ -1892,11 +1895,15 @@ enum DaemonMountBackendArg {
 
 #[derive(Subcommand)]
 enum CacheCmd {
-    /// Print cache statistics.
-    Stats,
+    /// Inspect local cache usage and availability without changing cache state.
+    Stats {
+        /// Structured JSON output (single envelope, including partial failures).
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify cached chunks, shards, and xorbs, evicting corrupt entries.
     Verify,
-    /// Clear the local cache.
+    /// Remove eligible local cache payloads, preserving retained and busy state.
     Clean,
 }
 
@@ -2112,6 +2119,7 @@ impl Cmd {
             | Self::Repack { json, jsonl, .. }
             | Self::Prune { json, jsonl, .. } => OutputMode::from_flags(*json, *jsonl),
             Self::Optimize(command) => command.output_mode(),
+            Self::Cache(CacheCmd::Stats { json }) => OutputMode::from_flags(*json, false),
             Self::Mirror(args) => args.output_mode(),
             Self::Push(args) => OutputMode::from_flags(args.json, args.jsonl),
             Self::Ship { json, .. } => OutputMode::from_flags(*json, false),
@@ -2349,7 +2357,7 @@ impl Cmd {
             Self::Optimize(command) => command.schema_name(),
             Self::Tier(..) => "tier",
             Self::Metadb(..) => "metadb",
-            Self::Cache(CacheCmd::Stats) => "cache.stats",
+            Self::Cache(CacheCmd::Stats { .. }) => "cache.stats",
             Self::Cache(CacheCmd::Verify) => "cache.verify",
             Self::Cache(CacheCmd::Clean) => "cache.clean",
             Self::Config(ConfigCmd::Get { .. }) => "config.get",
@@ -3284,7 +3292,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 #[cfg(unix)]
                 Some((
                     std::io::stdin().as_raw_fd(),
-                    crab::git::filter_process::FILTER_IDLE_TIMEOUT,
+                    crab::git::filter_process::FILTER_PARENT_POLL_INTERVAL,
                 )),
             )
             .await?;
@@ -5283,7 +5291,9 @@ async fn run_optimize_command(
         } => run_compact_command(repo, bucket, dry_run, max_shard_size, cancel).await,
         OptimizeCmd::Tiers { command } => run_tier_command(command, cancel).await,
         OptimizeCmd::Cache(command) => match command {
-            OptimizeCacheCmd::Stats => run_cache_command(CacheCmd::Stats, cancel).await,
+            OptimizeCacheCmd::Stats { json } => {
+                run_cache_command(CacheCmd::Stats { json }, cancel).await
+            }
             OptimizeCacheCmd::Verify => run_cache_command(CacheCmd::Verify, cancel).await,
             OptimizeCacheCmd::Clean => run_cache_command(CacheCmd::Clean, cancel).await,
             OptimizeCacheCmd::Prune {
@@ -5696,14 +5706,24 @@ async fn run_metadb_command(
 async fn run_cache_command(sub: CacheCmd, cancel: &CancellationToken) -> Result<ExitCode> {
     let _span = tracing::info_span!("cache").entered();
     match sub {
-        CacheCmd::Stats => run_cache_stats().await?,
+        CacheCmd::Stats { json } => {
+            let mode = OutputMode::from_flags(json, false);
+            let available = crab::cmd::cache::run_cache_stats(mode, cancel).await?;
+            // Inspection errors belong in the partial report, not a second
+            // JSON envelope. Preserve a nonzero exit for automation.
+            return Ok(if available {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
+        }
         CacheCmd::Verify => {
             let mode = OutputMode::from_flags(false, false);
             crab::cmd::cache::run_cache_verify_with_cancel(mode, cancel).await?;
         }
         CacheCmd::Clean => {
             let mode = OutputMode::from_flags(false, false);
-            crab::cmd::cache::run_cache_clean_with_cancel(false, mode, cancel)?;
+            crab::cmd::cache::run_cache_clean(false, mode, cancel).await?;
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -5935,7 +5955,7 @@ async fn create_cli_caching_store(
 
 #[derive(Default)]
 struct FilterProcessRemoteSmudge {
-    hydrator: Option<Arc<crab::cmd::hydrate::ShardHydrator>>,
+    hydrator: Option<Arc<crab::cmd::hydrate::HydrationRuntime>>,
     prefetch: Option<Arc<crab::git::prefetch::PrefetchQueue>>,
 }
 
@@ -5989,11 +6009,7 @@ async fn build_filter_process_remote_smudge(
             return FilterProcessRemoteSmudge::default();
         }
     };
-    let mut hydrator = match crab::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        selection.router,
-        config,
-    ) {
+    let hydrator = match crab::read::build_cli_hydrator(caching_store, selection.router, config) {
         Ok(hydrator) => hydrator,
         Err(e) => {
             tracing::debug!(error = %e, "filter-process: failed to build ShardHydrator, smudge will defer to hydrate");
@@ -6001,111 +6017,13 @@ async fn build_filter_process_remote_smudge(
         }
     };
 
-    match crab::cache::xet_chunk_cache_from_config(config) {
-        Ok(handle) => {
-            hydrator = hydrator.with_xet_chunk_cache(handle.cache);
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "filter-process: failed to open xet-core chunk cache, continuing without it");
-        }
-    }
-
-    let prefetch = Arc::new(hydrator.prefetch_queue(
-        config,
-        cancel.clone(),
-        tokio::runtime::Handle::current(),
-    ));
+    let prefetch =
+        Arc::new(hydrator.prefetch_queue(cancel.clone(), tokio::runtime::Handle::current()));
     tracing::debug!("filter-process: ShardHydrator and delayed-smudge PrefetchQueue wired");
     FilterProcessRemoteSmudge {
         hydrator: Some(Arc::new(hydrator)),
         prefetch: Some(prefetch),
     }
-}
-
-/// Format a byte count with a human-readable unit suffix. Used by the
-/// hydrate and `cache stats` chunk-cache summaries so the two outputs
-/// agree on formatting.
-fn format_bytes_size(bytes: u64) -> String {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "cache sizes fit in f64 without meaningful precision loss"
-    )]
-    let b = bytes as f64;
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut idx = 0;
-    let mut scaled = b;
-    while scaled >= 1024.0 && idx < UNITS.len() - 1 {
-        scaled /= 1024.0;
-        idx += 1;
-    }
-    if idx == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{scaled:.1} {unit}", unit = UNITS[idx])
-    }
-}
-
-/// Implementation of `crab cache stats`. Reports both cache families:
-/// xet-core's range cache for reconstruction reads, and Crab's object
-/// cache for shards, xorbs, manifests, and stages.
-async fn run_cache_stats() -> Result<()> {
-    let config = Config::resolve_local().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to load config for cache stats, using defaults");
-        Config::default()
-    });
-
-    let handle = match crab::cache::xet_chunk_cache_from_config(&config) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("chunk cache unavailable: {e}");
-            return Ok(());
-        }
-    };
-
-    let stats = handle.stats().await?;
-    println!("Chunk cache:");
-    println!("  directory:   {}", handle.directory.display());
-    println!(
-        "  size_limit:  {} ({} bytes)",
-        format_bytes_size(handle.size_bytes),
-        handle.size_bytes,
-    );
-    println!("  entries:     {}", stats.entries);
-    println!(
-        "  used_bytes:  {} ({} bytes)",
-        format_bytes_size(stats.total_bytes),
-        stats.total_bytes,
-    );
-
-    let object_cache = crab::cache::LocalCache::new(crab::cache::default_cache_root());
-    let object_stats = object_cache.stats().await?;
-    let object_bytes =
-        object_stats.shard_bytes + object_stats.xorb_bytes + object_stats.stage_bytes;
-    println!();
-    println!("Object cache:");
-    println!("  directory:   {}", object_cache.root().display());
-    println!(
-        "  used_bytes:  {} ({} bytes)",
-        format_bytes_size(object_bytes),
-        object_bytes,
-    );
-    println!(
-        "  shards:      {} entries, {}",
-        object_stats.shard_count,
-        format_bytes_size(object_stats.shard_bytes),
-    );
-    println!(
-        "  xorbs:       {} entries, {}",
-        object_stats.xorb_count,
-        format_bytes_size(object_stats.xorb_bytes),
-    );
-    println!(
-        "  stages:      {} entries, {}",
-        object_stats.stage_count,
-        format_bytes_size(object_stats.stage_bytes),
-    );
-    println!("  manifests:   {} entries", object_stats.manifest_count);
-    Ok(())
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
-crab-cache = { workspace = true, features = ["local-cache"] }
+crab-cache = { workspace = true, features = ["local-cache", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true }
 crab-diff = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader"] }
@@ -37,5 +37,6 @@ xet-data = { workspace = true }
 xet-runtime = { workspace = true }
 
 [dev-dependencies]
+slatedb = { version = "=0.15.0", features = ["wal_disable", "zstd"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

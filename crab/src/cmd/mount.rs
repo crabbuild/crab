@@ -2113,24 +2113,7 @@ fn build_mount_read_context(
         layout.global_prefix().to_owned(),
     );
     let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache).ok()?;
-    let read_layout = crab_read::ReadStoreLayout::with_global_prefix(
-        caching_store.origin().clone(),
-        layout.repo_prefix().to_owned(),
-        layout.global_prefix().to_owned(),
-    );
-    let mut hydrator = crab_read::ShardHydrator::new(
-        caching_store,
-        read_layout,
-        config.hydrate.download_concurrency,
-    )
-    .ok()?;
-
-    match crate::cache::xet_chunk_cache_from_config(config) {
-        Ok(handle) => hydrator = hydrator.with_xet_chunk_cache(handle.cache),
-        Err(error) => {
-            tracing::debug!(%error, "mount: continuing without shared xet chunk cache");
-        }
-    }
+    let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
 
     Some(crate::vfs::MountReadContext {
         store_layout,

@@ -686,6 +686,22 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
 fn checkout_head(target: &Path, remote_url: &str, mode: OutputMode) -> Result<()> {
     scrub_git_pack_appledouble_files(target)?;
 
+    // An unborn clone has nothing to check out. Other checkout failures must
+    // stop before hydration can conceal a broken Git/filter operation.
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .current_dir(target)
+        .output()?;
+    if head.status.code() == Some(1) {
+        return Ok(());
+    }
+    if !head.status.success() {
+        return Err(CrabError::Protocol(format!(
+            "failed to inspect cloned repository HEAD: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        )));
+    }
+
     // Git's branch-status chatter is not part of a clone JSON envelope.
     // Keep stderr diagnostics and the existing human-readable checkout output.
     let stdout = if mode.is_machine() {
@@ -1485,6 +1501,44 @@ mod tests {
     }
 
     #[test]
+    fn checkout_propagates_required_filter_failure() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let source = tempfile::tempdir().unwrap();
+        git_in(source.path(), &["init"]);
+        git_in(source.path(), &["config", "user.email", "test@example.com"]);
+        git_in(source.path(), &["config", "user.name", "Test User"]);
+        std::fs::write(source.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::fs::write(source.path().join("data.bin"), b"data").unwrap();
+        git_in(source.path(), &["add", "."]);
+        git_in(source.path(), &["commit", "-m", "fixture"]);
+        let target = tempfile::tempdir().unwrap();
+        git_in(
+            target.path(),
+            &[
+                "clone",
+                "--no-checkout",
+                source.path().to_str().unwrap(),
+                ".",
+            ],
+        );
+        git_in(target.path(), &["config", "filter.crab.process", "false"]);
+        git_in(target.path(), &["config", "filter.crab.required", "true"]);
+
+        assert!(matches!(
+            checkout_head(target.path(), "crab://bucket/repo", OutputMode::Text),
+            Err(CrabError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn checkout_accepts_unborn_repository() {
+        let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+        let target = tempfile::tempdir().unwrap();
+        git_in(target.path(), &["init"]);
+        checkout_head(target.path(), "crab://bucket/repo", OutputMode::Text).unwrap();
+    }
+
+    #[test]
     fn clone_leaves_lfs_config_untouched_for_empty_repository() {
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
@@ -1704,7 +1758,8 @@ mod tests {
     #[tokio::test]
     async fn clone_shard_sync_uses_selected_replica_store() {
         let cache_tmp = tempfile::tempdir().unwrap();
-        let _cache_guard = crate::test::git_repo::CacheDirGuard::new(cache_tmp.path());
+        let cache_root = cache_tmp.path().join("cache");
+        let _cache_guard = crate::test::git_repo::CacheDirGuard::new(&cache_root);
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(repo.path().join(".crab")).unwrap();
 
@@ -1745,13 +1800,67 @@ mod tests {
         .unwrap();
 
         assert!(
-            shard_cache_path(cache_tmp.path(), &replica_hash).exists(),
+            shard_cache_path(&cache_root, &replica_hash).exists(),
             "clone shard sync must cache the shard from the selected replica"
         );
         assert!(
-            !shard_cache_path(cache_tmp.path(), &primary_hash).exists(),
+            !shard_cache_path(&cache_root, &primary_hash).exists(),
             "clone shard sync must not silently read the primary when a replica is selected"
         );
+        assert!(crab_cache::private_cache_directory_is_safe(&cache_root));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clone_shard_sync_leaves_unsafe_cache_roots_unchanged() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let store = crate::storage::store::Store::new(std::sync::Arc::new(
+            object_store::memory::InMemory::new(),
+        ));
+        let router = crate::storage::StoreLayout::new(store.clone(), "repo".to_owned());
+        write_sync_manifest_with_shard(&store, &router, 1, b"shard").await;
+
+        for symlinked in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            let mode = if symlinked { 0o700 } else { 0o755 };
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).unwrap();
+            let sentinel = target.join("sentinel");
+            std::fs::write(&sentinel, b"retain").unwrap();
+            let root = if symlinked {
+                let link = temp.path().join("cache");
+                symlink(&target, &link).unwrap();
+                link
+            } else {
+                target.clone()
+            };
+
+            crate::metadata::shard_sync::run_post_fetch_shard_sync(
+                router.clone(),
+                "repo",
+                &root,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"retain");
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(&root)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                symlinked
+            );
+        }
     }
 
     async fn write_sync_manifest_with_shard(

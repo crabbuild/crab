@@ -22,6 +22,24 @@ The cache service exposes health endpoints, Prometheus metrics, and structured l
 
 Use liveness for restarts. Use readiness for load-balancer rotation.
 
+### Client failure suppression
+
+An enabled cache client shares availability state with its clones. A transport
+failure or HTTP 429, 502, or 503 defers new service requests for 30 seconds;
+reads can still use local cache and authoritative origin. After that interval,
+one logical request probes recovery. A streamed probe owns that admission until its
+body completes; dropping or cancelling it schedules another probe rather than
+leaving the client stuck. The existing request timeout remains 30 seconds,
+including connection and body transfer.
+
+Not every error disables the service. A missing object, caller/auth error,
+batch-local HTTP 500, origin-failure HTTP 504, or write-admission HTTP 507 can
+coexist with readable cached objects. Their normal error handling remains in
+place. This state is per configured client, not a machine-wide ban: new
+commands may construct new clients, and already-admitted requests can finish.
+These limits are not a whole-command latency guarantee. Health-gated client
+construction may also omit an unhealthy service for that operation.
+
 ## Prometheus
 
 Scrape:
@@ -152,6 +170,14 @@ and the active doctor probe.
 For S3-compatible staging environments such as RustFS or MinIO, run the
 RustFS smoke before rollout:
 
+Use a new dedicated disposable bucket, never a production or shared repository
+bucket. Existing owned buckets are rejected before writes; bucket-listing
+permission is required. Real push operations update the bucket-global chunk
+index. Synthetic origin fixtures are create-only and restricted to each run's prefixes; global
+metadata route probes reuse real objects written by that run. Choose a fresh
+`--run-id` when specifying one: an existing run directory is rejected to retain
+its evidence. The harness does not delete the bucket after completion.
+
 ```bash
 cd crab
 make cache-service-rustfs-smoke
@@ -199,6 +225,16 @@ another origin GET. The smoke report includes a post-traffic
 artifact; use it as the redacted evidence bundle when comparing cache hit
 rate, origin fallback rate, push warming, pressure behavior, and admin/metrics
 probes during rollout.
+
+A `cache-recovery-*` stage exercises failure after successful negotiation in
+one push process. It injects one metadata PUT failure, holds two immutable
+origin publications across the client's 30-second cooldown, and requires
+warming to resume without renegotiation. A recovered cache HIT must match
+origin without another origin GET; a fresh clone must hydrate the edited
+version byte-identically and have clean Git status. The report retains the
+HTTP timeline, gate timings, and hashes, including command failure evidence.
+The deliberate holds are not a normal-latency benchmark. This stage does not
+qualify recovery in mounts or every fetch/hydrate cancellation path.
 
 ## Release Evidence Gate
 

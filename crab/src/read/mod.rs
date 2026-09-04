@@ -4,6 +4,9 @@
 
 pub mod selection;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +17,7 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::{LocalCache, default_cache_root};
-use crate::cmd::hydrate::ShardHydrator;
+use crate::cmd::hydrate::HydrationRuntime;
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
@@ -29,6 +32,63 @@ const DEFAULT_REV: &str = "HEAD";
 const POINTER_PEEK_THRESHOLD: usize = 4096;
 const MAX_BLOB_PEEK: usize = 1024;
 const WRITE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Build the canonical CLI hydration runtime for a selected read store.
+///
+/// Cache initialization is an optimization: failure leaves the verified
+/// origin-backed hydrator available and emits a structured diagnostic.
+pub fn build_cli_hydrator(
+    caching_store: CachingStore,
+    router: StoreLayout,
+    config: &Config,
+) -> Result<HydrationRuntime> {
+    HydrationRuntime::with_config_from_cli_layout(caching_store, router, config)
+}
+
+/// Resolve the configured remote and build the product hydration adapter.
+pub async fn build_configured_cli_hydrator(
+    config: &Config,
+    operation: &str,
+    cancel: &CancellationToken,
+) -> Result<Option<HydrationRuntime>> {
+    let Some(url) = config.remote_url.as_deref() else {
+        return Ok(None);
+    };
+    if url.trim().is_empty() {
+        return Err(CrabError::Configuration {
+            key: "remote.url".into(),
+            origin: "crab.toml contains an empty [remote].url".into(),
+        });
+    }
+    let parsed = CrabUrl::parse(url)?;
+    let selection =
+        crate::replication::select_read_store(config, &parsed, operation, cancel).await?;
+    let caching_store = CachingStore::new(selection.store, &config.cache)?;
+    build_cli_hydrator(caching_store, selection.router, config).map(Some)
+}
+
+/// Build the canonical shared-crate hydration runtime for VFS/server callers.
+///
+/// Product configuration stays in this adapter while reconstruction remains
+/// owned by `crab-read`.
+pub fn build_shared_hydrator(
+    caching_store: CachingStore,
+    router: StoreLayout,
+    config: &Config,
+) -> Result<crab_read::ShardHydrator> {
+    let read_layout = crab_read::ReadStoreLayout::with_global_prefix(
+        caching_store.origin().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    Ok(crab_read::ReadRuntimeBuilder::new(
+        caching_store,
+        read_layout,
+        config.hydrate.download_concurrency,
+    )
+    .with_buffer_budget(config.hydrate.prefetch_budget)
+    .build()?)
+}
 
 /// Options used when opening a repository for reads.
 #[derive(Debug, Clone)]
@@ -61,7 +121,7 @@ struct Inner {
 struct RemoteContext {
     caching_store: CachingStore,
     router: StoreLayout,
-    hydrator: Arc<ShardHydrator>,
+    hydrator: Arc<HydrationRuntime>,
 }
 
 /// A repository snapshot pinned to a resolved commit.
@@ -395,11 +455,8 @@ impl Inner {
                     &self.config.cache,
                     Arc::clone(&self.cache),
                 )?;
-                let hydrator = ShardHydrator::with_config_from_cli_layout(
-                    caching_store.clone(),
-                    router.clone(),
-                    &self.config,
-                )?;
+                let hydrator =
+                    build_cli_hydrator(caching_store.clone(), router.clone(), &self.config)?;
 
                 Ok::<_, CrabError>(Arc::new(RemoteContext {
                     caching_store,

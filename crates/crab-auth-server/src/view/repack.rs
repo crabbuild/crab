@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 use std::pin::Pin;
 
@@ -11,6 +11,7 @@ use crab_types::pointer::Pointer;
 use crab_xet::chunker::GearChunker;
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder, XorbResult};
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{AuthServerError, Result};
 
@@ -76,40 +77,26 @@ impl CrabPointerRewriter for ViewCrabRepacker {
                 .serialize());
             }
 
-            let content = self
-                .hydrator
-                .reconstruct_from_pointer(pointer_bytes)
+            // Keep unverified output operation-owned. The anonymous file is
+            // released with its handles, including failed/cancelled reads.
+            let cancel = CancellationToken::new();
+            let _cancel_on_drop = cancel.clone().drop_guard();
+            let content = tempfile::tempfile()?;
+            self.hydrator
+                .reconstruct_to_writer_with_cancel(&pointer, content.try_clone()?, None, &cancel)
                 .await
-                .map_err(super::read_error)?;
-            if content.len() as u64 != pointer.size {
-                return Err(AuthServerError::CorruptObject {
-                    path: file_hash.hex(),
-                    reason: format!(
-                        "source pointer size {} does not match reconstructed size {}",
-                        pointer.size,
-                        content.len()
-                    ),
-                });
-            }
-            let computed_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
-            if computed_hash != file_hash {
-                return Err(AuthServerError::HashMismatch {
-                    requested: file_hash.hex(),
-                    actual: computed_hash.hex(),
-                });
-            }
-
-            let mut chunker = GearChunker::new();
-            let mut chunks = chunker.feed(&content);
-            if let Some(last) = chunker.finalize() {
-                chunks.push(last);
-            }
-            let chunk_hashes: Vec<MerkleHash> = chunks.iter().map(|chunk| chunk.hash).collect();
+                .map_err(AuthServerError::from)?;
             let run_id = RunId(self.next_run_id);
             self.next_run_id = self.next_run_id.saturating_add(1);
-            for chunk in &chunks {
-                self.builder.push(chunk, run_id)?;
-            }
+            // Chunking/compression and temporary-file I/O must not block the
+            // runtime. A failure aborts view creation before publication.
+            let builder = std::mem::take(&mut self.builder);
+            let (builder, chunk_hashes) = tokio::task::spawn_blocking(move || {
+                repack_verified_file(content, builder, run_id, &cancel)
+            })
+            .await
+            .map_err(|source| AuthServerError::ViewRepackJoin { source })??;
+            self.builder = builder;
 
             self.seen_files.insert(file_hash, self.files.len());
             self.files.push(RepackedFile {
@@ -126,6 +113,36 @@ impl CrabPointerRewriter for ViewCrabRepacker {
             .serialize())
         })
     }
+}
+
+fn repack_verified_file(
+    mut content: File,
+    mut builder: XorbBuilder,
+    run_id: RunId,
+    cancel: &CancellationToken,
+) -> Result<(XorbBuilder, Vec<MerkleHash>)> {
+    content.rewind()?;
+    let mut buffer = [0; 64 * 1024];
+    let mut chunker = GearChunker::new();
+    let mut hashes = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(AuthServerError::from(crab_read::ReadError::Cancelled));
+        }
+        let len = content.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        for chunk in chunker.feed(&buffer[..len]) {
+            hashes.push(chunk.hash);
+            builder.push(&chunk, run_id)?;
+        }
+    }
+    if let Some(chunk) = chunker.finalize() {
+        hashes.push(chunk.hash);
+        builder.push(&chunk, run_id)?;
+    }
+    Ok((builder, hashes))
 }
 
 pub(super) async fn materialize_crab_pointers_in_fast_export(
@@ -262,6 +279,43 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn incremental_repack_preserves_chunk_order_across_read_boundaries() {
+        let content: Vec<_> = (0..1_048_579_u32)
+            .map(|offset| offset.wrapping_mul(2_654_435_761).rotate_left(offset % 32) as u8)
+            .collect();
+        let mut chunker = GearChunker::new();
+        let mut chunks = chunker.feed(&content);
+        chunks.extend(chunker.finalize());
+        let expected: Vec<_> = chunks.iter().map(|chunk| chunk.hash).collect();
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&content).unwrap();
+        let (_, hashes) = repack_verified_file(
+            file,
+            XorbBuilder::new(),
+            RunId(0),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn cancelled_repack_stops_before_reading_content() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = repack_verified_file(
+            tempfile::tempfile().unwrap(),
+            XorbBuilder::new(),
+            RunId(0),
+            &cancel,
+        );
+        assert!(matches!(
+            result,
+            Err(AuthServerError::Read(source)) if matches!(source.as_ref(), crab_read::ReadError::Cancelled)
+        ));
+    }
 
     struct FakeRewriter;
 

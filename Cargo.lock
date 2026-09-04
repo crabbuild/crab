@@ -2067,16 +2067,18 @@ dependencies = [
 name = "crab-cache"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
- "base64 0.22.1",
  "blake3",
  "bytes",
  "crab-types",
  "crab-xet",
  "crc32fast",
+ "errno",
  "filetime",
  "fs4",
  "futures-util",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2088,6 +2090,7 @@ dependencies = [
  "tracing",
  "xet-client",
  "xet-runtime",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2281,6 +2284,7 @@ dependencies = [
  "gix-object",
  "globset",
  "object_store",
+ "slatedb",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

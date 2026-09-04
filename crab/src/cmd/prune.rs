@@ -60,11 +60,13 @@ pub async fn run_prune_with_cancel(
     cancel: &CancellationToken,
 ) -> Result<PruneSummary> {
     check_cancelled(cancel)?;
+    let root = crate::cache::default_cache_root();
+    super::cache::validate_destructive_cache_root(&root)?;
     let config = Config::resolve_local()?;
     let cache = LocalCache::with_limits(
-        crate::cache::default_cache_root(),
-        config.chunk_cache_bytes,
-        config.shard_cache_bytes,
+        root,
+        config.effective_chunk_cache_max_bytes(),
+        config.effective_shard_cache_max_bytes(),
     );
     let local_prune = cache.prune_with_options(PruneOptions {
         dry_run: args.dry_run,
@@ -78,7 +80,7 @@ pub async fn run_prune_with_cancel(
     check_cancelled(cancel)?;
     let xet = prune_xet_chunk_cache_with_cancel(
         &config.effective_chunk_cache_dir(),
-        config.chunk_cache_bytes,
+        config.effective_chunk_cache_max_bytes(),
         args.dry_run,
         args.verbose || args.mode == OutputMode::Jsonl,
         cancel,
@@ -237,9 +239,12 @@ mod tests {
     #[tokio::test]
     async fn dry_run_reports_current_cache_without_deleting() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LocalCache::with_limits(dir.path().to_path_buf(), 100, Some(50));
+        let cache = LocalCache::new(dir.path().join("cache"));
         seed_chunks(&cache).await;
         seed_shards(&cache).await;
+        // Model a budget reduction after valid writes; write-time admission
+        // would already evict entries if seeded with the final small budget.
+        let cache = LocalCache::with_limits(cache.root().to_path_buf(), 100, Some(50));
         let args = PruneArgs {
             dry_run: true,
             verbose: false,
@@ -258,9 +263,10 @@ mod tests {
     #[tokio::test]
     async fn prune_evicts_current_cache_to_budget() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = LocalCache::with_limits(dir.path().to_path_buf(), 100, Some(50));
+        let cache = LocalCache::new(dir.path().join("cache"));
         seed_chunks(&cache).await;
         seed_shards(&cache).await;
+        let cache = LocalCache::with_limits(cache.root().to_path_buf(), 100, Some(50));
         let args = PruneArgs {
             dry_run: false,
             verbose: false,

@@ -15,8 +15,10 @@ file into a discard sink, and retains the verified xet ranges and metadata in
 the canonical local caches. It never materializes the selected files in the
 working tree.
 
-Think of it as "download now, use later" — you can fetch objects while on a fast
-connection, then hydrate files later when offline or on a slower link.
+Fetch warms the xet range cache used by filter smudge, mount, and worktree
+prefetch. The explicit remote-backed `crab hydrate` command does not yet attach
+that cache, so fetch-to-offline-explicit-hydrate reuse is not a supported
+contract. `plans/017-local-cache-read-hardening.md` tracks that convergence.
 
 ## Options
 
@@ -87,10 +89,14 @@ fetch complete: 42 file(s), 1288490188 logical bytes verified
 
 ## Use Cases
 
-- Pre-warm the cache before a flight or going offline.
-- Speed up `crab hydrate` by downloading objects in advance.
+- Pre-warm checkout, mount, or worktree-prefetch reads.
+- Verify selected content without changing working files.
 - In CI, fetch objects before running tests that need hydrated files.
-- On shared machines, populate the cache once for all users.
+- Warm the persistent chunk index for later dedup lookup.
+
+Cache files can reconstruct private repository content. Keep the cache root
+private to one operating-system user and use the authenticated remote cache
+service for team reuse.
 
 ## Cache Location
 

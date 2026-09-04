@@ -796,23 +796,23 @@ async fn verify_deep_manifest_content(
         }
     };
 
-    verify_deep_manifest_content_with(repo_root, manifest, issues, |pointer_bytes| {
+    verify_deep_manifest_content_with(repo_root, manifest, issues, |pointer| {
         let hydrator = Arc::clone(&hydrator);
-        async move { hydrator.reconstruct_from_pointer(&pointer_bytes).await }
+        async move {
+            hydrator
+                .reconstruct_to_writer(&pointer, std::io::sink())
+                .await
+        }
     })
     .await
 }
 
 async fn release_deep_hydrator(
     repo_root: &Path,
-) -> Result<Arc<crate::cmd::hydrate::ShardHydrator>> {
+) -> Result<Arc<crate::cmd::hydrate::HydrationRuntime>> {
     let remote = open_release_remote(repo_root, "release.verify.deep").await?;
     let caching_store = crab_cache_store::CachingStore::new(remote.store, &remote.config.cache)?;
-    let hydrator = crate::cmd::hydrate::ShardHydrator::with_config_from_cli_layout(
-        caching_store,
-        remote.router,
-        &remote.config,
-    )?;
+    let hydrator = crate::read::build_cli_hydrator(caching_store, remote.router, &remote.config)?;
     Ok(Arc::new(hydrator))
 }
 
@@ -823,8 +823,8 @@ async fn verify_deep_manifest_content_with<F, Fut>(
     mut reconstruct: F,
 ) -> Result<()>
 where
-    F: FnMut(Vec<u8>) -> Fut,
-    Fut: Future<Output = Result<Vec<u8>>>,
+    F: FnMut(Pointer) -> Fut,
+    Fut: Future<Output = Result<u64>>,
 {
     let git_dir = params::find_git_dir(repo_root)?;
     let normalized = manifest.normalized();
@@ -843,16 +843,24 @@ where
             continue;
         };
 
-        if let Err(err) = Pointer::parse(&pointer_bytes) {
-            issues.push(ReleaseVerifyIssue {
-                code: "release.deep.pointer_invalid".to_owned(),
-                message: format!("manifest path {} is not a Crab pointer: {err}", file.path),
-            });
-            continue;
-        }
+        let pointer = match Pointer::parse(&pointer_bytes) {
+            Ok(pointer) => pointer,
+            Err(err) => {
+                issues.push(ReleaseVerifyIssue {
+                    code: "release.deep.pointer_invalid".to_owned(),
+                    message: format!("manifest path {} is not a Crab pointer: {err}", file.path),
+                });
+                continue;
+            }
+        };
 
-        match reconstruct(pointer_bytes).await {
-            Ok(content) => verify_reconstructed_release_file(file, &content, issues),
+        let actual_hash = b3_hex(pointer.file_hash);
+        // The canonical writer verifies actual streamed bytes against the
+        // pointer before success; the pointer alone is not deep verification.
+        match reconstruct(pointer).await {
+            Ok(actual_size) => {
+                verify_reconstructed_release_file(file, &actual_hash, actual_size, issues);
+            }
             Err(err) => issues.push(ReleaseVerifyIssue {
                 code: "release.deep.reconstruction_failed".to_owned(),
                 message: format!(
@@ -867,10 +875,10 @@ where
 
 fn verify_reconstructed_release_file(
     file: &ReleaseLargeFile,
-    content: &[u8],
+    actual_hash: &str,
+    actual_size: u64,
     issues: &mut Vec<ReleaseVerifyIssue>,
 ) {
-    let actual_hash = blake3_digest(content);
     if actual_hash != file.file_hash {
         issues.push(ReleaseVerifyIssue {
             code: "release.deep.content_hash_mismatch".to_owned(),
@@ -881,7 +889,6 @@ fn verify_reconstructed_release_file(
         });
     }
 
-    let actual_size = u64::try_from(content.len()).unwrap_or(u64::MAX);
     if actual_size != file.size {
         issues.push(ReleaseVerifyIssue {
             code: "release.deep.content_size_mismatch".to_owned(),
@@ -1601,64 +1608,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deep_verify_reconstructs_manifest_pointer_content() -> TestResult {
-        let (repo, _, _) = sample_repo()?;
-        let args = ReleaseCreateArgs {
-            name: Some("model-v1".to_owned()),
-            rev: "HEAD".to_owned(),
-            output: None,
-            allow_dirty: false,
-            publish: false,
-            json: false,
-        };
-        let create = create_payload(&args, repo.path())?;
-        let mut issues = Vec::new();
+    async fn deep_verify_checks_streamed_bytes_and_manifest() -> TestResult {
+        use crab_storage::test_support::ObjectReadKind;
 
-        verify_deep_manifest_content_with(
-            repo.path(),
-            &create.manifest,
-            &mut issues,
-            |bytes| async move {
-                Pointer::parse(&bytes)?;
-                Ok(b"model-bytes".to_vec())
-            },
-        )
-        .await?;
+        let content = Bytes::from(vec![42; 1024 * 1024]);
 
-        assert!(issues.is_empty());
-        Ok(())
-    }
+        for (case, expected_issue) in [
+            ("valid", None),
+            ("manifest_hash", Some("release.deep.content_hash_mismatch")),
+            ("manifest_size", Some("release.deep.content_size_mismatch")),
+            ("corrupt_origin", Some("release.deep.reconstruction_failed")),
+            ("pointer_size", Some("release.deep.reconstruction_failed")),
+        ] {
+            let (repo, _, _) = sample_repo()?;
+            let cache = tempfile::tempdir()?;
+            let (hydrator, mut pointer, counted) = crate::read::test_support::stored_file(
+                &cache.path().join("cache"),
+                content.clone(),
+                case == "corrupt_origin",
+            )
+            .await?;
+            let hydrator = Arc::new(hydrator);
+            if case == "pointer_size" {
+                pointer.size -= 1;
+            }
+            std::fs::write(repo.path().join("model.bin"), pointer.serialize())?;
+            git(repo.path(), &["add", "model.bin"])?;
+            git(repo.path(), &["commit", "-m", "streamed model fixture"])?;
+            let args = ReleaseCreateArgs {
+                name: Some("model-v1".to_owned()),
+                rev: "HEAD".to_owned(),
+                output: None,
+                allow_dirty: false,
+                publish: false,
+                json: false,
+            };
+            let mut create = create_payload(&args, repo.path())?;
+            match case {
+                "manifest_hash" => create.manifest.crab.large_files[0].file_hash = b3_hex([7; 32]),
+                "manifest_size" => create.manifest.crab.large_files[0].size += 1,
+                _ => {}
+            }
 
-    #[tokio::test]
-    async fn deep_verify_reports_reconstructed_content_mismatch() -> TestResult {
-        let (repo, _, _) = sample_repo()?;
-        let args = ReleaseCreateArgs {
-            name: Some("model-v1".to_owned()),
-            rev: "HEAD".to_owned(),
-            output: None,
-            allow_dirty: false,
-            publish: false,
-            json: false,
-        };
-        let create = create_payload(&args, repo.path())?;
-        let mut issues = Vec::new();
+            let mut issues = Vec::new();
+            verify_deep_manifest_content_with(
+                repo.path(),
+                &create.manifest,
+                &mut issues,
+                |pointer| {
+                    let hydrator = Arc::clone(&hydrator);
+                    async move {
+                        hydrator
+                            .reconstruct_to_writer(&pointer, std::io::sink())
+                            .await
+                    }
+                },
+            )
+            .await?;
 
-        verify_deep_manifest_content_with(
-            repo.path(),
-            &create.manifest,
-            &mut issues,
-            |bytes| async move {
-                Pointer::parse(&bytes)?;
-                Ok(b"different-model-bytes".to_vec())
-            },
-        )
-        .await?;
-
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.code == "release.deep.content_hash_mismatch")
-        );
+            let codes: Vec<_> = issues.iter().map(|issue| issue.code.as_str()).collect();
+            assert_eq!(
+                codes,
+                expected_issue.into_iter().collect::<Vec<_>>(),
+                "{case}: {issues:?}"
+            );
+            assert!(
+                counted.requests().iter().any(|request| {
+                    request.location.contains("/xorbs/") && request.kind != ObjectReadKind::Head
+                }),
+                "{case}: deep verification skipped origin bytes"
+            );
+        }
         Ok(())
     }
 

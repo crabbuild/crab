@@ -41,6 +41,25 @@ The `fuse` feature enables the FUSE session and mount lifecycle; `nfs` enables
 the NFS server path; `gix-facade` enables the optional Git facade integration.
 FUSE/NFS deployments also need the corresponding operating-system support.
 
+The auxiliary chunk cache is optional: unsafe or unavailable storage yields a
+non-storing handle, not a mount-startup failure or an alternative cache root.
+`crab-cache` owns private directory creation and chunk-identity validation;
+bad chunk records are removed before origin repair. The synchronous chunk
+adapter bypasses current-thread Tokio runtimes, where `block_in_place` would
+panic. Whole-pointer reconstruction continues through the configured
+`crab-read` runtime and its decoded-range cache.
+
+Writable mount publication currently has repository-local Git state but no
+resolved storage identity at the pointer-write boundary. It therefore omits
+the optional shard hint instead of consulting another bucket or managed view's
+cache row; hydration retains the file-index fallback. Product composition can
+thread a resolved storage scope here in a later ownership consolidation.
+
+This does not yet qualify the separate file-window cache in `hydration.rs`:
+its failure isolation, per-read verification, private filesystem access, and
+budget/lifetime ownership remain Plan 017 work. Startup and in-memory-origin
+tests are not native mounted-filesystem or whole-process resource proof.
+
 ## Usage
 
 Source detection is available with either `fuse` or `nfs`:

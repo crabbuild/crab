@@ -194,7 +194,7 @@ mod tests {
     async fn origin_recipe_does_not_accept_a_healthy_cache_for_corrupt_origin() {
         let (layout, pointer, recipe, body) = fixture().await;
         let cache_dir = tempfile::tempdir().unwrap();
-        let cache = crab_cache::LocalCache::new(cache_dir.path().to_owned());
+        let cache = crab_cache::LocalCache::new(cache_dir.path().join("cache"));
         let hash = recipe.segments[0].xorb_hash;
         let key = crab_cache::CacheKey::Xorb(hash);
         cache.put_bytes(&key, body.clone()).await.unwrap();

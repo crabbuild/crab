@@ -1,25 +1,15 @@
-//! `crab cache clean` — reclaim disk space used by the local cache.
+//! Local cache inspection, cleanup, and verification command policy.
 //!
-//! The local cache lives at `~/.cache/crab/` (or `$XDG_CACHE_HOME/crab/`)
-//! and stores downloaded shards, xorbs, persistent chunk indices, workflow
-//! stage entries, and bloom filters.
-//! Cleanup retains coordination markers and refuses active mirror owners.
+//! Only recognized private payloads are removed. Unknown state, databases,
+//! retained profiles, and live workspace trees retain their owner's lifecycle.
 
 use std::path::{Path, PathBuf};
 
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
-use crate::core::output::OutputMode;
-use crab_cache::lifecycle::{CacheCleanGuard, cleanup_preview};
+use crate::core::output::{OutputMode, emit_json};
+use crab_cache::health::{CacheCatalogHealth, CacheHealthReport, inspect_cache};
 use tokio_util::sync::CancellationToken;
-
-/// Summary of a cache clean operation.
-#[derive(Debug, Default, serde::Serialize)]
-pub struct CacheCleanSummary {
-    pub files_removed: u64,
-    pub bytes_reclaimed: u64,
-    pub dry_run: bool,
-}
 
 /// Summary of a cache verify operation.
 #[derive(Debug, Default, serde::Serialize)]
@@ -29,113 +19,175 @@ pub struct CacheVerifySummary {
     pub objects_corrupt: u64,
 }
 
-/// Remove cache data while retaining coordination markers.
-///
-/// When `dry_run` is true, reports what would be removed without deleting.
-pub fn run_cache_clean(dry_run: bool, mode: OutputMode) -> Result<CacheCleanSummary> {
-    run_cache_clean_with_cancel(dry_run, mode, &CancellationToken::new())
+/// Print a non-mutating cache report, returning whether all inspections were available.
+pub async fn run_cache_stats(mode: OutputMode, cancel: &CancellationToken) -> Result<bool> {
+    check_cancelled(cancel)?;
+    let config = Config::resolve_local()?;
+    let root = crate::cache::default_cache_root();
+    let report = inspect_cache(&root, config.cache.max_bytes, cancel).await?;
+    check_cancelled(cancel)?;
+    if mode.is_machine() {
+        emit_json("cache.stats", "1.0", &report);
+    } else {
+        print_cache_stats(&report);
+    }
+    Ok(report.is_available())
 }
 
-/// Remove cache contents while honoring the caller's cancellation token.
-pub fn run_cache_clean_with_cancel(
+fn print_cache_stats(report: &CacheHealthReport) {
+    println!(
+        "Local cache: {} ({:?})",
+        report.root.display(),
+        report.root_state
+    );
+    match report.budget_bytes {
+        Some(bytes) => println!("  budget: {bytes} bytes"),
+        None => println!("  budget: unlimited"),
+    }
+    println!(
+        "  observed: {} logical bytes, {} allocated bytes ({})",
+        report.observed.logical_bytes,
+        report.observed.allocated_bytes,
+        if report.scan_complete {
+            "complete scan"
+        } else {
+            "partial scan; lower bounds"
+        }
+    );
+    println!(
+        "  over budget: {}",
+        match report.over_budget {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        }
+    );
+    println!(
+        "\n  {:<14} {:>8} {:>8} {:>14} {:>14}  status",
+        "family", "files", "dirs", "logical bytes", "allocated bytes"
+    );
+    for (family, health) in &report.families {
+        let state = if !health.complete {
+            "partial"
+        } else if health.issues > 0 {
+            "unavailable"
+        } else {
+            "inspected"
+        };
+        println!(
+            "  {family:<14} {:>8} {:>8} {:>14} {:>14}  {state}",
+            health.usage.files,
+            health.usage.directories,
+            health.usage.logical_bytes,
+            health.usage.allocated_bytes
+        );
+    }
+    match &report.catalog {
+        CacheCatalogHealth::Readable { stats } => {
+            println!(
+                "\n  catalog: {} entries, {} recorded bytes, {} temporary bytes, {} reserved bytes",
+                stats.entries, stats.total_bytes, stats.temporary_bytes, stats.reservations_bytes
+            );
+            println!(
+                "  last maintenance (Unix ms): {}",
+                stats
+                    .last_maintenance_unix_ms
+                    .map_or_else(|| "unknown".into(), |value| value.to_string())
+            );
+        }
+        CacheCatalogHealth::Missing => println!("\n  catalog: missing (not initialized)"),
+        CacheCatalogHealth::Unavailable => println!("\n  catalog: unavailable"),
+    }
+    for issue in &report.issues {
+        println!(
+            "  unavailable: {} [{}]: {}",
+            issue.path,
+            issue.family.unwrap_or("root"),
+            issue.error
+        );
+    }
+    if report.omitted_issues > 0 {
+        println!("  {} additional issues omitted", report.omitted_issues);
+    }
+    println!(
+        "\nAllocation includes linked files and directories, not unlinked open files; reservations are separate."
+    );
+    println!(
+        "Live scan, not an atomic snapshot or full payload/index integrity verification. No persistent hit rate is recorded."
+    );
+}
+
+/// Remove eligible payloads through the shared ownership-aware cleanup boundary.
+pub async fn run_cache_clean(
     dry_run: bool,
     mode: OutputMode,
     cancel: &CancellationToken,
-) -> Result<CacheCleanSummary> {
-    check_cancelled(cancel)?;
+) -> Result<crab_cache::CacheCleanReport> {
     let config = Config::resolve_local()?;
-    let targets = clean_targets(
-        crate::cache::default_cache_root(),
-        config.effective_chunk_cache_dir(),
-    )?;
-    if targets.is_empty() {
-        if !mode.is_machine() {
-            println!("Cache directories do not exist.");
-        }
-        return Ok(CacheCleanSummary {
-            dry_run,
-            ..Default::default()
-        });
+    let root = crate::cache::default_cache_root();
+    let range_root = config.effective_chunk_cache_dir();
+    validate_destructive_cache_root(&root)?;
+    validate_destructive_cache_root(&range_root)?;
+    let clean_range_separately = !existing_paths_match(&root.join("chunks"), &range_root)?;
+    let mut report = clean_root(&root, dry_run, cancel).await?;
+    if clean_range_separately {
+        let range =
+            crate::cache::prune_xet_chunk_cache_with_cancel(&range_root, 0, dry_run, false, cancel)
+                .await?;
+        report.files_removed = report.files_removed.saturating_add(range.entries_evicted);
+        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(range.bytes_freed);
     }
-
-    if dry_run {
-        let mut files = 0u64;
-        let mut bytes = 0u64;
-        for target in &targets {
-            let stats = cleanup_preview(target, cancel)?;
-            files = files.saturating_add(stats.files_removed);
-            bytes = bytes.saturating_add(stats.bytes_reclaimed);
-        }
-        if !mode.is_machine() {
-            println!(
-                "Would remove {} file(s), reclaiming {}",
-                files,
-                format_bytes(bytes),
-            );
-        }
-        return Ok(CacheCleanSummary {
-            files_removed: files,
-            bytes_reclaimed: bytes,
-            dry_run: true,
-        });
-    }
-
-    let summary = clean_admitted_targets(&targets, cancel)?;
-
-    if !mode.is_machine() {
+    if mode.is_machine() {
+        emit_json("cache.clean", "1.0", &report);
+    } else {
         println!(
-            "Removed {} file(s), reclaimed {}",
-            summary.files_removed,
-            format_bytes(summary.bytes_reclaimed),
+            "{} {} cache payload(s), {}; retained {} entries/subtrees, {} busy, {} unsafe",
+            if dry_run { "Would remove" } else { "Removed" },
+            report.files_removed,
+            format_bytes(report.bytes_reclaimed),
+            report.retained_entries,
+            report.busy_entries,
+            report.unsafe_entries,
         );
     }
-
-    Ok(summary)
+    Ok(report)
 }
 
-fn clean_admitted_targets(
-    targets: &[PathBuf],
+fn existing_paths_match(left: &Path, right: &Path) -> Result<bool> {
+    let left = match std::fs::canonicalize(left) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let right = match std::fs::canonicalize(right) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(left == right)
+}
+
+async fn clean_root(
+    root: &Path,
+    dry_run: bool,
     cancel: &CancellationToken,
-) -> Result<CacheCleanSummary> {
-    // Admit every configured root before deleting from any of them. A busy
-    // mirror in the second root must not cause partial cleanup of the first.
-    let guards = targets
-        .iter()
-        .map(|target| CacheCleanGuard::acquire(target, cancel))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut summary = CacheCleanSummary::default();
-    for guard in guards {
-        check_cancelled(cancel)?;
-        let stats = guard.clean(cancel)?;
-        summary.files_removed = summary.files_removed.saturating_add(stats.files_removed);
-        summary.bytes_reclaimed = summary
-            .bytes_reclaimed
-            .saturating_add(stats.bytes_reclaimed);
-    }
-    Ok(summary)
+) -> Result<crab_cache::CacheCleanReport> {
+    check_cancelled(cancel)?;
+    validate_destructive_cache_root(root)?;
+    // The canonical path is a destructive-root safeguard, not I/O authority.
+    // Pass the original root so the private boundary can reject root symlinks.
+    Ok(crab_cache::clean_cache(root, dry_run, cancel).await?)
 }
 
-fn clean_targets(object_root: PathBuf, chunk_root: PathBuf) -> Result<Vec<PathBuf>> {
-    let mut targets = Vec::new();
-    for path in [object_root, chunk_root] {
-        if !path.exists() {
-            continue;
-        }
-        let canonical = std::fs::canonicalize(&path)?;
-        validate_destructive_cache_root(&canonical)?;
-        if targets
-            .iter()
-            .any(|root: &PathBuf| canonical.starts_with(root))
-        {
-            continue;
-        }
-        targets.retain(|root| !root.starts_with(&canonical));
-        targets.push(canonical);
-    }
-    Ok(targets)
-}
-
-fn validate_destructive_cache_root(path: &Path) -> Result<()> {
+// Even canonical payload names do not authorize cleanup of a live user root.
+// All destructive cache commands share this policy; private I/O still receives
+// the original path and independently validates/pins the actual directories.
+pub(super) fn validate_destructive_cache_root(root: &Path) -> Result<()> {
+    let path = match std::fs::canonicalize(root) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -143,11 +195,11 @@ fn validate_destructive_cache_root(path: &Path) -> Result<()> {
         .map(std::fs::canonicalize)
         .transpose()?;
     let unsafe_path = path.parent().is_none()
-        || home.as_ref().is_some_and(|home| path == home)
-        || cwd.starts_with(path);
+        || home.as_ref().is_some_and(|home| &path == home)
+        || cwd.starts_with(&path);
     if unsafe_path {
         return Err(CrabError::Configuration {
-            key: "cache directory is unsafe for recursive cleanup".to_owned(),
+            key: "cache directory is unsafe for cleanup".to_owned(),
             origin: path.display().to_string(),
         });
     }
@@ -165,8 +217,10 @@ pub async fn run_cache_verify_with_cancel(
     cancel: &CancellationToken,
 ) -> Result<CacheVerifySummary> {
     check_cancelled(cancel)?;
+    let root = crate::cache::default_cache_root();
+    validate_destructive_cache_root(&root)?;
     let config = Config::resolve_local()?;
-    let cache = crate::cache::LocalCache::new(crate::cache::default_cache_root());
+    let cache = crate::cache::LocalCache::new(root);
     let local_verify = cache.verify();
     tokio::pin!(local_verify);
     let report = tokio::select! {
@@ -187,12 +241,7 @@ pub async fn run_cache_verify_with_cancel(
     };
 
     if mode.is_machine() {
-        let json = serde_json::to_string(&summary).map_err(|e| {
-            crate::core::error::CrabError::Internal(format!(
-                "failed to serialize cache verify summary: {e}"
-            ))
-        })?;
-        println!("{json}");
+        emit_json("cache.verify", "1.0", &summary);
     } else {
         println!(
             "Checked {} cache object(s): {} valid, {} corrupt evicted",
@@ -225,57 +274,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn busy_second_root_prevents_deletion_from_first_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first");
-        let second = dir.path().join("second");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::write(first.join("keep"), b"data").unwrap();
-        let owner = crab_cache::lifecycle::CacheUseGuard::acquire(
-            &second.join("mirror.git"),
-            &CancellationToken::new(),
-        )
-        .unwrap();
-        let roots = vec![first.clone(), second];
-        let error = clean_admitted_targets(&roots, &CancellationToken::new()).unwrap_err();
-        assert!(
-            matches!(error, CrabError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-        );
-        assert!(first.join("keep").exists());
-        drop(owner);
-        let summary = clean_admitted_targets(&roots, &CancellationToken::new()).unwrap();
-        assert_eq!(summary.files_removed, 1);
-        assert_eq!(summary.bytes_reclaimed, 4);
-    }
-
-    #[test]
-    fn cache_clean_admission_honors_cancellation() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-
-        let error = clean_admitted_targets(&[dir.path().to_owned()], &cancel).unwrap_err();
-        assert!(matches!(error, CrabError::Cancelled));
-        assert!(dir.path().join("a.txt").exists());
-    }
-
-    #[test]
     fn format_bytes_units() {
         assert_eq!(format_bytes(500), "500 B");
         assert_eq!(format_bytes(1_048_576), "1.0 MB");
-    }
-
-    #[test]
-    fn clean_targets_deduplicates_nested_chunk_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("cache");
-        let chunks = root.join("chunks");
-        std::fs::create_dir_all(&chunks).unwrap();
-
-        let targets = clean_targets(root.clone(), chunks).unwrap();
-
-        assert_eq!(targets, vec![std::fs::canonicalize(root).unwrap()]);
     }
 
     #[test]
@@ -285,5 +286,45 @@ mod tests {
         let error = validate_destructive_cache_root(&cwd).unwrap_err();
 
         assert!(matches!(error, CrabError::Configuration { .. }));
+    }
+
+    #[tokio::test]
+    async fn stats_honors_cancellation_before_inspection() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            run_cache_stats(OutputMode::Text, &cancel).await,
+            Err(CrabError::Cancelled)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clean_command_uses_payload_ownership_and_private_root_checks() {
+        use crate::cache::{CacheKey, LocalCache};
+        use crab_xet::hash::compute_data_hash;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("cache");
+        let cache = LocalCache::new(root.clone());
+        cache
+            .put(&CacheKey::Chunk(compute_data_hash(b"data")), b"data")
+            .await
+            .unwrap();
+        let retained = root.join("user-notes");
+        std::fs::write(&retained, b"keep").unwrap();
+        let cancel = CancellationToken::new();
+        let preview = clean_root(&root, true, &cancel).await.unwrap();
+        assert_eq!((preview.files_removed, preview.bytes_reclaimed), (1, 4));
+        let report = clean_root(&root, false, &cancel).await.unwrap();
+        assert_eq!((report.files_removed, report.bytes_reclaimed), (1, 4));
+        assert_eq!(std::fs::read(retained).unwrap(), b"keep");
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        assert!(clean_root(&alias, false, &cancel).await.is_err());
+        cancel.cancel();
+        assert!(matches!(
+            clean_root(&root, false, &cancel).await,
+            Err(CrabError::Cancelled)
+        ));
     }
 }

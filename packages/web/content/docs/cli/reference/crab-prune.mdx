@@ -23,6 +23,11 @@ crab prune [OPTIONS]
 and shards. This frees disk space without affecting the remote store — pruned
 data can be fetched again when needed.
 
+Local retention is unlimited by default, so prune removes nothing until you
+set a cap, for example `crab config set cache.max_bytes 10737418240` (10 GiB).
+Use `crab config set cache.max_bytes unlimited` to remove the cap, or
+`crab cache clean` to explicitly remove eligible payloads without setting one.
+
 For conceptual background, see [Pruning Objects](/docs/cli/storage/pruning-objects).
 
 ## Options

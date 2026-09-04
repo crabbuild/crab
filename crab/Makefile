@@ -346,6 +346,7 @@ check:
 	$(CARGO) check
 
 architecture-check: crab-types-admission
+	@$(PYTHON) scripts/test_check_architecture_gates.py
 	@$(PYTHON) scripts/check-architecture-gates.py --cargo "$(CARGO)"
 
 crate-interface-check:

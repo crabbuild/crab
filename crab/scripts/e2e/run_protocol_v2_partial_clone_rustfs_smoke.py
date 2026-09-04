@@ -107,6 +107,13 @@ def deterministic_bytes(size: int, seed: str) -> bytes:
     return bytes(result[:size])
 
 
+def make_private_fixture_tree(root: Path) -> None:
+    """Give a disposable cache the ownership contract required by Crab."""
+    root.chmod(0o700)
+    for path in root.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+
+
 @contextmanager
 def hold_cache_lock(path: Path):
     """Hold the native lock used by Crab without replacing its inode."""
@@ -2423,15 +2430,23 @@ class ProtocolV2PartialCloneSmoke:
     def mirror_cache_cleanup_checks(
         self, source: Path, remote: str, cache: Path, plan: Path
     ) -> None:
-        """Clean only this run's explicit cache, never the user's default roots."""
+        """Clean payloads without treating a retained mirror as deletion authority."""
         control = self.run_root / "cache-clean-control"
         self.run_git(self.run_root, ["init", str(control)])
+        cleanup_root = cache.parent
+        cleanup_root.chmod(0o700)
+        payload = cleanup_root / "chunks" / "ab" / ("ab" * 32)
+        payload.parent.mkdir(parents=True)
+        payload.parent.parent.chmod(0o700)
+        payload.parent.chmod(0o700)
+        payload.write_bytes(b"cache-clean-fixture")
+        payload.chmod(0o600)
         (control / ".crab").mkdir()
         (control / ".crab/local.toml").write_text(
-            "[cache]\nchunk_cache_dir = " + json.dumps(str(cache / "chunks")) + "\n",
+            "[cache]\nchunk_cache_dir = " + json.dumps(str(cleanup_root / "chunks")) + "\n",
             encoding="utf-8",
         )
-        clean_env = {"CRAB_CACHE_DIR": str(cache)}
+        clean_env = {"CRAB_CACHE_DIR": str(cleanup_root)}
         mirror_args = [str(self.crab_bin), "mirror", str(source), remote,
                        "--cache-dir", str(cache), "--json"]
         refs_before = self.git_value(cache, ["show-ref"], name="cache refs before cleanup")
@@ -2472,49 +2487,45 @@ class ProtocolV2PartialCloneSmoke:
             )
 
         self.run_cmd(
-            "clean idle isolated mirror cache",
+            "clean idle payload beside retained mirror cache",
             [str(self.crab_bin), "cache", "clean"], control, extra_env=clean_env,
         )
         self.check(
-            "idle-cache-clean-removes-only-isolated-cache-data",
-            cache.is_dir() and not any(cache.iterdir())
+            "idle-cache-clean-removes-payload-and-retains-mirror",
+            not payload.exists() and (cache / "HEAD").is_file()
+            and self.git_value(cache, ["show-ref"], name="retained mirror refs") == refs_before
             and self.git_value(
                 control, ["ls-remote", "--refs", remote], name="remote refs after cache cleanup"
             ) == remote_before,
         )
-        rebuilt = self.run_cmd(
-            "mirror reclones cache emptied by cleanup", mirror_args + ["--check"], control,
+        refreshed = self.run_cmd(
+            "mirror refreshes cache retained by cleanup", mirror_args + ["--check"], control,
         )
-        rebuilt_data = self.json_data(rebuilt, "mirror.check")
-        self.run_git(cache, ["fsck", "--strict", "--full"], name="strict fsck rebuilt mirror cache")
+        refreshed_data = self.json_data(refreshed, "mirror.check")
+        self.run_git(cache, ["fsck", "--strict", "--full"], name="strict fsck retained mirror cache")
         self.check(
-            "mirror-reclones-cleaned-cache-with-exact-refs-and-origin-proof",
-            rebuilt_data.get("state") == "source_ahead"
-            and rebuilt_data.get("pointers", {}).get("state") == "verified"
-            and self.git_value(cache, ["show-ref"], name="rebuilt mirror refs") == refs_before,
+            "mirror-retained-cache-keeps-exact-refs-and-origin-proof",
+            refreshed_data.get("state") == "source_ahead"
+            and refreshed_data.get("pointers", {}).get("state") == "verified"
+            and self.git_value(cache, ["show-ref"], name="refreshed mirror refs") == refs_before,
         )
 
-        # A nested cleanup leaves its lock inode inside the parent Git cache.
-        # Rebuilding must preserve that inode even after all Git data is gone.
-        self.run_cmd(
-            "clean isolated nested Git object cache",
-            [str(self.crab_bin), "cache", "clean"], control,
-            extra_env={"CRAB_CACHE_DIR": str(cache / "objects")},
-        )
-        marker = cache / "objects.crab-cache-clean.lock"
-        with marker.open("rb") as opened_before_cleanup:
-            self.run_cmd(
-                "clean parent mirror cache retaining nested marker",
-                [str(self.crab_bin), "cache", "clean"], control, extra_env=clean_env,
-            )
-            self.check(
-                "mirror-cleanup-leaves-a-marker-only-skeleton",
-                marker.is_file() and not (cache / "HEAD").exists(),
-            )
+        # Marker-only recovery remains a mirror responsibility even though
+        # payload cleanup no longer deletes mutable Git workspaces.
+        marker_cache = cleanup_root / "marker-only.git"
+        marker_cache.mkdir(mode=0o700)
+        marker = marker_cache / "objects.crab-cache-clean.lock"
+        marker.write_bytes(b"")
+        marker.chmod(0o600)
+        marker_args = [
+            str(self.crab_bin), "mirror", str(source), remote,
+            "--cache-dir", str(marker_cache), "--json",
+        ]
+        with marker.open("rb") as opened_before_rebuild:
             control_config = sha256_file(control / ".git/config")
             restored = self.run_cmd(
                 "rebuild marker-only cache with ambient Git paths",
-                mirror_args + ["--check"], control,
+                marker_args + ["--check"], control,
                 extra_env={
                     "GIT_COMMON_DIR": str(control / ".git"),
                     "GIT_OBJECT_DIRECTORY": str(control / ".git/objects"),
@@ -2522,20 +2533,26 @@ class ProtocolV2PartialCloneSmoke:
                 },
             )
             restored_data = self.json_data(restored, "mirror.check")
-            self.run_git(cache, ["fsck", "--strict", "--full"], name="strict fsck marker-only rebuilt cache")
+            self.run_git(
+                marker_cache, ["fsck", "--strict", "--full"],
+                name="strict fsck marker-only rebuilt cache",
+            )
             self.check(
                 "mirror-rebuilds-marker-only-cache-with-stable-lock-inodes",
-                os.path.samestat(os.fstat(opened_before_cleanup.fileno()), marker.stat())
+                os.path.samestat(os.fstat(opened_before_rebuild.fileno()), marker.stat())
                 and restored_data.get("state") == "source_ahead"
                 and restored_data.get("pointers", {}).get("state") == "verified"
-                and self.git_value(cache, ["show-ref"], name="marker-only rebuilt refs") == refs_before,
+                and self.git_value(
+                    marker_cache, ["show-ref"], name="marker-only rebuilt refs"
+                ) == refs_before,
             )
             self.check(
                 "mirror-cache-ignores-ambient-git-repository-paths",
                 sha256_file(control / ".git/config") == control_config
-                and not (cache / "objects/info/alternates").exists()
+                and not (marker_cache / "objects/info/alternates").exists()
                 and self.git_value(
-                    control, ["ls-remote", "--refs", remote], name="remote refs after marker-only rebuild"
+                    control, ["ls-remote", "--refs", remote],
+                    name="remote refs after marker-only rebuild",
                 ) == remote_before,
             )
 
@@ -2544,12 +2561,20 @@ class ProtocolV2PartialCloneSmoke:
         # run natively in CI; do not claim a Windows CLI signal qualification.
         if os.name == "nt":
             return
-        cache = self.run_root / "mirror-cancellation-cache.git"
+        state = self.run_root / "mirror-cancellation-state"
+        state.mkdir(mode=0o700)
+        cache = state / "cache.git"
+        payload = state / "chunks" / "ab" / ("ab" * 32)
+        payload.parent.mkdir(parents=True)
+        payload.parent.parent.chmod(0o700)
+        payload.parent.chmod(0o700)
+        payload.write_bytes(b"cancellation-clean-fixture")
+        payload.chmod(0o600)
         control = self.run_root / "mirror-cancellation-control"
         self.run_git(self.run_root, ["init", str(control)])
         (control / ".crab").mkdir()
         (control / ".crab/local.toml").write_text(
-            "[cache]\nchunk_cache_dir = " + json.dumps(str(cache / "chunks")) + "\n",
+            "[cache]\nchunk_cache_dir = " + json.dumps(str(state / "chunks")) + "\n",
             encoding="utf-8",
         )
         ready = self.run_root / "mirror-pack-hook-ready"
@@ -2593,7 +2618,7 @@ class ProtocolV2PartialCloneSmoke:
             cleanup = self.run_cmd(
                 "cache cleanup during active mirror fetch",
                 [str(self.crab_bin), "cache", "clean"], control,
-                check=False, extra_env={"CRAB_CACHE_DIR": str(cache)},
+                check=False, extra_env={"CRAB_CACHE_DIR": str(state)},
             )
             self.check(
                 "mirror-cancel-retains-cache-owner-while-fetch-runs",
@@ -2622,11 +2647,11 @@ class ProtocolV2PartialCloneSmoke:
         self.run_cmd(
             "clean mirror cache after cancelled fetch",
             [str(self.crab_bin), "cache", "clean"], control,
-            extra_env={"CRAB_CACHE_DIR": str(cache)},
+            extra_env={"CRAB_CACHE_DIR": str(state)},
         )
         self.check(
             "mirror-cancel-releases-cache-without-publishing-refs",
-            not (cache / "HEAD").exists()
+            not payload.exists() and (cache / "HEAD").is_file()
             and self.git_value(self.run_root, ["ls-remote", "--refs", destination],
                 name="refs after cancelled mirror fetch") == before,
         )
@@ -3002,7 +3027,11 @@ class ProtocolV2PartialCloneSmoke:
     def mirror_oversized_header_check(self, source: Path, destination: str) -> None:
         """Corrupt only a disposable cache; a large header must not hide a pointer."""
         cache = self.run_root / "mirror-oversized-header.git"
-        self.run_git(self.run_root, ["clone", "--mirror", str(source), str(cache)])
+        self.run_git(
+            self.run_root,
+            ["clone", "--mirror", "--no-hardlinks", str(source), str(cache)],
+        )
+        make_private_fixture_tree(cache)
         oid = self.git_value(source, ["rev-parse", "HEAD:mirror-data.bin"], name="capture pointer OID before oversized-header fault")
         object_path = cache / "objects" / oid[:2] / oid[2:]
         original = object_path.read_bytes()
@@ -3011,6 +3040,7 @@ class ProtocolV2PartialCloneSmoke:
         large_file = self.artifacts / "oversized-header-blob.bin"
         large_file.write_bytes(deterministic_bytes(65536, "oversized-header"))
         large_oid = self.git_value(cache, ["hash-object", "-w", str(large_file)], name="create oversized-header cache fixture")
+        make_private_fixture_tree(cache)
         replacement = (cache / "objects" / large_oid[:2] / large_oid[2:]).read_bytes()
         before = self.git_value(source, ["ls-remote", "--refs", destination], name="capture remote refs before oversized-header fault")
         plan = self.run_root / "oversized-header-plan.json"
@@ -3021,6 +3051,7 @@ class ProtocolV2PartialCloneSmoke:
         object_path.unlink()
         try:
             object_path.write_bytes(replacement)
+            object_path.chmod(0o600)
             result = self.run_cmd(
                 "mirror rejects pointer disguised by oversized blob header",
                 args + ["--write-plan", str(plan)], self.run_root, check=False,
@@ -3047,6 +3078,7 @@ class ProtocolV2PartialCloneSmoke:
             if object_path.exists():
                 object_path.unlink()
             object_path.write_bytes(original)
+            object_path.chmod(0o600)
         repaired = self.run_cmd("mirror verifies restored cache object", args, self.run_root)
         self.check(
             "mirror-restored-cache-resumes-complete-pointer-proof",

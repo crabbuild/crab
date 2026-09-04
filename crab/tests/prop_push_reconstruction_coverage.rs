@@ -51,7 +51,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tokio_util::sync::CancellationToken;
 
-use crab::cmd::hydrate::{Hydrator, ShardHydrator};
+use crab::cmd::hydrate::Hydrator;
 use crab::git::push::{PushConfig, RefPushOutcome, run_push_batch};
 use crab::git::remote_helper::PushSpec;
 use crab::storage::StoreLayout;
@@ -472,7 +472,7 @@ async fn hydrate_pushed_file(
     let store = Store::new(recording.inner.clone() as Arc<dyn ObjectStore>);
 
     let cache_dir = tempfile::tempdir().expect("tempdir for hydrate cache");
-    let cache = Arc::new(crab::cache::LocalCache::new(cache_dir.path().to_path_buf()));
+    let cache = Arc::new(crab::cache::LocalCache::new(cache_dir.path().join("cache")));
     let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
         store.clone(),
         &crab::core::config::CacheConfig::default(),
@@ -480,9 +480,10 @@ async fn hydrate_pushed_file(
     )
     .expect("build caching store");
 
-    let hydrator = ShardHydrator::new_from_cli_layout(
+    let hydrator = crab::read::build_cli_hydrator(
         caching_store,
         StoreLayout::new(store, prefix.to_owned()),
+        &crab::core::config::Config::default(),
     )
     .expect("build shard hydrator");
 

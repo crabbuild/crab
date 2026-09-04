@@ -12,7 +12,7 @@ use std::time::Instant;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::cmd::hydrate::{HydrateArgs, ShardHydrator};
+use crate::cmd::hydrate::HydrateArgs;
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::event_payloads::{PERF_PHASE_SCHEMA, PerfPhasePayload};
@@ -121,13 +121,8 @@ pub async fn run_fetch_in(root: &Path, args: &FetchArgs, cancel: &CancellationTo
     }
     let read_router = selection.router;
     let caching_store = crab_cache_store::CachingStore::new(selection.store, &config.cache)?;
-    let mut hydrator = ShardHydrator::with_config_from_cli_layout(
-        caching_store.clone(),
-        read_router.clone(),
-        &config,
-    )?;
-    let chunk_cache = crate::cache::xet_chunk_cache_from_config(&config)?;
-    hydrator = hydrator.with_xet_chunk_cache(chunk_cache.cache);
+    let hydrator =
+        crate::read::build_cli_hydrator(caching_store.clone(), read_router.clone(), &config)?;
 
     let jsonl_stream = (args.mode == OutputMode::Jsonl)
         .then(|| Mutex::new(JsonlStream::new("fetch.event", "1.0", std::io::stdout())));

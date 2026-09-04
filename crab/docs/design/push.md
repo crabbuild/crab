@@ -2382,7 +2382,7 @@ This table supersedes §13 with entries for capabilities described in
 | Three-tier dedup | `engine/dedup.rs` | `Classifier::classify_with_context`, `DedupContext`, `lookup_three_tier` |
 | Cache-service tier | `cache_service/*` | `CachingStore::query_known_chunks`, `put` |
 | Local cache warming | `cache/local_cache.rs` | `LocalCache::put`, `get`, `default_cache_root` |
-| Shard-hint persist | `cache/shard_hints.rs` | `ShardHintCache::store`, `load_sync` |
+| Shard-hint persist | `crates/crab-cache/src/shard_hints.rs` | `ShardHintCache::update`, `load_sync` |
 
 -----
 

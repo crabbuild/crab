@@ -21,6 +21,7 @@ use tempfile::NamedTempFile;
 use crab_auth::token_cache::{TokenCache, expand_token_cache_path};
 use crab_cache::active_probe::{self, ActiveProbeAuth, ActiveProbeObject};
 use crab_cache::build_cache_service_http_client;
+use crab_cache::health::{CacheHealthReport, CacheIssueKind, CacheRootState, inspect_cache};
 use crab_cache::path_class::{CacheRouteContract, cache_route_contract_matches_current};
 
 use crate::core::config::{Config, ServiceAuth, ServiceMode};
@@ -320,7 +321,7 @@ pub async fn run_doctor_in(
     results.push(check_remote_access(root).await);
     results.push(check_credential_discovery(root).await);
     results.push(check_staging(root).await);
-    results.push(check_cache());
+    results.extend(check_cache(root).await);
     results.extend(check_cache_service(root, cache_service_active_probe).await);
     results.push(check_version_guard(root));
 
@@ -996,25 +997,86 @@ async fn check_staging(root: &Path) -> CheckResult {
     }
 }
 
-/// Check the local cache directory.
-fn check_cache() -> CheckResult {
-    let cache_dir = crate::cache::default_cache_root();
-
-    if !cache_dir.exists() {
-        return CheckResult::ok(
+async fn check_cache(repo_root: &Path) -> Vec<CheckResult> {
+    let config = match Config::resolve_for_repo(repo_root) {
+        Ok(config) => config,
+        Err(error) => {
+            return vec![CheckResult::fail(
+                "local cache",
+                format!("cannot resolve cache budget: {error}"),
+            )];
+        }
+    };
+    let root = crate::cache::default_cache_root();
+    match inspect_cache(&root, config.cache.max_bytes, &CancellationToken::new()).await {
+        Ok(report) => cache_checks(&report),
+        Err(error) => vec![CheckResult::warn(
             "local cache",
-            "not yet created (will be populated on first fetch)",
+            format!("inspection unavailable: {error}"),
+        )],
+    }
+}
+
+fn cache_checks(report: &CacheHealthReport) -> Vec<CheckResult> {
+    if report.root_state == CacheRootState::Missing {
+        return vec![CheckResult::ok(
+            "local cache",
+            "not yet created; inspection did not initialize it",
+        )];
+    }
+    let summary = format!(
+        "{}: {} allocated bytes, {} logical bytes, {} budget; {} (not full integrity verification)",
+        report.root.display(),
+        report.observed.allocated_bytes,
+        report.observed.logical_bytes,
+        report
+            .budget_bytes
+            .map_or_else(|| "unlimited".to_owned(), |bytes| format!("{bytes} byte")),
+        if report.scan_complete {
+            "complete scan"
+        } else {
+            "partial scan; lower bounds"
+        }
+    );
+    let mut checks = vec![if report.is_available() {
+        CheckResult::ok("local cache", summary)
+    } else {
+        CheckResult::warn("local cache", summary)
+    }];
+    if report.over_budget == Some(true) {
+        checks.push(CheckResult::warn("cache budget", "allocated usage exceeds the effective budget; inspect `crab cache stats --json`. Prune removes only eligible payloads; retained state needs its owner's maintenance"));
+    }
+    for issue in &report.issues {
+        let action = match issue.kind {
+            CacheIssueKind::UnsafePath => {
+                "check ownership, links and owner-only permissions on this exact path; no automatic repair was attempted"
+            }
+            CacheIssueKind::Busy => {
+                "retry after cache activity stops; do not remove database side files"
+            }
+            CacheIssueKind::Corrupt => {
+                "stop cache writers and preserve the affected database and side files for diagnosis; inspection does not rebuild them"
+            }
+            CacheIssueKind::Io | CacheIssueKind::Unavailable => {
+                "check this path and available disk space, then retry; inspection changed no cache state"
+            }
+        };
+        let detail = format!(
+            "{} [{}]: {}; {action}",
+            report.root.join(&issue.path).display(),
+            issue.family.unwrap_or("root"),
+            issue.error
         );
+        checks.push(if issue.kind == CacheIssueKind::UnsafePath {
+            CheckResult::fail("cache family", detail)
+        } else {
+            CheckResult::warn("cache family", detail)
+        });
     }
-
-    // Estimate cache size.
-    match dir_size(&cache_dir) {
-        Some(size) => CheckResult::ok(
-            "local cache",
-            format!("{} ({})", cache_dir.display(), format_bytes(size)),
-        ),
-        None => CheckResult::ok("local cache", format!("{}", cache_dir.display())),
+    if report.omitted_issues > 0 {
+        checks.push(CheckResult::warn("cache family", format!("{} additional issues omitted; inspect per-family counts with `crab cache stats --json`", report.omitted_issues)));
     }
+    checks
 }
 
 async fn collect_cache_service_support_bundle(root: &Path) -> CacheServiceSupportBundle {
@@ -2456,21 +2518,6 @@ fn check_version_guard(root: &Path) -> CheckResult {
     }
 }
 
-/// Recursively compute directory size in bytes.
-fn dir_size(path: &Path) -> Option<u64> {
-    let mut total: u64 = 0;
-    let rd = std::fs::read_dir(path).ok()?;
-    for entry in rd.flatten() {
-        let ft = entry.file_type().ok()?;
-        if ft.is_file() {
-            total += entry.metadata().ok()?.len();
-        } else if ft.is_dir() {
-            total += dir_size(&entry.path()).unwrap_or(0);
-        }
-    }
-    Some(total)
-}
-
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -2761,14 +2808,16 @@ mod tests {
         assert!(result.detail.contains("rerun `crab add`"));
     }
 
-    #[test]
-    fn check_cache_nonexistent() {
-        // With a custom cache dir that doesn't exist.
-        // SAFETY: test is single-threaded; no other thread reads this var.
-        unsafe { std::env::set_var("CRAB_CACHE_DIR", "/tmp/crab-doctor-test-nonexistent") };
-        let result = check_cache();
-        unsafe { std::env::remove_var("CRAB_CACHE_DIR") };
-        assert_eq!(result.status, CheckStatus::Ok);
+    #[tokio::test]
+    async fn check_cache_nonexistent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("missing");
+        let report = inspect_cache(&root, 1024, &CancellationToken::new())
+            .await
+            .unwrap();
+        let checks = cache_checks(&report);
+        assert_eq!(checks[0].status, CheckStatus::Ok);
+        assert!(!root.exists());
     }
 
     #[test]
