@@ -18,6 +18,35 @@
 
 ## Status
 
+### Fresh-root large-file qualification, 2026-09-03
+
+Resuming after external workspace cleanup requires new binaries, fixtures, and
+reports: the old `cache-f410.E7nt8I` qualification directory is no longer
+available locally. Historical measurements below are not new-run evidence.
+
+The fresh installed `f449f92` CLI successfully adds, commits, and pushes two
+identical 1 GiB files to the approved isolated local RustFS bucket. Under umask
+`022`, the next `cache clean` fails with `CRAB-E0070`: the writer's persistent
+chunk index created the shared cache root with mode `0755`. The failed run is
+retained as `cache-f410-resume.dY62Z0`; no fixture chmod masks this failure.
+
+| Evidence-map cell | Source / acceptance |
+|---|---|
+| Changed owner | `crates/crab-metadata/src/persistent_chunk_index.rs::normalize_index_path`: new Unix directories use recursive `DirBuilder` mode `0700`; existing paths are not chmodded. |
+| Entry / caller | Add/push planning and publication reach `MetaDb::open_persistent_tier`; bulk base-shard lookup also opens this index directly in `crab/src/git/push.rs`. |
+| Callee / contract | Both `open_shared` and `open_or_create` normalize before SQLite open. Installed Rust standard-library source confirms `DirBuilderExt::mode` defaults to `0777` and forwards the selected mode to `mkdir`; recursive creation uses the same builder. No Xet or dependency patch. |
+| Siblings | Post-fetch shard sync, metadb commands, and explicit local-index paths reach the same constructor. Existing root validation in post-fetch sync remains; non-Unix behavior is unchanged. |
+| Main behavior | Current `origin/main` uses `create_dir_all` here too. The PR's stricter cleanup exposes this pre-existing permissive creator. |
+| Focused regression | Both constructors must create all missing ancestors privately while preserving a pre-existing `0755` parent. All 25 persistent-index tests pass locally. |
+| Live acceptance | Fresh umask-022 large-file repos must pass add/commit/push, duplicate and delta dedup, cache-clean hydration, wholly absent-cache clone/fetch, origin-denied warm hydration, corruption recovery, and independent SHA-256 comparison. Rebuild/rerun pending. |
+
+Is this the best fix for the observed regression? The shared constructor owns
+directory creation for all these callers, avoiding additional per-command
+initialization paths. This bounded fix does **not** complete descriptor-pinned
+persistent-index I/O, existing unsafe-root migration, Windows ACLs, or the
+remaining resource and concurrency phases below. Production growth is ten
+lines for explicit creation policy, not a second cache path.
+
 ### Review handoff and current gate reconciliation, 2026-09-03
 
 The user requested a review-ready PR, not a merge or a declaration that this
