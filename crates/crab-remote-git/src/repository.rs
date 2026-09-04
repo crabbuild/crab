@@ -1183,7 +1183,9 @@ async fn prove_reachable(
     refs: &RepositoryRefs,
     operation: &OperationContext,
 ) -> Result<bool> {
-    let mut pending = Vec::new();
+    // Visit nearby commits before descending either side of a merge. A depth-first
+    // walk can exhaust the read budget before checking even HEAD's first parent.
+    let mut pending = std::collections::VecDeque::new();
     for reference in &refs.entries {
         match peel_to_commit(reference.target, operation).await {
             Ok((commit, _)) => {
@@ -1192,7 +1194,7 @@ async fn prove_reachable(
                         stage: crate::CorruptionStage::Tag,
                     });
                 }
-                pending.push(commit);
+                pending.push_back(commit);
             }
             Err(Error::Revision {
                 reason: RevisionError::NotCommit,
@@ -1201,7 +1203,7 @@ async fn prove_reachable(
         }
     }
     let mut visited = std::collections::HashSet::new();
-    while let Some(commit_oid) = pending.pop() {
+    while let Some(commit_oid) = pending.pop_front() {
         if !visited.insert(commit_oid) {
             continue;
         }
