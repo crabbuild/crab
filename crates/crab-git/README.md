@@ -32,6 +32,8 @@ The main surfaces are:
   identity and local Git layout;
 - `receive_plan` for exact atomic ref comparisons, policy checks and bounded
   commit/tree/tag connectivity with generation-pinned proof frontiers;
+- `receive_wire` for bounded native receive commands, advertisements and atomic
+  status framing without consuming the following pack;
 - `incoming_pack` for bounded full/thin-pack quarantine, with injected authorized
   base lookup and automatic private spool cleanup; `delta` for the shared bounded
   decoder used by incoming packs and remote reads;
@@ -136,8 +138,18 @@ checksum, compressed streams, entry framing and delta reconstruction. Callers
 use `receive_plan::validate` for object syntax, graph connectivity and exact ref
 checks, then prove pointer payload dependencies and publish metadata under the
 existing writer fences. Storage
-credentials, canonical writes and receive-pack protocol responses belong above
-this crate. HTTP push remains unavailable until those layers are implemented.
+credentials, canonical writes and the decision to acknowledge or reject a push
+belong above this crate. HTTP push remains unavailable until those layers are
+implemented.
+
+`receive_wire` preserves command order and exact old/new SHA-1 values, limits the
+command section to 1,024 refs and 1 MiB, and rejects malformed refs, duplicate
+destinations and unadvertised capabilities. Call its synchronous reader on a
+blocking worker with a transport deadline. The caller must validate pack presence
+and completeness, authorize writes and determine the actual publication outcome
+before emitting status. An uncertain commit must fail the transport rather than
+reporting a ref rejection. Shallow pushes, certificates, sidebands and push options
+are not advertised. Framing alone does not enable HTTP push.
 
 `receive_plan::GraphSource` supplies committed objects and an optional trusted
 kind. A trusted kind must come from a generation-bound proof of the object's
