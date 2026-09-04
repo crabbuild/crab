@@ -8,6 +8,19 @@ use super::{
     check_cancelled, git_command, git_command_from_vec, parse_ref_lines, run_required,
 };
 
+pub(super) fn acquire_cache(
+    args: &MirrorArgs,
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<CacheUseGuard> {
+    if args.cache_dir.is_none() {
+        let root = crate::cache::default_cache_root();
+        crab_cache::ensure_private_cache_directory(&root)?;
+        crab_cache::ensure_private_cache_directory(&root.join("mirrors"))?;
+    }
+    Ok(CacheUseGuard::acquire(path, cancel)?)
+}
+
 pub(super) fn prepare_cache(
     args: &MirrorArgs,
     cache: &CacheUseGuard,
@@ -18,13 +31,13 @@ pub(super) fn prepare_cache(
     let path = cache.path();
     check_cancelled(cancel)?;
     let created = needs_initialization(path, cancel)?;
+    crab_cache::ensure_private_cache_directory(path)?;
     if created {
         // Git clone requires an empty target and would conflict with retained
         // lock inodes. Init plus one mirror fetch handles every new cache,
         // including marker-only skeletons, without deleting coordination files.
         // The owner retains its physical path. Git for Windows cannot use
         // canonical verbatim paths as init operands; enter the owned directory.
-        std::fs::create_dir_all(path)?;
         run_required(
             runner,
             git_command(

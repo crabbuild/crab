@@ -124,18 +124,22 @@ Source, provider, ancestry, or pointer checks that cannot complete are
 `unverifiable`; they are never reported as healthy.
 
 All mirror operations take an exclusive local cache lock before initializing or
-refreshing. Planned apply retains it through the final destination ref check.
+refreshing. New mirror directories and child Git outputs are private to the
+current user; existing cache roots that do not meet that boundary are refused.
+Planned apply retains the lock through the final destination ref check.
 A competing invocation fails promptly: `--check` reports `unverifiable`, and
 legacy mirror/apply refuse to proceed. Retry after the other invocation ends;
 do not delete sibling `.crab-cache-use.lock` or `.crab-cache-clean.lock`
 files to bypass an active owner. `crab cache clean` and
 `crab optimize cache clean` refuse overlapping active mirror caches before
-deleting data. While cleanup holds ownership, new mirror operations refuse
-to start. Locks also cover nested paths and resolve directory symlinks to
-their physical cache location. Cleanup preserves coordination files; the
-next mirror invocation rebuilds a removed, empty, or marker-only cache through
-bare Git initialization and a complete mirror fetch. Nested lock inodes remain
-intact. An unrelated nonempty directory is refused, not overwritten.
+deleting payload data. While cleanup holds ownership, new mirror operations
+refuse to start. Locks also cover nested paths and resolve directory symlinks to
+their physical cache location. Cleanup preserves mirror repositories and only
+removes eligible cache payloads. The next mirror invocation refreshes the
+retained repository. An empty or marker-only cache left by interruption or
+external maintenance is rebuilt through bare Git initialization and a complete
+mirror fetch while nested lock inodes remain intact. An unrelated nonempty
+directory is refused, not overwritten.
 Relative `--cache-dir` paths resolve from your invocation directory. If source
 refresh fails, previously cached refs are not used as a current source snapshot.
 Fetched refs must exactly match the source advertisement. Source movement or

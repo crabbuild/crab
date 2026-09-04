@@ -32,6 +32,24 @@ fn refs(path: &Path) -> String {
     git(path, &["for-each-ref", "--format=%(refname) %(objectname)"])
 }
 
+#[cfg(unix)]
+fn assert_private_tree(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    assert_eq!(
+        metadata.permissions().mode() & 0o077,
+        0,
+        "{}",
+        path.display()
+    );
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).unwrap() {
+            assert_private_tree(&entry.unwrap().path());
+        }
+    }
+}
+
 fn source(path: &Path) {
     std::fs::create_dir(path).unwrap();
     git(path, &["init", "-b", "main"]);
@@ -88,6 +106,30 @@ fn destination_push_cannot_overwrite_source_owned_tracking_refs() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn created_mirror_cache_is_private_after_git_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source");
+    source(&source_path);
+    let cache_path = temp.path().join("cache.git");
+    let mut args = base_args(cache_path.clone());
+    args.source = source_path.to_string_lossy().into_owned();
+    let cancel = CancellationToken::new();
+    let owner = acquire_cache(&args, &cache_path, &cancel).unwrap();
+
+    prepare_cache(
+        &args,
+        &owner,
+        &cancel,
+        &test_options(),
+        &mut SystemCommandRunner::default(),
+    )
+    .unwrap();
+
+    assert_private_tree(owner.path());
+}
+
 #[test]
 fn rebuild_preserves_nested_lock_identity_and_matches_native_mirror_refs() {
     let temp = tempfile::tempdir().unwrap();
@@ -96,6 +138,7 @@ fn rebuild_preserves_nested_lock_identity_and_matches_native_mirror_refs() {
     let cache_path = temp.path().join("cache.git");
     let nested = cache_path.join("objects/nested");
     let cancel = CancellationToken::new();
+    crab_cache::ensure_private_cache_directory(&nested).unwrap();
     let child = CacheUseGuard::acquire(&nested, &cancel).unwrap();
     let marker = nested.with_file_name("nested.crab-cache-use.lock");
     let opened_before_cleanup = File::open(&marker).unwrap();

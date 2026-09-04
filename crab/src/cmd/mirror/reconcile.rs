@@ -10,9 +10,9 @@ use crab_types::pointer::Pointer;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CRAB_REMOTE, CommandRunner, MirrorArgs, MirrorExecution, check_cancelled, git_command,
-    git_command_from_vec, load_local_refs, preflight, prepare_cache, resolve_cache_dir,
-    resolve_source, run_required,
+    CRAB_REMOTE, CommandRunner, MirrorArgs, MirrorExecution, acquire_cache, check_cancelled,
+    git_command, git_command_from_vec, load_local_refs, preflight, prepare_cache,
+    resolve_cache_dir, resolve_source, run_required,
 };
 use crate::core::error::{CrabError, Result};
 use crate::core::output::OutputMode;
@@ -46,7 +46,7 @@ pub(super) async fn run_integrity_command(
     let cache_dir = resolve_cache_dir(args, &invocation_dir);
     preflight(runner, &options, false)?;
     check_cancelled(cancel)?;
-    let cache = CacheUseGuard::acquire(&cache_dir, cancel).map(Arc::new);
+    let cache = acquire_cache(args, &cache_dir, cancel).map(Arc::new);
     if let Some(plan_path) = &args.apply_plan {
         // Apply owns the cache through the final destination read, not just
         // inspection. A second source refresh must not change its Git objects.
