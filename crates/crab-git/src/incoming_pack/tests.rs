@@ -313,6 +313,8 @@ fn git(dir: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env("GIT_AUTHOR_NAME", "Crab")
         .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
         .env("GIT_COMMITTER_NAME", "Crab")
@@ -395,10 +397,189 @@ fn native_git_full_and_thin_packs_reconstruct_byte_identical_objects() {
                 assert!(thin, "full pack omitted {oid}");
             }
         }
+        verify_prepared_with_native_git(&accepted, temp.path());
         let expected = object_id(Kind::Blob, contents.as_bytes());
         assert_eq!(
             accepted.read_object(&expected).unwrap().unwrap().data,
             contents.as_bytes()
         );
     }
+}
+
+fn verify_prepared_with_native_git(accepted: &IncomingPack, temp: &Path) {
+    use std::sync::atomic::AtomicBool;
+    let prepared = accepted
+        .prepare(temp, 16 * 1024 * 1024, &AtomicBool::new(false))
+        .unwrap()
+        .unwrap();
+    let bytes = std::fs::read(prepared.pack_path()).unwrap();
+    assert_eq!(prepared.content_hash(), blake3::hash(&bytes));
+    assert_eq!(prepared.size(), bytes.len() as u64);
+    assert_eq!(prepared.object_count() as usize, accepted.objects().count());
+    assert_eq!(prepared.git_sha1().as_bytes(), &bytes[bytes.len() - 20..]);
+    let locations = crate::PackLocationIter::open(
+        prepared.index_path(),
+        prepared.reverse_path(),
+        prepared.size(),
+    )
+    .unwrap();
+    let kinds =
+        crate::decode_pack_kind_metadata(&std::fs::read(prepared.kinds_path()).unwrap(), locations)
+            .unwrap();
+    let expected = accepted
+        .objects()
+        .map(|o| (o.oid, o.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, expected);
+
+    // Native Git sees only the new self-contained pack, with no alternates or
+    // source repository. It independently reconstructs every quarantined object.
+    let client = tempfile::tempdir_in(temp).unwrap();
+    git(client.path(), &["init", "--bare", "-q"], b"");
+    let base = client
+        .path()
+        .join("objects/pack")
+        .join(format!("pack-{}", prepared.git_sha1()));
+    for (source, extension) in [
+        (prepared.pack_path(), "pack"),
+        (prepared.index_path(), "idx"),
+        (prepared.reverse_path(), "rev"),
+    ] {
+        std::fs::copy(source, base.with_extension(extension)).unwrap();
+    }
+    git(
+        client.path(),
+        &["verify-pack", base.with_extension("idx").to_str().unwrap()],
+        b"",
+    );
+    let oracle = client.path().join("oracle.idx");
+    git(
+        client.path(),
+        &[
+            "index-pack",
+            "--index-version=2",
+            "-o",
+            oracle.to_str().unwrap(),
+            base.with_extension("pack").to_str().unwrap(),
+        ],
+        b"",
+    );
+    assert_eq!(
+        std::fs::read(oracle).unwrap(),
+        std::fs::read(prepared.index_path()).unwrap()
+    );
+    for object in accepted.objects() {
+        let bytes = git(
+            client.path(),
+            &[
+                "cat-file",
+                &object.kind.to_string(),
+                &object.oid.to_string(),
+            ],
+            b"",
+        );
+        assert_eq!(
+            bytes,
+            accepted.read_object(&object.oid).unwrap().unwrap().data
+        );
+    }
+    let path = prepared.pack_path().parent().unwrap().to_owned();
+    drop(prepared);
+    assert!(!path.exists());
+    assert!(accepted.directory.path().exists());
+}
+
+#[test]
+fn prepared_artifacts_are_deterministic_and_empty_packs_need_no_artifacts() {
+    use std::sync::atomic::AtomicBool;
+    let temp = tempfile::tempdir().unwrap();
+    let entries = [
+        (Header::Blob, b"second".to_vec()),
+        (Header::Blob, Vec::new()),
+    ];
+    let first = quarantine(
+        Cursor::new(pack(&entries)),
+        temp.path(),
+        limits(),
+        || false,
+        no_base,
+    )
+    .unwrap();
+    let mut reversed = entries.to_vec();
+    reversed.reverse();
+    reversed.push(entries[0].clone());
+    let second = quarantine(
+        Cursor::new(pack(&reversed)),
+        temp.path(),
+        limits(),
+        || false,
+        no_base,
+    )
+    .unwrap();
+    let flag = AtomicBool::new(false);
+    let a = first.prepare(temp.path(), 1024, &flag).unwrap().unwrap();
+    let b = second.prepare(temp.path(), 1024, &flag).unwrap().unwrap();
+    assert_eq!(a.content_hash(), b.content_hash());
+    assert_eq!(
+        std::fs::read(a.index_path()).unwrap(),
+        std::fs::read(b.index_path()).unwrap()
+    );
+    verify_prepared_with_native_git(&first, temp.path());
+    let empty = quarantine(
+        Cursor::new(pack(&[])),
+        temp.path(),
+        limits(),
+        || false,
+        no_base,
+    )
+    .unwrap();
+    assert!(empty.prepare(temp.path(), 0, &flag).unwrap().is_none());
+}
+
+#[test]
+fn preparation_bounds_and_corruption_fail_without_retaining_artifacts() {
+    use std::sync::atomic::AtomicBool;
+    let temp = tempfile::tempdir().unwrap();
+    let accepted = quarantine(
+        Cursor::new(pack(&[(Header::Blob, b"test data".to_vec())])),
+        temp.path(),
+        limits(),
+        || false,
+        no_base,
+    )
+    .unwrap();
+    let flag = AtomicBool::new(false);
+    let prepared = accepted.prepare(temp.path(), 1024, &flag).unwrap().unwrap();
+    let exact = prepared.size();
+    drop(prepared);
+    for limit in [0, 19, 31, exact - 1] {
+        assert!(matches!(
+            accepted.prepare(temp.path(), limit, &flag),
+            Err(PreparePackError::Limit)
+        ));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+    assert!(
+        accepted
+            .prepare(temp.path(), exact, &flag)
+            .unwrap()
+            .is_some()
+    );
+    assert!(matches!(
+        accepted.prepare(temp.path(), 1024, &AtomicBool::new(true)),
+        Err(PreparePackError::Cancelled)
+    ));
+    let spool = accepted.directory.path().join("objects");
+    std::fs::write(&spool, b"bad bytes").unwrap();
+    assert!(matches!(
+        accepted.prepare(temp.path(), 1024, &flag),
+        Err(PreparePackError::Mismatch("indexed object identities"))
+    ));
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    std::fs::write(spool, b"short").unwrap();
+    assert!(matches!(
+        accepted.prepare(temp.path(), 1024, &flag),
+        Err(PreparePackError::Mismatch("truncated object spool"))
+    ));
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
 }

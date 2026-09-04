@@ -196,7 +196,10 @@ leaves its two native Git client repositories there for inspection.
 
 [Native write design](WRITE-DESIGN.md) records the remaining receive-pack boundary,
 including why protected-view commit translation cannot be used unchanged for
-native pushes. It is implementation planning, not evidence of working writes.
+native pushes. Quarantine, graph/ref validation and self-contained pack/index
+preparation are qualified against native Git and Kubernetes/RustFS. Pointer
+payload proof, atomic publication and HTTP receive wiring remain pending; these
+checks do not establish working pushes.
 
 ## Issues and comments
 

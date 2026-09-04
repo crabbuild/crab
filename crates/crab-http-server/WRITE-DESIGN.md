@@ -1,7 +1,7 @@
 # Native Git writes: implementation boundary
 
 Status: native HTTP push is not yet available. Shared incoming-pack quarantine
-and exact graph/ref validation are implemented and qualified; publication and
+and exact graph/ref validation plus self-contained pack preparation are qualified; publication and
 HTTP receive wiring remain pending.
 The passing intake tests do not prove an accepted push or an updated ref.
 
@@ -29,9 +29,10 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: pointer payload dependency proof, normalized self-contained
-pack/index publication, and HTTP streaming with a request-bound deadline. No Git binary, clone or local Git object database is
-used by quarantine. The test oracle uses Git independently.
+Remaining intake work: pointer payload dependency proof, canonical pack/index
+publication, and HTTP streaming with a request-bound deadline. No Git binary,
+clone or local Git object database is used by quarantine or preparation. The
+test oracle uses Git independently.
 
 ## Implemented graph and ref boundary
 
@@ -60,6 +61,32 @@ Validation used 38 committed proof frontiers and read no additional old object
 bodies. The exact new commit/tag OIDs and peeled target were preserved. The release
 run took 1,033 ms including repository open, proof loading, intake and validation;
 caches were not isolated. No refs were published by this check.
+
+## Implemented self-contained pack preparation
+
+`IncomingPack::prepare` streams every unique reconstructed object, including thin
+bases, into full zlib entries in OID order. This deliberately trades delta
+compression for independent pack readability; the output byte limit is separate
+from the wire limit. Empty inputs need no pack. Private artifact ownership removes
+partial output on failure and all prepared files on drop.
+
+Only normalized, bounded full entries reach Gitoxide's v2 index writer, with one
+worker and checksum verification. Indexed OIDs must exactly match quarantine.
+Crab's existing reverse-index and kind-sidecar encoders produce the same formats
+used by locator publication. The result exposes the Git pack SHA-1, full-pack
+Blake3 identity, byte size and object count. Preparation needs no Git binary or
+object database. Peak additional disk is two output packs plus index sidecars;
+memory is bounded by the quarantine object limits and index cardinality.
+
+Nine intake/preparation tests pass, including native Git full/thin fixtures,
+independent index generation, exact object reconstruction, deterministic output,
+empty input, byte limits, corrupted/truncated spools and cleanup. The Kubernetes
+candidate above produced a 2,714-byte self-contained pack from the 498-byte thin
+input: four incoming objects plus one RustFS base. A separate native Git client
+with no alternates verified the pack, generated a byte-identical index and read
+all five objects identically to the source. Local preparation took 2 ms; repository
+open, intake, validation and preparation took 904 ms, without cache isolation.
+These artifacts are private and are not evidence of published refs or HTTP push.
 
 ## Existing code and the semantic mismatch
 

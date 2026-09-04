@@ -15,6 +15,9 @@ use sha1::{Digest, Sha1};
 
 use crate::delta;
 
+mod prepared;
+pub use prepared::{PreparePackError, PreparedPack};
+
 type Result<T> = std::result::Result<T, IncomingPackError>;
 
 /// Resource bounds enforced before accepting incoming objects.
