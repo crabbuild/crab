@@ -772,10 +772,15 @@ pub(super) fn open_database_at(
 ) -> Result<Database> {
     let (directory, name) = root.descendant_parent(relative, mode == DatabaseMode::Create)?;
     let path = directory.path.join(name);
-    if mode == DatabaseMode::Create && !path.exists() {
-        let file = open_file(&path, true, true, SHARE_PINNED)?;
-        validate_handle(&file, &path, false)?;
-        validate_private_acl(&file, &path)?;
+    if mode == DatabaseMode::Create {
+        match open_file(&path, true, true, SHARE_PINNED) {
+            Ok(file) => {
+                validate_handle(&file, &path, false)?;
+                validate_private_acl(&file, &path)?;
+            }
+            Err(CacheError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
     }
     let main = open_file(&path, false, false, SHARE_PINNED)?;
     validate_handle(&main, &path, false)?;
