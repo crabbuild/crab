@@ -1,6 +1,7 @@
-import { Button } from "@primer/react";
+import { Button, IconButton } from "@primer/react";
 import {
   GitBranchIcon,
+  SearchIcon,
   SidebarExpandIcon,
   TagIcon,
 } from "@primer/octicons-react";
@@ -13,11 +14,13 @@ export function RepositoryRefControls({
   revision,
   onSelect,
   compact = false,
+  onSearch,
 }: {
   refs: Refs;
   revision: string;
   onSelect: (name: string) => void;
   compact?: boolean;
+  onSearch?: () => void;
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
@@ -28,14 +31,24 @@ export function RepositoryRefControls({
   return (
     <div className={`ref-controls${compact ? " compact" : ""}`}>
       <RevisionPicker refs={refs} revision={revision} onSelect={onSelect} />
-      <div className="ref-summary">
-        <span className="ref-count muted">
-          <GitBranchIcon /> {branches} {branches === 1 ? "branch" : "branches"}
-        </span>
-        <span className="ref-count muted">
-          <TagIcon /> {tags} {tags === 1 ? "tag" : "tags"}
-        </span>
-      </div>
+      {compact && onSearch ? (
+        <IconButton
+          icon={SearchIcon}
+          aria-label="Focus file search"
+          size="small"
+          onClick={onSearch}
+        />
+      ) : (
+        <div className="ref-summary">
+          <span className="ref-count muted">
+            <GitBranchIcon /> {branches}{" "}
+            {branches === 1 ? "branch" : "branches"}
+          </span>
+          <span className="ref-count muted">
+            <TagIcon /> {tags} {tags === 1 ? "tag" : "tags"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

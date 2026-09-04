@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "@primer/react";
 import { CodeIcon, TriangleDownIcon } from "@primer/octicons-react";
+import type { Icon } from "@primer/octicons-react";
 import type { Repository, Session } from "./api";
 
 interface GitToken {
@@ -171,14 +172,30 @@ export function GitAccess({
   );
 }
 
-export function CloneMenu({ repo }: { repo: Repository }) {
+export function CloneMenu({
+  repo,
+  compact = false,
+  icon: CompactIcon = CodeIcon,
+  label = "Code",
+}: {
+  repo: Repository;
+  compact?: boolean;
+  icon?: Icon;
+  label?: string;
+}) {
   const url = `${window.location.origin}/git/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}.git`;
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   return (
-    <details className="clone-menu">
-      <summary>
-        <CodeIcon /> Code <TriangleDownIcon size={12} />
+    <details className={`clone-menu${compact ? " compact" : ""}`}>
+      <summary aria-label={compact ? label : undefined}>
+        {compact ? (
+          <CompactIcon />
+        ) : (
+          <>
+            <CodeIcon /> Code <TriangleDownIcon size={12} />
+          </>
+        )}
       </summary>
       <div className="panel git-popover">
         <h2>Clone with HTTP</h2>
