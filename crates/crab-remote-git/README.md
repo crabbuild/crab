@@ -159,76 +159,7 @@ the reader walks verified raw commits breadth-first from the pinned refs, checki
 nearby merge parents before older ancestry on either branch. That fallback remains
 bounded by the operation's history and object budgets.
 
-## Live qualification example
-
-### Local HTTP browser and latency measurements
-
-`browse_http` is a small Rust/Axum example with a bundled browser UI. It uses
-the crate directly for refs, commit metadata, first-parent history, directories,
-and exact Git blob bytes. It needs an already-published repository and current
-object catalog, as described below. No Git executable, checkout, or local object
-database is used by the server. HTTP dependencies are dev-dependencies only.
-
-Configure S3 credentials in the process environment; for local RustFS, also set
-`AWS_ENDPOINT_URL=http://127.0.0.1:9000`, `AWS_ALLOW_HTTP=true`,
-`AWS_REGION=us-east-1`, and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false`.
-See the [local RustFS guide](../../crab/docs/guides/local-dev-rustfs.md).
-Build using a separate target directory for this checkout on the workspace volume:
-
-```sh
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-example" \
-  cargo build --locked --release -p crab-remote-git --example browse_http
-
-# Run from an empty directory; a source repository is not an input.
-"$HOME/Workspace/crabbuild-target/crab-http-example/release/examples/browse_http" \
-  <bucket> <repository-prefix> 8787
-```
-
-Open `http://127.0.0.1:8787`. Select a ref or full commit SHA, navigate the tree,
-read files, or browse commits. **Benchmark this request** performs one cold
-read, one shared-runtime priming read, and five measured warm reads. It reports
-the warm median and retains the individual request measurements. Ctrl-C drains
-requests and shuts down the reader runtime.
-
-The JSON API and binary blob endpoint also work with `curl -i`:
-
-| GET endpoint | Response |
-| --- | --- |
-| `/api/refs` | Pinned generation, pack count, HEAD, and refs |
-| `/api/commit?rev=main` | Commit OID, tree, parents, author, and message |
-| `/api/commits?rev=main&limit=20` | First-parent commit page, including the selected commit |
-| `/api/tree?rev=main&path=pkg&limit=50` | Immediate entries with OID, mode, kind, and byte-preserving `path_hex` |
-| `/api/blob?rev=main&path=README.md` | Exact Git bytes; blob OID in `X-Crab-Blob-Oid` |
-
-`rev` defaults to the pinned HEAD. `path_hex` can replace UTF-8 `path` to preserve
-arbitrary Git path bytes. Display strings are lossy UTF-8; commit `message_hex`
-preserves message bytes. Pages return a signed opaque `next` value; pass it as
-`cursor` with the same revision, path, and limit. Page limits are 1–200, default
-50. Cursors expire when the server restarts. Submodules are metadata-only;
-symlinks return their stored target bytes. Crab/LFS pointers remain pointers.
-
-Every handled read returns `Server-Timing` durations in milliseconds:
-
-- `open`: repository handshake for `mode=cold`; zero for `mode=warm`.
-- `read`: snapshot resolution, semantic read, response encoding, and explicit
-  locator close. `/api/refs` reads the already-open handle's in-memory refs.
-- `shutdown`: draining a cold request's runtime.
-- `total`: handler time through response construction, excluding HTTP body
-  transmission. The UI separately measures round trip through full body receipt.
-
-`mode=warm` (default) shares the startup repository handle and bounded runtime
-caches; it does not guarantee cache hits. `mode=cold` creates a fresh runtime and
-reopens the repository without disturbing the shared caches. It shares the S3
-transport and does not flush OS or RustFS caches. This compares Crab cache
-behavior on local RustFS, not production cloud latency. Responses disable HTTP
-caching so repeated browser requests reach the server.
-
-The server pins one generation at startup. Restart after publishing changes;
-a cold read of a different generation returns 409 instead of comparing different
-data. The example binds only to loopback and allows four concurrent reads
-(additional requests get 429), with 30-second semantic operation budgets and
-an 8 MiB response budget. This is a local inspection tool, not an authenticated
-multi-user service.
+## Live qualification
 
 ### Command-line qualification
 
