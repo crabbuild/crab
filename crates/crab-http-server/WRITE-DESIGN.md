@@ -1,7 +1,8 @@
 # Native Git writes: implementation boundary
 
 Status: native HTTP push is not yet available. Shared incoming-pack quarantine
-is implemented and qualified; publication and HTTP receive wiring remain pending.
+and exact graph/ref validation are implemented and qualified; publication and
+HTTP receive wiring remain pending.
 The passing intake tests do not prove an accepted push or an updated ref.
 
 ## Implemented intake boundary
@@ -28,10 +29,37 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: Git object syntax and graph connectivity, pointer dependency
-proof, normalized self-contained pack/index publication, and HTTP streaming with
-a request-bound deadline. No Git binary, clone or local Git object database is
+Remaining intake work: pointer payload dependency proof, normalized self-contained
+pack/index publication, and HTTP streaming with a request-bound deadline. No Git binary, clone or local Git object database is
 used by quarantine. The test oracle uses Git independently.
+
+## Implemented graph and ref boundary
+
+`crab-git::receive_plan::validate` applies exact old/new OID comparisons across an
+atomic candidate ref map. It rejects duplicate commands and final ref namespace
+collisions, requires commits for branch tips, enforces caller-supplied deletion
+and non-fast-forward policy, and returns peeled tag targets without rewriting
+commits. Git provides no separate force flag on the receive wire.
+
+Every quarantined object is parsed, including unreachable objects. Typed links
+must exist and match commit/tree/blob/tag requirements. Gitlinks remain references
+to another repository. Tree names retain raw bytes, while malformed modes,
+duplicate/unsorted entries, traversal components and protected `.git` aliases are
+rejected. Valid Crab/LFS pointers are returned as dependencies for storage proof.
+
+The injected `GraphSource` may stop traversal at an object only using a verified,
+generation-bound closure proof. A locator hit alone is not such a proof. Unknown
+objects are read and traversed with object-size, aggregate-byte, traversal-step
+and ref-count bounds. The caller must use the same pinned generation throughout,
+recheck the base under writer locks and prove pointer payloads before committing.
+
+Live qualification created a new Kubernetes-derived commit and annotated tag in
+an isolated client object database. Native `git fsck --strict` passed. Their
+498-byte thin pack contained four objects; quarantine read one base from RustFS.
+Validation used 38 committed proof frontiers and read no additional old object
+bodies. The exact new commit/tag OIDs and peeled target were preserved. The release
+run took 1,033 ms including repository open, proof loading, intake and validation;
+caches were not isolated. No refs were published by this check.
 
 ## Existing code and the semantic mismatch
 
