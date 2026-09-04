@@ -123,10 +123,7 @@ pub async fn run_cache_clean(
     let root = crate::cache::default_cache_root();
     let report = clean_root(&root, dry_run, cancel).await?;
     if mode.is_machine() {
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(std::io::Error::other)?
-        );
+        emit_json("cache.clean", "1.0", &report);
     } else {
         println!(
             "{} {} cache payload(s), {}; retained {} entries/subtrees, {} busy, {} unsafe",
@@ -215,12 +212,7 @@ pub async fn run_cache_verify_with_cancel(
     };
 
     if mode.is_machine() {
-        let json = serde_json::to_string(&summary).map_err(|e| {
-            crate::core::error::CrabError::Internal(format!(
-                "failed to serialize cache verify summary: {e}"
-            ))
-        })?;
-        println!("{json}");
+        emit_json("cache.verify", "1.0", &summary);
     } else {
         println!(
             "Checked {} cache object(s): {} valid, {} corrupt evicted",

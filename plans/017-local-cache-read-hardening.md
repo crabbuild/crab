@@ -18,6 +18,65 @@
 
 ## Status
 
+### Review handoff and current gate reconciliation, 2026-09-03
+
+The user requested a review-ready PR, not a merge or a declaration that this
+entire product roadmap is complete. Historical checkpoints below retain their
+original failures and approval states; this section is the current review map.
+Phase acceptance and the STOP conditions are not relaxed by requesting review.
+
+At `3d6e881`, hosted CLI library testing passes **3,855 tests**. The broad
+workspace job then stops at `no_direct_json_stdout_in_cmd_modules`: the new
+clean-report branch serializes directly to stdout. `stats` already uses the
+canonical output helper; the sibling verify branch has the same bypass but
+lies outside that lint's three-line detection window. Both branches now use
+`core::output::emit_json`, retaining stdout locking, a versioned envelope,
+newline, and flush under the existing output owner. No lint exception or
+weakened assertion is added. The change removes eight net production lines.
+
+| Evidence-map cell | Current source / proof |
+|---|---|
+| Changed surface | `crab/src/cmd/cache.rs`: clean and verify machine-mode report emission only; cache mutation policy is unchanged. |
+| Entry point and caller | `crab/src/main.rs::run_cache_command`; both `cache` and `optimize cache` dispatch here. Clean/verify select text mode; no new CLI flags or user-facing JSON claim is introduced. |
+| Owner and callee | `core::output::emit_json` constructs `Envelope::ok`, serializes under the stdout lock, appends a newline, and flushes. Command code owns schema/data; the helper owns emission. |
+| Siblings | Stats already uses this helper. Prune returns its summary to the command-level emitter. No second JSON writer is needed. |
+| Main / tagged behavior | `origin/main` clean returns its summary without machine output; verify contains the older raw-JSON branch. `v1.0.1` CLI dispatch selects text mode for both. This does not add a compatibility reader or alter a published CLI JSON response. |
+| Regression proof | The unchanged stdout guardrail plus actual clean/maintenance command suites cover canonical output routing and preserved payload/retained-state behavior. Final-head hosted workspace proof remains mandatory before merge. |
+
+The repaired source passes all **17 focused tests**: 13 across
+`no_direct_stdout`, `cache_clean`, and `cache_maintenance`, plus four cache
+command unit tests. The configured CLI Clippy gate, workspace formatting,
+and whitespace checks pass. The CLI test executable was
+rebuilt; the retained installed RustFS result below belongs to `3d6e881`, not
+this report-emission follow-up.
+
+Additional completed evidence on `3d6e881` closes previously pending gates:
+
+- Native Linux split-crate CI passes **279 cache tests**, including root/main
+  replacement, WAL checkpoint/close, native/private cross-process writer
+  exclusion, killed-writer recovery, and simultaneous WAL writers. Shared-read
+  tests pass **112 cases**. These are native Linux fixtures, not actual mounts.
+- Architecture guardrails, split-crate lint/contracts, binary/integration,
+  cache-service smoke, offline gates, protocol tests, four real-Git versions,
+  released-shape RustFS partial-clone lifecycle, and documentation pass.
+- Approved dedicated-bucket installed CLI proof passes **66 checks / 57
+  commands** in `generation-isolated-3d6e881.sxddyw/report.json`. Duplicate push
+  creates zero xorbs; a one-MiB delta adds 1,280,077 bytes; both warmed reads
+  make zero xorb body attempts under denial. Private-root shard sync, exact
+  hashes, corruption recovery, unsafe/unbound bypass, prune, and fsck pass.
+  The earlier shared-bucket failure and safety incident remain retained; the
+  dedicated run performs no shared-bucket repair, deletion, or schema bypass.
+
+**Review versus merge/release.** Review should examine whether these canonical
+owners are the best fix, not merely plausible patches. Independent review of
+the substantial SQLite FFI boundary is still required. The remaining
+persistent-index owners, VFS window cache, physical/resource bounds, tagged
+API/schema decisions, Windows private-cache support, native mounts, and actual
+provider qualification remain explicit implementation/acceptance work in their
+owning phases. They are not silently waived, relabeled as passing, or all
+declared release-only. Ready-for-review status invites that assessment; it is
+not merge authorization or completion of all seven phases.
+
 ### Approved fixture and architecture reconciliation, 2026-09-03
 
 The user explicitly approved the protected inventory updates, private-cache
