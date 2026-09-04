@@ -30,6 +30,8 @@ pub(crate) use platform::Database;
 pub(crate) struct DatabaseLease {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     generation: std::sync::Arc<platform::Generation>,
+    #[cfg(windows)]
+    identity: platform::DatabaseIdentity,
 }
 
 impl DatabaseLease {
@@ -37,6 +39,8 @@ impl DatabaseLease {
         Self {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             generation: _database.generation(),
+            #[cfg(windows)]
+            identity: _database.identity(),
         }
     }
 
@@ -48,14 +52,18 @@ impl DatabaseLease {
     ) -> Result<Database> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         return platform::open_database_leased(&root.0, relative, &self.generation, busy_timeout);
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        return platform::open_database_leased(&root.0, relative, self.identity, busy_timeout);
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         root.open_database(relative, DatabaseMode::ReadWrite, busy_timeout)
     }
 
     pub(crate) fn validate(&self, _root: &PinnedRoot, relative: &Path) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         return platform::validate_database_generation(&_root.0, relative, &self.generation);
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        return platform::validate_database_generation(&_root.0, relative, self.identity);
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         Err(CacheError::UnsafeRoot {
             path: relative.display().to_string(),
             reason: "private database generation ownership is unavailable on this platform".into(),
@@ -1126,7 +1134,11 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[path = "private_fs/windows.rs"]
+mod platform;
+
+#[cfg(not(any(unix, windows)))]
 mod platform {
     use std::fs::File;
     use std::path::Path;

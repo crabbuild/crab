@@ -48,8 +48,15 @@ storage instead of external volumes; builds now use the isolated
 `crabbuild-target/crab-f410` directory there. Native Windows and Linux CI proof
 remain required; local success does not replace those gates.
 
-Windows implementation remains outstanding. Preserve the same ownership
-contract, rather than suppressing native tests or bypassing filesystem checks:
+Windows implementation is now under native qualification. The candidate uses
+protected user/System/Administrators ACLs, pinned non-reparse directory handles,
+volume/file identities and hard-link rejection. Readers carry shared byte-range
+leases; exact-handle deletion requires an exclusive lease. Temporary files
+publish with replace-and-write-through and remain handle-owned through cleanup.
+SQLite retains a non-delete-share main handle and validates the generation on
+reopen; its native journal/WAL/SHM files inherit the private parent DACL and
+SQLite locking. This does not weaken the shared cache/catalog policy or skip
+native tests. Preserve this ownership contract through qualification:
 
 1. Implement handle-relative directory/file operations, private ACL creation
    and validation, reparse/hard-link rejection, file-identity checks, and
