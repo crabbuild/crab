@@ -5,6 +5,7 @@ mod fetch_admission;
 mod hidden_refs;
 mod hydrator;
 mod integrity;
+pub mod pointer_proof;
 mod ref_advertisement;
 mod selection;
 mod store_client;
