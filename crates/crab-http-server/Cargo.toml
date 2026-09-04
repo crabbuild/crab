@@ -11,6 +11,9 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
+crab-metadata = { workspace = true, features = ["storage"] }
+crab-write = { workspace = true }
 base64 = "0.22"
 futures-util = { workspace = true }
 flate2 = { workspace = true }
@@ -26,6 +29,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["io"] }
 toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -7,9 +7,11 @@ operator's own object storage. A read-only browser is not the completion bar.
 ## Run the current development build
 
 Requires Node 22.12+ for building the React app, Rust, and an existing Crab
-repository with a current committed object locator. Runtime needs only the
-resulting Rust binary and object-storage credentials. The server does not clone
-repositories, execute Git, or write a local object database.
+repository. Runtime needs the resulting Rust binary, object-storage credentials,
+and writable temporary space for catalog index sidecars. Use the standard
+`TMPDIR` on a suitable volume when the system temporary directory is small or
+read-only. The server does not clone repositories, execute Git, or write a local
+Git object database.
 
 ```sh
 npm ci --prefix packages/repository
@@ -61,12 +63,43 @@ not yet part of the HTTP application. Tree search covers loaded directories.
 - `base`: optional comparison base; defaults to the first parent. A root commit
   compares against an empty tree.
 
-The repository cache checks manifest freshness after two seconds. Reads remain
-bounded to 30 seconds and 8 MiB per operation/JSON response; 16 requests may run
+The repository cache reopens the authoritative snapshot after two seconds,
+including journal commits that have not changed the manifest ETag. Git fetch
+always opens a fresh snapshot. Reads remain bounded to 30 seconds and 8 MiB per
+operation/JSON response; 16 requests may run
 concurrently. `Server-Timing` reports repository open, read, and total handling
 milliseconds. It excludes HTTP transmission; the browser also measures the
 complete fetch/JSON round trip. Cached reads are not cold-storage measurements.
-Ctrl-C cancels requests and shuts down the shared runtime.
+Ctrl-C cancels requests, drains publication jobs and shuts down the shared runtime.
+
+When a read finds committed refs awaiting indexing, the server runs the shared
+read-readiness pass under the generation-owner lease and global/repository GC
+writer fences, then retries the read. Requests for one repository share that
+job; at most two repositories publish concurrently per server. A disconnected
+request leaves the job owned by the server. Its 60-second cooperative budget
+includes admission wait; cleanup can extend beyond that budget. This work is
+included in `Server-Timing`'s open duration, separately from the read budget.
+
+The service account therefore needs conditional writes and deletes for repository
+metadata, the locator database, visibility and journal/lock lifecycle, plus the
+global GC coordination namespace, in addition to object reads. Another server or
+CLI generation owner retains priority. Contention or superseded publication can
+return a retryable 503. Missing verified visibility is an explicit 503 failure;
+the server does not invent proofs or roll back committed refs. Storage or local
+temporary-space failures appear in server logs and can be retried after repair.
+Index receipts and reconstruction of missing evidence remain unfinished.
+
+An isolated RustFS qualification exercised cache refresh after a journal commit,
+API tree/blob reads, a later journal update repaired by native Git fetch, and
+exact commit/tree/blob comparison against native Git. A temporary-directory
+permission failure returned 503; restarting with writable temporary space repaired
+the partially published generation. The server ran in a sandbox denying source
+repository reads and Git execution; only its dedicated temporary index directory
+and log were writable. Owner and GC leases were released after both generations,
+and graceful shutdown succeeded. Initial API publication took 149 ms server time;
+native fetch including the second publication took 153 ms wall time for this
+three-object fixture. These shared-cache observations do not qualify production
+latency or native HTTP push.
 
 ## Team sign-in
 

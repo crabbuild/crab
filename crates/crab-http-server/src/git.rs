@@ -11,7 +11,7 @@ use crab_read::{
     UploadPackRequest, plan_upload_pack_catalog, upload_pack_repository_options,
     upload_pack_wire as wire,
 };
-use crab_remote_git::{RemoteGitRepository, RepositoryRefs};
+use crab_remote_git::RepositoryRefs;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::io::AsyncWrite;
@@ -48,12 +48,20 @@ pub(crate) enum GitError {
     Wire(#[from] wire::WireError),
     #[error("Git object read failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("repository service failed")]
+    Service(#[from] crate::Error),
     #[error("Git fetch planning failed")]
     Read(#[from] crab_read::ReadError),
 }
 
 impl IntoResponse for GitError {
     fn into_response(self) -> Response {
+        if let Self::Service(crate::Error::Maintenance(error)) = &self {
+            tracing::error!(error = ?error, "Git repository maintenance request failed");
+        }
+        if let Self::Service(crate::Error::Worker(error)) = &self {
+            tracing::error!(error = %error, "Git repository maintenance task failed");
+        }
         if let Self::Body(error) = self {
             return error.into_response();
         }
@@ -75,6 +83,14 @@ impl IntoResponse for GitError {
             ),
             Self::Compression(_) => (StatusCode::BAD_REQUEST, "Invalid gzip request body"),
             Self::Wire(_) => (StatusCode::BAD_REQUEST, "Invalid Git protocol-v2 request"),
+            Self::Service(crate::Error::Maintenance(_) | crate::Error::Worker(_))
+            | Self::Service(crate::Error::Remote(crab_remote_git::Error::RepositoryIndexing {
+                ..
+            }))
+            | Self::Remote(crab_remote_git::Error::RepositoryIndexing { .. }) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Repository indexing could not finish; retry or check server logs",
+            ),
             Self::Read(crab_read::ReadError::UnauthorizedObject) => (
                 StatusCode::FORBIDDEN,
                 "Requested object is not reachable from this repository's refs",
@@ -205,15 +221,9 @@ pub(crate) async fn upload_pack(
             "Only one command is allowed per HTTP request",
         ));
     }
-    let repository = RemoteGitRepository::open(
-        entry.store.clone(),
-        entry.layout.clone(),
-        entry.identity.clone(),
-        Arc::clone(&server.runtime),
-        upload_pack_repository_options()?,
-        &cancel,
-    )
-    .await?;
+    let repository = entry
+        .open_current(&server, upload_pack_repository_options()?, &cancel)
+        .await?;
     let mut response = Vec::new();
     match request.command.as_str() {
         "ls-refs" => {

@@ -48,15 +48,23 @@ enum ApiError {
     Input(&'static str),
     #[error("remote Git operation failed")]
     Remote(#[from] Error),
+    #[error("repository service failed")]
+    Service(#[from] crate::Error),
     #[error("JSON response encoding failed")]
     Json(#[from] serde_json::Error),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Self::Service(crate::Error::Maintenance(error)) = &self {
+            tracing::error!(error = ?error, "repository maintenance request failed");
+        }
+        if let Self::Service(crate::Error::Worker(error)) = &self {
+            tracing::error!(error = %error, "repository maintenance task failed");
+        }
         let (status, code, message) = match &self {
             Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
-            Self::Remote(error) => match error {
+            Self::Remote(error) | Self::Service(crate::Error::Remote(error)) => match error {
                 Error::EmptyRepository => (
                     StatusCode::NOT_FOUND,
                     "empty_repository",
@@ -108,7 +116,7 @@ impl IntoResponse for ApiError {
                 Error::RepositoryIndexing { .. } => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "indexing",
-                    "Repository metadata is being indexed. Ask the operator to check the metadata owner",
+                    "Repository metadata is still being indexed. Retry shortly",
                 ),
                 _ => (
                     StatusCode::BAD_GATEWAY,
@@ -116,6 +124,11 @@ impl IntoResponse for ApiError {
                     "Repository data could not be read. Check storage and repository health",
                 ),
             },
+            Self::Service(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "indexing_failed",
+                "Repository indexing could not finish. Check storage permissions and server logs, then retry",
+            ),
             Self::Json(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "encoding",

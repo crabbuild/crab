@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod git;
 mod issues;
+mod maintenance;
 mod server;
 
 pub use config::{Config, OidcConfig, RepositoryConfig};
@@ -28,6 +29,15 @@ pub enum Error {
     Storage(#[from] crab_storage::StorageError),
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
+    #[error("repository maintenance failed")]
+    Maintenance(#[from] crab_write::WriteError),
+    #[error("repository maintenance task failed")]
+    Worker(#[from] tokio::task::JoinError),
+    #[error("server logging initialization failed")]
+    Logging {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Server startup or lifecycle result.

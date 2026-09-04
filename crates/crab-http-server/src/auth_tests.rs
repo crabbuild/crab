@@ -193,6 +193,7 @@ impl Harness {
             layout: StoreLayout::new(store, "test".into()),
             identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
             pinned: Mutex::new(None),
+            maintenance: Mutex::new(None),
         };
         let server = Arc::new(Server {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]),
@@ -202,6 +203,7 @@ impl Harness {
             admission: Semaphore::new(16),
             git_admission: Arc::new(Semaphore::new(4)),
             app_admission: Semaphore::new(8),
+            maintenance_admission: Arc::new(Semaphore::new(2)),
             cancellation: CancellationToken::new(),
             port: address.port(),
             auth: Some(auth),
@@ -290,6 +292,7 @@ impl Harness {
             task.abort();
             let _ = task.await;
         }
+        self.server.finish_maintenance().await.unwrap();
         self.server.runtime.shutdown().await;
     }
 }
@@ -386,6 +389,77 @@ async fn browser_sign_in_enforces_membership_csrf_logout_and_rotated_signing_key
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{action}");
     }
+    h.close().await;
+}
+
+#[tokio::test]
+async fn non_members_cannot_trigger_repository_publication() {
+    let h = Harness::new(false).await;
+    *h.provider.mode.lock().await = "outsider".into();
+    let cookie = h.login().await;
+    let session = h.json("/api/session", &cookie).await;
+    let response = h
+        .http
+        .post(format!("{}/api/git-token", h.origin))
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let repo = &h.server.repositories[&("team".into(), "private".into())];
+    crab_metadata::manifest_store::create_manifest(
+        &repo.store,
+        &repo.layout,
+        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+    )
+    .await
+    .unwrap();
+    let lease = super::maintenance_tests::commit_without_proof(repo).await;
+    let before = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+        .await
+        .unwrap();
+    let api = h
+        .http
+        .get(format!("{}/api/repos/team/private/refs", h.origin))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    let git = h
+        .http
+        .post(format!("{}/git/team/private/git-upload-pack", h.origin))
+        .basic_auth("crab", issued["token"].as_str())
+        .header("git-protocol", "version=2")
+        .header(
+            header::CONTENT_TYPE,
+            "application/x-git-upload-pack-request",
+        )
+        .body("0014command=ls-refs\n00010000")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        (api.status(), git.status()),
+        (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND)
+    );
+    assert!(repo.maintenance.lock().await.is_none());
+    assert_eq!(
+        before,
+        crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        crab_metadata::ref_journal::list_active_transactions(&repo.store, &repo.layout)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    lease.release().await.unwrap();
     h.close().await;
 }
 
