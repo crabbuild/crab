@@ -3479,6 +3479,11 @@ mod storage {
                             "deleted ref pending edit cannot carry visibility evidence",
                         ));
                     }
+                    // Deleted tips need their own lookup: no surviving ref or
+                    // update evidence necessarily names the old object.
+                    if let Some(oid) = old_oid {
+                        required.insert(oid, ());
+                    }
                     resolved.push(ResolvedGitVisibilityPendingEdit {
                         ref_name: pending_edit.ref_name,
                         old_oid,
@@ -5083,6 +5088,82 @@ mod tests {
             lazy.index.incremental_ordinals("refs/heads/main", 4, &[0]),
             Some(vec![2, 3, 4, 5])
         );
+
+        // The removed tip is absent from both the new ref and its replacement
+        // evidence. Deletion must explicitly resolve it before checking closure.
+        let mut after_delete = target.clone();
+        after_delete.generation += 1;
+        after_delete.refs = BTreeMap::from([("refs/heads/kept".into(), "1".repeat(40))]);
+        after_delete.seal_git_validation();
+        let replacement = GitVisibilityEdit::from_replacement_objects(
+            None,
+            "1".repeat(40),
+            vec!["1".repeat(40), "2".repeat(40)],
+        );
+        let evidence = upload_edit(&store, &router, &replacement).await.unwrap();
+        let deletion = [
+            RefJournalEdit {
+                ref_name: "refs/heads/main".into(),
+                old_oid: Some("5".repeat(40)),
+                new_oid: None,
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            },
+            RefJournalEdit {
+                ref_name: "refs/heads/kept".into(),
+                old_oid: None,
+                new_oid: Some("1".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(evidence),
+            },
+        ];
+        assert!(
+            prepare_catalog_journal_edits(
+                &store,
+                &router,
+                &target,
+                &deletion,
+                &after_delete.refs,
+                after_delete.generation,
+                &after_delete.pack_index_hash,
+                &after_delete.git_validation_digest,
+            )
+            .await
+            .unwrap()
+        );
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .unwrap();
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: after_delete.generation,
+                pack_index_hash: target_pack_index_hash,
+            })
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+        assert!(
+            ensure_catalog_bound(&store, &router, &after_delete)
+                .await
+                .unwrap()
+        );
+        let final_index = read_catalog_with_format(
+            &store,
+            &router,
+            after_delete.generation,
+            &after_delete.pack_index_hash,
+            &after_delete.git_validation_digest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            final_index.index.ordinals_for_refs(["refs/heads/kept"]),
+            vec![0, 1]
+        );
+        assert!(!final_index.index.contains_ref("refs/heads/main"));
     }
 
     #[cfg(all(feature = "storage", feature = "remote-index"))]
