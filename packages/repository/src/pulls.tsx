@@ -21,6 +21,7 @@ import {
 } from "./api";
 import { ComparisonView } from "./content";
 import { useMutation } from "./discussion-mutations";
+import { DiscussionSearch } from "./discussion-search";
 import {
   DiscussionMarkdown,
   Editor,
@@ -187,8 +188,9 @@ export function PullRequests({
 function PullList({ repo, url }: { repo: Repository; url: URL }) {
   const state = url.searchParams.get("state") ?? "open";
   const before = url.searchParams.get("before") ?? undefined;
+  const query = url.searchParams.get("q") ?? "";
   const page = useRequest<Page<PullSummary>>(
-    endpoint(repo, "pulls", { state, before }),
+    endpoint(repo, "pulls", { state, before, q: query || undefined }),
   );
   return (
     <section className="pulls-page">
@@ -204,6 +206,20 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
         </Button>
       </div>
       <p className="muted">Review and discuss changes between branches.</p>
+      <DiscussionSearch
+        label="Search pull requests"
+        placeholder="Search titles, descriptions, or authors"
+        value={query}
+        onSearch={(value) =>
+          navigate(
+            repoHref(repo, {
+              view: "pulls",
+              state,
+              q: value || undefined,
+            }),
+          )
+        }
+      />
       <div className="issues-filters">
         <nav aria-label="Pull request state">
           {["open", "closed", "all"].map((value) => (
@@ -211,7 +227,11 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
               key={value}
               className={state === value ? "active" : ""}
               aria-current={state === value ? "page" : undefined}
-              href={repoHref(repo, { view: "pulls", state: value })}
+              href={repoHref(repo, {
+                view: "pulls",
+                state: value,
+                q: query || undefined,
+              })}
             >
               {value === "all"
                 ? "All pull requests"
@@ -269,13 +289,29 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
             ) : (
               <div className="notice issue-empty">
                 <GitPullRequestIcon size={32} />
-                <h3>No matching pull requests</h3>
-                <p>Compare two branches to start a review.</p>
+                <h3>
+                  {query
+                    ? `No pull requests match “${query}”`
+                    : "No matching pull requests"}
+                </h3>
+                <p>
+                  {query
+                    ? data.next
+                      ? "Try another search or continue to older pull requests."
+                      : "Try another title, description, or author."
+                    : "Compare two branches to start a review."}
+                </p>
               </div>
             )}
             <div className="discussion-pagination">
               {before && (
-                <Link href={repoHref(repo, { view: "pulls", state })}>
+                <Link
+                  href={repoHref(repo, {
+                    view: "pulls",
+                    state,
+                    q: query || undefined,
+                  })}
+                >
                   Newest pull requests
                 </Link>
               )}
@@ -284,6 +320,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                   href={repoHref(repo, {
                     view: "pulls",
                     state,
+                    q: query || undefined,
                     before: String(data.next),
                   })}
                 >

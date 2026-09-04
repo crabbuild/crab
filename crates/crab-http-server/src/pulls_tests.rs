@@ -205,6 +205,18 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     )
     .unwrap();
     assert_eq!(closed_list["items"][0]["number"], 1);
+    let searched: Value = serde_json::from_slice(
+        &client
+            .get(format!("{root}?state=closed&q=PLEASE%20REVIEW"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(searched["items"][0]["number"], 1);
 
     receive_tests::success(path, &["checkout", "main"]).await;
     receive_tests::success(path, &["push", &git_url, ":refs/heads/feature"]).await;
