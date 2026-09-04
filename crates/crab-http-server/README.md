@@ -184,6 +184,17 @@ their requested permission, intersected with the user's configured grant. A read
 token cannot gain write access when its owner has a write grant. Tokens cannot
 authenticate browser APIs.
 
+Git credential helpers ignore HTTP paths by default. Enable path matching for
+this server before saving tokens, replacing the example origin with yours:
+
+```bash
+git config --global 'credential.https://git.example.com.useHttpPath' true
+```
+
+The token panel shows the command for the current server. This keeps tokens for
+different repository paths separate; other hosts retain their own configuration.
+See [Git credential contexts](https://git-scm.com/docs/gitcredentials#_configuration_options).
+
 `POST /api/git-token` requires session CSRF/Origin and a JSON body with `owner`,
 `repository` and `access` (`read` or `write`), limited to 2 KiB. Missing fields and
 unknown permissions fail; inaccessible targets or permissions return 403 without

@@ -22,6 +22,8 @@ export function GitAccess({
   const [selected, setSelected] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string>();
+  const credentialKey =
+    `credential.${window.location.origin}.useHttpPath`.replaceAll("'", "'\\''");
   const repository = repositories.find(
     (repo) => `${repo.owner}/${repo.name}` === selected,
   );
@@ -72,6 +74,11 @@ export function GitAccess({
           this sign-in expires or you sign out.
         </p>
         <p>Save it in your Git credential manager. It is shown only here.</p>
+        <details className="credential-setup">
+          <summary>Credential manager setup</summary>
+          <p>Run once to keep this server’s repository tokens separate:</p>
+          <code>git config --global '{credentialKey}' true</code>
+        </details>
         <label htmlFor="git-token-repository">Repository</label>
         <select
           id="git-token-repository"
