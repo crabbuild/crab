@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::server::Server;
+use crate::{auth::Principal, server::Server};
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,11 +137,16 @@ enum Payload {
 
 pub(crate) async fn read(
     State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
     Path((owner, name, action)): Path<(String, String, Action)>,
     Query(params): Query<Parameters>,
 ) -> Response {
     let started = Instant::now();
-    let Some(entry) = server.repositories.get(&(owner, name)) else {
+    let Some(entry) = server
+        .repositories
+        .get(&(owner, name))
+        .filter(|entry| principal.can_read(&entry.config))
+    else {
         return (
             StatusCode::NOT_FOUND,
             Json(

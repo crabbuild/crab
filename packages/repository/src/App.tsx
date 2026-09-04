@@ -20,6 +20,7 @@ import {
   type Refs,
   type Repository,
   type Commit,
+  type Session,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 const RepositoryTree = lazy(() =>
@@ -58,7 +59,36 @@ export function App() {
     localStorage.setItem("crab-theme", theme);
   }, [theme]);
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
-  const catalog = useRequest<{ repositories: Repository[] }>("/api/repos");
+  const session = useRequest<Session>("/api/session");
+  const [signingOut, setSigningOut] = useState(false);
+  const [sessionError, setSessionError] = useState<string>();
+  useEffect(() => {
+    const expired = () => session.retry();
+    window.addEventListener("crab-session-expired", expired);
+    return () => window.removeEventListener("crab-session-expired", expired);
+  });
+  const catalog = useRequest<{ repositories: Repository[] }>(
+    session.data?.authenticated ? "/api/repos" : null,
+  );
+  async function signOut() {
+    setSigningOut(true);
+    setSessionError(undefined);
+    try {
+      const response = await fetch("/auth/logout", {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.data?.csrf ?? "" },
+      });
+      if (!response.ok)
+        throw new Error("Sign-out failed. Reload and try again.");
+      // A full reload disposes all repository content held by the previous session.
+      window.location.assign("/");
+    } catch (error) {
+      setSessionError(
+        error instanceof Error ? error.message : "Sign-out failed",
+      );
+      setSigningOut(false);
+    }
+  }
   const url = new URL(location, window.location.origin);
   const repo = catalog.data?.repositories.find(
     (repo) => `/${repo.owner}/${repo.name}` === url.pathname,
@@ -89,6 +119,16 @@ export function App() {
               <strong>{repo.name}</strong>
             </>
           )}
+          {session.data?.user && (
+            <div className="session-control">
+              <span title={session.data.user.subject}>
+                {session.data.user.name}
+              </span>
+              <Button size="small" disabled={signingOut} onClick={signOut}>
+                {signingOut ? "Signing out…" : "Sign out"}
+              </Button>
+            </div>
+          )}
           <div className="theme-control">
             <SunIcon />
             <label className="sr-only" htmlFor="theme">
@@ -106,50 +146,105 @@ export function App() {
           </div>
         </header>
         <main id="main" tabIndex={-1}>
-          <Result state={catalog}>
-            {(data) =>
-              url.pathname === "/" ? (
-                <div className="catalog">
-                  <div className="section-heading">
-                    <h1>Your repositories</h1>
-                    <Label>{data.repositories.length}</Label>
-                  </div>
-                  <p className="muted">Your code, in your storage.</p>
-                  <div className="repo-cards">
-                    {data.repositories.map((repo) => (
-                      <article
-                        className="panel repo-card"
-                        key={`${repo.owner}/${repo.name}`}
-                      >
-                        <RepoIcon size={20} />
-                        <h2>
-                          <Link href={repoHref(repo)}>
-                            {repo.owner} / <strong>{repo.name}</strong>
-                          </Link>
-                        </h2>
-                        <p className="muted">
-                          {repo.description ||
-                            "Browse files, history, and changes."}
+          {sessionError && (
+            <p className="notice error" role="alert">
+              {sessionError}
+            </p>
+          )}
+          {session.error ? (
+            <div className="notice error" role="alert">
+              <h1>Unable to check your session</h1>
+              <p>{session.error}</p>
+              <Button onClick={session.retry}>Try again</Button>
+            </div>
+          ) : session.loading || !session.data ? (
+            <div className="notice" role="status">
+              <Spinner size="small" /> Checking your session…
+            </div>
+          ) : !session.data.authenticated ? (
+            <div className="notice sign-in">
+              <h1>Sign in to Crab</h1>
+              <p>
+                Use your team's identity provider to access your repositories.
+              </p>
+              {url.searchParams.has("auth_error") && (
+                <p className="error" role="alert">
+                  Sign-in could not be completed. Start again, or contact your
+                  administrator if this continues.
+                </p>
+              )}
+              <Button
+                variant="primary"
+                onClick={() =>
+                  window.location.assign(
+                    `/auth/login?${new URLSearchParams({ return_to: url.pathname + (url.searchParams.has("auth_error") ? "" : url.search) })}`,
+                  )
+                }
+              >
+                Continue to sign in
+              </Button>
+            </div>
+          ) : (
+            <Result state={catalog}>
+              {(data) =>
+                url.pathname === "/" ? (
+                  <div className="catalog">
+                    <div className="section-heading">
+                      <h1>Your repositories</h1>
+                      <Label>{data.repositories.length}</Label>
+                    </div>
+                    <p className="muted">Your code, in your storage.</p>
+                    {data.repositories.length === 0 && (
+                      <div className="notice">
+                        <h2>No repositories available</h2>
+                        <p>
+                          Ask your administrator to grant access to your
+                          account.
                         </p>
-                      </article>
-                    ))}
+                        {session.data?.user && (
+                          <p className="muted">
+                            Your user ID:{" "}
+                            <code>{session.data.user.subject}</code>
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    <div className="repo-cards">
+                      {data.repositories.map((repo) => (
+                        <article
+                          className="panel repo-card"
+                          key={`${repo.owner}/${repo.name}`}
+                        >
+                          <RepoIcon size={20} />
+                          <h2>
+                            <Link href={repoHref(repo)}>
+                              {repo.owner} / <strong>{repo.name}</strong>
+                            </Link>
+                          </h2>
+                          <p className="muted">
+                            {repo.description ||
+                              "Browse files, history, and changes."}
+                          </p>
+                        </article>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : repo ? (
-                <RepositoryPage
-                  key={`${repo.owner}/${repo.name}`}
-                  repo={repo}
-                  url={url}
-                  theme={resolved}
-                />
-              ) : (
-                <div className="notice">
-                  <h1>Repository not found</h1>
-                  <Link href="/">Back to repositories</Link>
-                </div>
-              )
-            }
-          </Result>
+                ) : repo ? (
+                  <RepositoryPage
+                    key={`${repo.owner}/${repo.name}`}
+                    repo={repo}
+                    url={url}
+                    theme={resolved}
+                  />
+                ) : (
+                  <div className="notice">
+                    <h1>Repository not found</h1>
+                    <Link href="/">Back to repositories</Link>
+                  </div>
+                )
+              }
+            </Result>
+          )}
         </main>
         <footer className="site-footer">
           <span className="brand-small">Crab</span>

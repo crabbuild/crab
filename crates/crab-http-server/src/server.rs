@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Request, State},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
@@ -18,7 +18,10 @@ use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Config, RepositoryConfig, Result, api, assets};
+use crate::{
+    Config, RepositoryConfig, Result, api, assets,
+    auth::{self, Authentication, Principal},
+};
 
 pub(crate) struct Repository {
     pub config: RepositoryConfig,
@@ -69,11 +72,21 @@ pub(crate) struct Server {
     pub admission: Semaphore,
     pub cancellation: CancellationToken,
     port: u16,
+    pub auth: Option<Authentication>,
 }
 
 /// Serve configured repositories and compiled React assets until Ctrl-C.
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
+    let auth =
+        match config.auth {
+            Some(config) => Some(Authentication::new(config).await.map_err(|source| {
+                crate::Error::Identity {
+                    source: Box::new(source),
+                }
+            })?),
+            None => None,
+        };
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let port = listener.local_addr()?.port();
     let mut repositories = BTreeMap::new();
@@ -110,6 +123,7 @@ pub async fn serve(config: Config) -> Result<()> {
         cursor_key: rand::random(),
         admission: Semaphore::new(16),
         port,
+        auth,
     });
     let app = router(server);
     println!("Crab repositories: http://{}", listener.local_addr()?);
@@ -125,9 +139,13 @@ pub async fn serve(config: Config) -> Result<()> {
     result.map_err(crate::Error::from)
 }
 
-fn router(server: Arc<Server>) -> Router {
+pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/api/session", get(auth::session))
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::callback))
+        .route("/auth/logout", post(auth::logout))
         .route("/api/repos", get(catalog))
         .route("/api/repos/{owner}/{name}/{action}", get(api::read))
         .fallback(assets::serve)
@@ -138,16 +156,19 @@ fn router(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
-async fn catalog(State(server): State<Arc<Server>>) -> Json<serde_json::Value> {
+async fn catalog(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+) -> Json<serde_json::Value> {
     Json(
-        json!({"repositories": server.repositories.values().map(|repository| json!({
+        json!({"repositories": server.repositories.values().filter(|repository| principal.can_read(&repository.config)).map(|repository| json!({
         "owner": repository.config.owner, "name": repository.config.name,
         "description": repository.config.description,
     })).collect::<Vec<_>>()}),
     )
 }
 
-async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Next) -> Response {
+async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get("host")
@@ -157,10 +178,38 @@ async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Nex
         format!("localhost:{}", server.port),
         format!("[::1]:{}", server.port),
     ];
-    if !allowed.iter().any(|value| Some(value.as_str()) == host) {
+    let valid_host = server
+        .auth
+        .as_ref()
+        .map(|auth| auth.allows_host(host))
+        .unwrap_or_else(|| allowed.iter().any(|value| Some(value.as_str()) == host));
+    if !valid_host {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let mut response = next.run(request).await;
+    let principal = match &server.auth {
+        Some(auth) => auth.principal(request.headers()).await,
+        None => Principal::Local,
+    };
+    let protected =
+        request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
+    let denied = protected && !principal.authenticated();
+    let unsafe_method = !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let rejected_mutation = unsafe_method
+        && server
+            .auth
+            .as_ref()
+            .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
+    request.extensions_mut().insert(principal);
+    let mut response = if denied {
+        (StatusCode::UNAUTHORIZED, Json(json!({"error":{"code":"sign_in_required","message":"Sign in to access repositories"}}))).into_response()
+    } else if rejected_mutation {
+        (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"csrf_rejected","message":"Reload the page before trying again"}}))).into_response()
+    } else {
+        next.run(request).await
+    };
     response
         .headers_mut()
         .entry("cache-control")
@@ -192,6 +241,7 @@ mod tests {
             admission: Semaphore::new(1),
             cancellation: CancellationToken::new(),
             port: 8788,
+            auth: None,
         }));
         for (path, host, expected, cache) in [
             (
@@ -242,3 +292,7 @@ mod tests {
         runtime.shutdown().await;
     }
 }
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod auth_tests;

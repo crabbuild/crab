@@ -2,6 +2,7 @@
 """Compare a running Crab HTTP server with a read-only native Git oracle."""
 import argparse
 import hashlib
+from http.cookiejar import MozillaCookieJar
 import json
 import statistics
 import subprocess
@@ -20,7 +21,12 @@ def main():
     parser.add_argument('--directory', action='append', default=[''])
     parser.add_argument('--file', action='append')
     parser.add_argument('--blame', help='Optional ordinary text path for first-parent blame comparison')
+    parser.add_argument('--cookies', help='Private Netscape cookie file from an authenticated session')
     args = parser.parse_args()
+    jar = MozillaCookieJar(args.cookies)
+    if args.cookies:
+        jar.load(ignore_discard=True)
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     samples = {}
     checks = {'tree_entries': 0, 'commits': 0, 'blobs': 0, 'diffs': 0, 'errors': 0}
     api = '/api/repos/' + '/'.join(urllib.parse.quote(part, safe='') for part in args.repository.split('/'))
@@ -32,7 +38,7 @@ def main():
         request = urllib.request.Request(args.url.rstrip('/') + path, method=method, headers=headers or {})
         started = time.perf_counter()
         try:
-            response = urllib.request.urlopen(request, timeout=40)
+            response = opener.open(request, timeout=40)
         except urllib.error.HTTPError as error:
             response = error
         with response:
