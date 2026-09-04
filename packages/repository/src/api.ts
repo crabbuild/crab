@@ -1,5 +1,12 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+export interface Session {
+  authenticated: boolean;
+  mode: "local" | "oidc";
+  user: { subject: string; name: string } | null;
+  csrf: string | null;
+}
+
 export interface Repository {
   owner: string;
   name: string;
@@ -84,6 +91,8 @@ export async function request<T>(
     signal,
     headers: { Accept: "application/json" },
   });
+  if (response.status === 401)
+    window.dispatchEvent(new Event("crab-session-expired"));
   const body: unknown = await response.json();
   if (!response.ok) {
     const failure = body as { error?: { message?: string } };

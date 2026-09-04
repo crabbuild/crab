@@ -47,3 +47,23 @@ it("shows the server error rather than pretending failed data loaded", async () 
     request("/api/repos/team/repo.name/file", new AbortController().signal),
   ).rejects.toThrow("Read budget exceeded");
 });
+
+it("notifies the application when a repository request loses its session", async () => {
+  const browser = new EventTarget();
+  const expired = vi.fn();
+  browser.addEventListener("crab-session-expired", expired);
+  vi.stubGlobal("window", browser);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "Sign in" } }), {
+          status: 401,
+        }),
+    ),
+  );
+  await expect(
+    request("/api/repos", new AbortController().signal),
+  ).rejects.toThrow("Sign in");
+  expect(expired).toHaveBeenCalledOnce();
+});

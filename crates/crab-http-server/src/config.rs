@@ -1,6 +1,8 @@
+use openidconnect::IssuerUrl;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use url::Url;
 
 use serde::Deserialize;
 
@@ -12,6 +14,7 @@ use crate::{Error, Result};
 pub struct Config {
     pub listen: SocketAddr,
     pub repositories: Vec<RepositoryConfig>,
+    pub auth: Option<OidcConfig>,
 }
 
 /// One public repository name mapped to an operator-owned storage location.
@@ -24,6 +27,8 @@ pub struct RepositoryConfig {
     pub prefix: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub members: Vec<String>,
 }
 
 impl Config {
@@ -35,9 +40,26 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if !self.listen.ip().is_loopback() {
+        if let Some(auth) = &self.auth {
+            validate_identity_url(&auth.public_url, true)?;
+            validate_identity_url(auth.issuer.url(), auth.public_url.scheme() == "http")?;
+            if auth.public_url.path() != "/"
+                || auth.public_url.query().is_some()
+                || auth.issuer.url().query().is_some()
+                || auth.client_id.is_empty()
+            {
+                return Err(Error::Config(
+                    "OIDC requires a client ID, an issuer without query parameters, and a public URL without a path or query",
+                ));
+            }
+            if auth.public_url.scheme() == "http" && !self.listen.ip().is_loopback() {
+                return Err(Error::Config(
+                    "HTTP identity development requires a loopback listener",
+                ));
+            }
+        } else if !self.listen.ip().is_loopback() {
             return Err(Error::Config(
-                "the development server requires a loopback listener",
+                "OIDC authentication is required beyond loopback",
             ));
         }
         if self.repositories.is_empty() {
@@ -45,7 +67,15 @@ impl Config {
         }
         let mut names = HashSet::new();
         for repository in &self.repositories {
-            if matches!(repository.owner.as_str(), "api" | "assets") {
+            let mut subjects = HashSet::new();
+            for subject in &repository.members {
+                if subject.is_empty() || !subjects.insert(subject) {
+                    return Err(Error::Config(
+                        "repository members must be unique nonempty OIDC subjects",
+                    ));
+                }
+            }
+            if matches!(repository.owner.as_str(), "api" | "assets" | "auth") {
                 return Err(Error::Config(
                     "repository owner conflicts with a server route",
                 ));
@@ -76,5 +106,70 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+/// Browser identity provider and the application's canonical external origin.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcConfig {
+    pub issuer: IssuerUrl,
+    pub client_id: String,
+    pub public_url: Url,
+    pub client_secret_file: Option<PathBuf>,
+}
+
+pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Result<()> {
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain("localhost")) => true,
+        _ => false,
+    };
+    if url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !(url.scheme() == "https" || (allow_loopback_http && url.scheme() == "http" && loopback))
+    {
+        return Err(Error::Config(
+            "identity URLs require HTTPS without credentials or fragments; development HTTP is loopback-only",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_listeners_require_identity_and_https() {
+        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=['alice']\n";
+        let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\n";
+        let config: Config = toml::from_str(base).unwrap();
+        assert!(config.validate().is_err());
+        let config: Config = toml::from_str(&format!("{base}{identity}")).unwrap();
+        assert!(config.validate().is_ok());
+        for replacement in [
+            "http://git.example",
+            "http://127.0.0.1:8788",
+            "https://git.example/path",
+            "https://user:password@git.example",
+            "https://git.example/#fragment",
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "{base}{}",
+                identity.replace("https://git.example", replacement)
+            ))
+            .unwrap();
+            assert!(config.validate().is_err(), "{replacement}");
+        }
+        let config: Config = toml::from_str(&format!(
+            "{}{identity}",
+            base.replace("members=['alice']", "members=['alice','alice']")
+        ))
+        .unwrap();
+        assert!(config.validate().is_err());
     }
 }

@@ -567,3 +567,26 @@ main {
   background: var(--bgColor-default);
   color: var(--fgColor-default);
 }
+
+.session-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+.session-control span {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sign-in {
+  max-width: 520px;
+  margin: 64px auto;
+}
+@media (max-width: 640px) {
+  .session-control span {
+    max-width: 80px;
+  }
+}
