@@ -21,7 +21,7 @@ export function useMutation(csrf: string) {
   }, []);
   async function run<T>(
     url: string,
-    method: "POST" | "PATCH",
+    method: "POST" | "PATCH" | "DELETE",
     input: object,
   ): Promise<T | undefined> {
     if (busy.current) return;

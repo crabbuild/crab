@@ -44,6 +44,12 @@ pub(crate) enum Error {
     MergeBlocked,
     #[error("Write access is required to report commit statuses")]
     StatusPermission,
+    #[error("Write access is required to manage repository labels")]
+    LabelPermission,
+    #[error("A repository label with this name already exists")]
+    LabelConflict,
+    #[error("Repository label not found")]
+    LabelNotFound,
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error(
@@ -65,6 +71,16 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if matches!(
+            self,
+            Self::Storage(_)
+                | Self::Json(_)
+                | Self::Clock(_)
+                | Self::Repository(_)
+                | Self::Merge(_)
+        ) {
+            tracing::error!(error = ?self, "collaboration request failed");
+        }
         let (status, code, message) = match &self {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Discussion not found"),
@@ -113,6 +129,21 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to report commit statuses",
+            ),
+            Self::LabelPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage repository labels",
+            ),
+            Self::LabelConflict => (
+                StatusCode::CONFLICT,
+                "label_conflict",
+                "A repository label with this name already exists",
+            ),
+            Self::LabelNotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Repository label not found",
             ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,

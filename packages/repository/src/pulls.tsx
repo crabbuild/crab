@@ -18,10 +18,12 @@ import {
   useRequest,
   type Refs,
   type Repository,
+  type RepositoryLabel,
 } from "./api";
 import { ComparisonView } from "./content";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
+import { LabelBadges, LabelPicker } from "./discussion-labels";
 import {
   DiscussionMarkdown,
   Editor,
@@ -49,12 +51,14 @@ interface PullSummary {
   head_ref: string;
   created_at: number;
   updated_at: number;
+  labels: RepositoryLabel[];
 }
 
 interface PullRequest extends PullSummary {
   body: string;
   version: number;
   can_edit: boolean;
+  can_label: boolean;
   base_oid: string;
   head_oid: string;
   original_base_oid: string | null;
@@ -220,6 +224,11 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       />
+      <div className="discussion-list-actions">
+        <Link className="button-link" href={repoHref(repo, { view: "labels" })}>
+          Labels
+        </Link>
+      </div>
       <div className="issues-filters">
         <nav aria-label="Pull request state">
           {["open", "closed", "all"].map((value) => (
@@ -273,6 +282,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                       >
                         {pull.title}
                       </Link>
+                      <LabelBadges labels={pull.labels} />
                       <p className="muted">
                         #{pull.number} opened {timestamp(pull.created_at)} by{" "}
                         {pull.author}
@@ -515,6 +525,19 @@ function PullDetail({
                     <code>{branch(data.head_ref)}</code> into{" "}
                     <code>{branch(data.base_ref)}</code>
                   </span>
+                )}
+              </div>
+              <div className="discussion-label-controls">
+                <LabelBadges labels={data.labels} />
+                {data.can_label && (
+                  <LabelPicker
+                    repo={repo}
+                    labels={data.labels}
+                    version={data.version}
+                    path={`pulls/${number}`}
+                    csrf={csrf}
+                    onSaved={pull.retry}
+                  />
                 )}
               </div>
             </div>

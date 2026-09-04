@@ -1107,6 +1107,24 @@ main {
   min-width: 0;
   flex: 1;
 }
+.discussion-list-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 12px;
+}
+.button-link {
+  color: var(--fgColor-default);
+  background: var(--button-default-bgColor-rest);
+  border: 1px solid var(--button-default-borderColor-rest);
+  border-radius: var(--borderRadius-medium);
+  box-shadow: var(--shadow-resting-small);
+  font-weight: 500;
+  padding: 5px 12px;
+}
+.button-link:hover {
+  background: var(--button-default-bgColor-hover);
+  text-decoration: none;
+}
 .issues-filters nav a {
   color: var(--fgColor-muted);
   padding: 8px 12px;
@@ -1143,6 +1161,176 @@ main {
   font-weight: 600;
   font-size: 16px;
   overflow-wrap: anywhere;
+}
+.discussion-labels {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.discussion-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 15%);
+}
+.discussion-label-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -12px 0 24px;
+}
+.discussion-label-controls .discussion-labels {
+  margin-left: 0;
+}
+.label-picker {
+  position: relative;
+}
+.label-picker summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--fgColor-default);
+  background: var(--button-default-bgColor-rest);
+  border: 1px solid var(--button-default-borderColor-rest);
+  border-radius: var(--borderRadius-medium);
+  padding: 4px 10px;
+  font-weight: 500;
+}
+.label-picker summary::marker,
+.label-picker summary::-webkit-details-marker {
+  display: none;
+}
+.label-picker summary span {
+  color: var(--fgColor-muted);
+}
+.label-picker-menu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 300px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--overlay-bgColor);
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  box-shadow: var(--shadow-floating-medium);
+}
+.label-picker-menu header {
+  display: flex;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.label-picker-menu header span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.label-picker-menu fieldset {
+  display: grid;
+  gap: 2px;
+  border: 0;
+  margin: 8px 0;
+  padding: 0;
+}
+.label-picker-menu fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+.label-picker-menu button {
+  width: 100%;
+}
+.labels-page {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+.labels-page > .section-heading {
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+.label-form,
+.label-catalog {
+  margin-bottom: 20px;
+}
+.label-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 180px minmax(220px, 2fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+}
+.label-form h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.label-form label,
+.label-row-edit label {
+  display: grid;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 12px;
+}
+.label-form input,
+.label-row-edit input {
+  min-width: 0;
+  padding: 7px 8px;
+  color: var(--fgColor-default);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  font: inherit;
+}
+.label-color-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.label-color-input input[type="color"] {
+  width: 44px;
+  height: 34px;
+  padding: 3px;
+}
+.label-catalog > header,
+.label-row {
+  padding: 16px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.label-catalog > header {
+  background: var(--bgColor-muted);
+}
+.label-row:last-child {
+  border-bottom: 0;
+}
+.label-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(220px, 2fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+.label-row .discussion-actions {
+  margin: 0;
+}
+.label-row-edit {
+  grid-template-columns: minmax(140px, 1fr) 180px minmax(220px, 2fr) auto;
+}
+.label-row > .error {
+  grid-column: 1 / -1;
 }
 .issue-status-icon {
   flex: 0 0 auto;
@@ -1418,6 +1606,19 @@ main {
   }
   .issue-list li {
     padding: 14px;
+  }
+  .label-form,
+  .label-row,
+  .label-row-edit {
+    grid-template-columns: 1fr;
+  }
+  .label-picker-menu {
+    position: fixed;
+    top: 72px;
+    right: 16px;
+    left: 16px;
+    width: auto;
+    max-height: calc(100vh - 88px);
   }
 }
 

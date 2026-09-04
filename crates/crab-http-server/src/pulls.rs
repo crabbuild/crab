@@ -18,6 +18,7 @@ use crate::{
     app::{self, Error, Result},
     app_storage,
     auth::{Identity, Principal},
+    labels::{self, Label},
     server::{Repository, Server},
     statuses::{self, CommitStatus, StatusState},
 };
@@ -68,6 +69,7 @@ async fn pull_view(
         Some(rule) if !rule.required_checks.is_empty() => statuses::latest(repo, head_oid).await?,
         _ => vec![],
     };
+    let labels = labels::catalog(repo).await?;
     let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses);
     Ok(json!({
         "number": pull.number,
@@ -84,6 +86,8 @@ async fn pull_view(
         "version": pull.version,
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
+        "labels": labels::selection_view(&pull.label_ids, &labels),
+        "can_label": can_write,
         "can_edit": app_storage::same_author(&pull.author, actor),
         "can_manage": pull.state != PullState::Merged
             && pull.merge_pending.is_none()
@@ -212,7 +216,7 @@ fn merge_requirements(
     }
 }
 
-fn pull_list_view(pull: &PullRequest) -> Value {
+fn pull_list_view(pull: &PullRequest, labels: &[Label]) -> Value {
     json!({
         "number": pull.number,
         "title": pull.title,
@@ -222,6 +226,7 @@ fn pull_list_view(pull: &PullRequest) -> Value {
         "head_ref": pull.head_ref,
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
+        "labels": labels::selection_view(&pull.label_ids, labels),
     })
 }
 
@@ -298,6 +303,7 @@ async fn list(
     let limit = params.limit()?;
     let state = params.state()?;
     let query = app::search_query(params.q.as_deref())?;
+    let labels = labels::catalog(repo).await?;
     let last = app_storage::last_number(repo, storage::ROOT).await?;
     let mut next = last.min(params.before.map_or(last, |before| before - 1));
     let mut items = Vec::new();
@@ -320,7 +326,7 @@ async fn list(
                     &[&pull.title, &pull.body, &pull.author.name],
                 )
             {
-                items.push(pull_list_view(&pull));
+                items.push(pull_list_view(&pull, &labels));
             }
             if items.len() == limit || scanned == 200 {
                 break;
@@ -493,6 +499,7 @@ struct PullEdit {
     title: Option<String>,
     body: Option<String>,
     state: Option<PullState>,
+    label_ids: Option<Vec<u64>>,
 }
 
 async fn edit(
@@ -508,6 +515,7 @@ async fn edit(
     let (mut pull, etag) = app_storage::read::<PullRequest>(repo, &path)
         .await?
         .ok_or(Error::NotFound)?;
+    let label_change = input.label_ids.is_some();
     let author = app_storage::same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
         return Err(Error::MergePending);
@@ -518,15 +526,23 @@ async fn edit(
     if input.state.is_some() && !(author || principal.can_write(&repo.config)) {
         return Err(Error::Forbidden);
     }
+    if label_change && !principal.can_write(&repo.config) {
+        return Err(Error::LabelPermission);
+    }
     if input.state == Some(PullState::Merged) || (pull.merge.is_some() && input.state.is_some()) {
         return Err(Error::Invalid("Merged pull requests cannot change state"));
     }
     if input.version != pull.version {
         return Err(Error::Conflict);
     }
-    if input.title.is_none() && input.body.is_none() && input.state.is_none() {
+    if input.title.is_none()
+        && input.body.is_none()
+        && input.state.is_none()
+        && input.label_ids.is_none()
+    {
         return Err(Error::Invalid("No pull request changes supplied"));
     }
+    let labels = labels::catalog(repo).await?;
     if let Some(value) = input.title {
         pull.title = app::title(&value)?;
     }
@@ -537,12 +553,18 @@ async fn edit(
     if let Some(value) = input.state {
         pull.state = value;
     }
+    if let Some(value) = input.label_ids {
+        pull.label_ids = labels::validate_selection(value, &labels)?;
+    }
     pull.version = pull
         .version
         .checked_add(1)
         .filter(|value| *value < app_storage::MAX_NUMBER)
         .ok_or(Error::Conflict)?;
     pull.updated_at = app_storage::now()?;
+    if label_change && !principal.can_write(&repo.config) {
+        return Err(Error::LabelPermission);
+    }
     app_storage::update(repo, &path, &pull, etag).await?;
     let repository = repo
         .open_current(&server, RepositoryOptions::default(), &server.cancellation)

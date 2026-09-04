@@ -50,6 +50,11 @@ const Issues = lazy(() =>
 const PullRequests = lazy(() =>
   import("./pulls").then((module) => ({ default: module.PullRequests })),
 );
+const LabelsPage = lazy(() =>
+  import("./discussion-labels").then((module) => ({
+    default: module.LabelsPage,
+  })),
+);
 type Theme = "light" | "dark" | "auto";
 
 export function App() {
@@ -290,7 +295,7 @@ function RepositoryPage({
 }) {
   const view = url.searchParams.get("view") ?? "code";
   const refs = useRequest<Refs>(
-    view === "issues" ? null : endpoint(repo, "refs"),
+    view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
   );
   const revName =
     url.searchParams.get("rev") ??
@@ -342,8 +347,10 @@ function RepositoryPage({
             <GitPullRequestIcon /> Pull requests
           </Link>
           <Link
-            className={view === "issues" ? "active" : ""}
-            aria-current={view === "issues" ? "page" : undefined}
+            className={view === "issues" || view === "labels" ? "active" : ""}
+            aria-current={
+              view === "issues" || view === "labels" ? "page" : undefined
+            }
             href={repoHref(repo, { view: "issues" })}
           >
             <IssueOpenedIcon /> Issues
@@ -351,7 +358,17 @@ function RepositoryPage({
         </nav>
       </div>
       <div className={`repo-body${overview ? " repo-overview" : ""}`}>
-        {view === "issues" ? (
+        {view === "labels" ? (
+          <Suspense
+            fallback={
+              <div className="notice" role="status">
+                <Spinner size="small" /> Loading labels…
+              </div>
+            }
+          >
+            <LabelsPage repo={repo} csrf={csrf} />
+          </Suspense>
+        ) : view === "issues" ? (
           <Suspense
             fallback={
               <div className="notice" role="status">

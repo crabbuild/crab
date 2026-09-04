@@ -461,6 +461,26 @@ exact current head counts. Stale approvals do not count, and a current request
 for changes blocks the merge until that reviewer submits a current approval.
 Recording a decision advances the pull version so a concurrent stale merge or
 edit cannot claim the pull after that decision.
+
+Repository labels use `GET`/`POST /api/repos/{owner}/{name}/labels` and
+`PATCH`/`DELETE .../labels/{id}`. Any repository member can list labels; write
+access is required to create, edit, delete or assign them. Names contain 1–50
+characters and are unique case-insensitively. Colors are six hexadecimal digits
+without `#`, descriptions contain at most 100 characters, and each issue or pull
+request accepts at most 20 distinct label IDs. The label catalog is capped at 500
+created IDs over the repository lifetime so its conditionally updated document
+stays bounded.
+
+Issue and pull `PATCH` requests assign the complete label set with `label_ids`
+and the discussion's current `version`. Assignments store stable IDs. Renaming a
+label is therefore visible everywhere immediately; deleting it removes it from
+every response without rewriting discussions. Create requests use immutable UUID
+reservations. Replaying one after an edit returns the current label, while durable
+deletion tombstones prevent a replay from resurrecting a deleted label. Deletes
+are idempotent when retried with the deleted label's version. The React application
+provides repository label management, GitHub-style colored badges and label pickers
+on issue and pull detail views.
+
 Repository writers can `POST /pulls/{number}/merge` with the displayed
 pull version and exact base/head IDs. The only accepted method is
 `fast_forward`: the server revalidates ancestry, pointer dependencies and Git
@@ -510,8 +530,8 @@ cursor. Titles allow 1–256 characters; bodies allow 64 KiB. Eight discussion
 operations run concurrently, with a 30-second deadline and an 80-KiB HTTP body
 limit. `Server-Timing: app` reports handling latency.
 
-Data lives under `<repository-prefix>/app/v1/issues`, `app/v1/pulls` and
-`app/v1/statuses`,
+Data lives under `<repository-prefix>/app/v1/issues`, `app/v1/pulls`,
+`app/v1/labels` and `app/v1/statuses`,
 independently of Git refs, packs and metadata. Each JSON document has
 `schema_version: 1`; unknown versions are rejected. Conditional counter updates
 allocate numbers, immutable
@@ -529,7 +549,7 @@ addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Labels, assignees, deletion/moderation, edit history, notifications, merge
+Assignees, discussion deletion/moderation, edit history, notifications, merge
 commits and detailed check runs/logs remain unimplemented. Production
 backup/restore qualification is pending.
 
@@ -600,6 +620,17 @@ Light, dark and 390-pixel pull-list screenshots were compared with the saved
 GitHub issue-list reference; the search input, state controls and results had no
 horizontal overflow. These small shared-cache reads validate behavior and
 layout, not production search throughput.
+
+The same RustFS-backed pull collection qualified repository labels without a
+local checkout. Two labels were assigned to persisted pull request 2; editing a
+label propagated immediately, deleting the other removed it from the pull, a
+repeated delete returned 204, and replaying the original create returned the
+edited label without resurrection. The final assignment survived a server
+restart. Warm label edit, delete and replay requests took 1.8, 1.5 and 0.8 ms
+round trip; pull assignment took 37.9 ms. The label catalog and pull picker were
+inspected in light, dark and 390-pixel layouts with no browser errors or
+horizontal overflow. These localhost shared-cache timings are functional
+observations rather than production throughput evidence.
 
 ## Current verification
 
@@ -703,7 +734,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, commit statuses, required checks and recoverable fast-forward merge with canonical ref publication; merge commits, detailed check runs and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, required checks and recoverable fast-forward merge with canonical ref publication; assignees, merge commits, detailed check runs and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |
