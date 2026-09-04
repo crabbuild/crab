@@ -2217,6 +2217,7 @@ dependencies = [
  "gix-object",
  "gix-odb",
  "gix-pack",
+ "gix-packetline",
  "gix-ref",
  "gix-traverse",
  "gix-url",
