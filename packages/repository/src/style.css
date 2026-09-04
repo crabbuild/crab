@@ -942,6 +942,24 @@ main {
 .comment-edit {
   padding: 16px;
 }
+.conflict-review {
+  margin: 16px 0;
+  padding: 16px;
+  text-align: left;
+  border: 1px solid var(--borderColor-attention-emphasis);
+  border-radius: var(--borderRadius-medium);
+}
+.conflict-review h3 {
+  margin-top: 0;
+}
+.conflict-source {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  background: var(--bgColor-muted);
+}
 .load-comments {
   margin: 12px 0;
   width: 100%;
