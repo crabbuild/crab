@@ -14,6 +14,9 @@ use crate::{
 type Result<T> = std::result::Result<T, ReceivePlanError>;
 type SourceError = Box<dyn std::error::Error + Send + Sync>;
 
+mod visibility;
+pub use visibility::{RefVisibility, VisibilitySource, plan_visibility};
+
 /// One exact ref comparison and replacement; `None` represents absence/deletion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefUpdate {
@@ -232,17 +235,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
             }
         }
     }
-    let mut validator = Validator {
-        incoming,
-        source,
-        nodes: HashMap::new(),
-        trusted: HashMap::new(),
-        pointers: BTreeMap::new(),
-        limits,
-        steps: 0,
-        bytes: 0,
-        cancelled,
-    };
+    let mut validator = Validator::new(incoming, source, limits, cancelled);
     // Validate all received objects, including unreachable objects. Otherwise a
     // syntactically corrupt object could be published for a later ref update.
     for object in incoming.objects() {
@@ -311,7 +304,38 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
     })
 }
 
-impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
+impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
+    fn new(
+        incoming: &'a IncomingPack,
+        source: &'a mut S,
+        limits: GraphLimits,
+        cancelled: C,
+    ) -> Self {
+        Self {
+            incoming,
+            source,
+            limits,
+            cancelled,
+            nodes: HashMap::new(),
+            trusted: HashMap::new(),
+            pointers: BTreeMap::new(),
+            steps: 0,
+            bytes: 0,
+        }
+    }
+
+    fn trusted_kind(&mut self, oid: ObjectId) -> Result<Option<Kind>> {
+        if let Some(kind) = self.trusted.get(&oid) {
+            return Ok(*kind);
+        }
+        let kind = self
+            .source
+            .trusted_kind(&oid)
+            .map_err(|source| ReceivePlanError::Source { oid, source })?;
+        self.trusted.insert(oid, kind);
+        Ok(kind)
+    }
+
     fn step(&mut self) -> Result<()> {
         if (self.cancelled)() {
             return Err(ReceivePlanError::Cancelled);
@@ -478,17 +502,7 @@ impl<S: GraphSource, C: Fn() -> bool> Validator<'_, S, C> {
             let (kind, links) = if let Some(kind) = visited.get(&oid) {
                 (*kind, None)
             } else {
-                let trusted = match self.trusted.get(&oid) {
-                    Some(kind) => *kind,
-                    None => {
-                        let kind = self
-                            .source
-                            .trusted_kind(&oid)
-                            .map_err(|source| ReceivePlanError::Source { oid, source })?;
-                        self.trusted.insert(oid, kind);
-                        kind
-                    }
-                };
+                let trusted = self.trusted_kind(oid)?;
                 match trusted {
                     Some(kind) => (kind, None),
                     None => {
