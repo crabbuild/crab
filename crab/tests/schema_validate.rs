@@ -561,7 +561,32 @@ fn validate_mirror_apply() {
             actions_planned: 1,
             actions_applied: 1,
             already_applied: false,
+            transaction_id: Some("f".repeat(64)),
+            manifest_digest: None,
             final_state: MirrorDriftState::Equal,
+            current: Box::new(MirrorCheckSummary {
+                source: "https://example.com/org/repo.git".into(),
+                destination: "crab://bucket/org/repo".into(),
+                cache_dir: "/tmp/cache.git".into(),
+                state: MirrorDriftState::Equal,
+                refs: Vec::new(),
+                destination_snapshot: Some("d".repeat(64)),
+                destination_identity: Some("e".repeat(64)),
+                pointers: MirrorPointerStatus {
+                    discovered: 0,
+                    verified: 0,
+                    recipe_digest: Some("c".repeat(64)),
+                    state: MirrorPointerState::Verified,
+                    issues: Vec::new(),
+                },
+                hook: MirrorHookStatus {
+                    state: MirrorHookState::NotApplicable,
+                    path: None,
+                    detail: None,
+                },
+                ci_passed: true,
+                issues: Vec::new(),
+            }),
         },
     );
 }

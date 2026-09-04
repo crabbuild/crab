@@ -206,8 +206,10 @@ pub(super) async fn commit_view_metadb(
         router.global_prefix(),
     );
     let digest = generation_file_index_digest(shard_index_hash.into());
-    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
+    // Prepare fallible local resources before opening writers so an I/O error
+    // cannot bypass the explicit close boundary below.
     let workspace = tempfile::tempdir()?;
+    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
     let operation = async {
         let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
         let mut seen_chunks = HashSet::new();
@@ -360,6 +362,34 @@ mod tests {
     use object_store::path::Path as ObjectPath;
 
     use super::*;
+
+    #[tokio::test]
+    async fn view_workspace_failure_precedes_metadata_writes() {
+        if !crate::test_support::unavailable_workspace_child(
+            "view::objects::tests::view_workspace_failure_precedes_metadata_writes",
+        ) {
+            return;
+        }
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = super::super::view_store_layout(&store, "org/repo/acl-views/v1/scope/view");
+        let uploaded = UploadedViewCrabObjects {
+            shard_hashes: Vec::new(),
+            shards: Vec::new(),
+            placement: ChunkPlacementMap::new(),
+            payload_digests: HashMap::new(),
+        };
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.shard_index_hash = "a".repeat(64);
+        let result = commit_view_metadb(&store, &router, &uploaded, &manifest, 1).await;
+        assert!(matches!(result, Err(AuthServerError::Io(_))), "{result:?}");
+        assert!(
+            store
+                .list_prefix(&ObjectPath::from(""))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn upload_view_crab_objects_uses_view_local_global_prefix() {

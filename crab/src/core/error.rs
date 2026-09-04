@@ -54,6 +54,11 @@ pub enum CrabError {
     #[error("corrupt object at {path} [CRAB-E0020]: {reason}")]
     CorruptObject { path: String, reason: String },
 
+    // Pack evidence uses the same integrity contract as remote object
+    // validation, with a typed payload so dependency causes stay inspectable.
+    #[error("corrupt Git pack evidence [CRAB-E0020]: {0}")]
+    GitPackCorrupt(#[source] crab_git::pack_locator::PackLocatorError),
+
     #[error("chunk not found [CRAB-E0021]: {hash}")]
     ChunkNotFound { hash: String },
 
@@ -1647,11 +1652,33 @@ impl From<crab_git::pack::PackError> for CrabError {
                 Self::PackTooLarge { size, limit }
             }
             crab_git::pack::PackError::Io { source, .. } => Self::Io(source),
+            crab_git::pack::PackError::ReverseIndex { source } => source.into(),
             crab_git::pack::PackError::InvalidPackFile { .. } => Self::PackIntegrity {
                 expected: String::new(),
                 computed: String::new(),
             },
             error => Self::Internal(error.to_string()),
+        }
+    }
+}
+
+impl From<crab_git::pack_locator::PackLocatorError> for CrabError {
+    fn from(error: crab_git::pack_locator::PackLocatorError) -> Self {
+        use crab_git::pack_locator::PackLocatorError;
+
+        match &error {
+            PackLocatorError::IndexOpen {
+                source: gix_pack::index::init::Error::Io { source, .. },
+                ..
+            }
+            | PackLocatorError::ReverseIndexIo { source, .. } => {
+                Self::Io(std::io::Error::new(source.kind(), error))
+            }
+            PackLocatorError::IndexChecksum {
+                source: gix_pack::index::verify::checksum::Error::Interrupted,
+                ..
+            } => Self::Cancelled,
+            _ => Self::GitPackCorrupt(error),
         }
     }
 }
@@ -1670,7 +1697,7 @@ impl From<crab_git::repack::RepackError> for CrabError {
             crab_git::repack::RepackError::EmptyRefs => {
                 Self::Internal("cannot repack a repository without refs".to_owned())
             }
-            crab_git::repack::RepackError::Locator { source } => Self::Internal(source.to_string()),
+            crab_git::repack::RepackError::Locator { source } => source.into(),
             crab_git::repack::RepackError::Git { operation, status } => {
                 Self::Internal(format!("{operation} failed with {status}"))
             }
@@ -2106,6 +2133,7 @@ impl CrabError {
             | Self::ConcurrentMaintenance { .. } => 3,
 
             Self::CorruptObject { .. }
+            | Self::GitPackCorrupt(_)
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
             | Self::CrcMismatch { .. }
@@ -2297,7 +2325,7 @@ impl CrabError {
             Self::RefAlreadyExists { .. } => "CRAB-E0011",
             Self::PushLockHeld { .. } => "CRAB-E0012",
             Self::NonFastForward { .. } => "CRAB-E0017",
-            Self::CorruptObject { .. } => "CRAB-E0020",
+            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) => "CRAB-E0020",
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",
@@ -2499,6 +2527,7 @@ impl CrabError {
             | Self::FileChangedDuringStaging { .. } => ErrorCategory::Conflict,
 
             Self::CorruptObject { .. }
+            | Self::GitPackCorrupt(_)
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
             | Self::CrcMismatch { .. }
@@ -2710,6 +2739,7 @@ impl CrabError {
             | Self::PushIntegrationFailed { .. }
             | Self::FileChangedDuringStaging { .. }
             | Self::CorruptObject { .. }
+            | Self::GitPackCorrupt(_)
             | Self::ChunkNotFound { .. }
             | Self::NotFound { .. }
             | Self::Forbidden { .. }
@@ -2899,6 +2929,7 @@ impl CrabError {
                     "reason": reason,
                 })
             }
+            Self::GitPackCorrupt(source) => serde_json::json!({ "source": source.to_string() }),
             Self::ChunkNotFound { hash } => {
                 serde_json::json!({ "hash": hash })
             }
@@ -4947,6 +4978,93 @@ mod tests {
         );
         assert_eq!(err.code(), "CRAB-E0602");
         assert_source_is::<gix_pack::data::decode::Error>(&err);
+    }
+
+    #[test]
+    fn pack_and_repack_preserve_corrupt_index_diagnostics() {
+        use crab_git::pack_locator::{PackLocatorError, write_pack_reverse_index};
+
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("pack.idx");
+        let reverse = dir.path().join("pack.rev");
+        std::fs::write(&index, b"not a valid git pack index\n").unwrap();
+        for repack in [false, true] {
+            let source = write_pack_reverse_index(&index, &reverse).unwrap_err();
+            let error = if repack {
+                CrabError::from(crab_git::repack::RepackError::Locator { source })
+            } else {
+                CrabError::from(crab_git::pack::PackError::ReverseIndex { source })
+            };
+            assert_eq!(error.code(), "CRAB-E0020");
+            assert_eq!(crate::core::error_catalog::error_code(&error), error.code());
+            assert_eq!(error.exit_code(), 4);
+            assert_eq!(error.category(), ErrorCategory::Integrity);
+            assert!(!error.is_retryable());
+            assert!(
+                error
+                    .to_string()
+                    .contains("too small for even an empty index")
+            );
+            assert_source_is::<PackLocatorError>(&error);
+            let source = std::error::Error::source(&error).unwrap();
+            assert!(matches!(
+                source.source().unwrap().downcast_ref(),
+                Some(gix_pack::index::init::Error::Corrupt { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn pack_locator_io_retains_kind_and_typed_cause() {
+        use crab_git::pack_locator::{PackLocatorError, write_pack_reverse_index};
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = write_pack_reverse_index(
+            &dir.path().join("missing.idx"),
+            &dir.path().join("pack.rev"),
+        )
+        .unwrap_err();
+        let denied = PackLocatorError::ReverseIndexIo {
+            path: dir.path().join("denied.rev"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        for (source, kind) in [
+            (missing, std::io::ErrorKind::NotFound),
+            (denied, std::io::ErrorKind::PermissionDenied),
+        ] {
+            let error = CrabError::from(source);
+            let CrabError::Io(wrapper) = &error else {
+                panic!("expected I/O classification: {error}");
+            };
+            assert_eq!(wrapper.kind(), kind);
+            assert!(wrapper.get_ref().unwrap().is::<PackLocatorError>());
+        }
+    }
+
+    #[test]
+    fn pack_index_checksum_distinguishes_interruption_from_corruption() {
+        use crab_git::pack_locator::PackLocatorError;
+        use gix_pack::index::verify::checksum::Error;
+
+        let interrupted = CrabError::from(PackLocatorError::IndexChecksum {
+            path: "pack.idx".into(),
+            source: Error::Interrupted,
+        });
+        assert!(matches!(interrupted, CrabError::Cancelled));
+        let error = CrabError::from(PackLocatorError::IndexChecksum {
+            path: "pack.idx".into(),
+            source: Error::Verify(gix_hash::verify::Error {
+                actual: gix_hash::ObjectId::from_bytes_or_panic(&[1; 20]),
+                expected: gix_hash::ObjectId::from_bytes_or_panic(&[2; 20]),
+            }),
+        });
+        assert_eq!(error.code(), "CRAB-E0020");
+        assert_source_is::<PackLocatorError>(&error);
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(matches!(
+            source.source().unwrap().downcast_ref(),
+            Some(Error::Verify(_))
+        ));
     }
 
     #[test]

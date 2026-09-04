@@ -124,7 +124,7 @@ fn failed_transport_keeps_diagnostics_in_both_output_modes() {
             &CancellationToken::new(),
         );
         assert!(
-            matches!(result, Err(CrabError::PullRemoteUnreachable { reason, .. }) if reason.contains("could not read from remote repository"))
+            matches!(result, Err(CrabError::PullRemoteUnreachable { reason, .. }) if reason.contains("Could not read from remote repository"))
         );
     }
 }

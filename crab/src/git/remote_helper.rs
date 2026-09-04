@@ -2713,8 +2713,10 @@ async fn fetch_promisor_objects(
             cancel,
         )
         .await?;
-    let visible_refs =
-        crate::git::upload_pack_wire::visible_ref_names(&repository, &config.transfer_hide_refs)?;
+    let visible_refs = crate::git::upload_pack_wire::visible_ref_names(
+        repository.refs(),
+        &config.transfer_hide_refs,
+    )?;
     let visible_tips = repository
         .refs()
         .entries

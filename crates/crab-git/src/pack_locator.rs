@@ -42,7 +42,7 @@ pub enum PackLocatorError {
     InvalidPackLength { pack_len: u64, minimum: u64 },
 
     /// The pack index could not be opened.
-    #[error("failed to open git pack index {path}")]
+    #[error("failed to open git pack index {path}: {source}")]
     IndexOpen {
         path: PathBuf,
         #[source]
@@ -50,7 +50,7 @@ pub enum PackLocatorError {
     },
 
     /// The pack index checksum did not match its contents.
-    #[error("git pack index checksum failed for {path}")]
+    #[error("git pack index checksum failed for {path}: {source}")]
     IndexChecksum {
         path: PathBuf,
         #[source]

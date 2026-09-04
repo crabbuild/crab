@@ -1222,8 +1222,10 @@ pub async fn commit_service_metadata(
         router.repo_prefix(),
         router.global_prefix(),
     );
-    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
+    // Prepare fallible local resources before opening writers so an I/O error
+    // cannot bypass the explicit close boundary below.
     let workspace = tempfile::tempdir()?;
+    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
     let operation = async {
         for segment in index.segments {
             let segment_path = router.repo_path(&segment.path);
@@ -3655,6 +3657,35 @@ mod tests {
         assert_eq!(stored.xorb_hash, xorb_hash);
         assert_eq!(stored.chunk_index, first_chunk.index);
         assert_eq!(stored.uncompressed_size, first_chunk.uncompressed_size);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_workspace_failure_precedes_metadata_writes() -> Result<()> {
+        if !crate::test_support::unavailable_workspace_child(
+            "receive::tests::service_workspace_failure_precedes_metadata_writes",
+        ) {
+            return Ok(());
+        }
+        let store = store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let index = segmented::build_index_object(SegmentKind::Shard, SegmentIndex::default())?;
+        let index_key = router
+            .repo_path(&segmented::index_relative_path(
+                SegmentKind::Shard,
+                &index.hash,
+            ))
+            .to_string();
+        let object = staged_object_for_bytes(index_key, &index.bytes);
+        put_staged(&store, &object, Bytes::from(index.bytes)).await?;
+        let mut plan = push_plan();
+        plan.candidate_manifest.shard_index_hash = index.hash;
+        plan.staged_objects = vec![object];
+        let before = store.list_prefix(&ObjectPath::from("")).await?;
+        let result =
+            commit_service_metadata(&store, &router, &plan, &plan.candidate_manifest, 1).await;
+        assert!(matches!(result, Err(AuthServerError::Io(_))), "{result:?}");
+        assert_eq!(store.list_prefix(&ObjectPath::from("")).await?, before);
         Ok(())
     }
 
