@@ -327,7 +327,7 @@ fn dependency_limits() -> DependencyProofLimits {
             max_recipe_entries: 1_000_000,
         },
         content: PointerProofLimits {
-            max_file_bytes: 512 * 1024 * 1024,
+            max_file_bytes: crate::server::MAX_DEPENDENCY_FILE_BYTES,
             max_shard_bytes: 128 * 1024 * 1024,
             max_xorb_bytes: 128 * 1024 * 1024,
             max_read_bytes: 2 * 1024 * 1024 * 1024,
