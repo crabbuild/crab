@@ -69,7 +69,7 @@ jobs:
             local repo_docs=false
             while IFS= read -r file; do
               case "${file}" in
-                Cargo.toml|Cargo.lock|crates/*|.github/workflows/*) rust=true ;;
+                Cargo.toml|Cargo.lock|crates/*|packages/repository/*|.github/workflows/*) rust=true ;;
                 crab/docs/*) repo_docs=true ;;
                 crab/*) rust=true ;;
                 packages/web/content/*) docs=true ;;
@@ -98,6 +98,7 @@ jobs:
           assert_classification 'crab/src/main.rs' 'true false false false'
           assert_classification 'packages/web/content/docs/index.mdx' 'false false true false'
           assert_classification 'packages/web/app/page.tsx' 'false true false false'
+          assert_classification 'packages/repository/src/App.tsx' 'true false false false'
           assert_classification $'crab/docs/design/layout.md\ncrab/src/main.rs' 'true false false true'
           assert_classification 'README.md' 'true false false false'
 
@@ -143,6 +144,23 @@ jobs:
         with:
           workspaces: ". -> target"
           cache-on-failure: true
+
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+
+      - name: Build and verify embedded repository frontend
+        run: |
+          npm ci --prefix packages/repository
+          npm run format:check --prefix packages/repository
+          npm test --prefix packages/repository
+          npm run build --prefix packages/repository
+
+      - name: Check HTTP server
+        run: cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
