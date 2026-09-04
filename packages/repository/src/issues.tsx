@@ -7,10 +7,12 @@ import {
   repoHref,
   useRequest,
   type Repository,
+  type RepositoryLabel,
 } from "./api";
 import { Link, Result } from "./ui";
 import { ConflictReview, useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
+import { LabelBadges, LabelPicker } from "./discussion-labels";
 import {
   DiscussionMarkdown,
   Editor,
@@ -31,6 +33,8 @@ interface Comment {
 interface Issue extends Comment {
   title: string;
   state: "open" | "closed";
+  labels: RepositoryLabel[];
+  can_label: boolean;
 }
 interface Page<T> {
   items: T[];
@@ -114,6 +118,11 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       />
+      <div className="discussion-list-actions">
+        <Link className="button-link" href={repoHref(repo, { view: "labels" })}>
+          Labels
+        </Link>
+      </div>
       <div className="issues-filters">
         <nav aria-label="Issue state">
           {["open", "closed", "all"].map((value) => (
@@ -165,6 +174,7 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
                       >
                         {issue.title}
                       </Link>
+                      <LabelBadges labels={issue.labels} />
                       <p className="muted">
                         #{issue.number} opened {timestamp(issue.created_at)} by{" "}
                         {issue.author}
@@ -341,6 +351,19 @@ function IssueDetail({
           {current.author} opened this issue {timestamp(current.created_at)}
         </span>
       </p>
+      <div className="discussion-label-controls">
+        <LabelBadges labels={current.labels} />
+        {current.can_label && (
+          <LabelPicker
+            repo={repo}
+            labels={current.labels}
+            version={current.version}
+            path={`issues/${number}`}
+            csrf={csrf}
+            onSaved={resource.retry}
+          />
+        )}
+      </div>
       {resource.error && (
         <p className="notice error" role="alert">
           {resource.error}

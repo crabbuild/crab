@@ -18,6 +18,15 @@ export interface Repository {
     required_checks: string[];
   }>;
 }
+export interface RepositoryLabel {
+  id: number;
+  name: string;
+  color: string;
+  description: string | null;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
 export interface Ref {
   name: string;
   oid: string;

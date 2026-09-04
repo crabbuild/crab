@@ -419,6 +419,49 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(success.0, StatusCode::CREATED);
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["satisfied"], true);
+    let label = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::POST,
+        "/api/repos/team/private/labels",
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000022",
+            "name":"ready for merge",
+            "color":"1f883d",
+            "description":"All required checks passed"
+        }),
+    )
+    .await;
+    assert_eq!(label.0, StatusCode::CREATED);
+    let labeled = mutate(
+        &h,
+        &alice,
+        alice_csrf,
+        reqwest::Method::PATCH,
+        &format!("{ROOT}/1"),
+        json!({"version":ready["version"],"label_ids":[label.1["id"]]}),
+    )
+    .await;
+    assert_eq!(labeled.0, StatusCode::OK);
+    assert_eq!(labeled.1["labels"][0]["name"], "ready for merge");
+    assert_eq!(
+        h.json(ROOT, &bob).await["items"][0]["labels"][0]["id"],
+        label.1["id"]
+    );
+    assert_eq!(
+        mutate(
+            &h,
+            &bob,
+            bob_csrf,
+            reqwest::Method::PATCH,
+            &format!("{ROOT}/1"),
+            json!({"version":labeled.1["version"],"label_ids":[]}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
     crate::server::receive_tests::success(path, &["push", git_url.as_str(), ":feature"]).await;
     let replay = report_status(
         &h,
