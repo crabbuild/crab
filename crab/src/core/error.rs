@@ -1857,6 +1857,10 @@ impl From<crab_storage::error::StorageError> for CrabError {
 impl From<crab_write::WriteError> for CrabError {
     fn from(error: crab_write::WriteError) -> Self {
         match error {
+            crab_write::WriteError::RefChanged { path, .. } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),

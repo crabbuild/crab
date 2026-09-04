@@ -8361,18 +8361,6 @@ impl PushPipeline {
                 );
             }
         }
-        let mut expected_heads = Vec::with_capacity(edits.len());
-        let mut parents = BTreeMap::new();
-        for edit in &edits {
-            let head = crate::metadata::manifest::read_ref_journal_head(
-                store,
-                &self.router,
-                &edit.ref_name,
-            )
-            .await?;
-            parents.insert(edit.ref_name.clone(), head.visible_transaction.clone());
-            expected_heads.push(head);
-        }
         let packs = self
             .uploaded_packs
             .lock()
@@ -8391,14 +8379,20 @@ impl PushPipeline {
             .as_ref()
             .is_none_or(|value| value.head != manifest.head)
             .then(|| manifest.head.clone());
-        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
-            parents, edits, head, packs, shards,
-        )?;
-        let committed = crate::metadata::manifest::commit_ref_journal_transaction(
-            store,
-            &self.router,
-            &transaction,
-            &expected_heads,
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let committed = crab_write::journal::commit_edits(
+            storage,
+            &layout,
+            &current_snapshot,
+            edits,
+            head,
+            packs,
+            shards,
         )
         .await?;
         info!(
