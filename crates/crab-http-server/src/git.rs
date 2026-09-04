@@ -26,6 +26,8 @@ pub(crate) const MAX_BODY_BYTES: usize = wire::MAX_REQUEST_BYTES + 4 * 65_536;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GitError {
+    #[error("Git receive failed")]
+    Receive(#[source] Box<crate::receive::ReceiveError>),
     #[error("{0}")]
     Request(&'static str),
     #[error("repository not found")]
@@ -56,6 +58,9 @@ pub(crate) enum GitError {
 
 impl IntoResponse for GitError {
     fn into_response(self) -> Response {
+        if let Self::Receive(error) = self {
+            return error.into_response();
+        }
         if let Self::Service(crate::Error::Maintenance(error)) = &self {
             tracing::error!(error = ?error, "Git repository maintenance request failed");
         }
@@ -135,6 +140,11 @@ pub(crate) async fn advertise(
     Query(query): Query<Discovery>,
     headers: HeaderMap,
 ) -> Result<Response, GitError> {
+    if query.service == "git-receive-pack" {
+        return crate::receive::advertise(&server, &principal, &owner, &name)
+            .await
+            .map_err(|error| GitError::Receive(Box::new(error)));
+    }
     if !server
         .repositories
         .get(&(owner, name))
@@ -144,9 +154,7 @@ pub(crate) async fn advertise(
     }
     require_v2(&headers)?;
     if query.service != "git-upload-pack" {
-        return Err(GitError::Request(
-            "Only Git fetch is available; receive-pack is not implemented yet",
-        ));
+        return Err(GitError::Request("Unsupported Git service"));
     }
     let cancel = server.cancellation.child_token();
     let mut bytes = Vec::new();

@@ -11,6 +11,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
+crab-git = { workspace = true }
+gix-hash = { workspace = true }
+gix-object = { workspace = true }
+tempfile = { workspace = true }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-metadata = { workspace = true, features = ["storage"] }
 crab-write = { workspace = true }
@@ -27,13 +31,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = { workspace = true, features = ["io"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
-tempfile = { workspace = true }
 object_store = { workspace = true }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

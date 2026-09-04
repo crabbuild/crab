@@ -21,6 +21,14 @@ async fn principal(h: &Harness, token: &str) -> auth::Principal {
 #[tokio::test]
 async fn token_permissions_intersect_repository_membership_and_requested_scope() {
     let h = Harness::new(false).await;
+    let repo = &h.server.repositories[&("team".into(), "private".into())];
+    crab_metadata::manifest_store::create_manifest(
+        &repo.store,
+        &repo.layout,
+        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+    )
+    .await
+    .unwrap();
     for (identity, access, permitted) in [
         ("valid", "read", true),
         ("valid", "write", true),
@@ -60,7 +68,37 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
             (&issued["owner"], &issued["repository"], &issued["access"]),
             (&json!("team"), &json!("private"), &json!(access))
         );
-        let principal = principal(&h, issued["token"].as_str().unwrap()).await;
+        let token = issued["token"].as_str().unwrap();
+        for (method, route, body) in [
+            (
+                reqwest::Method::GET,
+                "info/refs?service=git-receive-pack",
+                Vec::new(),
+            ),
+            (reqwest::Method::POST, "git-receive-pack", b"0000".to_vec()),
+        ] {
+            let response = h
+                .http
+                .request(method, format!("{}/git/team/private/{route}", h.origin))
+                .basic_auth("crab", Some(token))
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-git-receive-pack-request",
+                )
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if access == "write" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+        let principal = principal(&h, token).await;
         let mut config = h.server.repositories[&("team".into(), "private".into())]
             .config
             .clone();

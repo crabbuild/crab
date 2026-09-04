@@ -11,6 +11,7 @@ export interface Repository {
   owner: string;
   name: string;
   description: string;
+  access: "read" | "write";
 }
 export interface Ref {
   name: string;
