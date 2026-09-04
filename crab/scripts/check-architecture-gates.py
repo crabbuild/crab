@@ -1751,7 +1751,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-cache-server": {"crab", "crab-cache-store"},
 }
 WORKSPACE_DEPENDENCY_POLICY = {
-    "crab-http-server": {"normal": {"crab-remote-git", "crab-storage"}},
+    "crab-http-server": {"normal": {"crab-read", "crab-remote-git", "crab-storage"}},
     "crab": {
         "normal": {
             "crab-auth",

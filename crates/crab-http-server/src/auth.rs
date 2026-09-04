@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+mod git_tokens;
+pub(crate) use git_tokens::{issue_git_token, revoke_git_tokens};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -93,6 +96,13 @@ pub(crate) struct Session {
     identity: Identity,
     csrf: String,
     expires: Instant,
+    revoked: AtomicBool,
+}
+
+impl Session {
+    fn active(&self) -> bool {
+        self.expires > Instant::now() && !self.revoked.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone)]
@@ -107,12 +117,18 @@ impl Principal {
         match self {
             Self::Anonymous => false,
             Self::Local => true,
-            Self::User(session) => repository.members.contains(&session.identity.subject),
+            Self::User(session) => {
+                session.active() && repository.members.contains(&session.identity.subject)
+            }
         }
     }
 
     pub fn authenticated(&self) -> bool {
-        !matches!(self, Self::Anonymous)
+        match self {
+            Self::Anonymous => false,
+            Self::Local => true,
+            Self::User(session) => session.active(),
+        }
     }
 }
 
@@ -130,6 +146,7 @@ pub(crate) struct Authentication {
     client: Client,
     flows: Mutex<HashMap<Key, Flow>>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
+    git_tokens: Mutex<HashMap<Key, Arc<Session>>>,
     admission: Semaphore,
 }
 
@@ -163,6 +180,7 @@ impl Authentication {
             client,
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            git_tokens: Mutex::new(HashMap::new()),
             admission: Semaphore::new(8),
         })
     }
@@ -212,7 +230,7 @@ impl Authentication {
             return Principal::Anonymous;
         };
         let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, session| session.expires > Instant::now());
+        sessions.retain(|_, session| session.active());
         sessions
             .get(&key(token))
             .cloned()
@@ -467,14 +485,17 @@ async fn finish_login(
         identity: Identity { subject, name },
         csrf: CsrfToken::new_random_len(32).secret().clone(),
         expires: Instant::now() + lifetime,
+        revoked: AtomicBool::new(false),
     });
     let mut sessions = auth.sessions.lock().await;
-    sessions.retain(|_, session| session.expires > Instant::now());
+    sessions.retain(|_, session| session.active());
     if sessions.len() >= 4096 {
         return Err(AuthError::Busy);
     }
-    if let Some(old) = cookie_value(&headers, auth.cookie_name(false)) {
-        sessions.remove(&key(old));
+    if let Some(old) = cookie_value(&headers, auth.cookie_name(false))
+        && let Some(session) = sessions.remove(&key(old))
+    {
+        session.revoked.store(true, Ordering::Release);
     }
     sessions.insert(key(token.secret()), session);
     let mut response = Redirect::to(&flow.return_to).into_response();
@@ -508,7 +529,9 @@ pub(crate) async fn logout(
     let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
     // The transport boundary has already required both session CSRF and the canonical Origin.
     let token = cookie_value(&headers, auth.cookie_name(false)).ok_or(AuthError::Invalid)?;
-    auth.sessions.lock().await.remove(&key(token));
+    if let Some(session) = auth.sessions.lock().await.remove(&key(token)) {
+        session.revoked.store(true, Ordering::Release);
+    }
     Ok((
         [(header::SET_COOKIE, auth.cookie(false, "", Duration::ZERO)?)],
         StatusCode::NO_CONTENT,
@@ -560,6 +583,7 @@ mod tests {
             ),
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            git_tokens: Mutex::new(HashMap::new()),
             admission: Semaphore::new(1),
         };
         let cookie = auth.cookie(false, "test-token", SESSION_LIFETIME).unwrap();
@@ -579,6 +603,7 @@ mod tests {
             },
             csrf: "test-csrf".into(),
             expires: Instant::now() - Duration::from_secs(1),
+            revoked: AtomicBool::new(false),
         });
         auth.sessions
             .lock()

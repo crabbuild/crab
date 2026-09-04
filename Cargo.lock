@@ -2228,10 +2228,13 @@ name = "crab-http-server"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "base64 0.22.1",
  "blake3",
  "clap",
+ "crab-read",
  "crab-remote-git",
  "crab-storage",
+ "futures-util",
  "http-body-util",
  "object_store",
  "openidconnect",
@@ -2309,6 +2312,7 @@ dependencies = [
  "gix-hash",
  "gix-ignore",
  "gix-object",
+ "gix-packetline",
  "globset",
  "object_store",
  "tempfile",

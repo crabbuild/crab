@@ -3,6 +3,7 @@ mod api;
 mod assets;
 mod auth;
 mod config;
+mod git;
 mod server;
 
 pub use config::{Config, OidcConfig, RepositoryConfig};

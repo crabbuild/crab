@@ -20,6 +20,7 @@ pub(crate) async fn serve(request: Request) -> Response {
             && components[0] != "api"
             && components[0] != "assets"
             && components[0] != "auth"
+            && components[0] != "git"
             && components
                 .iter()
                 .all(|part| !part.is_empty() && !matches!(*part, "." | "..")));

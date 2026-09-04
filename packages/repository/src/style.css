@@ -590,3 +590,64 @@ main {
     max-width: 80px;
   }
 }
+
+.git-access,
+.clone-menu {
+  position: relative;
+}
+.git-access summary,
+.clone-menu summary {
+  cursor: pointer;
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 13px;
+  background: var(--button-default-bgColor-rest);
+  white-space: nowrap;
+}
+.git-popover {
+  position: absolute;
+  z-index: 30;
+  right: 0;
+  top: 32px;
+  width: min(360px, calc(100vw - 32px));
+  padding: 16px;
+  box-shadow: var(--shadow-floating-small);
+  font-size: 13px;
+  font-weight: normal;
+}
+.git-popover h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.git-popover label {
+  display: block;
+  margin: 12px 0 6px;
+}
+.git-popover input {
+  width: 100%;
+  padding: 8px;
+  margin-bottom: 10px;
+  background: var(--bgColor-default);
+  color: var(--fgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  font-family: var(--fontStack-monospace);
+}
+.git-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.clone-menu {
+  margin-left: auto;
+  order: 3;
+}
+@media (max-width: 640px) {
+  .git-access .git-popover {
+    position: fixed;
+    top: 62px;
+    right: 16px;
+  }
+}
