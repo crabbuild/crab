@@ -710,6 +710,89 @@ main {
 .pull-conversation > .discussion-form h3 {
   margin-top: 0;
 }
+.pull-timeline {
+  display: grid;
+  gap: 16px;
+}
+.review-event {
+  overflow: hidden;
+}
+.review-event > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 16px;
+  background: var(--bgColor-muted);
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.review-event > header .muted {
+  margin-left: auto;
+}
+.review-icon {
+  display: inline-flex;
+  color: var(--fgColor-muted);
+}
+.review-event.approved .review-icon {
+  color: var(--fgColor-open);
+}
+.review-event.changes_requested .review-icon {
+  color: var(--fgColor-danger);
+}
+.review-event .discussion-markdown {
+  padding: 16px;
+}
+.review-event footer {
+  padding: 0 16px 12px;
+  font-size: 12px;
+}
+.review-outdated {
+  padding: 1px 6px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: 20px;
+  color: var(--fgColor-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.review-form {
+  max-width: 820px;
+  margin-top: 28px;
+  padding: 16px;
+}
+.review-form h3 {
+  margin-top: 0;
+}
+.review-choices {
+  display: grid;
+  gap: 0;
+  margin: 16px 0;
+  padding: 0;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.review-choices label {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.review-choices label + label {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.review-choices label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.review-choices input {
+  margin-top: 4px;
+}
+.review-choices span,
+.review-choices small {
+  display: block;
+}
+.review-choices small {
+  margin-top: 2px;
+  color: var(--fgColor-muted);
+}
 .pull-merge-note {
   display: flex;
   align-items: flex-start;
@@ -740,6 +823,14 @@ main {
   }
   .pull-tabs a {
     padding: 10px 12px;
+  }
+  .review-event > header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .review-event > header .muted {
+    width: 100%;
+    margin-left: 23px;
   }
 }
 .repository-tree {
