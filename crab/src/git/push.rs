@@ -8473,18 +8473,6 @@ impl PushPipeline {
                 );
             }
         }
-        let mut expected_heads = Vec::with_capacity(edits.len());
-        let mut parents = BTreeMap::new();
-        for edit in &edits {
-            let head = crate::metadata::manifest::read_ref_journal_head(
-                store,
-                &self.router,
-                &edit.ref_name,
-            )
-            .await?;
-            parents.insert(edit.ref_name.clone(), head.visible_transaction.clone());
-            expected_heads.push(head);
-        }
         let packs = self
             .uploaded_packs
             .lock()
