@@ -196,8 +196,9 @@ leaves its two native Git client repositories there for inspection.
 
 [Native write design](WRITE-DESIGN.md) records the remaining receive-pack boundary,
 including why protected-view commit translation cannot be used unchanged for
-native pushes. Quarantine, graph/ref validation and self-contained pack/index
-preparation are qualified against native Git and Kubernetes/RustFS. Pointer
+native pushes. Quarantine, graph/ref validation, self-contained pack/index
+preparation and per-ref visibility planning are qualified against native Git and
+Kubernetes/RustFS. Pointer
 payload proof, atomic publication and HTTP receive wiring remain pending; these
 checks do not establish working pushes.
 
