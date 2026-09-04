@@ -343,7 +343,6 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-git-${{ matrix.label }}
       CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ matrix.label }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -358,6 +357,8 @@ jobs:
 
       - name: Install compatibility dependencies
         run: |
+          # Generated fixtures must not dirty the source attested by the report.
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
@@ -406,6 +407,19 @@ jobs:
           fi
           "$git_bin" --version
           echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+          dirname "$git_bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned previous release for rollback qualification
+        run: |
+          set -euo pipefail
+          rollback="$RUNNER_TEMP/gc-fence-rollback"
+          mkdir -p "$rollback"
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
+            --output "$rollback/crab-linux-x86_64.tar.gz"
+          (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
+          tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
+          test -x "$rollback/crab"
 
       - name: Start RustFS
         run: |
@@ -430,6 +444,8 @@ jobs:
         run: |
           python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
             --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-crab-bin "$RUNNER_TEMP/gc-fence-rollback/crab" \
+            --rollback-crab-tag v1.0.1 \
             --git-bin "$GIT_BIN" \
             --bucket "${CRAB_E2E_BUCKET}" \
             --endpoint-url "${AWS_ENDPOINT_URL}" \
@@ -438,16 +454,21 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}" \
             --source-root "${GITHUB_WORKSPACE}"
 
+      - name: Enforce all declared capability evidence
+        run: |
+          python3 crab/scripts/verify_git_capability_matrix.py \
+            --report "$CRAB_E2E_ROOT/$CRAB_E2E_RUN_ID/artifacts/report.json" \
+            --profile linux-rustfs-release \
+            --git-version "${{ matrix.git_version }}" \
+            --git-bin "$GIT_BIN" \
+            --binary "${CARGO_TARGET_DIR}/release/crab" \
+            --rollback-binary "$RUNNER_TEMP/gc-fence-rollback/crab" \
+            --source-revision "$(git rev-parse HEAD)"
+
       - name: Qualify explicit coordination upgrade and tagged writer refusal
         run: |
           set -euo pipefail
           rollback="$RUNNER_TEMP/gc-fence-rollback"
-          mkdir -p "$rollback"
-          curl --fail --location --silent --show-error --retry 3 \
-            https://github.com/crabbuild/crab/releases/download/v1.0.1/crab-linux-x86_64.tar.gz \
-            --output "$rollback/crab-linux-x86_64.tar.gz"
-          (cd "$rollback" && echo 'd36ef7c1939b40bf700cf7679a3579646b73e50ecc96021a11fa474060acf79f  crab-linux-x86_64.tar.gz' | sha256sum --check --strict)
-          tar -xzf "$rollback/crab-linux-x86_64.tar.gz" -C "$rollback"
           python3 crab/scripts/e2e/run_add_commit_push_rustfs_smoke.py \
             --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
             --rollback-crab-bin "$rollback/crab" \
@@ -483,7 +504,6 @@ jobs:
     timeout-minutes: 45
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-smoke
       CRAB_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -499,6 +519,7 @@ jobs:
 
       - name: Install smoke dependencies
         run: |
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y curl libfuse3-dev pipx
           pipx install awscli

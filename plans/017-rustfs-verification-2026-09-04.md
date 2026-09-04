@@ -255,3 +255,52 @@ tests, replica shard sync, schema inventory, and all 15 `lfs::recent` tests).
 matrix verifier, its ten unit tests, and both protocol log-path tests pass.
 Full CI results must be attached to the pushed revision rather than inferred
 from these focused checks.
+
+## Hosted evidence audit and workflow correction
+
+At `c955248`, the full Crab library batch passes 4,098 tests with three existing
+ignored tests; the binary batch passes 52 tests and fails the public-help
+inventory test. Its duplicated internal-command list omits the already-hidden
+`mirror-pre-push` hook command. Correcting this additional inventory still needs
+explicit approval; neither the command's visibility nor the test was changed.
+
+The protocol workflow `33836634284` passes all four hosted Git lifecycles, the
+released-shape lifecycle, and both platform protocol-contract jobs. The GC
+race/crash/scale gate also passes. Hosted evidence uses GitHub's test merge
+revision `bcb952b5280f22ca8e601261b1fa24056be4ada1`, which contains `c955248`,
+not a binary reporting the PR head directly. The Linux executable SHA-256 is
+`c37e96798e619ce48548dcd7cd453c9384c91fe11a5c14b3757770f0bc24dba6`.
+
+These passes were not sufficient release evidence. Retained reports show
+`crab_source_checkout_clean: false`: fixture files under `.ci/` dirty the source
+checkout. PR lifecycle jobs also omitted the pinned rollback binary and strict
+report verifier, and selected Git was not on PATH for Crab's child processes.
+Do not reinterpret these reports as clean-source/full-version qualification.
+
+The workflow correction keeps RustFS fixture roots outside the checkout, exports
+the selected Git's directory on PATH, reuses the existing checksum-pinned v1.0.1
+binary for both rollback and fence migration, and invokes the existing strict
+capability verifier in PR CI. The RustFS release jobs receive the same root/PATH
+correction; their verifier and rejection rules remain unchanged. Packaged smoke
+binaries also move outside the checkout. No ignore rule or provenance flag is
+relaxed. Cloud/platform preview jobs remain separate unqualified surfaces.
+
+Roots are set in runtime steps through `GITHUB_ENV`, where `RUNNER_TEMP` is
+available; the runner context is not admitted in job-level `env` expressions.
+See [GitHub context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+Acceptance: all four fresh PR reports pass the strict verifier, show a clean
+source checkout, match the packaged binary and selected Git, retain pinned
+rollback evidence, and preserve every required operation check.
+
+Additional local exact-head proof: `git-{230,240,245,current}-c955248-20260904-0433`
+all pass (537 checks / 1,897 commands total), with release executable SHA-256
+`3e5d2361b1be9e4912e66f0de5120dde51e69bbb548aec80fa98a61f36a75e8f`.
+The three earlier `git-{240,245,current}-approved-fixtures-20260904-0428` attempts
+correctly failed provenance because they used the prior binary after the source
+commit changed; they are retained and excluded from passing counts.
+
+Host-enforcement audit remains blocked: GitHub reports no classic protection or
+effective branch rules on `main`; the repository's `Main` ruleset is disabled.
+No protection settings were changed. The exact-candidate merge-rejection
+criterion requires explicit host/branch/check authorization and a controlled
+missing-data candidate; passing local mirror CI does not prove host enforcement.

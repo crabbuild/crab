@@ -967,7 +967,6 @@ jobs:
     timeout-minutes: 90
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-smoke
       CRAB_E2E_RUN_ID: release-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -987,6 +986,8 @@ jobs:
 
       - name: Install smoke dependencies
         run: |
+          # Keep packaged binaries and generated evidence outside the source checkout.
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y curl libfuse3-dev pipx
           pipx install awscli
@@ -996,15 +997,15 @@ jobs:
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: crab-linux-x86_64
-          path: release-dist
+          path: ${{ runner.temp }}/protocol-v2-release-dist
 
       - name: Extract release artifact
         run: |
           set -euo pipefail
-          mkdir -p release-bin
-          tar -xzf release-dist/crab-linux-x86_64.tar.gz -C release-bin
-          test -x release-bin/crab
-          test -L release-bin/git-remote-crab || ln -s crab release-bin/git-remote-crab
+          mkdir -p "$RUNNER_TEMP/protocol-v2-release-bin"
+          tar -xzf "$RUNNER_TEMP/protocol-v2-release-dist/crab-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/protocol-v2-release-bin"
+          test -x "$RUNNER_TEMP/protocol-v2-release-bin/crab"
+          test -L "$RUNNER_TEMP/protocol-v2-release-bin/git-remote-crab" || ln -s crab "$RUNNER_TEMP/protocol-v2-release-bin/git-remote-crab"
 
       - name: Start RustFS
         run: |
@@ -1029,7 +1030,7 @@ jobs:
       - name: Run lifecycle against the packaged artifact
         run: |
           python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
-            --crab-bin "$GITHUB_WORKSPACE/release-bin/crab" \
+            --crab-bin "$RUNNER_TEMP/protocol-v2-release-bin/crab" \
             --backend rustfs \
             --bucket "$CRAB_E2E_BUCKET" \
             --endpoint-url "$AWS_ENDPOINT_URL" \
@@ -1077,7 +1078,6 @@ jobs:
             git_version: current
     env:
       CRAB_E2E_BUCKET: crab
-      CRAB_E2E_ROOT: ${{ github.workspace }}/.ci/crab-protocol-v2-release-${{ matrix.label }}
       CRAB_E2E_RUN_ID: release-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
@@ -1092,6 +1092,7 @@ jobs:
 
       - name: Install compatibility dependencies
         run: |
+          echo "CRAB_E2E_ROOT=$RUNNER_TEMP/crab-protocol-v2-$CRAB_E2E_RUN_ID" >> "$GITHUB_ENV"
           sudo apt-get update -y
           sudo apt-get install -y \
             build-essential ca-certificates curl gettext libcurl4-gnutls-dev \
@@ -1151,6 +1152,7 @@ jobs:
           fi
           "$git_bin" --version
           echo "GIT_BIN=$git_bin" >> "$GITHUB_ENV"
+          dirname "$git_bin" >> "$GITHUB_PATH"
 
       - name: Start RustFS
         run: |
