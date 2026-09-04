@@ -29,11 +29,14 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileStandardInfo,
+    FileDispositionInfoEx, FileIdInfo, FileRenameInfoEx, FileStandardInfo,
     GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+};
 
 use crate::private_fs::{DatabaseMode, EntryStat, FileStat};
 use crate::{CacheError, Result};
@@ -946,12 +949,9 @@ impl TemporaryFile {
     }
 
     pub(super) fn commit(mut self) -> Result<()> {
-        let destination = self.destination_path.file_name().ok_or_else(|| {
-            unsafe_path(&self.destination_path, "cache destination has no filename")
-        })?;
         let started = Instant::now();
         loop {
-            match rename_handle(&self.file, &self._directory, destination) {
+            match rename_handle(&self.file, &self.destination_path) {
                 Ok(()) => break,
                 Err(CacheError::Io(error))
                     if publication_busy(&error) && started.elapsed() < PUBLICATION_BUSY_TIMEOUT =>
@@ -978,16 +978,18 @@ fn publication_busy(error: &io::Error) -> bool {
     })
 }
 
-fn rename_handle(file: &File, directory: &Directory, destination: &OsStr) -> Result<()> {
-    let destination: Vec<u16> = destination.encode_wide().collect();
+fn rename_handle(file: &File, destination: &Path) -> Result<()> {
+    let destination = wide(destination);
     let name_bytes = destination
         .len()
-        .checked_mul(size_of::<u16>())
+        .checked_sub(1)
+        .and_then(|units| units.checked_mul(size_of::<u16>()))
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache path is too long"))?;
     let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let buffer_bytes = header
         .checked_add(name_bytes as usize)
+        .and_then(|bytes| bytes.checked_add(size_of::<u16>()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cache path is too long"))?;
     let buffer_bytes = u32::try_from(buffer_bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -1000,15 +1002,9 @@ fn rename_handle(file: &File, directory: &Directory, destination: &OsStr) -> Res
             info,
             FILE_RENAME_INFO {
                 Anonymous: FILE_RENAME_INFO_0 {
-                    ReplaceIfExists: true,
+                    Flags: FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS,
                 },
-                RootDirectory: directory
-                    .chain
-                    .last()
-                    .ok_or_else(|| {
-                        CacheError::Internal("Windows cache directory lost its handle".into())
-                    })?
-                    .as_raw_handle() as HANDLE,
+                RootDirectory: ptr::null_mut(),
                 FileNameLength: name_bytes,
                 FileName: [0],
             },
@@ -1020,7 +1016,7 @@ fn rename_handle(file: &File, directory: &Directory, destination: &OsStr) -> Res
         );
         if SetFileInformationByHandle(
             file.as_raw_handle() as HANDLE,
-            FileRenameInfo,
+            FileRenameInfoEx,
             info.cast(),
             buffer_bytes,
         ) == 0
