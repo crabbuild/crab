@@ -604,7 +604,7 @@ fn validate_private_acl(file: &File, path: &Path) -> Result<()> {
         }
         // SAFETY: every ACE begins with ACE_HEADER.
         let header = unsafe { &*raw.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
-        if header.AceType == ACCESS_ALLOWED_ACE_TYPE {
+        if u32::from(header.AceType) == ACCESS_ALLOWED_ACE_TYPE {
             // SAFETY: this tag identifies ACCESS_ALLOWED_ACE and SidStart.
             let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
             if !sid_allowed(ptr::from_ref(&ace.SidStart).cast_mut().cast(), &allowed) {
