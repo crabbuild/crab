@@ -3,6 +3,7 @@
 Status: native HTTP push is not yet available. Shared incoming-pack quarantine,
 exact graph/ref validation, self-contained pack preparation and ref visibility
 planning are qualified; publication and HTTP receive wiring remain pending.
+Crab pointer content verification is qualified separately against RustFS.
 The passing intake tests do not prove an accepted push or an updated ref.
 
 ## Implemented intake boundary
@@ -29,7 +30,7 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: pointer payload dependency proof, canonical pack/index
+Remaining intake work: generation-bound pointer dependency proof, canonical pack/index
 publication, and HTTP streaming with a request-bound deadline. No Git binary,
 clone or local Git object database is used by quarantine or preparation. The
 test oracle uses Git independently.
@@ -124,6 +125,47 @@ and 13 for its annotated tag, excluding the former main tip. Its 4,733-byte inpu
 carries all 13 objects; neither intake nor planning reads old object bodies.
 The two replacement proofs took 124 ms locally. This fixture and cache state
 differ from the additive measurement, so their times are not directly comparable.
+
+## Implemented Crab pointer content proof
+
+`crab-read::pointer_proof::verify_crab_pointer` verifies one pointer from an
+explicit shard through an origin-only store. It checks the shard identity,
+selects the exact ordered recipe, validates each xorb's identity and serialized
+payload digest, then decompresses and hash-checks each selected chunk with the
+existing `XorbParser`. The reconstructed size and whole-file Blake3 must match
+the pointer. Repeated chunk occurrences retain their ordering. Empty files work
+without xorbs. No ref, receipt, cache or local Git object is written.
+
+The caller bounds file size, shard/xorb reads, aggregate successful response
+bodies, expanded chunk occurrences and duration. Transport retries retain the
+store's separate bounds. One xorb body is retained at a time; nonconsecutive
+reuse is charged again. CPU work runs on blocking workers with cancellation
+checkpoints. The shared materializing shard parsers now cap expanded occurrences,
+so repeated ranges cannot multiply a small metadata input into unbounded output.
+All synchronous shard replay paths share record readers that reject records over
+the canonical shard byte limit and grow buffers only as bytes arrive. They reuse
+the upstream header codecs and record views; the upstream streaming helpers
+reserve attacker-declared sizes before reading. The verifier replays bounded
+records instead of following lookup offsets into another deserializer.
+Streaming visitors still support aggregate inventories above the materialization
+limit while applying the same per-record byte bound.
+
+This is content evidence, not publication authority. The publisher must select
+the shard from its pinned committed generation, acquire writer/GC fences, and
+recheck its base before publication. Pointer hints and file-index hits alone are
+insufficient. LFS dependency integration and canonical fenced publication remain
+pending; HTTP push is still disabled.
+
+Six focused tests cover repeated compressed content, empty files, missing or
+corrupt origin objects, forged file identity, resource bounds and cancellation
+of pending reads. All 36 relevant shard tests pass, including oversized/truncated
+records, optional record flags, repeated ranges across three materializing
+readers and streaming above the materialization limit. A separate RustFS fixture reconstructs
+16,384 bytes from three ordered chunk occurrences in two xorbs, reading 1,218
+stored bytes per proof. Ten local release proofs took 1.816–2.769 ms each; these
+are small synthetic, cache-sharing observations, not Kubernetes or production
+latency claims. Corrupting and deleting an isolated fixture xorb both caused
+verification to fail; restoring the content made it pass again.
 
 ## Existing code and the semantic mismatch
 
