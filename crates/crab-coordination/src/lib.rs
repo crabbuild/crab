@@ -8,6 +8,8 @@ pub mod error;
 #[cfg(feature = "object-store-lock")]
 pub mod gc_fence;
 #[cfg(feature = "object-store-lock")]
+mod lease_operation;
+#[cfg(feature = "object-store-lock")]
 pub mod push_admission;
 #[cfg(feature = "object-store-lock")]
 pub mod push_lock;
@@ -31,3 +33,6 @@ pub use push_lock::*;
 #[cfg(feature = "object-store-lock")]
 pub use read_admission::*;
 pub use write_coordinator::*;
+
+#[cfg(feature = "object-store-lock")]
+pub use lease_operation::while_renewing;

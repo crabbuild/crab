@@ -416,22 +416,20 @@ async fn run_generation_owner(
     )
     .await?;
     info!(%repo_prefix, once, interval_secs, "Git generation owner acquired");
-    let operation = Box::pin(
-        crate::git::push::while_renewing_internal_lock_with_cancellation(
-            &mut owner,
+    let operation = Box::pin(crab_coordination::while_renewing(
+        &mut owner,
+        Some(&owner_cancel),
+        generation_owner_loop(
+            &store,
+            &router,
+            once,
+            interval_secs,
+            jsonl,
+            lock_ttl,
+            &config,
             &owner_cancel,
-            generation_owner_loop(
-                &store,
-                &router,
-                once,
-                interval_secs,
-                jsonl,
-                lock_ttl,
-                &config,
-                &owner_cancel,
-            ),
         ),
-    )
+    ))
     .await;
     if let Err(error) = owner.release().await {
         if operation.is_ok() {
@@ -846,114 +844,111 @@ async fn maintain_object_catalog(
     crab_metadata::git_object_locator::LocatorSweepStats,
 )> {
     let mut lock = acquire_generation_owner_locator_lock(store, router, lock_ttl, cancel).await?;
-    let operation = Box::pin(
-        crate::git::push::while_renewing_internal_lock_with_cancellation(
-            &mut lock,
-            cancel,
-            async {
-                // Plan under the publication lock. An unlocked snapshot could
-                // miss a concurrent push and incorrectly skip compaction.
-                // Recheck the anchor first so a push that won the race before
-                // lock acquisition cannot trigger a repository-sized stale plan.
-                let (current_manifest, _) =
-                    crate::metadata::manifest::read_manifest(store, router).await?;
-                let current_anchor =
-                    crate::git::push::committed_manifest_anchor(&current_manifest)?;
-                if current_anchor != anchor {
-                    return Ok((
-                        false,
-                        crab_metadata::git_object_locator::GitObjectCatalogStats::default(),
-                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                    ));
-                }
-                let (coverage, bindings) = {
-                    let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
-                        Arc::clone(store.inner()),
-                        router.repo_prefix(),
-                    )
-                    .await
-                    .map_err(CrabError::from)?;
-                    let coverage = session.coverage();
-                    let bindings = session.pack_bindings().await.map_err(CrabError::from);
-                    let close = session.close().await.map_err(CrabError::from);
-                    match (bindings, close) {
-                        (Ok(bindings), Ok(())) => (coverage, bindings),
-                        (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
-                        (Err(error), Err(close_error)) => {
-                            warn!(
-                                error = %close_error,
-                                "Git locator session close also failed after reading pack bindings"
-                            );
-                            return Err(error);
-                        }
-                    }
-                };
-                let planned_object_rows =
-                    crate::git::push::uncovered_locator_object_rows(coverage, &bindings, packs);
-                let pack_inventory_unchanged = anchor.is_some_and(|anchor| {
-                    coverage.is_some_and(|coverage| coverage.pack_index_hash == anchor.pack_index_hash)
-                }) && planned_object_rows == 0;
-                let mut writer = if pack_inventory_unchanged {
-                    crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_coverage_update(
-                        Arc::clone(store.inner()),
-                        router.repo_prefix(),
-                    )
-                    .await?
-                } else {
-                    crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                        Arc::clone(store.inner()),
-                        router.repo_prefix(),
-                        planned_object_rows,
-                    )
-                    .await?
-                };
-                let result = async {
-                    let current = anchor.is_none_or(|anchor| {
-                        writer.coverage()
-                            == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
-                                generation: anchor.generation,
-                                pack_index_hash: anchor.pack_index_hash,
-                            })
-                    });
-                    let (advanced, sweep) = if current {
-                        (
-                            false,
-                            crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                        )
-                    } else if let Some(anchor) = anchor {
-                        crate::git::push::publish_pack_locator_inventory_for_owner(
-                            &mut writer,
-                            store,
-                            router,
-                            anchor,
-                            packs,
-                            cancel,
-                        )
-                        .await?
-                    } else {
-                        (
-                            false,
-                            crab_metadata::git_object_locator::LocatorSweepStats::default(),
-                        )
-                    };
-                    Ok::<_, CrabError>((advanced, writer.catalog_stats().await?, sweep))
-                }
-                .await;
-                let close = writer.close().await.map_err(CrabError::from);
-                match (result, close) {
-                    (Ok(result), Ok(_)) => Ok(result),
-                    (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
+    let operation = Box::pin(crab_coordination::while_renewing(
+        &mut lock,
+        Some(cancel),
+        async {
+            // Plan under the publication lock. An unlocked snapshot could
+            // miss a concurrent push and incorrectly skip compaction.
+            // Recheck the anchor first so a push that won the race before
+            // lock acquisition cannot trigger a repository-sized stale plan.
+            let (current_manifest, _) =
+                crate::metadata::manifest::read_manifest(store, router).await?;
+            let current_anchor = crate::git::push::committed_manifest_anchor(&current_manifest)?;
+            if current_anchor != anchor {
+                return Ok((
+                    false,
+                    crab_metadata::git_object_locator::GitObjectCatalogStats::default(),
+                    crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                ));
+            }
+            let (coverage, bindings) = {
+                let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
+                    Arc::clone(store.inner()),
+                    router.repo_prefix(),
+                )
+                .await
+                .map_err(CrabError::from)?;
+                let coverage = session.coverage();
+                let bindings = session.pack_bindings().await.map_err(CrabError::from);
+                let close = session.close().await.map_err(CrabError::from);
+                match (bindings, close) {
+                    (Ok(bindings), Ok(())) => (coverage, bindings),
+                    (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
                     (Err(error), Err(close_error)) => {
                         warn!(
                             error = %close_error,
-                            "Git locator close also failed after owner publication"
+                            "Git locator session close also failed after reading pack bindings"
                         );
-                        Err(error)
+                        return Err(error);
                     }
                 }
-            },
-        ),
-    )
+            };
+            let planned_object_rows =
+                crate::git::push::uncovered_locator_object_rows(coverage, &bindings, packs);
+            let pack_inventory_unchanged = anchor.is_some_and(|anchor| {
+                coverage.is_some_and(|coverage| coverage.pack_index_hash == anchor.pack_index_hash)
+            }) && planned_object_rows == 0;
+            let mut writer = if pack_inventory_unchanged {
+                crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_coverage_update(
+                    Arc::clone(store.inner()),
+                    router.repo_prefix(),
+                )
+                .await?
+            } else {
+                crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
+                    Arc::clone(store.inner()),
+                    router.repo_prefix(),
+                    planned_object_rows,
+                )
+                .await?
+            };
+            let result = async {
+                let current = anchor.is_none_or(|anchor| {
+                    writer.coverage()
+                        == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
+                            generation: anchor.generation,
+                            pack_index_hash: anchor.pack_index_hash,
+                        })
+                });
+                let (advanced, sweep) = if current {
+                    (
+                        false,
+                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                    )
+                } else if let Some(anchor) = anchor {
+                    crate::git::push::publish_pack_locator_inventory_for_owner(
+                        &mut writer,
+                        store,
+                        router,
+                        anchor,
+                        packs,
+                        cancel,
+                    )
+                    .await?
+                } else {
+                    (
+                        false,
+                        crab_metadata::git_object_locator::LocatorSweepStats::default(),
+                    )
+                };
+                Ok::<_, CrabError>((advanced, writer.catalog_stats().await?, sweep))
+            }
+            .await;
+            let close = writer.close().await.map_err(CrabError::from);
+            match (result, close) {
+                (Ok(result), Ok(_)) => Ok(result),
+                (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
+                (Err(error), Err(close_error)) => {
+                    warn!(
+                        error = %close_error,
+                        "Git locator close also failed after owner publication"
+                    );
+                    Err(error)
+                }
+            }
+        },
+    ))
     .await;
     let release = lock.release().await.map_err(CrabError::from);
     match (operation, release) {
@@ -2770,7 +2765,7 @@ async fn rebuild_git_object_locators(
         crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE,
     )
     .await?;
-    let write_result = crate::git::push::while_renewing_internal_lock(&mut lock, async {
+    let write_result = crab_coordination::while_renewing(&mut lock, None, async {
         let (current, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         if current.generation != manifest.generation
             || current.pack_index_hash != manifest.pack_index_hash

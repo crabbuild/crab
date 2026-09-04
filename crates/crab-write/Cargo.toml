@@ -8,6 +8,10 @@ description = "Shared Git publication and generation maintenance for Crab."
 
 [dependencies]
 bytes = { workspace = true }
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
+crab-types = { workspace = true }
+rand = "0.9"
+uuid = { workspace = true }
 crab-git = { workspace = true }
 crab-metadata = { workspace = true, features = ["remote-index"] }
 crab-storage = { workspace = true }

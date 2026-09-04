@@ -1,9 +1,12 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
 pub mod catalog;
+pub mod journal;
 
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    #[error("publication coordination failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
     #[error("publication storage operation failed")]
     Storage(#[from] crab_storage::StorageError),
     #[error("publication metadata operation failed")]
