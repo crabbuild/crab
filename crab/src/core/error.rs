@@ -1871,7 +1871,8 @@ impl From<crab_write::WriteError> for CrabError {
             }
             crab_write::WriteError::Internal(message) => Self::Internal(message),
             crab_write::WriteError::Cancelled => Self::Cancelled,
-            error @ (crab_write::WriteError::Worker(_)
+            error @ (crab_write::WriteError::Namespace(_)
+            | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }
             | crab_write::WriteError::ManifestHash { .. }) => {
@@ -1895,6 +1896,7 @@ impl From<crab_lfs::LfsError> for CrabError {
 impl From<crab_metadata::error::MetadataError> for CrabError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
+            crab_metadata::error::MetadataError::RefJournalCancelled => Self::Cancelled,
             crab_metadata::error::MetadataError::FileLookupLimit { resource, maximum } => {
                 Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
             }

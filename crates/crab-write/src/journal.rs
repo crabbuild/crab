@@ -25,7 +25,9 @@ const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = 5;
 /// immutable artifact and visibility evidence uploads, and lease renewal through
 /// completion. This function checks expected old values, reads causal parents,
 /// and publishes through the journal's atomic active marker. It does not publish
-/// a readable catalog or release leases. Await completion without dropping the
+/// a readable catalog or release the caller's leases. Ref-name changes acquire
+/// a separate namespace lease and recheck a fresh snapshot before publication.
+/// Await completion without dropping the
 /// future; a storage error at the marker may require commit-outcome recovery.
 pub async fn commit_edits(
     store: &Store,
@@ -35,14 +37,47 @@ pub async fn commit_edits(
     head: Option<String>,
     packs: Vec<PackManifestEntry>,
     shards: Vec<String>,
+    cancel: &CancellationToken,
 ) -> Result<RefJournalCommitResult> {
+    check_cancelled(cancel)?;
     let parents = edits
         .iter()
         .map(|edit| (edit.ref_name.clone(), None))
         .collect();
     // Validate the whole batch before any I/O; one invalid or stale edit must
     // not leave immutable transaction bodies or prepared heads for its siblings.
-    let mut transaction = RefJournalTransaction::new(parents, edits, head, packs, shards)?;
+    let transaction = RefJournalTransaction::new(parents, edits, head, packs, shards)?;
+    check_old_values(router, snapshot, &transaction)?;
+    let changes_namespace = transaction
+        .edits
+        .iter()
+        .any(|edit| edit.old_oid.is_none() != edit.new_oid.is_none());
+    if !changes_namespace {
+        return commit_transaction(store, router, transaction, cancel).await;
+    }
+    check_namespace(snapshot, &transaction)?;
+    crate::with_ref_namespace(
+        store,
+        router,
+        crab_coordination::DEFAULT_PUSH_LOCK_TTL,
+        cancel,
+        |scoped| async move {
+            check_cancelled(&scoped)?;
+            let fresh =
+                crab_metadata::manifest_store::read_repository_snapshot(store, router).await?;
+            check_old_values(router, &fresh, &transaction)?;
+            check_namespace(&fresh, &transaction)?;
+            commit_transaction(store, router, transaction, &scoped).await
+        },
+    )
+    .await
+}
+
+fn check_old_values(
+    router: &StoreLayout<Store>,
+    snapshot: &RepositorySnapshot,
+    transaction: &RefJournalTransaction,
+) -> Result<()> {
     for edit in &transaction.edits {
         if snapshot.journal.refs.get(&edit.ref_name) != edit.old_oid.as_ref() {
             return Err(WriteError::RefChanged {
@@ -53,15 +88,55 @@ pub async fn commit_edits(
             });
         }
     }
+    Ok(())
+}
+
+fn check_namespace(
+    snapshot: &RepositorySnapshot,
+    transaction: &RefJournalTransaction,
+) -> Result<()> {
+    let removed: std::collections::BTreeSet<_> = transaction
+        .edits
+        .iter()
+        .filter(|edit| edit.new_oid.is_none())
+        .map(|edit| edit.ref_name.as_str())
+        .collect();
+    let retained = snapshot
+        .journal
+        .refs
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !removed.contains(name));
+    let added = transaction
+        .edits
+        .iter()
+        .filter(|edit| edit.new_oid.is_some())
+        .map(|edit| edit.ref_name.as_str());
+    crab_git::refname::validate_ref_namespace(retained.chain(added))?;
+    Ok(())
+}
+
+async fn commit_transaction(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    mut transaction: RefJournalTransaction,
+    cancel: &CancellationToken,
+) -> Result<RefJournalCommitResult> {
     let mut expected_heads = Vec::with_capacity(transaction.edits.len());
     for edit in &transaction.edits {
+        check_cancelled(cancel)?;
         let observed = ref_journal::read_ref_head(store, router, &edit.ref_name).await?;
         transaction
             .parents
             .insert(edit.ref_name.clone(), observed.visible_transaction.clone());
         expected_heads.push(observed);
     }
-    Ok(ref_journal::commit_ref_transaction(store, router, &transaction, &expected_heads).await?)
+    Ok(
+        ref_journal::commit_ref_transaction(store, router, &transaction, &expected_heads, || {
+            cancel.is_cancelled()
+        })
+        .await?,
+    )
 }
 
 fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
@@ -71,7 +146,7 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
     Ok(())
 }
 
-fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
+pub(crate) fn push_lock_wait_delay(attempt: u32, remaining: Duration) -> Duration {
     let shift = 1_u32.checked_shl(attempt).unwrap_or(u32::MAX);
     let bound = Duration::from_millis(250)
         .saturating_mul(shift)

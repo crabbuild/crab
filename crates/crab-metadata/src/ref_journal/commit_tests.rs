@@ -1,4 +1,11 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use futures_util::stream::BoxStream;
 use object_store::{
@@ -24,6 +31,7 @@ struct MarkerFaultStore {
     inner: Arc<InMemory>,
     marker_prefix: String,
     fault: Fault,
+    cancel_after: Option<(String, Arc<AtomicBool>)>,
 }
 
 impl fmt::Display for MarkerFaultStore {
@@ -50,6 +58,13 @@ impl ObjectStore for MarkerFaultStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if let Some((prefix, cancel)) = &self.cancel_after
+            && location.as_ref().starts_with(prefix)
+        {
+            let result = self.inner.put_opts(location, payload, options).await?;
+            cancel.store(true, Ordering::Release);
+            return Ok(result);
+        }
         if !location.as_ref().starts_with(&self.marker_prefix) {
             return self.inner.put_opts(location, payload, options).await;
         }
@@ -147,6 +162,7 @@ async fn fixture(
             inner,
             marker_prefix: format!("{}/", layout.ref_journal_active_prefix()),
             fault,
+            cancel_after: None,
         }),
         crab_storage::RetryPolicy {
             max_attempts: 1,
@@ -175,9 +191,58 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn cancellation_before_marker_rolls_back_heads_but_after_marker_preserves_commit() {
+    for boundary in ["refs/heads/dev", "refs/heads/main", "active"] {
+        let committed = boundary == "active";
+        let (_, _, _, transaction, heads) = fixture(Fault::LostReply).await;
+        let inner = Arc::new(InMemory::new());
+        let origin = Store::new(inner.clone());
+        let layout = StoreLayout::new(origin.clone(), "cancellation".to_owned());
+        manifest_store::create_manifest(
+            &origin,
+            &layout,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let prefix = if committed {
+            format!("{}/", layout.ref_journal_active_prefix())
+        } else {
+            layout
+                .ref_journal_head_path(&ref_name_hash(boundary))
+                .to_string()
+        };
+        let store = Store::new(Arc::new(MarkerFaultStore {
+            inner,
+            marker_prefix: format!("{}/", layout.ref_journal_active_prefix()),
+            fault: Fault::LostReply,
+            cancel_after: Some((prefix, Arc::clone(&cancel))),
+        }));
+        let result = commit_ref_transaction(&store, &layout, &transaction, &heads, || {
+            cancel.load(Ordering::Acquire)
+        })
+        .await;
+        assert!(cancel.load(Ordering::Acquire));
+        if committed {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(MetadataError::RefJournalCancelled)));
+        }
+        let state = manifest_store::read_repository_snapshot(&origin, &layout)
+            .await
+            .unwrap();
+        assert_eq!(state.journal.refs.len(), if committed { 2 } else { 0 });
+        for head in list_ref_heads(&origin, &layout).await.unwrap() {
+            assert!(head.head.prepared_transaction.is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn lost_marker_reply_is_confirmed_before_returning_committed() {
     let (store, layout, origin, transaction, heads) = fixture(Fault::LostReply).await;
-    let committed = commit_ref_transaction(&store, &layout, &transaction, &heads)
+    let committed = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
         .await
         .unwrap();
     assert_eq!(committed.transaction_id, transaction.id().unwrap());
@@ -199,7 +264,7 @@ async fn unconfirmed_marker_preserves_identity_and_typed_failure() {
         Fault::OversizedMarker,
     ] {
         let (store, layout, origin, transaction, heads) = fixture(fault).await;
-        let error = commit_ref_transaction(&store, &layout, &transaction, &heads)
+        let error = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
             .await
             .unwrap_err();
         let MetadataError::RefJournalCommitUncertain {
@@ -229,7 +294,7 @@ async fn unconfirmed_marker_preserves_identity_and_typed_failure() {
 #[tokio::test]
 async fn missing_marker_after_compaction_is_not_reported_as_rejection() {
     let (store, layout, origin, transaction, heads) = fixture(Fault::CompactedBeforeRead).await;
-    let error = commit_ref_transaction(&store, &layout, &transaction, &heads)
+    let error = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
         .await
         .unwrap_err();
     assert!(matches!(

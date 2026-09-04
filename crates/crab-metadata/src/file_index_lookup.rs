@@ -1411,9 +1411,15 @@ mod tests {
             vec![shard_hash.hex()],
         )
         .unwrap();
-        crate::ref_journal::commit_ref_transaction(&storage, &router, &transaction, &[head])
-            .await
-            .unwrap();
+        crate::ref_journal::commit_ref_transaction(
+            &storage,
+            &router,
+            &transaction,
+            &[head],
+            || false,
+        )
+        .await
+        .unwrap();
 
         let session = FileIndexLookupSession::open(store, "org/journal")
             .await
@@ -1455,9 +1461,15 @@ mod tests {
             vec![shard_hash.hex()],
         )
         .unwrap();
-        crate::ref_journal::commit_ref_transaction(&storage, &router, &transaction, &[head])
-            .await
-            .unwrap();
+        crate::ref_journal::commit_ref_transaction(
+            &storage,
+            &router,
+            &transaction,
+            &[head],
+            || false,
+        )
+        .await
+        .unwrap();
         let sibling_ref = "refs/heads/sibling";
         let sibling_head = crate::ref_journal::read_ref_head(&storage, &router, sibling_ref)
             .await
@@ -1480,9 +1492,15 @@ mod tests {
             vec![hash_from_seed(64).hex()],
         )
         .unwrap();
-        crate::ref_journal::commit_ref_transaction(&storage, &router, &sibling, &[sibling_head])
-            .await
-            .unwrap();
+        crate::ref_journal::commit_ref_transaction(
+            &storage,
+            &router,
+            &sibling,
+            &[sibling_head],
+            || false,
+        )
+        .await
+        .unwrap();
         let db = slatedb::Db::open(
             ObjectPath::from(file_index_path(repo_prefix).as_str()),
             Arc::clone(&store),

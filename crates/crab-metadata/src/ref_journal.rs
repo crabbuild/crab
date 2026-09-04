@@ -205,14 +205,20 @@ pub async fn read_ref_head(
 /// A failed marker write is confirmed by bounded exact readback when possible.
 /// Otherwise `RefJournalCommitUncertain` retains its identity and both failures;
 /// missing markers cannot prove rejection because compaction removes them.
+/// Cancellation before the marker rolls back prepared heads; after attempting
+/// the marker, the operation finishes outcome recovery and returns its result.
 pub async fn commit_ref_transaction(
     store: &Store,
     router: &StoreLayout<Store>,
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
+    cancelled: impl Fn() -> bool,
 ) -> Result<RefJournalCommitResult> {
     validate_transaction(transaction)?;
     validate_expected_heads(transaction, expected_heads)?;
+    if cancelled() {
+        return Err(MetadataError::RefJournalCancelled);
+    }
     let transaction_id = transaction.id()?;
     let transaction_path = router.ref_journal_transaction_path(&transaction_id);
     store
@@ -221,6 +227,10 @@ pub async fn commit_ref_transaction(
 
     let mut prepared = Vec::with_capacity(expected_heads.len());
     for expected in expected_heads {
+        if cancelled() {
+            rollback_prepared_heads(store, router, &prepared).await;
+            return Err(MetadataError::RefJournalCancelled);
+        }
         match prepare_head(store, router, expected, &transaction_id).await {
             Ok(snapshot) => prepared.push((expected, snapshot)),
             Err(error) => {
@@ -236,6 +246,12 @@ pub async fn commit_ref_transaction(
     };
     let marker_path = router.ref_journal_active_path(&transaction_id);
     let marker_body = Bytes::from(serialize(&marker)?);
+    if cancelled() {
+        rollback_prepared_heads(store, router, &prepared).await;
+        return Err(MetadataError::RefJournalCancelled);
+    }
+    // After attempting the marker, cancellation cannot prove rejection. Finish
+    // outcome recovery and promotion under the same rule as a lost write reply.
     if let Err(source) = store.put_exact(&marker_path, marker_body.clone()).await {
         // A lost write response is not a rejected transaction. Confirm only the
         // exact marker; never roll back prepared heads after attempting commit.
@@ -1030,8 +1046,8 @@ mod tests {
             transaction_for(&store, &layout, vec![edit("refs/heads/right", 'b')]).await;
 
         let (left_result, right_result) = tokio::join!(
-            commit_ref_transaction(&store, &layout, &left, &left_heads),
-            commit_ref_transaction(&store, &layout, &right, &right_heads),
+            commit_ref_transaction(&store, &layout, &left, &left_heads, || false),
+            commit_ref_transaction(&store, &layout, &right, &right_heads, || false),
         );
 
         assert!(left_result.is_ok());
@@ -1051,12 +1067,12 @@ mod tests {
         let (second, _) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'b')]).await;
 
-        commit_ref_transaction(&store, &layout, &first, &stale_heads)
+        commit_ref_transaction(&store, &layout, &first, &stale_heads, || false)
             .await
             .unwrap();
 
         assert!(
-            commit_ref_transaction(&store, &layout, &second, &stale_heads)
+            commit_ref_transaction(&store, &layout, &second, &stale_heads, || false)
                 .await
                 .is_err()
         );
@@ -1134,7 +1150,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &layout, &next, &[observed])
+        commit_ref_transaction(&store, &layout, &next, &[observed], || false)
             .await
             .unwrap();
 
@@ -1203,10 +1219,10 @@ mod tests {
             transaction_for(&store, &layout, vec![edit("refs/heads/left", 'a')]).await;
         let (right, right_heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/right", 'b')]).await;
-        commit_ref_transaction(&store, &layout, &left, &left_heads)
+        commit_ref_transaction(&store, &layout, &left, &left_heads, || false)
             .await
             .unwrap();
-        commit_ref_transaction(&store, &layout, &right, &right_heads)
+        commit_ref_transaction(&store, &layout, &right, &right_heads, || false)
             .await
             .unwrap();
 
@@ -1244,7 +1260,7 @@ mod tests {
         let base = Manifest::default_for_repo("refs/heads/main");
         let (first, first_heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
-        commit_ref_transaction(&store, &layout, &first, &first_heads)
+        commit_ref_transaction(&store, &layout, &first, &first_heads, || false)
             .await
             .unwrap();
         let current = read_ref_head(&store, &layout, "refs/heads/main")
@@ -1270,7 +1286,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &layout, &second, &[current])
+        commit_ref_transaction(&store, &layout, &second, &[current], || false)
             .await
             .unwrap();
 
@@ -1290,7 +1306,7 @@ mod tests {
         let (transaction, heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
         let transaction_id = transaction.id().unwrap();
-        commit_ref_transaction(&store, &layout, &transaction, &heads)
+        commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
             .await
             .unwrap();
         let snapshot = materialize(&store, &layout, &base).await;
@@ -1321,7 +1337,7 @@ mod tests {
         let (transaction, heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
         let transaction_id = transaction.id().unwrap();
-        commit_ref_transaction(&store, &layout, &transaction, &heads)
+        commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
             .await
             .unwrap();
 
