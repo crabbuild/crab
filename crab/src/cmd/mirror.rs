@@ -270,11 +270,15 @@ fn initialize_mirror_destination(
     cancel: &CancellationToken,
 ) -> Result<()> {
     crate::cmd::lfs::block_on_runtime(async {
-        let destination = CrabUrl::parse(destination)?;
+        let destination = crate::git::url::ObjectUrl::parse(destination)?;
         let config = crate::core::config::Config::resolve_for_repo(cache_dir)?;
-        let repo_prefix = destination.repo_path.clone();
-        let store = crate::auth::build_store(&config, destination, "repo-create", cancel).await?;
-        let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix);
+        // Bootstrap needs the primary object endpoint before a repository layout
+        // exists; ordinary repository resolution would reject that empty prefix.
+        let resolved =
+            crate::storage::resolve_object_url_store(&destination, &config, "repo-create", cancel)
+                .await?;
+        let store = resolved.store;
+        let router = crate::storage::StoreLayout::new(store.clone(), resolved.prefix);
         match store.head(&router.layout_descriptor_path()).await {
             // Existing repositories must pass the normal read validation;
             // implicit mirroring must not repair a lost manifest in place.
