@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets, assignees,
     auth::{self, Authentication, Principal},
-    git, issues, labels, lfs, maintenance, pulls, receive, statuses,
+    checks, git, issues, labels, lfs, maintenance, pulls, receive, statuses,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -226,6 +226,7 @@ pub async fn serve(config: Config) -> Result<()> {
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .merge(assignees::routes(Arc::clone(&server)))
+        .merge(checks::routes(Arc::clone(&server)))
         .merge(issues::routes(Arc::clone(&server)))
         .merge(labels::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))
@@ -305,8 +306,8 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
         return StatusCode::FORBIDDEN.into_response();
     }
     let git_request = request.uri().path().starts_with("/git/");
-    let status_request = status_api_path(request.uri().path());
-    let token_request = status_request && request.headers().contains_key("authorization");
+    let integration_request = integration_api_path(request.uri().path());
+    let token_request = integration_request && request.headers().contains_key("authorization");
     let principal = match &server.auth {
         Some(auth) if git_request || token_request => auth.git_principal(request.headers()).await,
         Some(auth) => auth.principal(request.headers()).await,
@@ -357,7 +358,7 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
     ).into_response()
 }
 
-fn status_api_path(path: &str) -> bool {
+fn integration_api_path(path: &str) -> bool {
     let mut segments = path.split('/');
     segments.next() == Some("")
         && segments.next() == Some("api")
@@ -365,13 +366,19 @@ fn status_api_path(path: &str) -> bool {
         && segments.next().is_some_and(|value| !value.is_empty())
         && segments.next().is_some_and(|value| !value.is_empty())
         && match segments.next() {
+            Some("check-runs") => segments.next().is_none(),
             Some("statuses") => {
                 segments.next().is_some_and(|value| !value.is_empty()) && segments.next().is_none()
             }
             Some("commits") => {
                 segments.next().is_some_and(|value| !value.is_empty())
-                    && segments.next() == Some("status")
-                    && segments.next().is_none()
+                    && match segments.next() {
+                        Some("status") => segments.next().is_none(),
+                        Some("check-runs") => segments
+                            .next()
+                            .is_none_or(|value| !value.is_empty() && segments.next().is_none()),
+                        _ => false,
+                    }
             }
             _ => false,
         }
@@ -389,21 +396,31 @@ mod tests {
     use tower::ServiceExt;
 
     #[test]
-    fn repository_tokens_are_only_considered_on_exact_status_routes() {
-        assert!(status_api_path(
+    fn repository_tokens_are_only_considered_on_exact_integration_routes() {
+        assert!(integration_api_path(
             "/api/repos/team/repo/statuses/0123456789012345678901234567890123456789"
         ));
-        assert!(status_api_path(
+        assert!(integration_api_path(
             "/api/repos/team/repo/commits/0123456789012345678901234567890123456789/status"
+        ));
+        assert!(integration_api_path("/api/repos/team/repo/check-runs"));
+        assert!(integration_api_path(
+            "/api/repos/team/repo/commits/0123456789012345678901234567890123456789/check-runs"
+        ));
+        assert!(integration_api_path(
+            "/api/repos/team/repo/commits/0123456789012345678901234567890123456789/check-runs/1"
         ));
         for path in [
             "/api/repos/team/repo/pulls/1",
+            "/api/repos/team/repo/check-runs/1",
             "/api/repos/team/repo/statuses/oid/extra",
             "/api/repos/team/repo/commits/oid/statuses",
+            "/api/repos/team/repo/commits/oid/check-runs/1/extra",
+            "/api/repos/team/repo/commits/oid/check-runs/",
             "/api/repos//repo/commits/oid/statuses",
             "/api/repos/team/repo/commits//statuses",
         ] {
-            assert!(!status_api_path(path), "{path}");
+            assert!(!integration_api_path(path), "{path}");
         }
     }
 

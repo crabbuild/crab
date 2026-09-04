@@ -44,6 +44,10 @@ pub(crate) enum Error {
     MergeBlocked,
     #[error("Write access is required to report commit statuses")]
     StatusPermission,
+    #[error("Write access is required to manage check runs")]
+    CheckPermission,
+    #[error("Check run not found")]
+    CheckNotFound,
     #[error("Write access is required to manage repository labels")]
     LabelPermission,
     #[error("A repository label with this name already exists")]
@@ -132,6 +136,12 @@ impl IntoResponse for Error {
                 "forbidden",
                 "Write access is required to report commit statuses",
             ),
+            Self::CheckPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to manage check runs",
+            ),
+            Self::CheckNotFound => (StatusCode::NOT_FOUND, "not_found", "Check run not found"),
             Self::LabelPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",

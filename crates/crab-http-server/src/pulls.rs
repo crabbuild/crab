@@ -19,6 +19,7 @@ use crate::{
     app_storage,
     assignees::{self, Assignee},
     auth::{Identity, Principal},
+    checks::{self, CheckRun},
     labels::{self, Label},
     server::{Repository, Server},
     statuses::{self, CommitStatus, StatusState},
@@ -66,13 +67,16 @@ async fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
-    let statuses = match repo.config.protection(&pull.base_ref) {
-        Some(rule) if !rule.required_checks.is_empty() => statuses::latest(repo, head_oid).await?,
-        _ => vec![],
+    let (statuses, check_runs) = match repo.config.protection(&pull.base_ref) {
+        Some(rule) if !rule.required_checks.is_empty() => (
+            statuses::latest(repo, head_oid).await?,
+            checks::latest(repo, head_oid).await?,
+        ),
+        _ => (vec![], vec![]),
     };
     let labels = labels::catalog(repo).await?;
     let assignees = assignees::available(repo, actor);
-    let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses);
+    let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses, &check_runs);
     Ok(json!({
         "number": pull.number,
         "title": pull.title,
@@ -117,6 +121,7 @@ async fn pull_view(
                 "target_url": check.target_url,
                 "author": check.author,
                 "updated_at": check.updated_at,
+                "run_id": check.run_id,
             })).collect::<Vec<_>>(),
             "satisfied": requirements.satisfied,
         },
@@ -155,6 +160,7 @@ struct RequiredCheck {
     target_url: Option<String>,
     author: Option<String>,
     updated_at: Option<u64>,
+    run_id: Option<u64>,
 }
 
 fn merge_requirements(
@@ -162,6 +168,7 @@ fn merge_requirements(
     config: &RepositoryConfig,
     head_oid: &str,
     statuses: &[CommitStatus],
+    check_runs: &[CheckRun],
 ) -> MergeRequirements {
     let Some(rule) = config.protection(&pull.base_ref) else {
         return MergeRequirements {
@@ -194,6 +201,22 @@ fn merge_requirements(
             let status = statuses
                 .iter()
                 .find(|status| statuses::same_context(&status.context, context));
+            let run = check_runs
+                .iter()
+                .find(|run| statuses::same_context(&run.name, context));
+            if let Some(run) =
+                run.filter(|run| status.is_none_or(|status| run.updated_at >= status.created_at))
+            {
+                return RequiredCheck {
+                    context: context.clone(),
+                    state: Some(run.requirement_state()),
+                    description: Some(run.output_title.clone()),
+                    target_url: run.details_url.clone(),
+                    author: Some(run.author.name.clone()),
+                    updated_at: Some(run.updated_at),
+                    run_id: Some(run.number),
+                };
+            }
             RequiredCheck {
                 context: context.clone(),
                 state: status.map(|status| status.state),
@@ -201,6 +224,7 @@ fn merge_requirements(
                 target_url: status.and_then(|status| status.target_url.clone()),
                 author: status.map(|status| status.author.name.clone()),
                 updated_at: status.map(|status| status.created_at),
+                run_id: None,
             }
         })
         .collect::<Vec<_>>();
