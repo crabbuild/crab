@@ -516,6 +516,64 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
     assert_eq!(response.status(), StatusCode::OK);
     let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     let token = issued["token"].as_str().unwrap();
+    for authenticated in [false, true] {
+        let request = h
+            .http
+            .post(format!("{}/git/team/private/git-upload-pack", h.origin))
+            .header(
+                header::CONTENT_TYPE,
+                "application/x-git-upload-pack-request",
+            )
+            .body(b"0000".to_vec());
+        let response = if authenticated {
+            request.basic_auth("crab", Some(token))
+        } else {
+            request
+        }
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            if authenticated {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
+        );
+    }
+    {
+        use tower::ServiceExt as _;
+        let _busy = h.server.git_admission.acquire_many(4).await.unwrap();
+        let authorization = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            format!("crab:{token}"),
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/git/team/private/git-upload-pack")
+            .header(header::HOST, h.origin.strip_prefix("http://").unwrap())
+            .header(header::AUTHORIZATION, format!("Basic {authorization}"))
+            .header(
+                header::CONTENT_TYPE,
+                "application/x-git-upload-pack-request",
+            )
+            .header("git-protocol", "version=2")
+            .body(axum::body::Body::from_stream(
+                futures_util::stream::pending::<
+                    std::result::Result<axum::body::Bytes, std::io::Error>,
+                >(),
+            ))
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            router(Arc::clone(&h.server)).oneshot(request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
     let response = h
         .http
         .get(&git_url)

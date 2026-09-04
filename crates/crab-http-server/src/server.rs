@@ -148,9 +148,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
             "/git/{owner}/{name}/git-upload-pack",
-            post(git::upload_pack).layer(axum::extract::DefaultBodyLimit::max(
-                crab_read::upload_pack_wire::MAX_REQUEST_BYTES + 4 * 65_536,
-            )),
+            post(git::upload_pack).layer(axum::extract::DefaultBodyLimit::max(git::MAX_BODY_BYTES)),
         )
         .route(
             "/api/git-token",

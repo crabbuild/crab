@@ -165,6 +165,39 @@ The qualification client creates its own clone; the HTTP server reads the bucket
 from an empty working directory. HTTP responses end with flush and HTTP EOF;
 unlike the stdio helper, they must not send a response-end (`0002`) packet.
 
+Git can gzip buffered requests or send an empty authentication probe followed by
+a chunked request when a batch exceeds its HTTP buffer. Both forms are supported.
+Authentication and membership checks precede the probe response; probes do not
+open repository storage. A transfer slot is acquired before buffering the body,
+with a 30-second body deadline and a 4.25-MiB limit on both transmitted and decoded
+bytes. The shared parser independently limits command payload to 4 MiB. Unknown
+content encodings return 415, invalid gzip returns 400, and oversized bodies return
+413. Gzip decoding runs on a blocking worker with an expansion limit.
+
+The large-batch qualification below fetched 1,600 distinct Kubernetes blobs through
+both native Git request modes and compared every byte with the source repository.
+Git reported an 80,122-byte request compressed to 39,574 bytes in the buffered run,
+and a chunked request in the second run. Local fetch times were 2.58 seconds and
+0.81 seconds respectively; these were sequential, cache-sharing runs, so the timing
+difference does not establish that one encoding is faster.
+
+Configure your credential helper or `GIT_ASKPASS` with a Git access token first:
+
+```sh
+python3 crates/crab-http-server/tests/verify_git_transport.py \
+  --url http://127.0.0.1:8788/git/my-team/my-project \
+  --source /path/to/read-only-kubernetes \
+  --revision FULL_UPLOADED_COMMIT \
+  --workdir "$HOME/Workspace/Github/crab-qualification"
+```
+
+The work directory must already exist on the workspace volume. This verifier
+leaves its two native Git client repositories there for inspection.
+
+[Native write design](WRITE-DESIGN.md) records the remaining receive-pack boundary,
+including why protected-view commit translation cannot be used unchanged for
+native pushes. It is implementation planning, not evidence of working writes.
+
 ## Current verification
 
 ```sh
@@ -193,7 +226,7 @@ The local Kubernetes/RustFS run matched 162 directory entries, 10 commits,
 three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local run measured median tree reads of 11 ms,
 diffs of 34 ms, and one blame request of 1.5 seconds. Caches were not flushed;
-these measurements are not a production latency guarantee. Twelve Rust transport, identity and envelope tests and six frontend navigation/model
+these measurements are not a production latency guarantee. Fourteen Rust transport, identity and envelope tests and six frontend navigation/model
 tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
@@ -221,7 +254,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read memberships; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | Pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; push and branch administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | Pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
