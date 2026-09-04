@@ -12,7 +12,7 @@ use gix_hash::ObjectId;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{pull_view, storage};
+use super::{merge_requirements, pull_view, storage};
 use crate::{
     app::{self, Error, Result},
     app_storage,
@@ -141,6 +141,7 @@ async fn finish(
     Ok(pull_view(
         &pull,
         &app::actor(principal)?,
+        &repo.config,
         principal.can_write(&repo.config),
         None,
     ))
@@ -177,7 +178,13 @@ async fn execute(
         }
         return Ok((
             StatusCode::OK,
-            Json(pull_view(&pull, &candidate.author, true, None)),
+            Json(pull_view(
+                &pull,
+                &candidate.author,
+                &repo.config,
+                true,
+                None,
+            )),
         ));
     }
     if let Some(record) = &pull.merge_pending {
@@ -205,6 +212,9 @@ async fn execute(
         || current_ref(&repository, &pull.head_ref).as_deref() != Some(candidate.head_oid.as_str())
     {
         return Err(Error::MergeConflict);
+    }
+    if !merge_requirements(&pull, &repo.config, &candidate.head_oid).satisfied {
+        return Err(Error::MergeBlocked);
     }
     let record = storage::reserve_merge(repo, id, &candidate).await?;
     let pull = storage::begin_merge(repo, id, &record).await?;
