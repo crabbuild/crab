@@ -174,10 +174,9 @@ fn bstr_to_string(b: &BStr) -> Result<String> {
 /// — only the construction path changes. Call sites that want to
 /// flip behind `gix-transport` compare the two outputs in tests.
 ///
-/// `refs` is an iterator of `(input_name, Reference)` pairs, matching
-/// the shape [`crab_git::ref_resolve::resolve_refs_typed_batch`]
-/// returns. `head_symref_target` is the ref name HEAD points at, if
-/// any; an unborn symbolic target need not occur among the concrete refs.
+/// `refs` supplies typed references with concrete or symbolic targets.
+/// `head_symref_target` is the ref name HEAD points at, if
+/// any; an unborn target is omitted from this helper-list wire format.
 /// The caller omits the target when read-side policy hides it.
 pub fn build_ref_advertisement_typed<'a, I>(
     refs: I,
@@ -190,8 +189,16 @@ where
 
     use std::fmt::Write;
     let mut buf = String::new();
+    let refs = refs.into_iter().collect::<Vec<_>>();
 
-    if let Some(target) = head_symref_target {
+    // Match the helper-list serializer: unresolved symrefs become null OIDs
+    // in Git's client, unlike protocol v2's explicit unborn advertisement.
+    if let Some(target) = head_symref_target
+        && refs.iter().any(|reference| {
+            reference.name.as_bstr() == target.as_bytes()
+                && matches!(reference.target, gix_ref::Target::Object(_))
+        })
+    {
         writeln!(buf, "@{target} HEAD")
             .map_err(|e| CrabError::Internal(format!("format list output: {e}")))?;
     }

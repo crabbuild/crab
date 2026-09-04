@@ -131,3 +131,28 @@ fn typed_refs_and_gix_refspecs_match_the_v1_helper_contract() {
     assert!(deletion.src.is_empty());
     assert_eq!(deletion.dst, "refs/heads/old");
 }
+
+#[test]
+fn typed_advertisement_omits_unborn_head_without_retargeting_to_a_tag() {
+    use gix_hash::ObjectId;
+    use gix_ref::{FullName, Reference, Target};
+
+    let oid = "a".repeat(40);
+    let tag = Reference {
+        name: FullName::try_from("refs/tags/v1").expect("tag name"),
+        target: Target::Object(ObjectId::from_hex(oid.as_bytes()).expect("tag OID")),
+        peeled: None,
+    };
+    for refs in [Vec::new(), vec![&tag]] {
+        let expected = if refs.is_empty() {
+            "\n".to_owned()
+        } else {
+            format!("{oid} refs/tags/v1\n\n")
+        };
+        assert_eq!(
+            build_ref_advertisement_typed(refs, Some("refs/heads/main"))
+                .expect("typed advertisement"),
+            expected
+        );
+    }
+}
