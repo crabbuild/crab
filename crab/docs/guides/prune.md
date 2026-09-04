@@ -16,7 +16,11 @@ Eviction can remove warm data used by the current checkout; a later read may
 need to download it again. This command does not replace `crab gc`.
 
 `crab optimize cache prune` runs the same implementation. Configure the cache
-budget through `[cache].max_bytes`; the default is 10 GiB. Object and range
+budget through `[cache].max_bytes`; retention is unlimited by default. Without
+a cap, prune removes nothing. Set a cap with
+`crab config set cache.max_bytes 10737418240` (10 GiB), or remove it with
+`crab config set cache.max_bytes unlimited`. `crab cache clean` explicitly
+removes eligible payloads in either mode. Object and range
 maintenance still have separate passes, and busy entries are retained. This
 is not yet a qualified hard cap on all bytes below the cache root; full
 accounting and unified lifecycle acceptance remain in Plan 017.

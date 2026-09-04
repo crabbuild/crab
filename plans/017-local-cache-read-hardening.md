@@ -20,7 +20,7 @@
 
 ### Unlimited local retention with an opt-in cap
 
-The user-approved product default is now unlimited local disk retention, not
+The user-approved shared payload-cache default is now unlimited disk retention, not
 the earlier 10 GiB ceiling. Earlier 10/20 GiB reports below retain the exact
 default used by those binaries; do not relabel them as unlimited qualification.
 
@@ -34,7 +34,7 @@ Internally `Option<u64>` distinguishes no cap from an actual byte count.
 |---|---|
 | Configuration | `Config::default`, layered `CacheOverlay`, and `crab config set` propagate the optional cap to `crab-cache-store::CacheConfig`. Both default constructors agree. Existing public bounded constructor calls remain accepted by `Into<Option<u64>>`; no new configuration key or dependency patch. |
 | Admission and retention | `LocalCache` and `XetChunkCacheHandle` share `CacheCatalog` reservations, generation ownership and publication. Unlimited skips capacity rejection/eviction, not accounting, private file checks or corrupt-entry repair. Explicit maintenance still reconciles stale owners. |
-| Read siblings | `ReadRuntimeBuilder` transfers the object's optional cap to decoded ranges used by fetch/hydrate/smudge/mount. Its 256 MiB reconstruction-buffer limit remains unchanged. Xet 1.6.0's `ChunkCache` trait permits eviction but does not require a cap; Crab owns this implementation. |
+| Read siblings | `ReadRuntimeBuilder` transfers the object's optional cap to decoded ranges used by fetch/hydrate/smudge/whole-pointer mount reads. Its 256 MiB reconstruction-buffer limit remains unchanged. Xet 1.6.0's `ChunkCache` trait permits eviction but does not require a cap; Crab owns this implementation. |
 | Maintenance/reporting | Both prune spellings remove nothing without a cap; explicit clean retains its ownership policy. Stats/doctor show unlimited; JSON `budget_bytes=null` denotes no cap. Unavailable families still fail inspection, independently of over-budget status. |
 | Authority boundary | Immutable xorb/shard/chunk identities remain verified. Mutable refs/manifests still use origin freshness; cached dedup candidates still require origin-bound proof. Cached bytes do not prove an object still exists remotely after GC or corruption. Cache-service capacity and in-memory caches are not changed. |
 
@@ -46,16 +46,71 @@ can still cause misses. Unlimited retention can fill a user's disk; no implicit
 free-space reserve, disk-pressure eviction or whole-process resource guarantee
 is introduced. Existing resource-admission slices remain required.
 
+Separate VFS chunk-hash storage is not covered by this default change:
+`crates/crab-vfs/src/chunk_cache.rs::open(None)` still resolves 4 GiB for
+standalone pipeline/daemon callers, and `CoordinatorConfig` supplies 1 GiB
+for its shared cache. These are disk caches, not the unchanged RAM limits.
+They pass explicit numeric caps into the shared owner and keep their prior
+behavior; canonical whole-pointer reads use the supplied shared hydrator.
+Follow-up: consolidate these placements/caps with product configuration while
+resolving the tagged `max_bytes`/coordinator health API and per-repository versus
+shared-daemon policy. Acceptance: foreground, daemon and coordinator mounts
+agree on effective retention, operator caps affect the intended directory,
+conflicting live owners remain explicit, and native mount reads/reopens retain
+exact bytes without accidentally changing RAM limits. Do not claim every Crab
+disk cache is now unlimited or that native mounts were live-qualified here.
+
 Is this the best fix? An optional cap at the existing shared owner removes the
 three conflicting fixed defaults without weakening integrity, adding a second
 cache path, or using an enormous numeric sentinel. Acceptance: default and
 explicit-unlimited behavior agree across reopen; inherited caps can be cleared;
 bounded/zero admission and LRU remain effective; no-cap prune retains objects
 and ranges; stats retain accurate usage and unavailable-family diagnostics.
-Live gate: fresh 10/20 GiB reader caches exceed the former ceiling, retain exact
-payloads across process exit/prune and hydrate with xorb GETs denied, then
-recover from real RustFS after explicit cleanup. Qualification is pending at
-this implementation checkpoint; prior roadmap/platform/provider gaps remain.
+**Live gate passed:** Make-installed `387942d`, native RustFS beta.8, run
+`cache-f410-unlimited.JyU74u`: **45 commands / 93 checks**, zero failed
+assertions or timeouts, `matrix_completed=true`, overall `passed`, exit zero.
+It reuses the committed high-entropy 10/20 GiB fixtures from the earlier
+add/commit/push qualification, but starts fresh reader repositories and caches.
+This is new retention/read evidence, not a second large-file writer matrix.
+
+| Acceptance | 10 GiB / 20 GiB |
+|---|---|
+| Default retained decoded bytes | 10,772,760,389 / 21,477,342,860; both exceed the former default ceiling. |
+| Reopened warm hydrate after both unlimited prune spellings | Exact hashes for all three files; zero xorb GET attempts / zero xorb GET attempts. |
+| Explicit zero cap and prune | Removes all decoded ranges; stats resolves zero and completes without issues. Denied cold hydrate exits 7 and preserves pointers. |
+| Remove cap, cold fetch, then denied-origin hydrate | Fetch reads real RustFS xorb bytes and leaves pointers; subsequent hydrate has exact hashes and zero xorb GET attempts at both sizes. |
+| Final integrity and cleanup | Both readers pass fsck and Git-clean checks, then dehydrate. Explicit clean removes unlimited cached payloads. Remote xorb keys, sizes and ETags are unchanged. |
+
+Only the two deliberately denied cold hydrations exit nonzero. The local
+gateway prints a `BrokenPipeError` in each denial stage when the client closes
+another response; its `finally` path drains request accounting, and all
+positive read and preservation assertions pass. Warm checks deny xorb GETs,
+not every remote operation: metadata/authorization requests still occur.
+Healthy stats have complete scans and no issues. Run-owned payloads are cleaned;
+backend objects, logs, manifests and reports are retained. No bucket GC ran.
+
+Provenance SHA-256 values: binary
+`c38eba2af4be60ccf219dce28113426fefaa2a78100971540096cd786a88cba3`;
+report `94a646c3549160c38fb1b4cd6a8f9abd608b790421c2d10f6fbe19455a00b96b`;
+runner `f43a80a2e0e47189741993b0b39f955b7fef6d0e7021d1a4adfcfee6f0e68ffe`;
+imported harness
+`d645a53acd36bc77012f60d89bccb3e515cab5239cc4972a91b30ff7c2a8cb0d`.
+The report records the working-tree manifest; unrelated changes are not claimed
+as a pristine source tree. Measured warm command times are 20.920 / 39.130
+seconds versus cold 40.245 / 72.413 seconds; these shared-host observations are
+not a controlled performance or process-tree memory bound. Git validation of
+20 GiB working files remains expensive even without payload downloads.
+
+Local proof also passes: 283 all-feature cache tests; 32 range tests with only
+`xet-chunk-cache`; 63 all-feature cache-store tests; 31 shared-hydrator tests;
+176 cache-related CLI tests; 13 actual maintenance-command tests plus the
+cleanup integration test. Strict all-target cache Clippy, configured CLI
+Clippy, architecture guards, formatting and whitespace checks pass. Native
+release CLI/FUSE/NFS-helper layouts build and install. Web typecheck, lint
+(16 warnings in untouched files), and nine tests pass. Link checking passes
+against the existing production build; fresh MDX rendering/build proof remains
+with CI. Prior VFS/platform/provider/upgrade/resource gaps remain; this is not
+merge approval.
 
 ### Mitigation of the 10/20 GiB findings
 

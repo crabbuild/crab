@@ -1267,6 +1267,11 @@ crab provides `crab bench dedup <path>` to estimate dedup ratios on a directory 
 
 ### 11.2 Cache Policies
 
+The original policy sketch below is superseded for local disk retention:
+the current default is unlimited, with the optional shared `cache.max_bytes`
+cap. See [Local Cache](../guides/cache.md) for current configuration and scope;
+this does not remove memory limits or change authoritative metadata freshness.
+
 - **Shard cache**: unbounded by default. Shards are small (KiB-MiB) and their fully-populated set is the dedup index — too valuable to evict aggressively. Users can configure a max size; oldest-accessed shards are evicted.
 - **Chunk cache (per-repo)**: bounded by disk space, default 10 GiB. LRU eviction. Chunks are easy to refetch (single `Range` GET) so false evictions are cheap.
 - **Chunk cache (shared)**: optional, opt-in, default off. When on, chunks are shared across repos on the machine; a checkout of repo B’s large file reuses chunks cached from repo A’s checkout if they’re the same. Default max 50 GiB.

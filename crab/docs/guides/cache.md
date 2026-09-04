@@ -23,6 +23,14 @@ tracks outstanding cross-process/provider qualification and lifecycle work.
 The cache is located at `~/.cache/crab/` by default, or at the path specified
 by the `$CRAB_CACHE_DIR` environment variable.
 
+Disk retention is unlimited by default. Set an optional byte cap with
+`crab config set cache.max_bytes 10737418240` (10 GiB), then `crab prune` to
+trim eligible payloads. `crab config set cache.max_bytes unlimited` clears
+the cap, including an inherited cap. Without a cap, prune removes nothing;
+explicit clean and corrupt-entry repair remain available. Stats displays
+`budget: unlimited`, or `budget_bytes: null` in JSON. This policy does not
+remove memory limits or guarantee free disk space; inspect usage regularly.
+
 This command does not manage the organization cache service
 (`crab-cache-server`). Configure that service through the `[cache]` block in
 Crab config and operate it through its HTTP admin endpoints.

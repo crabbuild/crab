@@ -90,6 +90,11 @@ bytes. It does not promise every object is cached: selective reads retain the
 decoded ranges they use, without also installing a redundant full-xorb copy.
 Per-object safety bounds and private-cache ownership checks remain active.
 
+This setting covers the shared object/decoded-range cache. Older VFS
+coordinator and daemon chunk-hash caches still have separate limits; unifying
+their placement and configuration remains in Plan 017. It is not a global cap
+on every directory maintained by Crab.
+
 Range and object caches receive this budget. Unified admission, all-family
 accounting, and automatic maintenance are still being completed in Plan 017;
 do not treat it as a proven hard limit on total disk usage yet. The old
