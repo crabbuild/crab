@@ -71,6 +71,7 @@ main {
 }
 .global-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 16px;
   min-height: 64px;
@@ -97,6 +98,7 @@ main {
 }
 .theme-control {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   margin-left: auto;
@@ -573,9 +575,9 @@ main {
   align-items: center;
   gap: 8px;
   margin-left: auto;
-  min-width: 0;
+  flex-shrink: 0;
 }
-.session-control span {
+.session-control > span {
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -586,7 +588,16 @@ main {
   margin: 64px auto;
 }
 @media (max-width: 640px) {
-  .session-control span {
+  .global-header {
+    position: relative;
+  }
+  .session-control {
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    margin-left: 0;
+    order: 1;
+  }
+  .session-control > span {
     max-width: 80px;
   }
 }
@@ -645,10 +656,14 @@ main {
   order: 3;
 }
 @media (max-width: 640px) {
+  .git-access {
+    position: static;
+  }
   .git-access .git-popover {
-    position: fixed;
-    top: 62px;
+    top: 100%;
     right: 16px;
+    left: 16px;
+    width: auto;
   }
 }
 
