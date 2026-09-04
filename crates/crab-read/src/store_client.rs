@@ -53,6 +53,7 @@ pub struct StoreClient {
     shard_hints: SharedShardHints,
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
+    failures: Option<Arc<crate::error::OperationFailures>>,
 }
 
 impl StoreClient {
@@ -70,6 +71,7 @@ impl StoreClient {
             shard_hints: Arc::new(RwLock::new(HashMap::new())),
             metrics: None,
             availability: None,
+            failures: None,
         }
     }
 
@@ -104,6 +106,22 @@ impl StoreClient {
     pub fn with_shard_hint(self, file_hash: MerkleHash, shard_hash: MerkleHash) -> Self {
         self.insert_shard_hint(file_hash, shard_hash);
         self
+    }
+
+    pub(crate) fn with_failures(mut self, failures: Arc<crate::error::OperationFailures>) -> Self {
+        self.failures = Some(failures);
+        self
+    }
+
+    fn record_error(&self, error: ClientError) -> ClientError {
+        match &self.failures {
+            Some(failures) => failures.read_error(error),
+            None => error,
+        }
+    }
+
+    fn map_read_error(&self, error: ReadError) -> ClientError {
+        self.record_error(ClientError::internal(error))
     }
 
     fn insert_shard_hint(&self, file_hash: MerkleHash, shard_hash: MerkleHash) {
@@ -163,7 +181,7 @@ impl StoreClient {
         let shard_hash = match self.resolve_file_index(file_hash).await {
             Ok(h) => h,
             Err(ReadError::NotFound { .. }) => return Ok(None),
-            Err(e) => return Err(map_read_error(e)),
+            Err(e) => return Err(self.map_read_error(e)),
         };
 
         if !self.store.has_cache_service()
@@ -203,7 +221,7 @@ impl StoreClient {
         match self.load_shard(&shard_hash).await {
             Ok(shard) => Ok(Some((shard, shard_hash))),
             Err(ReadError::NotFound { .. }) => Ok(None),
-            Err(e) => Err(map_read_error(e)),
+            Err(e) => Err(self.map_read_error(e)),
         }
     }
 
@@ -306,10 +324,6 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
     Ok((hash, ranges))
 }
 
-fn map_read_error(e: ReadError) -> ClientError {
-    ClientError::internal(e)
-}
-
 fn build_response_v2(
     file_info: &MDBFileInfo,
     byte_range: Option<FileRange>,
@@ -399,7 +413,7 @@ impl Client for StoreClient {
 
         let Some(info) = shard
             .get_file_info(file_hash)
-            .map_err(|e| map_read_error(e.into()))?
+            .map_err(|e| self.map_read_error(e.into()))?
         else {
             warn!(
                 file_hash = %file_hash.hex(),
@@ -417,21 +431,21 @@ impl Client for StoreClient {
         bytes_range: Option<FileRange>,
     ) -> ClientResult<Option<QueryReconstructionResponseV2>> {
         let Some((shard, shard_hash)) = self.load_shard_for_file(file_id).await? else {
-            return Err(ClientError::Other(format!(
+            return Err(self.record_error(ClientError::Other(format!(
                 "cannot reconstruct file {}: shard not found (file-index entry missing or shard body unreachable)",
                 file_id.hex(),
-            )));
+            ))));
         };
 
         let Some(file_info) = shard
             .get_file_info(file_id)
-            .map_err(|e| map_read_error(e.into()))?
+            .map_err(|e| self.map_read_error(e.into()))?
         else {
-            return Err(ClientError::Other(format!(
+            return Err(self.record_error(ClientError::Other(format!(
                 "cannot reconstruct file {}: shard {} does not contain an entry for the requested file",
                 file_id.hex(),
                 shard_hash.hex(),
-            )));
+            ))));
         };
 
         Ok(build_response_v2(&file_info, bytes_range))
@@ -451,7 +465,7 @@ impl Client for StoreClient {
         let shard_hashes = self
             .resolve_file_indexes_batch(file_ids)
             .await
-            .map_err(map_read_error)?;
+            .map_err(|error| self.map_read_error(error))?;
         let mut files_by_shard: HashMap<MerkleHash, Vec<MerkleHash>> = HashMap::new();
         for (file_id, shard_hash) in file_ids.iter().zip(shard_hashes) {
             if let Some(shard_hash) = shard_hash {
@@ -463,13 +477,13 @@ impl Client for StoreClient {
             let shard = match self.load_shard(&shard_hash).await {
                 Ok(shard) => shard,
                 Err(ReadError::NotFound { .. }) => continue,
-                Err(e) => return Err(map_read_error(e)),
+                Err(e) => return Err(self.map_read_error(e)),
             };
 
             for file_id in shard_file_ids {
                 let Some(file_info) = shard
                     .get_file_info(&file_id)
-                    .map_err(|e| map_read_error(e.into()))?
+                    .map_err(|e| self.map_read_error(e.into()))?
                 else {
                     warn!(
                         file_hash = %file_id.hex(),
@@ -501,7 +515,10 @@ impl Client for StoreClient {
     }
 
     async fn acquire_download_permit(&self) -> ClientResult<ConnectionPermit> {
-        self.concurrency.acquire_connection_permit().await
+        self.concurrency
+            .acquire_connection_permit()
+            .await
+            .map_err(|error| self.record_error(error))
     }
 
     async fn get_file_term_data(
@@ -511,15 +528,19 @@ impl Client for StoreClient {
         _progress_callback: Option<ProgressCallback>,
         _uncompressed_size_if_known: Option<usize>,
     ) -> ClientResult<(Bytes, Vec<u32>)> {
-        let (url, _http_ranges) = url_info.retrieve_url().await?;
-        let (xorb_hash, chunk_ranges) = parse_xorb_url(&url)?;
+        let (url, _http_ranges) = url_info
+            .retrieve_url()
+            .await
+            .map_err(|error| self.record_error(error))?;
+        let (xorb_hash, chunk_ranges) =
+            parse_xorb_url(&url).map_err(|error| self.record_error(error))?;
 
         let xorb_path = self.router.xorb_path(&xorb_hash);
         if let Some(availability) = &self.availability {
             availability
                 .ensure_available(&xorb_path)
                 .await
-                .map_err(map_read_error)?;
+                .map_err(|error| self.map_read_error(error))?;
         }
         let ranges = chunk_ranges
             .iter()
@@ -529,7 +550,7 @@ impl Client for StoreClient {
             .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
             .await
             .map_err(ReadError::from)
-            .map_err(map_read_error)
+            .map_err(|error| self.map_read_error(error))
     }
 
     async fn query_for_global_dedup_shard(

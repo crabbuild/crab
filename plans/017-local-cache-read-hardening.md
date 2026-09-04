@@ -18,6 +18,56 @@
 
 ## Status
 
+### Crab-owned reconstruction failures, 2026-09-03
+
+The user approved a Crab-side solution while keeping Xet unchanged. This
+supersedes the earlier dependency-patch blocker for error-source retention;
+it does not erase the retained failing runs or approve unrelated inventories.
+
+`crab-read` now owns a fresh failure context per reconstruction, attached after
+advisory shard preflight. Terminal adapter errors retain the original typed
+source before crossing Xet's callback boundary. The first read failure and
+first non-Interrupted writer failure are retained independently. The returned
+reconstruction error also retains Xet's outcome, including secondary channel
+errors; no diagnostic-string matching, global error slot, or output replay is
+used. Recovered cache/hint failures remain advisory and are not recorded.
+
+The canonical output owner closes its writer before taking the error snapshot,
+waiting for an in-progress write under the same lock. Late Xet callbacks can
+neither write output nor replace the returned snapshot. A completed destination
+I/O failure takes precedence over read failure/cancellation, preserving the
+existing fatal/no-replay policy. Without a writer failure, explicit cancellation
+or source-reported cancellation retains Crab's cancellation result. Other read
+failures expose their typed chain instead of depending on which Xet task won
+its first-error race. Full-file hash/size checks and range-size checks remain
+unchanged.
+
+Evidence map: CLI hydration and delayed smudge call `ShardHydrator`; VFS
+`HydrationService` and auth-view repacking share that owner. The adapter calls
+`CachingStore` and `FileIndexLookupSession`, while Xet consumes its `Client`
+callbacks. Pinned Xet 1.6.0 `SequentialWriter::set_next_term_data_source` drops
+the sender before publishing a failed data future; `RunState::set_error` keeps
+the first error. `ClientError::clone` stringifies, so Crab retains Arc-backed
+sources rather than cloning those errors. Neither dependency files nor pinned
+versions change in this repair.
+
+Focused proof: 112 shared read tests pass, including the existing 256-iteration
+availability and cancellation regressions. New tests cover three concurrent
+operations with different outcomes over 64 rounds, writer precedence in either
+observation order, Interrupted and WriteZero semantics, closing an in-flight
+write, late writes, and immutable returned snapshots. The exact CLI
+`hydrate_preserves_failure_diagnostics_without_publishing` regression passes;
+`crab-auth-server` and `crab-vfs` compile. Strict shared-read Clippy and the
+31-test no-default-feature hydration filter pass. Compiling commands use the
+checkout-specific external target. Installed-command and hosted proof for this
+repair are still pending; the PR remains draft.
+
+The non-test LOC increase pays for two previously missing responsibilities:
+owning original failures across the dependency boundary, and closing output
+before classification. This is the bounded Crab-only fix, not a replacement
+reconstructor. Protected architecture inventory reconciliation and the existing
+private-root/503-warming fixture corrections remain separate merge blockers.
+
 ### StoreClient consolidation regression coverage, 2026-09-03
 
 PR #147 removed `crab/src/git/store_client.rs` in favor of the existing

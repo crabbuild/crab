@@ -5,6 +5,9 @@ mod buffer;
 mod cache_completion;
 #[cfg(test)]
 mod cache_completion_tests;
+#[cfg(test)]
+mod failure_tests;
+mod output;
 use buffer::ReconstructionBuffer;
 
 use crab_cache_store::CachingStore;
@@ -218,7 +221,9 @@ impl ShardHydrator {
                 // Xet writer failure; retain the same source and replay policy.
                 writer.flush().map_err(|error| ReadError::Reconstruction {
                     file_hash: file_hash.hex(),
-                    source: crate::error::ReconstructionError(error.into()),
+                    source: crate::error::ReconstructionError::from(
+                        xet_data::file_reconstruction::FileReconstructionError::from(error),
+                    ),
                 })?;
             }
             drop(writer);
@@ -289,17 +294,16 @@ impl ShardHydrator {
         &self,
         ptr: &Pointer,
         file_index_lookup: Option<&SharedFileIndexLookup>,
-    ) -> Arc<dyn xet_client::cas_client::Client> {
+    ) -> StoreClient {
         let file_hash = MerkleHash::from(ptr.file_hash);
         let mut client = self.store_client();
         if let Some(lookup) = file_index_lookup {
             client = client.with_file_index_lookup(lookup.clone());
         }
-        let client = match ptr.shard_hint {
+        match ptr.shard_hint {
             Some(hint) => client.with_shard_hint(file_hash, MerkleHash::from(hint)),
             None => client,
-        };
-        Arc::new(client)
+        }
     }
 
     async fn reconstruct_file(&self, ptr: &Pointer) -> Result<Vec<u8>> {
@@ -315,7 +319,7 @@ impl ShardHydrator {
 
     async fn reconstruct_to_writer_unverified<W>(
         &self,
-        client: Arc<dyn xet_client::cas_client::Client>,
+        client: StoreClient,
         file_hash: MerkleHash,
         writer: W,
         range: Option<FileRange>,
@@ -328,6 +332,13 @@ impl ShardHydrator {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
+        // Attach observations after advisory preflight, and never to the shared
+        // hydrator: concurrent reconstructions must not inherit each other's errors.
+        let failures = Arc::new(crate::error::OperationFailures::default());
+        let client: Arc<dyn xet_client::cas_client::Client> =
+            Arc::new(client.with_failures(Arc::clone(&failures)));
+        let output = output::OutputOwner::new(writer);
+        let writer = output.writer(Arc::clone(&failures));
         let reconstructor =
             xet_data::file_reconstruction::FileReconstructor::new(&xet_context, &client, file_hash)
                 .with_buffer_semaphore(Arc::clone(&self.buffer_semaphore))
@@ -346,9 +357,11 @@ impl ShardHydrator {
             None => (reconstructor, None),
         };
 
-        if let Err(error) = reconstructor.reconstruct_to_writer(writer).await {
-            let source = crate::error::ReconstructionError(error);
-            if cancel.is_cancelled() || source.is_cancelled() {
+        let outcome = reconstructor.reconstruct_to_writer(writer).await;
+        drop(output);
+        if let Err(error) = outcome {
+            let source = failures.finish(error);
+            if !source.has_writer_error() && (cancel.is_cancelled() || source.is_cancelled()) {
                 return Err(ReadError::Cancelled);
             }
             return Err(ReadError::Reconstruction {
@@ -369,11 +382,8 @@ impl ShardHydrator {
         Ok(())
     }
 
-    async fn preflight_shard_coverage(
-        &self,
-        client: &Arc<dyn xet_client::cas_client::Client>,
-        ptr: &Pointer,
-    ) -> Result<()> {
+    async fn preflight_shard_coverage(&self, client: &StoreClient, ptr: &Pointer) -> Result<()> {
+        use xet_client::cas_client::Client;
         let file_hash = MerkleHash::from(ptr.file_hash);
         let Ok(Some((info, _))) = client.get_file_reconstruction_info(&file_hash).await else {
             return Ok(());
