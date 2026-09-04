@@ -20,6 +20,7 @@ export interface Ref {
 }
 export interface Refs {
   head: Ref | null;
+  unborn_head: string | null;
   refs: Ref[];
   generation: number;
 }

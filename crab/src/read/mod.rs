@@ -808,7 +808,7 @@ fn resolve_manifest_rev(manifest: &Manifest, rev: &str) -> Option<String> {
     }
 
     let ref_name = if rev == "HEAD" || rev == "head" {
-        manifest_head_target(manifest)?
+        manifest.head.clone()
     } else if manifest.refs.contains_key(rev) {
         rev.to_owned()
     } else if !rev.starts_with("refs/") {
@@ -824,13 +824,6 @@ fn resolve_manifest_rev(manifest: &Manifest, rev: &str) -> Option<String> {
     };
 
     manifest.refs.get(&ref_name).cloned()
-}
-
-fn manifest_head_target(manifest: &Manifest) -> Option<String> {
-    if manifest.refs.contains_key(&manifest.head) {
-        return Some(manifest.head.clone());
-    }
-    manifest.refs.keys().next().cloned()
 }
 
 fn is_full_hex_sha(rev: &str) -> bool {
@@ -979,6 +972,13 @@ mod tests {
             Some("a".repeat(40))
         );
         assert_eq!(resolve_manifest_rev(&manifest, "v1"), Some("b".repeat(40)));
+    }
+
+    #[test]
+    fn unborn_head_does_not_resolve_to_an_existing_tag() {
+        let mut manifest = Manifest::default_for_repo("refs/heads/unborn");
+        manifest.refs.insert("refs/tags/v1".into(), "a".repeat(40));
+        assert_eq!(resolve_manifest_rev(&manifest, "HEAD"), None);
     }
 
     #[test]

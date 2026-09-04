@@ -177,8 +177,8 @@ fn bstr_to_string(b: &BStr) -> Result<String> {
 /// `refs` is an iterator of `(input_name, Reference)` pairs, matching
 /// the shape [`crab_git::ref_resolve::resolve_refs_typed_batch`]
 /// returns. `head_symref_target` is the ref name HEAD points at, if
-/// any — the caller applies the same "HEAD target must live among the
-/// advertised refs" fallback the legacy path uses before calling in.
+/// any; an unborn symbolic target need not occur among the concrete refs.
+/// The caller omits the target when read-side policy hides it.
 pub fn build_ref_advertisement_typed<'a, I>(
     refs: I,
     head_symref_target: Option<&str>,

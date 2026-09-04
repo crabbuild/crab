@@ -276,6 +276,7 @@ async fn execute(
         return Ok(Payload::Json(json!({
             "generation": repository.generation(), "packs": repository.pack_count(),
             "head": refs.head.as_ref().map(|head| json!({"name":head.name, "oid":head.target.to_string()})),
+            "unborn_head": refs.unborn_head,
             "refs": refs.entries.iter().map(|entry| json!({"name":entry.name,"oid":entry.target.to_string(),"peeled":entry.peeled.map(|oid|oid.to_string())})).collect::<Vec<_>>(),
         })));
     }
@@ -286,7 +287,15 @@ async fn execute(
                 .refs()
                 .head
                 .as_ref()
-                .ok_or(Error::EmptyRepository)?
+                .ok_or_else(|| {
+                    if repository.refs().is_empty() {
+                        Error::EmptyRepository
+                    } else {
+                        Error::Revision {
+                            reason: RevisionError::NotFound,
+                        }
+                    }
+                })?
                 .name
                 .clone(),
         ),

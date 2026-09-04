@@ -319,10 +319,16 @@ and active-active publication coexistence, LFS upload endpoints, and process-cra
 qualification remain unfinished; use this development server with standard Crab
 repository publication only.
 
-Initialization still uses the shared manifest requirement that HEAD resolve when
-refs exist. Tag-only initialization can therefore select a tag as HEAD; supporting
-an unborn default alongside existing tags requires coordinated manifest, reader
-and CLI changes. Such a HEAD is also protected from deletion by HTTP receive.
+Tag-only initialization preserves an unborn default branch. The refs API returns
+`head: null` and its symbolic name in `unborn_head`; native protocol-v2 clone
+preserves that name while fetching tags. The browser selects an available ref for
+browsing without changing HEAD. HTTP receive, CLI publication and protected
+publication choose only branches when establishing a default.
+
+Deploy the updated CLI and services together before using this state. Tagged
+releases v1.0.1 and v1.1.0 reject a nonempty repository with an unborn HEAD. Existing
+resolved-HEAD repositories and serialized fields are unchanged; no automatic
+migration or tag-to-branch conversion is performed.
 
 Injected storage faults pass against both memory storage and RustFS: lost marker
 replies, rejected marker writes, and cancellation before and after the commit

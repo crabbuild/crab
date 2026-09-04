@@ -1104,7 +1104,9 @@ impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
                 peeled,
             });
         }
-        let (head, unborn_head) = if entries.is_empty() {
+        let (head, unborn_head) = if !manifest.refs.contains_key(&manifest.head)
+            && (entries.is_empty() || manifest.head.starts_with("refs/heads/"))
+        {
             (None, Some(manifest.head.clone()))
         } else {
             let target = manifest

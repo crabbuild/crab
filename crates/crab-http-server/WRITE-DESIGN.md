@@ -495,6 +495,15 @@ meet immediate read/fetch visibility or coexist correctly with native CLI writer
 
 ## Evidence required before exposing push
 
+Tag-only HTTP publication now preserves an unborn default branch through journal
+replay, catalog publication and reopen. Native Git protocol-v2 clone retains its
+symbolic name and fetches tag content; later branch publication establishes a
+default normally. The API distinguishes unborn HEAD from an empty ref set, and
+the browser can browse the available tags. RustFS qualification repeats this
+flow and verifies exact blob bytes after client removal and server restart.
+CLI/protected candidate builders and read-side advertisements share this rule.
+Older tagged readers reject the new state; deploy the updated components together.
+
 - Native Git round trips: empty-repo initial push, update, branch creation,
   lightweight/annotated tags, deletion, policy-controlled force updates and
   atomic multi-ref batches. Every accepted ref must have the exact client OID.

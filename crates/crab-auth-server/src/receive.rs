@@ -2066,21 +2066,20 @@ pub async fn build_service_candidate_manifest(
             .refs
             .insert(update.ref_name.clone(), update.new_oid.clone());
     }
-    if !manifest.refs.is_empty() && !manifest.refs.contains_key(&manifest.head) {
-        manifest.head = if plan
-            .candidate_manifest
-            .refs
-            .contains_key(&plan.candidate_manifest.head)
-        {
-            plan.candidate_manifest.head.clone()
-        } else {
-            manifest
-                .refs
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "refs/heads/main".to_owned())
-        };
+    if !manifest.refs.contains_key(&manifest.head) {
+        let candidate = &plan.candidate_manifest.head;
+        let branch =
+            if candidate.starts_with("refs/heads/") && manifest.refs.contains_key(candidate) {
+                Some(candidate)
+            } else {
+                manifest
+                    .refs
+                    .keys()
+                    .find(|name| name.starts_with("refs/heads/"))
+            };
+        if let Some(branch) = branch {
+            manifest.head = branch.clone();
+        }
     }
     manifest.peeled_refs = materialized.peeled_refs.clone();
     manifest.shard_index_hash = build_service_segment_index(
@@ -2834,6 +2833,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_candidate_preserves_unborn_head_for_tag_only_updates() -> Result<()> {
+        let store = store();
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut plan = push_plan();
+        plan.candidate_manifest = Manifest::default_for_repo("refs/heads/unborn");
+        let materialized = MaterializedSourcePush {
+            ref_updates: vec![PushRefUpdate {
+                ref_name: "refs/tags/v1".into(),
+                old_oid: None,
+                new_oid: oid('2'),
+            }],
+            packs: vec![],
+            peeled_refs: BTreeMap::new(),
+            git_visibility: MaterializedGitVisibility::Exact(BTreeMap::new()),
+        };
+        let manifest =
+            build_service_candidate_manifest(&store, &router, None, &plan, &materialized).await?;
+        assert_eq!(manifest.head, "refs/heads/unborn");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn materialized_visibility_must_match_candidate_manifest() {
         let store = store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
@@ -3336,14 +3357,16 @@ mod tests {
         Ok((key, xorb.bytes, expected_chunks, shard_bytes))
     }
 
-    fn test_file_shard_reference() -> Result<(
+    type FileShardReference = (
         MerkleHash,
         MerkleHash,
         Vec<u8>,
         MerkleHash,
         Bytes,
         Vec<ExpectedXorbChunk>,
-    )> {
+    );
+
+    fn test_file_shard_reference() -> Result<FileShardReference> {
         use crab_xet::shard::{
             FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
             XorbChunkSequenceEntry, XorbChunkSequenceHeader,
