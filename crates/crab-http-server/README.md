@@ -136,7 +136,7 @@ name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
 protected_branches = [
-  { branch = "main", required_approvals = 1 },
+  { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
 ]
 members = [
   { subject = "provider-subject-for-alice", access = "write" },
@@ -163,6 +163,8 @@ Organization and membership administration in the application remain future work
 
 `protected_branches` contains exact branch names without the `refs/heads/`
 prefix. `required_approvals` accepts 0–20 and defaults to zero when omitted.
+`required_checks` accepts at most 50 unique, case-insensitive context names of
+1–100 characters. It defaults to an empty list.
 Once a repository has a branch, native Git cannot create, update or delete a
 protected name; an atomic push containing one is rejected in full. The first
 branch can still initialize an empty or tag-only repository. A fast-forward
@@ -203,8 +205,9 @@ read token, or a read/write token when their membership permits writes. Supply `
 using a credential manager. Git requests use Basic authentication independently
 of browser cookies. Tokens are restricted to the selected owner/repository and
 their requested permission, intersected with the user's configured grant. A read
-token cannot gain write access when its owner has a write grant. Tokens cannot
-authenticate browser APIs.
+token cannot gain write access when its owner has a write grant. Basic tokens
+also authenticate the commit-status API for their selected repository; other
+browser APIs require the signed-in session cookie.
 
 Git credential helpers ignore HTTP paths by default. Enable path matching for
 this server before saving tokens, replacing the example origin with yours:
@@ -382,7 +385,7 @@ Remote objects are compared byte for byte after removing client repositories.
 The deletion flow also exposed and fixed a shared catalog bug: removed tips must
 be looked up even when no surviving ref or new evidence mentions them. These
 small-repository tests are not Kubernetes push throughput or production
-qualification. Required checks, broader protection rules, protected-view and active-active
+qualification. Detailed check runs, broader protection rules, protected-view and active-active
 publication coexistence, LFS HTTP locking, and process-crash qualification remain unfinished;
 use this development server with standard Crab repository publication only.
 
@@ -467,7 +470,36 @@ concurrent pull edits and lets the same request resume after a lost response or
 restart. A completed merge retains its pre-merge comparison even if the source
 branch is deleted. Protected base branches can be updated only through this merge
 path. The configured current-head approval requirement is checked before the
-merge reservation is created. Merge commits and checks are not implemented.
+merge reservation is created. Merge commits and detailed check runs are not
+implemented.
+
+## Commit statuses and required checks
+
+External CI can `POST /api/repos/{owner}/{name}/statuses/{sha}` with a
+repository-scoped write token using Basic authentication. The JSON body contains
+a UUID `request_id`, `context`, `state` (`pending`, `success`, `failure` or
+`error`), and optional `description` and `target_url`. The target must use HTTPS,
+or loopback HTTP for local development. A signed-in writer may use the same route
+with the normal Origin and CSRF headers. Repository readers can
+`GET /api/repos/{owner}/{name}/commits/{sha}/status` to inspect the latest status
+for every context and the combined state.
+
+The commit must be reachable in the repository. Context matching is
+case-insensitive, so a later `CI/Test` status replaces `ci/test`. Every status
+submission has an immutable object-storage reservation and monotonically ordered
+number. Replaying an older request returns its original result without replacing
+a newer status for the same context. Each commit accepts at most 1,000 status
+submissions and retains the latest result for at most 128 contexts; descriptions
+are limited to 140 characters and target URLs to 2 KiB.
+
+Protected pull requests evaluate configured required contexts only against the
+exact current head. Missing, pending, failed and errored checks block merge;
+every required context must report `success`. A head advance starts with missing
+statuses for that new commit. The merge panel mirrors GitHub's checks summary,
+with expected, pending, successful and unsuccessful states plus safe detail links.
+Merge admission uses one latest-status snapshot; an update that completes after
+admission applies to later merge attempts, while an existing merge reservation
+remains recoverable.
 
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
@@ -476,7 +508,8 @@ Clients must follow that cursor. Titles allow 1–256 characters; bodies allow
 64 KiB. Eight discussion operations run concurrently, with a 30-second deadline
 and an 80-KiB HTTP body limit. `Server-Timing: app` reports handling latency.
 
-Data lives under `<repository-prefix>/app/v1/issues` and `app/v1/pulls`,
+Data lives under `<repository-prefix>/app/v1/issues`, `app/v1/pulls` and
+`app/v1/statuses`,
 independently of Git refs, packs and metadata. Each JSON document has
 `schema_version: 1`; unknown versions are rejected. Conditional counter updates
 allocate numbers, immutable
@@ -495,8 +528,8 @@ including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
 Labels, assignees, deletion/moderation, edit history, notifications, merge
-commits and checks remain unimplemented. Production backup/restore qualification
-is pending.
+commits and detailed check runs/logs remain unimplemented. Production
+backup/restore qualification is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
 replayed both creation requests, edited content, closed/reopened the issue and
@@ -545,6 +578,18 @@ detail and its exact one-file comparison took 46.8 and 40.6 ms from the client.
 These localhost timings are functional observations rather than production
 latency guarantees.
 
+A required-check qualification then pushed a new head with native Git and opened
+pull request 5 against protected `main`. Missing and pending `ci/test` statuses
+blocked merge; a success reported through the repository token unlocked it. An
+older pending request replay returned its original response without replacing the
+newer success. The merge took 297.9 ms, and an independent depth-one clone read
+the exact merged commit and file in 723.1 ms after the source checkout and branch
+were removed. After server restart, pull detail, combined status, exact changes
+and native ref discovery took 45.8, 42.4, 21.1 and 42.7 ms from the client. The
+check panel was also inspected in light, dark and 390-pixel layouts without
+horizontal overflow. These shared-cache localhost timings are functional
+observations rather than production latency guarantees.
+
 ## Current verification
 
 ```sh
@@ -574,7 +619,7 @@ three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
-latency guarantee. Forty Rust server tests and eight frontend navigation,
+latency guarantee. Forty-one Rust server tests and eight frontend navigation,
 model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
@@ -647,7 +692,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews and recoverable fast-forward merge with canonical ref publication; merge commits, checks and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, commit statuses, required checks and recoverable fast-forward merge with canonical ref publication; merge commits, detailed check runs and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

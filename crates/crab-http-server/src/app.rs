@@ -24,6 +24,8 @@ pub(crate) enum Error {
     Invalid(&'static str),
     #[error("Not found")]
     NotFound,
+    #[error("Commit not found")]
+    CommitNotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
@@ -40,6 +42,8 @@ pub(crate) enum Error {
     MergePending,
     #[error("Protected branch review requirements are not satisfied")]
     MergeBlocked,
+    #[error("Write access is required to report commit statuses")]
+    StatusPermission,
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error(
@@ -64,6 +68,7 @@ impl IntoResponse for Error {
         let (status, code, message) = match &self {
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Discussion not found"),
+            Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -102,7 +107,12 @@ impl IntoResponse for Error {
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,
                 "merge_blocked",
-                "Required approvals are missing or a reviewer requested changes on the current head",
+                "Required approvals or status checks are not satisfied on the current head",
+            ),
+            Self::StatusPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to report commit statuses",
             ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
