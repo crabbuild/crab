@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
 base64 = "0.22"
 futures-util = { workspace = true }
+flate2 = { workspace = true }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 rand = "0.9"
