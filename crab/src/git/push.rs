@@ -11,6 +11,9 @@
 //! the skeleton and step boundaries.
 
 use crab_write::catalog::{GitObjectKindMap, LocatorPackEvidence};
+use crab_write::generation::{
+    CommittedManifestAnchor, committed_manifest_anchor, uncovered_locator_object_rows,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -349,44 +352,6 @@ struct RemoteChunkRefKey {
     xorb_hash: XorbHash,
     chunk_index: u32,
     uncompressed_size: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommittedManifestAnchor {
-    pub(crate) generation: u64,
-    pub(crate) shard_index_hash: MerkleHash,
-    pub(crate) pack_index_hash: MerkleHash,
-}
-
-pub(crate) fn committed_manifest_anchor(
-    manifest: &Manifest,
-) -> Result<Option<CommittedManifestAnchor>> {
-    if manifest.shard_index_hash.is_empty() && manifest.pack_index_hash.is_empty() {
-        return Ok(None);
-    }
-    let shard_index_hash = if manifest.shard_index_hash.is_empty() {
-        MerkleHash::default()
-    } else {
-        MerkleHash::from_hex(&manifest.shard_index_hash).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed manifest has invalid shard-index hash: {error}"
-            ))
-        })?
-    };
-    let pack_index_hash = if manifest.pack_index_hash.is_empty() {
-        MerkleHash::default()
-    } else {
-        MerkleHash::from_hex(&manifest.pack_index_hash).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed manifest has invalid pack-index hash: {error}"
-            ))
-        })?
-    };
-    Ok(Some(CommittedManifestAnchor {
-        generation: manifest.generation,
-        shard_index_hash,
-        pack_index_hash,
-    }))
 }
 
 impl RemoteChunkRefKey {
@@ -5801,88 +5766,6 @@ async fn planned_locator_object_rows(
         &bindings,
         current_packs,
     ))
-}
-
-pub(crate) fn uncovered_locator_object_rows(
-    coverage: Option<crab_metadata::git_object_locator::GitLocatorCoverage>,
-    bindings: &[crab_metadata::git_object_locator::GitPackLocatorBinding],
-    packs: &[PackManifestEntry],
-) -> u64 {
-    let Some(coverage) = coverage else {
-        return packs
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-    };
-    let covered = bindings
-        .iter()
-        .map(|binding| {
-            (
-                binding.record.pack_id,
-                (
-                    binding.record.committed_generation,
-                    binding.record.object_count,
-                    binding.record.pack_size,
-                ),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    packs
-        .iter()
-        .filter(|pack| {
-            let Ok(pack_id) = MerkleHash::from_hex(&pack.pack_id) else {
-                return true;
-            };
-            !covered
-                .get(&pack_id)
-                .is_some_and(|(committed_generation, object_count, pack_size)| {
-                    *object_count == pack.object_count
-                        && *pack_size == pack.size
-                        && *committed_generation <= coverage.generation
-                })
-        })
-        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count))
-}
-
-pub(crate) async fn publish_pack_locator_inventory_for_owner(
-    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
-    store: &Store,
-    router: &StoreLayout,
-    anchor: CommittedManifestAnchor,
-    current_packs: &[PackManifestEntry],
-    cancel: &CancellationToken,
-) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
-    if writer.coverage()
-        == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
-            generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-        })
-    {
-        return Ok((
-            false,
-            crab_metadata::git_object_locator::LocatorSweepStats::default(),
-        ));
-    }
-    let mut local_evidence = HashMap::new();
-    let storage_router =
-        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    let (updated, sweep) = crab_write::catalog::publish_inventory(
-        writer,
-        store.as_storage(),
-        &storage_router,
-        &mut local_evidence,
-        crab_metadata::git_object_locator::GitLocatorCoverage {
-            generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-        },
-        current_packs,
-        true,
-        cancel,
-    )
-    .await?;
-    if updated {
-        writer.publish_checkpoint().await?;
-    }
-    Ok((updated, sweep))
 }
 
 pub(crate) async fn publish_committed_pack_locators(
@@ -18657,34 +18540,17 @@ mod tests {
             .await
             .expect("publish second graph generation");
 
-        let anchor = CommittedManifestAnchor {
-            generation: current_manifest.generation,
-            shard_index_hash: MerkleHash::default(),
-            pack_index_hash: MerkleHash::from_hex(&pack_index_hash)
-                .expect("parse graph fixture pack index hash"),
-        };
-        let mut writer =
-            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                Arc::clone(store.inner()),
-                router.repo_prefix(),
-                object_count,
-            )
-            .await
-            .expect("open graph fixture locator writer");
-        publish_pack_locator_inventory_for_owner(
-            &mut writer,
-            &store,
-            &router,
-            anchor,
+        crab_write::generation::maintain_catalog(
+            store.as_storage(),
+            &base_storage_router,
+            &current_manifest,
             &[pack],
+            Duration::from_secs(60),
             &CancellationToken::new(),
         )
         .await
-        .expect("publish graph fixture locator");
-        writer
-            .close()
-            .await
-            .expect("close graph fixture locator writer");
+        .expect("publish graph fixture catalog")
+        .expect("current fixture generation");
 
         let rebuild = rebuild_split_commit_graph_from_remote_packs_if_current(
             &store,
@@ -25730,33 +25596,24 @@ mod tests {
             .await
             .expect("upload owner kind metadata");
 
-        let anchor = CommittedManifestAnchor {
-            generation: manifest.generation,
-            shard_index_hash: MerkleHash::default(),
-            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).expect("owner pack hash"),
-        };
-        let mut writer =
-            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                Arc::clone(store.inner()),
-                router.repo_prefix(),
-                pack.object_count,
-            )
-            .await
-            .expect("open owner locator writer");
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
         assert!(
-            publish_pack_locator_inventory_for_owner(
-                &mut writer,
-                &store,
-                &router,
-                anchor,
+            crab_write::generation::maintain_catalog(
+                store.as_storage(),
+                &storage_router,
+                &manifest,
                 &[pack],
+                Duration::from_secs(60),
                 &CancellationToken::new(),
             )
             .await
-            .expect("publish owner locator")
-            .0
+            .expect("publish owner catalog")
+            .expect("current generation")
+            .advanced
         );
-        writer.close().await.expect("close owner locator writer");
 
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
