@@ -44,6 +44,27 @@ async fn report_status(h: &Harness, token: &str, oid: &str, body: Value) -> (Sta
     (status, body)
 }
 
+async fn report_check(
+    h: &Harness,
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .request(method, format!("{}{path}", h.origin))
+        .basic_auth("crab", Some(token))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
 #[tokio::test]
 async fn pull_routes_require_membership_and_csrf_before_repository_access() {
     let h = Harness::new(false).await;
@@ -297,6 +318,193 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(statuses["state"], "success");
     assert_eq!(statuses["statuses"].as_array().unwrap().len(), 1);
     assert_eq!(statuses["statuses"][0]["context"], "CI/Test");
+    let created_check = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::POST,
+        "/api/repos/team/private/check-runs",
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000023",
+            "head_sha":first_head,
+            "name":"ci/test",
+            "status":"queued",
+            "conclusion":null,
+            "details_url":"https://ci.example.test/runs/23",
+            "output":{
+                "title":"Tests are queued",
+                "summary":"Waiting for a runner.",
+                "text":null,
+                "steps":[]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(created_check.0, StatusCode::CREATED, "{}", created_check.1);
+    let run_id = created_check.1["id"].as_u64().unwrap();
+    let run_path = format!("/api/repos/team/private/commits/{first_head}/check-runs/{run_id}");
+    let waiting = h.json(&format!("{ROOT}/1"), &alice).await;
+    assert_eq!(
+        waiting["merge_requirements"]["checks"][0]["state"],
+        "pending"
+    );
+    assert_eq!(waiting["merge_requirements"]["checks"][0]["run_id"], run_id);
+    let listed = h
+        .json(
+            &format!("/api/repos/team/private/commits/{first_head}/check-runs"),
+            &bob,
+        )
+        .await;
+    assert_eq!(listed["items"][0]["name"], "ci/test");
+    assert_eq!(listed["next"], Value::Null);
+    assert_eq!(
+        mutate(
+            &h,
+            &bob,
+            bob_csrf,
+            reqwest::Method::PATCH,
+            &run_path,
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000024",
+                "version":1,
+                "status":"in_progress",
+                "conclusion":null,
+                "details_url":null,
+                "output":{"title":"Denied","summary":"Denied","text":null,"steps":[]}
+            }),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let running_input = json!({
+        "request_id":"00000000-0000-4000-8000-000000000025",
+        "version":1,
+        "status":"in_progress",
+        "conclusion":null,
+        "details_url":"https://ci.example.test/runs/23",
+        "output":{
+            "title":"Tests are running",
+            "summary":"One step has completed.",
+            "text":"Live output is available below.",
+            "steps":[{
+                "name":"Build",
+                "status":"completed",
+                "conclusion":"success",
+                "log":"Compiling crab-http-server\nFinished release build\n"
+            }]
+        }
+    });
+    let running = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::PATCH,
+        &run_path,
+        running_input.clone(),
+    )
+    .await;
+    assert_eq!(running.0, StatusCode::OK, "{}", running.1);
+    assert_eq!(running.1["version"], 2);
+    let completed = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::PATCH,
+        &run_path,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000026",
+            "version":2,
+            "status":"completed",
+            "conclusion":"success",
+            "details_url":"https://ci.example.test/runs/23",
+            "output":{
+                "title":"All tests passed",
+                "summary":"The required test suite passed.",
+                "text":"No failures were reported.",
+                "steps":[{
+                    "name":"Build",
+                    "status":"completed",
+                    "conclusion":"success",
+                    "log":"Compiling crab-http-server\nFinished release build\n"
+                },{
+                    "name":"Test",
+                    "status":"completed",
+                    "conclusion":"success",
+                    "log":"44 passed; 0 failed\n"
+                }],
+                "annotations":[{
+                    "path":"src/lib.rs",
+                    "start_line":42,
+                    "end_line":44,
+                    "level":"warning",
+                    "title":"Slow assertion",
+                    "message":"This assertion took longer than expected."
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(completed.0, StatusCode::OK, "{}", completed.1);
+    assert_eq!(completed.1["version"], 3);
+    assert_eq!(
+        completed.1["output"]["steps"][1]["log"],
+        "44 passed; 0 failed\n"
+    );
+    assert_eq!(completed.1["output"]["annotations"][0]["start_line"], 42);
+    let replay = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::PATCH,
+        &run_path,
+        running_input,
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["version"], 2);
+    assert_eq!(h.json(&run_path, &bob).await["version"], 3);
+    let immutable = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::PATCH,
+        &run_path,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000027",
+            "version":3,
+            "status":"in_progress",
+            "conclusion":null,
+            "details_url":null,
+            "output":{"title":"Restarted","summary":"Restarted","text":null}
+        }),
+    )
+    .await;
+    assert_eq!(immutable.0, StatusCode::BAD_REQUEST);
+    let invalid_annotation = report_check(
+        &h,
+        &git_token,
+        reqwest::Method::POST,
+        "/api/repos/team/private/check-runs",
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000028",
+            "head_sha":first_head,
+            "name":"ci/lint",
+            "status":"completed",
+            "conclusion":"success",
+            "details_url":null,
+            "output":{
+                "title":"Lint passed",
+                "summary":"No findings.",
+                "text":null,
+                "annotations":[{
+                    "path":"src/lib.rs",
+                    "start_line":2,
+                    "end_line":1,
+                    "level":"failure",
+                    "title":null,
+                    "message":"Invalid range"
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(invalid_annotation.0, StatusCode::BAD_REQUEST);
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["merge_requirements"]["checks"][0]["state"], "success");
     assert_eq!(ready["merge_requirements"]["checks_satisfied"], true);

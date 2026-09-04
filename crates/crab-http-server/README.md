@@ -501,8 +501,7 @@ concurrent pull edits and lets the same request resume after a lost response or
 restart. A completed merge retains its pre-merge comparison even if the source
 branch is deleted. Protected base branches can be updated only through this merge
 path. The configured current-head approval requirement is checked before the
-merge reservation is created. Merge commits and detailed check runs are not
-implemented.
+merge reservation is created. Merge commits are not implemented.
 
 ## Commit statuses and required checks
 
@@ -532,6 +531,33 @@ Merge admission uses one latest-status snapshot; an update that completes after
 admission applies to later merge attempts, while an existing merge reservation
 remains recoverable.
 
+CI integrations can also create detailed check runs with
+`POST /api/repos/{owner}/{name}/check-runs`, list them at
+`GET /api/repos/{owner}/{name}/commits/{sha}/check-runs`, inspect one at the
+same path plus `/{id}`, and update it with `PATCH`. Create and update bodies use
+UUID `request_id` values. Updates also include the displayed `version`; only the
+writer identity that created a run can update it. Runs advance from `queued` to
+`in_progress` to `completed`. A completed run requires one of `success`,
+`neutral`, `skipped`, `failure`, `cancelled`, `timed_out` or
+`action_required`, and cannot be reopened. Queued and in-progress runs cannot
+carry a conclusion. `details_url` follows the status target URL policy.
+
+Each report contains an output title, Markdown summary, optional Markdown text,
+up to 50 steps with bounded plain-text logs, and up to 50 file/line annotations.
+Encoded output is limited to 192 KiB and requests to 256 KiB. A commit retains
+at most 100 runs. List pages use the same `limit` and exclusive `before` cursor
+contract as other app lists. The pull request Checks tab presents run outcomes,
+annotations, rendered output and expandable escaped logs, with links to older
+runs and external details.
+
+For a required context, the newest report by timestamp wins across commit
+statuses and check runs; a check run wins a same-millisecond tie. Queued and
+in-progress runs satisfy `pending`. Completed `success`, `neutral` and `skipped`
+satisfy `success`; all other conclusions block merge. Check creation and every
+update reserve immutable request and output objects before a conditional catalog
+write. Retrying an old request returns that version without rolling back the
+visible run.
+
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor.
 Issue and pull lists accept `state=open|closed|all` plus an optional case-insensitive
 `q` search across title, description and author. Queries are limited to 256
@@ -542,7 +568,7 @@ operations run concurrently, with a 30-second deadline and an 80-KiB HTTP body
 limit. `Server-Timing: app` reports handling latency.
 
 Data lives under `<repository-prefix>/app/v1/issues`, `app/v1/pulls`,
-`app/v1/labels` and `app/v1/statuses`,
+`app/v1/labels`, `app/v1/statuses` and `app/v1/check-runs`,
 independently of Git refs, packs and metadata. Each JSON document has
 `schema_version: 1`; unknown versions are rejected. Conditional counter updates
 allocate numbers, immutable
@@ -560,14 +586,22 @@ addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Assignees, discussion deletion/moderation, edit history, notifications, merge
-commits and detailed check runs/logs remain unimplemented. Production
+Discussion deletion/moderation, edit history, notifications and merge commits
+remain unimplemented. Production
 backup/restore qualification is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
 replayed both creation requests, edited content, closed/reopened the issue and
 rejected stale edits. Both edited records survived a process restart; replaying
 the original submission IDs recovered the same records. Git refs were unchanged.
+
+The detailed-check qualification created a queued run on a real RustFS-backed
+commit, advanced it through in-progress to successful with two step logs and a
+file annotation, and recovered byte-identical detail after restart. Create took
+99.12 ms, updates took 32.63–36.95 ms, and warm list/detail reads took
+27.39–31.86 ms locally. A native HTTP push supplied a live pull head; light,
+dark and 390-pixel browser runs displayed its stored result without horizontal
+overflow.
 
 A separate RustFS qualification used a real depth-one Git client to push a pull
 request branch, created a pull request and comment, and compared the exact added
@@ -745,7 +779,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, required checks and recoverable fast-forward merge with canonical ref publication; assignees, merge commits, detailed check runs and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks and recoverable fast-forward merge with canonical ref publication; merge commits and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

@@ -17,6 +17,7 @@ use crate::{
     app::{self, Error, Result},
     app_storage,
     auth::Principal,
+    checks,
     receive::{self, ReceiveError},
     server::Server,
     statuses,
@@ -209,15 +210,24 @@ async fn execute(
     {
         return Err(Error::MergeConflict);
     }
-    // This read orders merge admission before any later status update. Once the
-    // merge reservation exists, retries recover that admitted publication.
-    let statuses = match repo.config.protection(&pull.base_ref) {
-        Some(rule) if !rule.required_checks.is_empty() => {
-            statuses::latest(repo, &candidate.head_oid).await?
-        }
-        _ => vec![],
+    // These reads order merge admission before later status or check-run updates.
+    // Once the reservation exists, retries recover that admitted publication.
+    let (statuses, check_runs) = match repo.config.protection(&pull.base_ref) {
+        Some(rule) if !rule.required_checks.is_empty() => (
+            statuses::latest(repo, &candidate.head_oid).await?,
+            checks::latest(repo, &candidate.head_oid).await?,
+        ),
+        _ => (vec![], vec![]),
     };
-    if !merge_requirements(&pull, &repo.config, &candidate.head_oid, &statuses).satisfied {
+    if !merge_requirements(
+        &pull,
+        &repo.config,
+        &candidate.head_oid,
+        &statuses,
+        &check_runs,
+    )
+    .satisfied
+    {
         return Err(Error::MergeBlocked);
     }
     let record = storage::reserve_merge(repo, id, &candidate).await?;

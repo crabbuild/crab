@@ -5,6 +5,7 @@ mod app_storage;
 mod assets;
 mod assignees;
 mod auth;
+mod checks;
 mod config;
 mod git;
 mod issues;

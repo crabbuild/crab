@@ -716,6 +716,210 @@ main {
 .pull-conversation > .discussion-form h3 {
   margin-top: 0;
 }
+.check-runs {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.check-run-list {
+  min-width: 0;
+  background: var(--bgColor-muted);
+  border-right: 1px solid var(--borderColor-default);
+}
+.check-run-list > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 16px;
+  border-bottom: 1px solid var(--borderColor-default);
+}
+.check-run-list nav {
+  display: grid;
+  padding: 8px;
+}
+.check-run-list nav a {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  color: var(--fgColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.check-run-list nav a:hover,
+.check-run-list nav a.active {
+  background: var(--bgColor-default);
+  text-decoration: none;
+}
+.check-run-list nav a.active {
+  box-shadow: inset 3px 0 var(--borderColor-accent-emphasis);
+}
+.check-run-list nav a > span {
+  min-width: 0;
+}
+.check-run-list nav strong,
+.check-run-list nav small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.check-run-list nav small {
+  color: var(--fgColor-muted);
+}
+.check-run-list footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 16px 16px;
+  font-size: 12px;
+}
+.check-run-list svg,
+.check-run-heading > svg,
+.check-steps summary > svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.check-run-list .success svg,
+.check-run-heading.success > svg,
+.check-steps .success > svg {
+  color: var(--fgColor-success);
+}
+.check-run-list .queued svg,
+.check-run-list .in_progress svg,
+.check-run-heading.queued > svg,
+.check-run-heading.in_progress > svg,
+.check-steps .queued > svg,
+.check-steps .in_progress > svg {
+  color: var(--fgColor-attention);
+}
+.check-run-list .failure svg,
+.check-run-list .cancelled svg,
+.check-run-list .timed_out svg,
+.check-run-list .action_required svg,
+.check-run-heading.failure > svg,
+.check-run-heading.cancelled > svg,
+.check-run-heading.timed_out > svg,
+.check-run-heading.action_required > svg,
+.check-steps .failure > svg,
+.check-steps .cancelled > svg,
+.check-steps .timed_out > svg,
+.check-steps .action_required > svg {
+  color: var(--fgColor-danger);
+}
+.check-run-detail {
+  min-width: 0;
+  padding: 24px;
+}
+.check-run-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.check-run-heading h3,
+.check-run-heading p {
+  margin: 0;
+}
+.check-run-heading > div {
+  min-width: 0;
+  flex: 1;
+}
+.check-run-heading > a {
+  flex: 0 0 auto;
+}
+.check-output,
+.check-steps,
+.check-annotations {
+  margin-top: 20px;
+}
+.check-output > h3,
+.check-steps > h3,
+.check-annotations > h4 {
+  margin: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--borderColor-default);
+}
+.check-output > .discussion-markdown + .discussion-markdown {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.check-steps > p {
+  padding: 4px 16px 12px;
+}
+.check-steps details + details {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.check-steps summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+.check-steps summary strong {
+  min-width: 0;
+  flex: 1;
+}
+.check-steps summary span {
+  color: var(--fgColor-muted);
+  font-size: 12px;
+}
+.check-steps pre {
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  padding: 16px;
+  color: var(--fgColor-default);
+  background: var(--bgColor-muted);
+  border-top: 1px solid var(--borderColor-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.check-annotations {
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.check-annotations ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.check-annotations li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 12px 16px;
+  text-align: left;
+}
+.check-annotations li + li {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.check-annotations li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.check-annotations li p {
+  overflow-wrap: anywhere;
+}
+.check-annotations li.notice > svg {
+  color: var(--fgColor-accent);
+}
+.check-annotations li.warning > svg {
+  color: var(--fgColor-attention);
+}
+.check-annotations li.failure > svg {
+  color: var(--fgColor-danger);
+}
+.check-empty {
+  grid-column: 1 / -1;
+  align-self: center;
+  text-align: center;
+}
 .pull-timeline {
   display: grid;
   gap: 16px;
@@ -931,6 +1135,22 @@ main {
   .review-event > header .muted {
     width: 100%;
     margin-left: 23px;
+  }
+  .check-runs {
+    grid-template-columns: 1fr;
+  }
+  .check-run-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--borderColor-default);
+  }
+  .check-run-detail {
+    padding: 16px;
+  }
+  .check-run-heading {
+    flex-wrap: wrap;
+  }
+  .check-run-heading > a {
+    margin-left: 26px;
   }
 }
 .repository-tree {
