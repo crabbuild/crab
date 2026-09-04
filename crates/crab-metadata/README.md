@@ -71,11 +71,25 @@ The snapshot digest does not replace the manifest's Git-only validation digest.
 Callers bind the repository namespace separately and revalidate the snapshot;
 neither digest reserves physical dependencies against GC.
 
+Receive validation uses
+`FileIndexLookupSession::for_snapshot(&layout, &snapshot, limits)` when the
+composing operation must supply stricter aggregate bounds.
+
+`FileIndexLookupLimits` bounds batch size, cached distinct files, cumulative shard
+visits, each fetched shard body and expanded recipe entries. The inventory must
+fit the visit budget before the session is created. A complete scan reserves its
+visits before dispatch; failures and cancellation consume that reservation, and
+cannot create cached absences. Cached results need no further shard visits.
+At most four shard reads overlap. Excluding transport retries, total shard-body
+bytes are bounded by `max_shard_visits * max_shard_bytes`; each visit also permits
+one HEAD and at most a 12-byte trailer plus a 4 KiB bloom prefilter read.
+
 A selected shard is only a dependency candidate. Verify the file's content at
 origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
-publication base before accepting a write. Snapshot lookup retains the canonical
-scan's per-shard bounds; the composing request must also provide admission and
-operation-wide limits.
+publication base before accepting a write. The composing request must also own
+process-wide admission and deadlines. Shard parsing remains synchronous and
+bounded by the supplied body and recipe limits; deadline/admission integration
+with CPU workers remains part of the native HTTP receive implementation.
 
 ## Usage
 
