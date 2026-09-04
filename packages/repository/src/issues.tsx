@@ -9,6 +9,7 @@ import {
   type Repository,
 } from "./api";
 import { Link, Result } from "./ui";
+import { ConflictReview, useMutation } from "./discussion-mutations";
 import {
   DiscussionMarkdown,
   Editor,
@@ -40,60 +41,6 @@ function timestamp(value: number) {
     timeStyle: "short",
   });
 }
-function useMutation(csrf: string) {
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
-  const active = useRef(true);
-  const busy = useRef(false);
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
-  async function run<T>(
-    url: string,
-    method: "POST" | "PATCH",
-    input: object,
-  ): Promise<T | undefined> {
-    if (busy.current) return;
-    busy.current = true;
-    setPending(true);
-    setError(undefined);
-    try {
-      const response = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
-        body: JSON.stringify(input),
-        signal: AbortSignal.timeout(35_000),
-      });
-      if (response.status === 401)
-        window.dispatchEvent(new Event("crab-session-expired"));
-      const body: unknown = await response.json().catch(() => null);
-      if (!response.ok) {
-        const failure = body as { error?: { message?: string } } | null;
-        throw new Error(
-          failure?.error?.message ?? `Request failed (${response.status})`,
-        );
-      }
-      if (active.current) return body as T;
-    } catch (error) {
-      if (active.current)
-        setError(
-          error instanceof Error &&
-            error.name !== "TimeoutError" &&
-            error.name !== "TypeError"
-            ? error.message
-            : "The response was lost. Retry this submission to recover a possible completed write.",
-        );
-    } finally {
-      busy.current = false;
-      if (active.current) setPending(false);
-    }
-  }
-  return { run, pending, error };
-}
-
 // Retain the key for an unchanged submission so retrying an ambiguous response cannot duplicate it.
 function useSubmission() {
   const current = useRef({ body: "", id: crypto.randomUUID() });
@@ -383,6 +330,11 @@ function IssueDetail({
           repo={repo}
           csrf={csrf}
           onCancel={() => setEditing(false)}
+          onReviewed={(latest) =>
+            setIssue((old) =>
+              old && old.version > latest.version ? old : latest,
+            )
+          }
           onSaved={(issue) => {
             setIssue(issue);
             setEditing(false);
@@ -437,23 +389,27 @@ function EditIssue({
   csrf,
   onCancel,
   onSaved,
+  onReviewed,
 }: {
   issue: Issue;
   repo: Repository;
   csrf: string;
   onCancel: () => void;
   onSaved: (issue: Issue) => void;
+  onReviewed: (issue: Issue) => void;
 }) {
   const [title, setTitle] = useState(issue.title);
   const [body, setBody] = useState(issue.body);
   const mutation = useMutation(csrf);
   // The edit retains the version at which the draft began, even if the parent refreshes.
   const version = useRef(issue.version);
+  const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);
   return (
     <form
       className="discussion-compose panel"
       onSubmit={async (event) => {
         event.preventDefault();
+        if (mutation.conflict) return;
         const updated = await mutation.run<Issue>(
           endpoint(repo, `issues/${issue.number}`),
           "PATCH",
@@ -479,12 +435,29 @@ function EditIssue({
         onChange={setBody}
         disabled={mutation.pending}
       />
-      <Failure message={mutation.error} />
+      {mutation.conflict ? (
+        <ConflictReview<Issue>
+          url={endpoint(repo, `issues/${issue.number}`)}
+          onResolve={(latest, choice) => {
+            // Only explicit review advances the draft's version; background refresh cannot.
+            version.current = latest.version;
+            if (choice === "saved") {
+              setTitle(latest.title);
+              setBody(latest.body);
+            }
+            onReviewed(latest);
+            mutation.reset();
+          }}
+        />
+      ) : (
+        <Failure message={mutation.error} />
+      )}
       <div className="discussion-actions">
         <Button
+          ref={save}
           type="submit"
           variant="primary"
-          disabled={mutation.pending || !title.trim()}
+          disabled={mutation.pending || mutation.conflict || !title.trim()}
         >
           Save changes
         </Button>
@@ -527,7 +500,11 @@ function Comments({
       });
   }, [page.data]);
   function upsert(comment: Comment) {
-    setItems((old) => ({ ...old, [comment.number]: comment }));
+    setItems((old) =>
+      old[comment.number]?.version > comment.version
+        ? old
+        : { ...old, [comment.number]: comment },
+    );
   }
   return (
     <section className="issue-comments" aria-label="Discussion">
@@ -670,6 +647,7 @@ function CommentCard({
   const [draft, setDraft] = useState<{ body: string; version: number }>();
   const mutation = useMutation(csrf);
   const editTrigger = useReturnFocus<HTMLButtonElement>(Boolean(draft));
+  const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);
   return (
     <article id={`comment-${comment.number}`} className="discussion-card panel">
       <header>
@@ -682,9 +660,10 @@ function CommentCard({
           <Button
             ref={editTrigger}
             size="small"
-            onClick={() =>
-              setDraft({ body: comment.body, version: comment.version })
-            }
+            onClick={() => {
+              mutation.reset();
+              setDraft({ body: comment.body, version: comment.version });
+            }}
           >
             Edit comment
           </Button>
@@ -695,6 +674,7 @@ function CommentCard({
           className="comment-edit"
           onSubmit={async (event) => {
             event.preventDefault();
+            if (mutation.conflict) return;
             const updated = await mutation.run<Comment>(
               endpoint(repo, `issues/${issue}/comments/${comment.number}`),
               "PATCH",
@@ -715,12 +695,29 @@ function CommentCard({
             disabled={mutation.pending}
             required
           />
-          <Failure message={mutation.error} />
+          {mutation.conflict ? (
+            <ConflictReview<Comment>
+              url={endpoint(repo, `issues/${issue}/comments/${comment.number}`)}
+              onResolve={(latest, choice) => {
+                setDraft({
+                  body: choice === "saved" ? latest.body : draft.body,
+                  version: latest.version,
+                });
+                onSaved(latest);
+                mutation.reset();
+              }}
+            />
+          ) : (
+            <Failure message={mutation.error} />
+          )}
           <div className="discussion-actions">
             <Button
+              ref={save}
               type="submit"
               variant="primary"
-              disabled={mutation.pending || !draft.body.trim()}
+              disabled={
+                mutation.pending || mutation.conflict || !draft.body.trim()
+              }
             >
               Save comment
             </Button>

@@ -299,9 +299,10 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-These four checks cover issue/comment edit focus, cancellation, close/reopen,
+These seven checks cover issue/comment edit focus, cancellation, close/reopen,
 Markdown tab navigation, posting from preview, retained drafts after failure,
-and preserving focus moved elsewhere during a delayed response. Header checks
+preserving focus moved elsewhere during a delayed response, repeated edit
+conflicts, and retrying a failed read of newer content. Header checks
 exercise light/dark themes at 320–1,280 px, including control hit targets and
 Git access panel bounds. They use
 in-memory HTTP fixtures to isolate browser behavior; they do not prove storage
@@ -311,13 +312,27 @@ separate browser job and retains traces/screenshots on failure.
 An authenticated browser run against a separate RustFS fixture also exercised
 issue creation/edit/cancellation, comment preview/post/edit, close/reopen and
 page reload. A concurrent edit returned a conflict while preserving the local
-draft and the separately saved content; Git refs remained unchanged. Conflict
-review and merging still require additional UI work. Desktop/mobile screenshots
+draft and the separately saved content; Git refs remained unchanged. Desktop/mobile screenshots
 revealed overlapping account/theme controls; the header now wraps account
 actions onto a separate mobile row, with its Git access panel below the header.
 The saved title, comment and reopened state also survived a server restart and
 fresh sign-in. These checks use a local test issuer, not a production identity
 provider, and do not constitute a complete accessibility audit.
+
+When an issue or comment save conflicts, an inline panel loads the saved title
+and raw Markdown while retaining the editable draft. Save remains disabled
+until the user reviews that version. **Continue with my draft** retains local
+content; **Use saved content** replaces the form with the displayed version.
+Neither action writes to storage. Users can combine changes in the form before
+explicitly saving; another concurrent edit produces another conflict. A failed
+read has a retry action and leaves the draft intact. This is manual conflict
+resolution, without automatic merging or forced writes.
+
+A real RustFS browser run exercised both choices and two successive edit races
+for both issues and comments. Version checks rejected all four stale saves;
+review choices left storage unchanged, and explicit combined saves persisted
+after reload. Git refs remained unchanged. Light/dark desktop/mobile conflict
+panels were inspected, with no browser runtime errors or horizontal overflow.
 
 The authenticated Kubernetes/RustFS run matched the same data checks. Its median
 tree request was 8.878 ms, diff request 40.688 ms, and blame request 1,982.136 ms.
