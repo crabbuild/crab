@@ -1921,6 +1921,26 @@ impl From<crab_storage::error::StorageError> for CrabError {
     }
 }
 
+impl From<crab_write::WriteError> for CrabError {
+    fn from(error: crab_write::WriteError) -> Self {
+        match error {
+            crab_write::WriteError::Storage(source) => Self::from(source),
+            crab_write::WriteError::Metadata(source) => Self::from(source),
+            crab_write::WriteError::Git(source) => Self::from(source),
+            crab_write::WriteError::Io(source) => Self::Io(source),
+            crab_write::WriteError::CorruptObject { path, reason } => {
+                Self::CorruptObject { path, reason }
+            }
+            crab_write::WriteError::Internal(message) => Self::Internal(message),
+            crab_write::WriteError::Cancelled => Self::Cancelled,
+            error @ (crab_write::WriteError::Worker(_)
+            | crab_write::WriteError::PackIdentity { .. }) => {
+                Self::Io(std::io::Error::other(error))
+            }
+        }
+    }
+}
+
 impl From<crab_lfs::LfsError> for CrabError {
     fn from(error: crab_lfs::LfsError) -> Self {
         match error {

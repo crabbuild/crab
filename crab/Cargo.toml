@@ -160,6 +160,7 @@ crab-git = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
 crab-read = { workspace = true }
+crab-write = { workspace = true }
 crab-remote-git = { workspace = true }
 crab-staging = { workspace = true }
 crab-storage = { workspace = true }

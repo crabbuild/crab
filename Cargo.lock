@@ -1885,6 +1885,7 @@ dependencies = [
  "crab-types",
  "crab-vfs",
  "crab-workflow",
+ "crab-write",
  "crab-xet",
  "crc32c",
  "crc32fast",
@@ -2510,6 +2511,27 @@ dependencies = [
  "unicode-normalization",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "crab-write"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crab-git",
+ "crab-metadata",
+ "crab-remote-git",
+ "crab-storage",
+ "crab-xet",
+ "futures-util",
+ "gix-hash",
+ "gix-object",
+ "object_store",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -32,7 +32,7 @@ CrabBuild/
 └── .codex/            Repository-local Codex skills
 ```
 
-Cargo workspace: 21 members — 20 shared and server crates under `crates/`, plus `crab`.
+Cargo workspace: 22 members — 21 shared and server crates under `crates/`, plus `crab`.
 There is no desktop application, Python package, or SDK package in this workspace; desktop material under `packages/web/` is documentation and marketing content.
 
 ## Architecture
