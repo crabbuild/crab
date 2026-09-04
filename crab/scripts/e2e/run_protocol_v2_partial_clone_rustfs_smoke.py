@@ -270,13 +270,21 @@ class ProtocolV2PartialCloneSmoke:
         return env
 
     def temp_disk_bytes(self) -> int:
+        def on_walk_error(error: OSError) -> None:
+            # Git removes temporary pack directories while resource sampling
+            # runs. Losing that sample is normal; other scan errors are not.
+            if not isinstance(error, FileNotFoundError):
+                raise error
+
         total = 0
-        for path in self.temp_root.rglob("*"):
-            try:
-                if path.is_file():
-                    total += path.stat().st_size
-            except FileNotFoundError:
-                continue
+        for directory, _, names in os.walk(self.temp_root, onerror=on_walk_error):
+            for name in names:
+                path = Path(directory) / name
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except FileNotFoundError:
+                    continue
         return total
 
     def child_usage(self) -> dict[str, int]:
