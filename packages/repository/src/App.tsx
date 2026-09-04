@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useLayoutEffect, useState } from "react";
 import { BaseStyles, Button, Label, Spinner } from "@primer/react";
 import { ThemeProvider } from "@primer/react/next";
 import {
@@ -27,6 +27,7 @@ import {
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 import { CloneMenu, GitAccess } from "./git-access";
+import { RevisionPicker } from "./revision-picker";
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
 );
@@ -70,6 +71,9 @@ export function App() {
     localStorage.setItem("crab-theme", theme);
   }, [theme]);
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
+  useLayoutEffect(() => {
+    document.documentElement.style.colorScheme = resolved;
+  }, [resolved]);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -358,34 +362,13 @@ function RepositoryPage({
                 <>
                   <div className="toolbar">
                     <div className="row">
-                      <span className="branch-picker">
-                        {revName?.startsWith("refs/tags/") ? (
-                          <TagIcon />
-                        ) : (
-                          <GitBranchIcon />
-                        )}
-                        <label className="sr-only" htmlFor="revision">
-                          Branch or tag
-                        </label>
-                        <select
-                          id="revision"
-                          value={selected ? revName : rev}
-                          onChange={(event) =>
-                            navigate(
-                              repoHref(repo, { rev: event.target.value, view }),
-                            )
-                          }
-                        >
-                          {!selected && (
-                            <option value={rev}>{short(rev)}</option>
-                          )}
-                          {data.refs.map((ref) => (
-                            <option key={ref.name} value={ref.name}>
-                              {ref.name.replace(/^refs\/(heads|tags)\//, "")}
-                            </option>
-                          ))}
-                        </select>
-                      </span>
+                      <RevisionPicker
+                        refs={data}
+                        revision={revName ?? rev}
+                        onSelect={(name) =>
+                          navigate(repoHref(repo, { rev: name, view }))
+                        }
+                      />
                       <span className="ref-count muted">
                         <GitBranchIcon />
                         {
