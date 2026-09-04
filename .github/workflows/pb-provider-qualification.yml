@@ -142,19 +142,6 @@ jobs:
             --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --size-mib 4
 
-      # Canary failures live outside the provider report directory. Retain
-      # their redacted diagnostics without uploading repositories or caches.
-      - name: Upload canary evidence
-        if: always() && steps.canary.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: provider-canary-s3-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/report.json
-            ${{ runner.temp }}/provider-qualification/s3/canary/gha-${{ github.run_id }}-${{ github.run_attempt }}/logs/*.log
-          if-no-files-found: error
-          retention-days: 90
-
       - name: Verify retained evidence
         run: |
           python3 crab/scripts/verify-provider-qualification-report.py \
