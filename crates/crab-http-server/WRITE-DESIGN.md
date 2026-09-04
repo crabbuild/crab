@@ -30,7 +30,7 @@ through `crab-remote-git` from local RustFS. All 53 objects matched native Git b
 The release run took 452 ms including repository open, without cache isolation.
 This measures intake, not receive-pack publication or production push latency.
 
-Remaining intake work: request-bounded dependency orchestration, canonical pack/index
+Remaining intake work: dependency admission/deadlines, canonical pack/index
 publication, and HTTP streaming with a request-bound deadline. No Git binary,
 clone or local Git object database is used by quarantine or preparation. The
 test oracle uses Git independently.
@@ -158,10 +158,20 @@ inventory. Cancellation leaves no reader checkpoints or reader handle to close.
 Ordinary current-state lookups retain the same shared anchor derivation and
 acceleration behavior.
 
+Snapshot-bound callers supply `FileIndexLookupLimits`: file queries/cache entries,
+cumulative shard visits, individual shard-body bytes and recipe expansion. The
+inventory must fit before session allocation. Each scan reserves its complete
+visit count before dispatch; failure or cancellation does not refund the count
+or cache incomplete absence results. Successful cached results need no new I/O.
+Four reads may overlap. Full-body traffic is bounded by visits times the body
+cap, plus each visit's HEAD and at most 4,108 bloom/trailer bytes, excluding the
+transport's separately bounded retries. Current-state readers retain their
+existing scan policy. No config or environment setting is added.
+
 Selection and content evidence are not publication authority. The publisher must
 acquire writer/GC fences and recheck its exact base before publication. Pointer
-hints and file-index hits alone are insufficient. Request-wide admission and
-scan budgets, LFS dependency integration and canonical fenced publication remain
+hints and file-index hits alone are insufficient. Process-wide admission,
+deadline integration with CPU workers, LFS dependencies and fenced publication remain
 pending; HTTP push is still disabled.
 
 Six focused tests cover repeated compressed content, empty files, missing or
@@ -184,6 +194,16 @@ exact 16,384 bytes. The current snapshot selects only generation 2's dependency.
 All six repository objects retain identical sizes and ETags during the reads.
 Captured lookup plus content proof took 3.293 ms locally. This is an isolated
 metadata/content fixture, not a native Git push or production latency result.
+
+The bounded lookup version passes 16 file-index tests, including oversized
+inventory/query rejection before storage reads, cached-result reuse, cumulative
+cache/visit caps, shard/recipe limits, and retained reservations after errors and
+cancellation. A fresh RustFS fixture repeats the pinned lookup/content proof with
+one allowed shard visit, then verifies exhausted-budget and oversized-body
+rejections. The failed body read keeps its visit charged; all six repository
+objects remain unchanged. Lookup, cached/budget checks and content proof took
+3.168 ms locally. Process-wide admission and CPU deadline behavior are not proven
+by this small fixture.
 
 ## Existing code and the semantic mismatch
 

@@ -6,6 +6,13 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// A snapshot-bound file lookup exhausted its caller-owned budget.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup exceeds {resource} limit ({maximum})")]
+    FileLookupLimit {
+        resource: &'static str,
+        maximum: usize,
+    },
     /// Local filesystem operation failed.
     #[error("metadata I/O error: {source}")]
     Io {

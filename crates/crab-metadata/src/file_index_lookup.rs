@@ -22,6 +22,37 @@ const DB_LABEL: &str = "file_index_db";
 const GET_BATCH_CONCURRENCY: usize = 256;
 const SHARD_SEARCH_CONCURRENCY: usize = 4;
 
+/// Resource limits for one snapshot-bound file lookup session.
+///
+/// File count bounds each batch and the session's cached distinct files. Shard
+/// visits count cumulatively, including bloom misses and failed scans. Each
+/// visit reads at most one bounded body plus a 12-byte trailer and 4 KiB bloom;
+/// transport retry limits remain owned by `Store`. At most four visits overlap.
+#[derive(Debug, Clone, Copy)]
+pub struct FileIndexLookupLimits {
+    pub max_files: usize,
+    pub max_shard_visits: usize,
+    pub max_shard_bytes: u64,
+    pub max_recipe_entries: usize,
+}
+
+impl FileIndexLookupLimits {
+    // Existing current-state readers keep their established batch/scan policy.
+    const CURRENT_STATE: Self = Self {
+        max_files: usize::MAX,
+        max_shard_visits: usize::MAX,
+        max_shard_bytes: crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
+        max_recipe_entries: crab_xet::shard_parse::MAX_SHARD_CHUNK_ENTRIES,
+    };
+}
+
+fn check_limit(value: usize, maximum: usize, resource: &'static str) -> Result<()> {
+    if value > maximum {
+        return Err(MetadataError::FileLookupLimit { resource, maximum });
+    }
+    Ok(())
+}
+
 fn file_index_path(repo_prefix: &str) -> String {
     format!("{}/file_index_db/", repo_prefix.trim_end_matches('/'))
 }
@@ -120,6 +151,7 @@ impl CommittedShardAnchor {
 struct ManifestFallbackCache {
     found: HashMap<MerkleHash, MerkleHash>,
     missing: HashSet<MerkleHash>,
+    shard_visits: usize,
 }
 
 fn validate_record(
@@ -200,6 +232,7 @@ pub struct FileIndexLookupSession {
     storage: crab_storage::Store,
     router: crab_storage::StoreLayout<crab_storage::Store>,
     manifest_fallback: tokio::sync::Mutex<ManifestFallbackCache>,
+    limits: FileIndexLookupLimits,
 }
 
 impl FileIndexLookupSession {
@@ -230,7 +263,13 @@ impl FileIndexLookupSession {
     pub fn for_snapshot(
         router: &crab_storage::StoreLayout<crab_storage::Store>,
         snapshot: &crate::manifest_store::RepositorySnapshot,
+        limits: FileIndexLookupLimits,
     ) -> Result<Self> {
+        check_limit(
+            snapshot.journal.shards.len(),
+            limits.max_shard_visits,
+            "shard visits",
+        )?;
         let anchor = CommittedShardAnchor::from_snapshot(snapshot, router)?;
         Ok(Self {
             reader: None,
@@ -238,6 +277,7 @@ impl FileIndexLookupSession {
             storage: router.store().clone(),
             router: router.clone(),
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            limits,
         })
     }
 
@@ -284,6 +324,7 @@ impl FileIndexLookupSession {
             storage,
             router,
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            limits: FileIndexLookupLimits::CURRENT_STATE,
         })
     }
 
@@ -310,6 +351,7 @@ impl FileIndexLookupSession {
         &self,
         file_hashes: &[MerkleHash],
     ) -> Result<Vec<Option<MerkleHash>>> {
+        check_limit(file_hashes.len(), self.limits.max_files, "file queries")?;
         if file_hashes.is_empty() {
             return Ok(Vec::new());
         }
@@ -341,6 +383,7 @@ impl FileIndexLookupSession {
         &self,
         file_hashes: &[MerkleHash],
     ) -> Result<Vec<Option<CommittedFileRecord>>> {
+        check_limit(file_hashes.len(), self.limits.max_files, "file queries")?;
         if file_hashes.is_empty() {
             return Ok(Vec::new());
         }
@@ -378,6 +421,7 @@ impl FileIndexLookupSession {
         &self,
         file_hashes: &[MerkleHash],
     ) -> Result<Vec<Option<MerkleHash>>> {
+        check_limit(file_hashes.len(), self.limits.max_files, "file queries")?;
         let Some(anchor) = self.anchor.as_ref() else {
             return Ok(vec![None; file_hashes.len()]);
         };
@@ -390,6 +434,22 @@ impl FileIndexLookupSession {
             .copied()
             .collect::<HashSet<_>>();
         if !unresolved.is_empty() {
+            let cached_files = cache.found.len().saturating_add(cache.missing.len());
+            check_limit(
+                unresolved.len(),
+                self.limits.max_files.saturating_sub(cached_files),
+                "uncached file queries",
+            )?;
+            check_limit(
+                anchor.shards.len(),
+                self.limits
+                    .max_shard_visits
+                    .saturating_sub(cache.shard_visits),
+                "remaining shard visits",
+            )?;
+            // Reserve the whole scan before dispatch. Failed/cancelled scans
+            // consume their reservation and cannot create cached absences.
+            cache.shard_visits += anchor.shards.len();
             let batches = stream::iter(anchor.shards.iter().copied().map(|shard_hash| {
                 let storage = self.storage.clone();
                 let router = self.router.clone();
@@ -409,7 +469,9 @@ impl FileIndexLookupSession {
                     let (body, _) = storage
                         .get_with_etag_bounded(
                             &path,
-                            crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64,
+                            self.limits
+                                .max_shard_bytes
+                                .min(crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES as u64),
                         )
                         .await?;
                     if crab_xet::hash::compute_data_hash(&body) != shard_hash {
@@ -419,7 +481,11 @@ impl FileIndexLookupSession {
                         });
                     }
                     let recipes =
-                        crab_xet::shard_parse::extract_file_recipes_for_hashes(&body, &unresolved)?;
+                        crab_xet::shard_parse::extract_file_recipes_for_hashes_with_limit(
+                            &body,
+                            &unresolved,
+                            self.limits.max_recipe_entries,
+                        )?;
                     Ok::<_, MetadataError>(
                         recipes
                             .into_iter()
@@ -644,6 +710,15 @@ mod tests {
     use bytes::Bytes;
     use object_store::memory::InMemory;
 
+    fn lookup_limits() -> FileIndexLookupLimits {
+        FileIndexLookupLimits {
+            max_files: 16,
+            max_shard_visits: 16,
+            max_shard_bytes: 1 << 20,
+            max_recipe_entries: 16,
+        }
+    }
+
     fn hash_from_seed(seed: u64) -> MerkleHash {
         MerkleHash::from([seed, seed.wrapping_mul(31), seed.wrapping_mul(97), seed])
     }
@@ -843,7 +918,8 @@ mod tests {
         db.close().await.unwrap();
 
         // Open after the later state is durable: only the supplied snapshot is authority.
-        let pinned = FileIndexLookupSession::for_snapshot(&router, &captured).unwrap();
+        let pinned =
+            FileIndexLookupSession::for_snapshot(&router, &captured, lookup_limits()).unwrap();
         let pinned_result = pinned.lookup_batch(&[old_file, new_file]).await;
         pinned.close().await.unwrap();
         let latest = FileIndexLookupSession::open(Arc::clone(&store), "pinned/repo")
@@ -878,7 +954,8 @@ mod tests {
             .try_collect::<BTreeMap<_, _>>()
             .await
             .unwrap();
-        let session = FileIndexLookupSession::for_snapshot(&router, &snapshot).unwrap();
+        let session =
+            FileIndexLookupSession::for_snapshot(&router, &snapshot, lookup_limits()).unwrap();
         let result = session.lookup(&file).await;
         session.close().await.unwrap();
         result.unwrap();
@@ -889,6 +966,236 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, before);
+    }
+
+    async fn bounded_lookup_fixture() -> (
+        crab_storage::StoreLayout<crab_storage::Store>,
+        crate::manifest_store::RepositorySnapshot,
+        MerkleHash,
+        MerkleHash,
+    ) {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let router = crab_storage::StoreLayout::new(storage.clone(), "bounded/repo".to_owned());
+        let file = hash_from_seed(1);
+        let (body, shard) = shard_with_file(file);
+        seed_file_index(store, "bounded/repo", &[(file, shard)]).await;
+        storage
+            .put(&router.shard_path(&shard), Bytes::from(body))
+            .await
+            .unwrap();
+        let snapshot = crate::manifest_store::read_repository_snapshot(&storage, &router)
+            .await
+            .unwrap();
+        (router, snapshot, file, shard)
+    }
+
+    #[tokio::test]
+    async fn excessive_inventory_and_batch_are_rejected_before_storage_reads() {
+        let (router, snapshot, file, _) = bounded_lookup_fixture().await;
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&reads);
+        let storage = router
+            .store()
+            .clone()
+            .with_read_request_observer(Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }));
+        let router = crab_storage::StoreLayout::new(storage, router.repo_prefix().to_owned());
+        let inventory_rejected = matches!(
+            FileIndexLookupSession::for_snapshot(
+                &router,
+                &snapshot,
+                FileIndexLookupLimits {
+                    max_shard_visits: 0,
+                    ..lookup_limits()
+                }
+            ),
+            Err(MetadataError::FileLookupLimit {
+                resource: "shard visits",
+                ..
+            })
+        );
+        let session = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_files: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        let batch_rejected = matches!(
+            session.lookup_batch(&[file, file]).await,
+            Err(MetadataError::FileLookupLimit {
+                resource: "file queries",
+                ..
+            })
+        );
+        assert_eq!(
+            (
+                inventory_rejected,
+                batch_rejected,
+                reads.load(Ordering::Relaxed)
+            ),
+            (true, true, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_scan_keeps_its_reservation_without_caching_absence() {
+        let (router, snapshot, file, shard) = bounded_lookup_fixture().await;
+        router
+            .store()
+            .delete(&router.shard_path(&shard))
+            .await
+            .unwrap();
+        let session = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_shard_visits: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        let first_failed = matches!(
+            session.lookup(&file).await,
+            Err(MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. }
+            })
+        );
+        let (body, _) = shard_with_file(file);
+        router
+            .store()
+            .put(&router.shard_path(&shard), Bytes::from(body))
+            .await
+            .unwrap();
+        let retry_rejected = matches!(
+            session.lookup(&file).await,
+            Err(MetadataError::FileLookupLimit {
+                resource: "remaining shard visits",
+                maximum: 0
+            })
+        );
+        assert_eq!((first_failed, retry_rejected), (true, true));
+    }
+
+    #[tokio::test]
+    async fn cached_queries_reuse_results_after_visit_budget_is_spent() {
+        let (router, snapshot, file, shard) = bounded_lookup_fixture().await;
+        let session = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_shard_visits: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        session.lookup(&file).await.unwrap();
+        let cached = session.lookup(&file).await.unwrap();
+        let fresh_rejected = matches!(
+            session.lookup(&hash_from_seed(99)).await,
+            Err(MetadataError::FileLookupLimit {
+                resource: "remaining shard visits",
+                ..
+            })
+        );
+        assert_eq!((cached, fresh_rejected), (Some(shard), true));
+    }
+
+    #[tokio::test]
+    async fn cache_admission_bounds_distinct_files_across_batches() {
+        let (router, snapshot, file, _) = bounded_lookup_fixture().await;
+        let session = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_files: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        session.lookup(&file).await.unwrap();
+        assert!(matches!(
+            session.lookup(&hash_from_seed(99)).await,
+            Err(MetadataError::FileLookupLimit {
+                resource: "uncached file queries",
+                maximum: 0
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn shard_body_and_recipe_limits_fail_closed() {
+        let (router, snapshot, file, _) = bounded_lookup_fixture().await;
+        let bytes = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_shard_bytes: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        let recipe = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_recipe_entries: 0,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            bytes.lookup(&file).await,
+            Err(MetadataError::Storage {
+                source: crab_storage::StorageError::CorruptObject { .. }
+            })
+        ));
+        assert!(matches!(
+            recipe.lookup(&file).await,
+            Err(MetadataError::Xet { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_scan_keeps_its_reservation() {
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+        use std::time::Duration;
+        let (router, snapshot, file, _) = bounded_lookup_fixture().await;
+        let store = ThrottledStore::new(
+            Arc::clone(router.store().inner()),
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_secs(60),
+                ..Default::default()
+            },
+        );
+        let router = crab_storage::StoreLayout::new(
+            crab_storage::Store::new(Arc::new(store)),
+            router.repo_prefix().to_owned(),
+        );
+        let session = FileIndexLookupSession::for_snapshot(
+            &router,
+            &snapshot,
+            FileIndexLookupLimits {
+                max_shard_visits: 1,
+                ..lookup_limits()
+            },
+        )
+        .unwrap();
+        let timed_out = tokio::time::timeout(Duration::from_millis(10), session.lookup(&file))
+            .await
+            .is_err();
+        let retry_rejected = matches!(
+            session.lookup(&file).await,
+            Err(MetadataError::FileLookupLimit {
+                resource: "remaining shard visits",
+                maximum: 0
+            })
+        );
+        assert_eq!((timed_out, retry_rejected), (true, true));
     }
 
     #[tokio::test]
