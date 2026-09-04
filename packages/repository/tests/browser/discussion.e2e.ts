@@ -26,7 +26,13 @@ async function openDiscussion(page: Page) {
     } else if (path === "/api/repos") {
       json = {
         repositories: [
-          { owner: "team", name: "project", description: "", access: "write" },
+          {
+            owner: "team",
+            name: "project",
+            description: "",
+            access: "write",
+            protected_branches: [],
+          },
         ],
       };
     } else if (path === "/api/repos/team/project/issues/1") {

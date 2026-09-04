@@ -29,6 +29,8 @@ pub struct RepositoryConfig {
     pub description: String,
     #[serde(default)]
     pub members: Vec<RepositoryMember>,
+    #[serde(default)]
+    pub protected_branches: Vec<String>,
 }
 
 /// A provider subject's explicit repository permission.
@@ -91,6 +93,19 @@ impl Config {
                     ));
                 }
             }
+            let mut protected = HashSet::new();
+            for branch in &repository.protected_branches {
+                let reference = format!("refs/heads/{branch}");
+                if branch.is_empty()
+                    || branch.starts_with("refs/")
+                    || crab_git::validate_push_refname(&reference).is_err()
+                    || !protected.insert(branch)
+                {
+                    return Err(Error::Config(
+                        "protected branches must be unique valid branch names without a refs/heads prefix",
+                    ));
+                }
+            }
             if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
                 return Err(Error::Config(
                     "repository owner conflicts with a server route",
@@ -122,6 +137,14 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+impl RepositoryConfig {
+    pub(crate) fn protects(&self, reference: &str) -> bool {
+        reference
+            .strip_prefix("refs/heads/")
+            .is_some_and(|branch| self.protected_branches.iter().any(|value| value == branch))
     }
 }
 
@@ -172,6 +195,29 @@ mod tests {
             );
             assert!(toml::from_str::<RepositoryConfig>(&source).is_err());
         }
+    }
+
+    #[test]
+    fn protected_branches_are_exact_valid_branch_names() {
+        for branches in [
+            "['']",
+            "['refs/heads/main']",
+            "['release..next']",
+            "['main','main']",
+        ] {
+            let source = format!(
+                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches={branches}"
+            );
+            let config: Config = toml::from_str(&source).unwrap();
+            assert!(config.validate().is_err(), "{branches}");
+        }
+        let config: Config = toml::from_str(
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=['main','release/v1']",
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+        assert!(config.repositories[0].protects("refs/heads/main"));
+        assert!(!config.repositories[0].protects("refs/heads/Main"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ export interface Repository {
   name: string;
   description: string;
   access: "read" | "write";
+  protected_branches: string[];
 }
 export interface Ref {
   name: string;

@@ -75,6 +75,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              protected_branches: ["main"],
             },
           ],
         },
@@ -249,6 +250,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   ).toBeVisible();
   await expect(page.locator(".pull-summary")).toContainText(
     "feature/docs into main",
+  );
+  await expect(page.locator(".pull-merge-note")).toContainText(
+    "main is protected",
   );
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();

@@ -290,7 +290,14 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
     let mut server = maintenance_tests::fixture().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    Arc::get_mut(&mut server).unwrap().port = port;
+    let mutable = Arc::get_mut(&mut server).unwrap();
+    mutable.port = port;
+    mutable
+        .repositories
+        .get_mut(&("team".into(), "repo".into()))
+        .unwrap()
+        .config
+        .protected_branches = vec!["main".into()];
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));
@@ -319,6 +326,45 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
     receive_tests::success(path, &["commit", "-m", "feature"]).await;
     let head = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
     receive_tests::success(path, &["push", &git_url, "feature"]).await;
+
+    let direct = receive_tests::git(
+        path,
+        &[
+            "push",
+            "--atomic",
+            &git_url,
+            "feature:main",
+            "feature:protected-batch-side",
+        ],
+    )
+    .await;
+    assert!(!direct.status.success());
+    assert!(
+        String::from_utf8_lossy(&direct.stderr)
+            .contains("protected branch requires a pull request")
+    );
+    let protected_refs = receive_tests::success(
+        path,
+        &[
+            "ls-remote",
+            &git_url,
+            "refs/heads/main",
+            "refs/heads/protected-batch-side",
+        ],
+    )
+    .await;
+    assert_eq!(protected_refs, format!("{base}\trefs/heads/main"));
+
+    let catalog: Value = serde_json::from_slice(
+        &reqwest::get(format!("http://127.0.0.1:{port}/api/repos"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(catalog["repositories"][0]["protected_branches"][0], "main");
 
     let client = reqwest::Client::new();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");

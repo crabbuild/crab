@@ -32,6 +32,7 @@ pub(super) async fn fixture() -> Arc<Server> {
                     prefix: "maintenance".into(),
                     description: String::new(),
                     members: vec![],
+                    protected_branches: vec![],
                 },
                 identity: RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
                 store,

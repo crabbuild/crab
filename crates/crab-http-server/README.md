@@ -135,6 +135,7 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
+protected_branches = ["main"]
 members = [
   { subject = "provider-subject-for-alice", access = "write" },
   { subject = "provider-subject-for-bob", access = "read" },
@@ -157,6 +158,13 @@ All repository read endpoints enforce membership before opening storage; absent
 and unauthorized repositories both return 404. Membership changes currently
 require a configuration update and server restart, which invalidates every session.
 Organization and membership administration in the application remain future work.
+
+`protected_branches` contains exact branch names without the `refs/heads/`
+prefix. Once a repository has a branch, native Git cannot create, update or
+delete a protected name; an atomic push containing one is rejected in full.
+The first branch can still initialize an empty or tag-only repository. A
+fast-forward pull request merge is the supported publication path for a
+protected branch.
 
 Sign-in verifies browser-bound state, PKCE, nonce, signature, issuer, audience,
 authorized party, expiry, issuance time and an access-token hash when supplied.
@@ -353,8 +361,10 @@ rejected as incomplete.
 The current symbolic HEAD cannot be deleted through HTTP push. Rejection applies
 to the entire atomic batch and Git reports `deletion is prohibited`; other branches
 and tags remain deletable. This follows the repository's recorded default rather
-than a hardcoded branch name. Default-branch administration and configurable
-branch protections remain pending.
+than a hardcoded branch name. Exact names listed in `protected_branches` also
+reject direct creation, update or deletion after repository initialization and
+report `protected branch requires a pull request`. Default-branch and protection
+administration in the application remain pending.
 
 Disconnects and deadlines signal cancellation; owned workers retain admission
 and renew their GC fences until cleanup finishes. A known commit is never reported
@@ -370,8 +380,8 @@ Remote objects are compared byte for byte after removing client repositories.
 The deletion flow also exposed and fixed a shared catalog bug: removed tips must
 be looked up even when no surviving ref or new evidence mentions them. These
 small-repository tests are not Kubernetes push throughput or production
-qualification. Protected branches, protected-view and active-active publication
-coexistence, LFS HTTP locking, and process-crash qualification remain unfinished;
+qualification. Required review/check rules, protected-view and active-active
+publication coexistence, LFS HTTP locking, and process-crash qualification remain unfinished;
 use this development server with standard Crab repository publication only.
 
 Tag-only initialization preserves an unborn default branch. The refs API returns
@@ -448,7 +458,8 @@ visibility under the base-ref lease and both GC fences, then publishes through
 the same journal path as native Git push. A persisted merge marker blocks
 concurrent pull edits and lets the same request resume after a lost response or
 restart. A completed merge retains its pre-merge comparison even if the source
-branch is deleted. Merge commits, checks and branch protection are not implemented.
+branch is deleted. Protected base branches can be updated only through this merge
+path. Merge commits and checks are not implemented.
 
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
@@ -513,6 +524,16 @@ available. Pull creation, merge and idempotent merge replay took 34.1, 391.2 and
 server work on localhost with shared caches. These are observations, not
 production latency guarantees.
 
+The same RustFS repository was then configured with protected `main`. A native
+atomic push that combined a fast-forward of `main` with creation of another
+branch was rejected in 126.7 ms and neither ref changed. Pull request 4 published
+that exact head through the merge path in 259.6 ms, and a fresh depth-one clone
+read the exact commit and file in 163.5 ms. After source-branch deletion and a
+server restart, native ref discovery still returned the merged `main`; pull
+detail and its exact one-file comparison took 46.8 and 40.6 ms from the client.
+These localhost timings are functional observations rather than production
+latency guarantees.
+
 ## Current verification
 
 ```sh
@@ -542,7 +563,7 @@ three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
-latency guarantee. Thirty-nine Rust server tests and eight frontend navigation,
+latency guarantee. Forty Rust server tests and eight frontend navigation,
 model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
@@ -614,7 +635,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push and tag lifecycle have scoped RustFS proof; protected branches and administration pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews and recoverable fast-forward merge with canonical ref publication; merge commits, checks and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
