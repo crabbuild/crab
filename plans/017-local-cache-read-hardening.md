@@ -38,7 +38,7 @@ retained as `cache-f410-resume.dY62Z0`; no fixture chmod masks this failure.
 | Siblings | Post-fetch shard sync, metadb commands, and explicit local-index paths reach the same constructor. Existing root validation in post-fetch sync remains; non-Unix behavior is unchanged. |
 | Main behavior | Current `origin/main` uses `create_dir_all` here too. The PR's stricter cleanup exposes this pre-existing permissive creator. |
 | Focused regression | Both constructors must create all missing ancestors privately while preserving a pre-existing `0755` parent. All 25 persistent-index tests pass locally. |
-| Live acceptance | Fresh umask-022 large-file repos must pass add/commit/push, duplicate and delta dedup, cache-clean hydration, wholly absent-cache clone/fetch, origin-denied warm hydration, corruption recovery, and independent SHA-256 comparison. Rebuild/rerun pending. |
+| Live acceptance | Make-installed `3f71f8d` passes **97 checks / 94 commands** on native RustFS beta.8 under umask `022`; detailed evidence below. The constructor regression also passes under umask `000`; configured metadata Clippy and formatting pass. |
 
 Is this the best fix for the observed regression? The shared constructor owns
 directory creation for all these callers, avoiding additional per-command
@@ -46,6 +46,53 @@ initialization paths. This bounded fix does **not** complete descriptor-pinned
 persistent-index I/O, existing unsafe-root migration, Windows ACLs, or the
 remaining resource and concurrency phases below. Production growth is ten
 lines for explicit creation policy, not a second cache path.
+
+#### Completed local qualification
+
+Run `cache-f410-private.Qt3eLW` retains its harness, report, per-command logs,
+installed binaries, six reader checkouts, and renamed former cache roots in
+the external qualification directory. Two synthetic repositories each contain
+three 1 GiB files at the final commit: high-entropy content and repeated 1 MiB
+content, with exact duplicates and a one-MiB edit. These are not real-model
+repository or throughput benchmarks. All writes use fresh prefixes in the
+previously approved isolated bucket; no bucket-wide GC or cleanup is run.
+
+| Check | High-entropy / repeated-content result |
+|---|---|
+| Initial add, Git commit, Crab push | Pointer blobs committed; source SHA-256 unchanged; initial new xorb bytes **1,074,489,235 / 1,097,690**. |
+| Duplicate after writer `cache clean` | **Zero new xorbs** in both repositories. |
+| One-MiB edit, add/commit/push | **1,138,197 / 1,097,510** new xorb bytes, both below four MiB. |
+| Lazy clone, cold hydrate | Pointers first; actual RustFS xorb bodies; all three independent SHA-256 values match. Ordinary hydration does not install whole-xorb cache files. |
+| `cache clean`, then hydrate | Observed decoded ranges removed; unrelated sentinel and pointers retained; actual origin reads and exact bytes restored. |
+| `optimize cache clean`, then default `fetch --all` | Origin bodies fetched; worktree remains pointers. Subsequent hydrate passes with **zero xorb GET attempts**, even while the gateway rejects such requests. |
+| Entire former cache roots renamed out of reach, new clone/cache | Cold origin-denied hydrate fails and preserves every pointer; restored-origin fetch succeeds. Warm hydrate again has **zero xorb GET attempts** and exact SHA-256 values. |
+| Corrupt all decoded range entries | Hydrate recovers via actual RustFS reads and reconstructs exact bytes. |
+| Fresh eager `clone --no-lazy` | Actual origin bodies and exact bytes; all six reader checkouts finish Git-clean and pass `fsck`. |
+| Origin preservation | Xorb keys, sizes, and ETags are identical before and after reader/cache maintenance. |
+
+SHA-256 provenance: installed CLI
+`d59f36d6e2ace2c3a80171d35a459d63202bba637b6b3745132e4321bdf9aab2`;
+harness `c69da158469bcfd4e71c2d6a51a877523d9c5576490124259dcf520cb73d1f1b`;
+report `fae42877d89b0f1b439097d351dbc63aa8cfdaf54dd46750a0489dde585818b4`.
+Native RustFS executable hash remains
+`c758fa3ba0a9e4f25cc1d947d9868dc8417fea9dc16140806027ac385d2f4b61`.
+The source revision is `3f71f8d1431591c62073144e30033db86bc25e35`.
+
+This proves the bounded functional matrix, not absence of every regression.
+Warm hydration still uses metadata/control requests, so xorb denial is not
+whole-network offline proof. Cold high-entropy hydration transfers about
+2.02 GB, and post-clean hydration about 3.02 GB, for roughly 1.08 GB of unique
+stored data. Repeated-content cold hydration uses 19 xorb GETs; denied cold
+hydration makes 195 attempts. Coalescing/read amplification and failure-path
+request budgets remain opportunities; no performance acceptance is waived.
+
+Expanded hosted `f449f92` CI run `33835238378` passes Rust and full web checks.
+Optional provider run `33835240121` passes its provider-contract report but
+fails the later missing-pack canary at `refs remain coherent` (exit 128).
+Its uploaded artifacts omit that canary stderr, so the cause is not declared
+resolved or unrelated. GCS/Azure credentials and the scale runner remain
+unavailable. New-head CI must be assessed separately before merge; this local
+result is not an all-CI-green or merge approval.
 
 ### Review handoff and current gate reconciliation, 2026-09-03
 
