@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{io::Read, sync::Arc, time::Duration};
 
 use axum::{
     Extension,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{FromRequest, Path, Query, Request, State, rejection::BytesRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -22,6 +22,8 @@ use crate::{auth::Principal, server::Server};
 // HTTP response EOF delimits commands: Git's remote-curl rejects an on-wire 0002.
 // The stdio helper separately emits response-end packets for stateless-connect.
 
+pub(crate) const MAX_BODY_BYTES: usize = wire::MAX_REQUEST_BYTES + 4 * 65_536;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GitError {
     #[error("{0}")]
@@ -30,6 +32,18 @@ pub(crate) enum GitError {
     NotFound,
     #[error("Git transport is busy")]
     Busy,
+    #[error("Git request body exceeded its deadline")]
+    BodyTimeout,
+    #[error("Git request body could not be read")]
+    Body(#[from] BytesRejection),
+    #[error("Unsupported Git request content encoding")]
+    Encoding,
+    #[error("Git request body exceeds its decoded size limit")]
+    BodyTooLarge,
+    #[error("Git request compression is invalid")]
+    Compression(#[source] std::io::Error),
+    #[error("Git request decoding task failed")]
+    DecodeTask(#[from] tokio::task::JoinError),
     #[error("Git protocol failed")]
     Wire(#[from] wire::WireError),
     #[error("Git object read failed")]
@@ -40,6 +54,9 @@ pub(crate) enum GitError {
 
 impl IntoResponse for GitError {
     fn into_response(self) -> Response {
+        if let Self::Body(error) = self {
+            return error.into_response();
+        }
         let (status, message) = match self {
             Self::Request(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound => (StatusCode::NOT_FOUND, "Repository not found"),
@@ -47,6 +64,16 @@ impl IntoResponse for GitError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Git transfers are busy; retry shortly",
             ),
+            Self::BodyTimeout => (StatusCode::REQUEST_TIMEOUT, "Git request body timed out"),
+            Self::Encoding => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Use identity or gzip content encoding",
+            ),
+            Self::BodyTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Git request body is too large",
+            ),
+            Self::Compression(_) => (StatusCode::BAD_REQUEST, "Invalid gzip request body"),
             Self::Wire(_) => (StatusCode::BAD_REQUEST, "Invalid Git protocol-v2 request"),
             Self::Read(crab_read::ReadError::UnauthorizedObject) => (
                 StatusCode::FORBIDDEN,
@@ -131,14 +158,13 @@ pub(crate) async fn upload_pack(
     Extension(principal): Extension<Principal>,
     Path((owner, name)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Result<Response, GitError> {
     let entry = server
         .repositories
         .get(&(owner, name))
         .filter(|entry| principal.can_read(&entry.config))
         .ok_or(GitError::NotFound)?;
-    require_v2(&headers)?;
     if headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
@@ -153,6 +179,23 @@ pub(crate) async fn upload_pack(
         .map_err(|_| GitError::Busy)?;
     let cancel = server.cancellation.child_token();
     let guard = cancel.clone().drop_guard();
+    let body = tokio::select! {
+        () = cancel.cancelled() => return Err(wire::WireError::Cancelled.into()),
+        result = tokio::time::timeout(Duration::from_secs(30), Bytes::from_request(request, &server)) => {
+            result.map_err(|_| GitError::BodyTimeout)??
+        }
+    };
+    let body = decode_body(&headers, body).await?;
+    // remote-curl probes authorization before a chunked POST, omitting Git-Protocol.
+    // Authenticate and check membership above, then acknowledge without opening storage.
+    if body.as_ref() == b"0000" {
+        return Ok((
+            [("content-type", "application/x-git-upload-pack-result")],
+            "",
+        )
+            .into_response());
+    }
+    require_v2(&headers)?;
     let mut input = body.as_ref();
     let request = wire::read_command_request(&mut input, &cancel)
         .await?
@@ -289,6 +332,36 @@ pub(crate) async fn upload_pack(
     }
 }
 
+async fn decode_body(headers: &HeaderMap, body: Bytes) -> Result<Bytes, GitError> {
+    let mut encodings = headers.get_all("content-encoding").iter();
+    let Some(encoding) = encodings.next() else {
+        return Ok(body);
+    };
+    if encodings.next().is_some() {
+        return Err(GitError::Encoding);
+    }
+    let encoding = encoding.to_str().map_err(|_| GitError::Encoding)?.trim();
+    if encoding.eq_ignore_ascii_case("identity") {
+        return Ok(body);
+    }
+    if !encoding.eq_ignore_ascii_case("gzip") {
+        return Err(GitError::Encoding);
+    }
+    // Limit decoded bytes as well as transport bytes; gzip never expands on a Tokio worker.
+    tokio::task::spawn_blocking(move || {
+        let mut decoded = Vec::new();
+        flate2::read::MultiGzDecoder::new(body.as_ref())
+            .take(MAX_BODY_BYTES as u64 + 1)
+            .read_to_end(&mut decoded)
+            .map_err(GitError::Compression)?;
+        if decoded.len() > MAX_BODY_BYTES {
+            return Err(GitError::BodyTooLarge);
+        }
+        Ok(Bytes::from(decoded))
+    })
+    .await?
+}
+
 async fn write_refs<W: AsyncWrite + Unpin>(
     writer: &mut W,
     refs: &RepositoryRefs,
@@ -355,6 +428,68 @@ async fn write_refs<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn gzip(body: &[u8]) -> Bytes {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap().into()
+    }
+
+    #[tokio::test]
+    async fn gzip_requests_preserve_framing_and_reject_corruption_and_expansion() {
+        let headers =
+            HeaderMap::from_iter([("content-encoding".parse().unwrap(), "gzip".parse().unwrap())]);
+        let request = b"0014command=ls-refs\n00010000";
+        let body = decode_body(&headers, gzip(request)).await.unwrap();
+        let parsed = wire::read_command_request(&mut body.as_ref(), &CancellationToken::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.command, "ls-refs");
+
+        let mut corrupt = gzip(request).to_vec();
+        let trailer = corrupt.len() - 8;
+        corrupt[trailer] ^= 1;
+        for (body, status) in [
+            (Bytes::from(corrupt), StatusCode::BAD_REQUEST),
+            (Bytes::from_static(b"not gzip"), StatusCode::BAD_REQUEST),
+            (
+                gzip(&vec![b'x'; MAX_BODY_BYTES + 1]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ] {
+            assert_eq!(
+                decode_body(&headers, body)
+                    .await
+                    .unwrap_err()
+                    .into_response()
+                    .status(),
+                status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_stacked_content_encodings_are_rejected() {
+        for encoding in ["br", "gzip, identity", ""] {
+            let headers = HeaderMap::from_iter([(
+                "content-encoding".parse().unwrap(),
+                encoding.parse().unwrap(),
+            )]);
+            assert!(matches!(
+                decode_body(&headers, Bytes::new()).await,
+                Err(GitError::Encoding)
+            ));
+        }
+        let mut headers = HeaderMap::new();
+        headers.append("content-encoding", "gzip".parse().unwrap());
+        headers.append("content-encoding", "identity".parse().unwrap());
+        assert!(matches!(
+            decode_body(&headers, Bytes::new()).await,
+            Err(GitError::Encoding)
+        ));
+    }
 
     #[tokio::test]
     async fn http_ref_listing_ends_at_flush_without_helper_response_end() {

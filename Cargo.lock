@@ -2234,6 +2234,7 @@ dependencies = [
  "crab-read",
  "crab-remote-git",
  "crab-storage",
+ "flate2",
  "futures-util",
  "http-body-util",
  "object_store",
