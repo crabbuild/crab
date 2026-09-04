@@ -1,10 +1,11 @@
 //! Single-process HTTP composition for object-storage-backed Crab repositories.
 mod api;
 mod assets;
+mod auth;
 mod config;
 mod server;
 
-pub use config::{Config, RepositoryConfig};
+pub use config::{Config, OidcConfig, RepositoryConfig};
 pub use server::serve;
 
 /// Startup and server lifecycle errors with their original sources retained.
@@ -12,6 +13,11 @@ pub use server::serve;
 pub enum Error {
     #[error("invalid server configuration: {0}")]
     Config(&'static str),
+    #[error("identity initialization failed")]
+    Identity {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("configuration or listener I/O failed")]
     Io(#[from] std::io::Error),
     #[error("invalid TOML configuration")]
