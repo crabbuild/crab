@@ -102,9 +102,6 @@ export function RepositoryTree({
         className="repository-tree"
         aria-label="Repository files"
       />
-      <p className="tree-hint">
-        Expand folders to load files. Search covers loaded folders.
-      </p>
       {pending > 0 && (
         <p className="tree-hint" role="status">
           Loading {pending} {pending === 1 ? "folder" : "folders"}…

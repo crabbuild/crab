@@ -750,14 +750,19 @@ three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
-latency guarantee. Forty-one Rust server tests and eight frontend navigation,
-model and Markdown tests passed. Identity integration tests exercise real HTTP redirects and signed
+latency guarantee. Forty-four Rust server tests, eight frontend navigation,
+model and Markdown tests, and fourteen Chromium tests passed. Identity integration tests exercise real HTTP redirects and signed
 Ed25519 tokens, including key rotation, replay, invalid claims, outsider access
 and logout CSRF rejection, plus confidential-client secret-file authentication,
 Git token scope and revocation. Thirteen shared wire tests and nineteen remote-helper
 tests cover the extracted framing/parser path and existing helper contracts.
-The local test issuer is not a production identity service. Dark/light
-rendering, highlighted source and an actual split diff were inspected in browser.
+The local test issuer is not a production identity service. Highlighted source
+and an actual split diff were inspected in browser. The repository file view was
+also compared at 1,512 by 950 pixels with GitHub's current public Crab file view
+and the supplied signed-in GitHub reference. Light, dark and 390-pixel captures
+verify the same repository identity/navigation hierarchy, full-height file pane,
+branch controls, breadcrumbs, latest-commit row and Code/Blame toolbar without
+horizontal page overflow.
 
 Discussion keyboard regression checks run in Chromium:
 
@@ -768,7 +773,7 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-These seven checks cover issue/comment edit focus, cancellation, close/reopen,
+These browser checks cover issue/comment edit focus, cancellation, close/reopen,
 Markdown tab navigation, posting from preview, retained drafts after failure,
 preserving focus moved elsewhere during a delayed response, repeated edit
 conflicts, and retrying a failed read of newer content. Header checks
@@ -820,7 +825,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
 | Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
-| GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
+| GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell and file view pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks and recoverable fast-forward merge with canonical ref publication; merge commits and remaining workflows pending |

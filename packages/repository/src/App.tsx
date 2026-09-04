@@ -8,9 +8,8 @@ import {
   HistoryIcon,
   IssueOpenedIcon,
   RepoIcon,
+  SidebarCollapseIcon,
   SunIcon,
-  TagIcon,
-  SidebarExpandIcon,
 } from "@primer/octicons-react";
 import {
   displayHex,
@@ -27,8 +26,12 @@ import {
   type Session,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
-import { CloneMenu, GitAccess } from "./git-access";
-import { RevisionPicker } from "./revision-picker";
+import { GitAccess } from "./git-access";
+import {
+  RepositoryRefControls,
+  RepositoryToolbar,
+  revisionLabel,
+} from "./repository-toolbar";
 const RepositoryTree = lazy(() =>
   import("./tree").then((module) => ({ default: module.RepositoryTree })),
 );
@@ -132,14 +135,20 @@ export function App() {
           <Link className="brand" href="/" aria-label="Crab repositories">
             <span className="brand-mark" aria-hidden="true" />
           </Link>
-          <Link href="/">Repositories</Link>
-          {repo && (
-            <>
-              <span className="muted">/</span>
-              <span>{repo.owner}</span>
-              <span className="muted">/</span>
-              <strong>{repo.name}</strong>
-            </>
+          {repo ? (
+            <div className="global-repository">
+              <RepoIcon size={16} />
+              <h1>
+                <Link href={repoHref(repo)}>
+                  {repo.owner} <span aria-hidden="true">/</span>{" "}
+                  <strong>{repo.name}</strong>
+                </Link>
+              </h1>
+            </div>
+          ) : (
+            <Link className="global-catalog-link" href="/">
+              Repositories
+            </Link>
           )}
           {session.data?.user && (
             <div className="session-control">
@@ -308,20 +317,13 @@ function RepositoryPage({
   const [showTree, setShowTree] = useState(Boolean(path));
   useEffect(() => setShowTree(Boolean(path)), [path]);
   const overview = view === "code" && !path && !showTree;
+  const fileWorkspace = view === "code" && showTree;
   function selectEntry(entry: Entry) {
     navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
   }
   return (
     <>
       <div className="repo-header">
-        <div className="repo-title">
-          <RepoIcon size={20} />
-          <h1>
-            <Link href={repoHref(repo)}>
-              {repo.owner} / <strong>{repo.name}</strong>
-            </Link>
-          </h1>
-        </div>
         <nav aria-label="Repository">
           <Link
             className={view === "code" ? "active" : ""}
@@ -357,7 +359,9 @@ function RepositoryPage({
           </Link>
         </nav>
       </div>
-      <div className={`repo-body${overview ? " repo-overview" : ""}`}>
+      <div
+        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}`}
+      >
         {view === "labels" ? (
           <Suspense
             fallback={
@@ -408,56 +412,6 @@ function RepositoryPage({
                 </div>
               ) : rev ? (
                 <>
-                  <div className="toolbar">
-                    <div className="row">
-                      <RevisionPicker
-                        refs={data}
-                        revision={revName ?? rev}
-                        onSelect={(name) =>
-                          navigate(repoHref(repo, { rev: name, view }))
-                        }
-                      />
-                      <span className="ref-count muted">
-                        <GitBranchIcon />
-                        {
-                          data.refs.filter((ref) =>
-                            ref.name.startsWith("refs/heads/"),
-                          ).length
-                        }{" "}
-                        {data.refs.filter((ref) =>
-                          ref.name.startsWith("refs/heads/"),
-                        ).length === 1
-                          ? "branch"
-                          : "branches"}
-                      </span>
-                      <span className="ref-count muted">
-                        <TagIcon />
-                        {
-                          data.refs.filter((ref) =>
-                            ref.name.startsWith("refs/tags/"),
-                          ).length
-                        }{" "}
-                        {data.refs.filter((ref) =>
-                          ref.name.startsWith("refs/tags/"),
-                        ).length === 1
-                          ? "tag"
-                          : "tags"}
-                      </span>
-                    </div>
-                    <div className="repository-actions">
-                      {view === "code" && (
-                        <Button
-                          leadingVisual={SidebarExpandIcon}
-                          onClick={() => setShowTree((value) => !value)}
-                          aria-expanded={showTree}
-                        >
-                          Browse files
-                        </Button>
-                      )}
-                      <Button onClick={refs.retry}>Refresh</Button>
-                      {view === "code" && <CloneMenu repo={repo} />}
-                    </div>
-                  </div>
                   <Suspense
                     fallback={
                       <div className="notice" role="status">
@@ -466,14 +420,32 @@ function RepositoryPage({
                     }
                   >
                     {view === "commits" ? (
-                      <History key={rev} repo={repo} rev={rev} />
+                      <>
+                        <RepositoryToolbar
+                          repo={repo}
+                          refs={data}
+                          revision={revisionLabel(data, revName ?? rev)}
+                          view={view}
+                          onRefresh={refs.retry}
+                        />
+                        <History key={rev} repo={repo} rev={rev} />
+                      </>
                     ) : view === "commit" ? (
-                      <CommitView
-                        key={rev}
-                        repo={repo}
-                        rev={rev}
-                        theme={theme}
-                      />
+                      <>
+                        <RepositoryToolbar
+                          repo={repo}
+                          refs={data}
+                          revision={revisionLabel(data, revName ?? rev)}
+                          view={view}
+                          onRefresh={refs.retry}
+                        />
+                        <CommitView
+                          key={rev}
+                          repo={repo}
+                          rev={rev}
+                          theme={theme}
+                        />
+                      </>
                     ) : (
                       <div
                         className={
@@ -486,14 +458,26 @@ function RepositoryPage({
                       >
                         {showTree && (
                           <aside className="tree-sidebar">
-                            <div className="panel-header">
-                              <strong>Files</strong>
+                            <div className="tree-sidebar-header">
                               <Button
                                 size="small"
                                 onClick={() => setShowTree(false)}
+                                aria-label="Browse files"
+                                aria-expanded={true}
                               >
-                                Hide
+                                <SidebarCollapseIcon />
                               </Button>
+                              <strong>Files</strong>
+                            </div>
+                            <div className="tree-sidebar-controls">
+                              <RepositoryRefControls
+                                refs={data}
+                                revision={revisionLabel(data, revName ?? rev)}
+                                onSelect={(name) =>
+                                  navigate(repoHref(repo, { rev: name, view }))
+                                }
+                                compact
+                              />
                             </div>
                             <RepositoryTree
                               key={rev}
@@ -504,6 +488,16 @@ function RepositoryPage({
                           </aside>
                         )}
                         <div className="code-main">
+                          {!showTree && (
+                            <RepositoryToolbar
+                              repo={repo}
+                              refs={data}
+                              revision={revisionLabel(data, revName ?? rev)}
+                              view={view}
+                              onRefresh={refs.retry}
+                              onBrowse={() => setShowTree(true)}
+                            />
+                          )}
                           {!overview && (
                             <div className="breadcrumb">
                               <Link href={repoHref(repo, { rev })}>
@@ -615,6 +609,7 @@ function RepositoryPage({
     </>
   );
 }
+
 function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
   const state = useRequest<Commit>(endpoint(repo, "commit", { rev }));
   if (state.loading || (!state.data && !state.error))
