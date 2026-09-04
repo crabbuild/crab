@@ -20,6 +20,7 @@ members = [
     "crates/crab-types",
     "crates/crab-vfs",
     "crates/crab-workflow",
+    "crates/crab-write",
     "crates/crab-xet",
     "crab",
 ]
@@ -46,6 +47,7 @@ crab-staging = { path = "crates/crab-staging", default-features = false }
 crab-storage = { path = "crates/crab-storage", default-features = false }
 crab-types = { path = "crates/crab-types", default-features = false }
 crab-vfs = { path = "crates/crab-vfs", default-features = false }
+crab-write = { path = "crates/crab-write", default-features = false }
 crab-workflow = { path = "crates/crab-workflow", default-features = false }
 crab-xet = { path = "crates/crab-xet", default-features = false }
 
