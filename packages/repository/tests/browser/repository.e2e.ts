@@ -49,12 +49,14 @@ test.beforeEach(async ({ page }) => {
     if (url.pathname.endsWith("/tree"))
       return route.fulfill({
         json: {
-          items: (url.searchParams.get("path_hex")
-            ? []
-            : [
-                ["README.md", "Blob"],
-                ["src", "Tree"],
-              ]
+          items: (url.searchParams.get("path_hex") === pathHex("src")
+            ? [["src/index.ts", "Blob"]]
+            : url.searchParams.get("path_hex")
+              ? []
+              : [
+                  ["README.md", "Blob"],
+                  ["src", "Tree"],
+                ]
           ).map(([path, kind]) => ({
             path,
             path_hex: pathHex(path),
@@ -137,8 +139,69 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toHaveText("project/README.md");
   await expect(page.locator(".file-panel")).toBeVisible();
-  await page.getByRole("button", { name: "Browse files", exact: true }).click();
+  await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "356px");
+  await expect(page.getByPlaceholder("Go to file")).toBeVisible();
+  await page
+    .getByRole("button", { name: "Close file tree", exact: true })
+    .click();
   await expect(page.locator(".tree-sidebar")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Open file tree", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".file-navigation .breadcrumb")).toHaveText(
+    "project/README.md",
+  );
+  await page.keyboard.press("t");
+  await expect(page.locator(".tree-sidebar")).toBeVisible();
+  await expect(page.getByPlaceholder("Go to file")).toBeFocused();
+  await page.getByPlaceholder("Go to file").fill("README");
+  await expect
+    .poll(() =>
+      page
+        .locator('[aria-label="Repository files"]')
+        .evaluate((tree) =>
+          [
+            ...(tree.shadowRoot?.querySelectorAll('[role="treeitem"]') ?? []),
+          ].map((row) => row.getAttribute("aria-label")),
+        ),
+    )
+    .toEqual(["README.md"]);
+});
+
+test("deep links expand the active path and select its file", async ({
+  page,
+}) => {
+  await page.goto(`/team/project?path=${pathHex("src/index.ts")}&kind=Blob`);
+  const state = await page
+    .locator('[aria-label="Repository files"]')
+    .evaluate((tree) => {
+      const rows = [
+        ...(tree.shadowRoot?.querySelectorAll('[role="treeitem"]') ?? []),
+      ];
+      const active = rows.find(
+        (row) => row.getAttribute("aria-selected") === "true",
+      );
+      const folder = rows.find(
+        (row) => row.getAttribute("data-item-type") === "folder",
+      );
+      const folderContent = folder?.querySelector(
+        '[data-item-section="content"]',
+      );
+      return {
+        active: active?.getAttribute("aria-label"),
+        activeHeight: active?.getBoundingClientRect().height,
+        expanded: rows
+          .filter((row) => row.getAttribute("aria-expanded") === "true")
+          .map((row) => row.getAttribute("aria-label")),
+        folderIconWidth: folderContent
+          ? getComputedStyle(folderContent, "::before").width
+          : null,
+      };
+    });
+  expect(state.active).toBe("index.ts");
+  expect(state.activeHeight).toBe(32);
+  expect(state.expanded).toContain("src");
+  expect(state.folderIconWidth).toBe("16px");
 });
 
 test("mobile Code menu stays within the viewport and theme selection persists", async ({
