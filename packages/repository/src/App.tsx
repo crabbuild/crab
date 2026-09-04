@@ -27,6 +27,7 @@ import {
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
+import { IssuesWorkspace } from "./issues-navigation";
 import {
   RepositoryRefControls,
   RepositoryToolbar,
@@ -318,6 +319,9 @@ function RepositoryPage({
   useEffect(() => setShowTree(Boolean(path)), [path]);
   const overview = view === "code" && !path && !showTree;
   const fileWorkspace = view === "code" && showTree;
+  const issuesView = view === "issues" || view === "labels";
+  const issueNavigation =
+    view === "labels" || (view === "issues" && !url.searchParams.has("issue"));
   function selectEntry(entry: Entry) {
     navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
   }
@@ -360,28 +364,36 @@ function RepositoryPage({
         </nav>
       </div>
       <div
-        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}`}
+        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}`}
       >
-        {view === "labels" ? (
-          <Suspense
-            fallback={
-              <div className="notice" role="status">
-                <Spinner size="small" /> Loading labels…
-              </div>
-            }
+        {issuesView ? (
+          <IssuesWorkspace
+            repo={repo}
+            view={view}
+            showNavigation={issueNavigation}
           >
-            <LabelsPage repo={repo} csrf={csrf} />
-          </Suspense>
-        ) : view === "issues" ? (
-          <Suspense
-            fallback={
-              <div className="notice" role="status">
-                <Spinner size="small" /> Loading issues…
-              </div>
-            }
-          >
-            <Issues repo={repo} url={url} csrf={csrf} />
-          </Suspense>
+            {view === "labels" ? (
+              <Suspense
+                fallback={
+                  <div className="notice" role="status">
+                    <Spinner size="small" /> Loading labels…
+                  </div>
+                }
+              >
+                <LabelsPage repo={repo} csrf={csrf} />
+              </Suspense>
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="notice" role="status">
+                    <Spinner size="small" /> Loading issues…
+                  </div>
+                }
+              >
+                <Issues repo={repo} url={url} csrf={csrf} />
+              </Suspense>
+            )}
+          </IssuesWorkspace>
         ) : view === "pulls" ? (
           <Result state={refs} showTiming={false}>
             {(data) => (

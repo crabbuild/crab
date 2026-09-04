@@ -94,8 +94,8 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
   );
   return (
     <section className="issues-page">
-      <div className="section-heading">
-        <h2>Issues</h2>
+      <div className="issues-heading">
+        <h2>All issues</h2>
         <Button
           variant="primary"
           onClick={() =>
@@ -105,12 +105,9 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
           New issue
         </Button>
       </div>
-      <p className="muted">
-        Track work, report problems, and discuss changes with your team.
-      </p>
       <DiscussionSearch
         label="Search issues"
-        placeholder="Search titles, descriptions, or authors"
+        placeholder="Search all issues"
         value={query}
         onSearch={(value) =>
           navigate(
@@ -122,121 +119,115 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       />
-      <div className="discussion-list-actions">
-        <Link className="button-link" href={repoHref(repo, { view: "labels" })}>
-          Labels
-        </Link>
-      </div>
-      <div className="issues-filters">
-        <nav aria-label="Issue state">
-          {["open", "closed", "all"].map((value) => (
-            <Link
-              key={value}
-              className={state === value ? "active" : ""}
-              aria-current={state === value ? "page" : undefined}
-              href={repoHref(repo, {
-                view: "issues",
-                state: value,
-                q: query || undefined,
-              })}
-            >
-              {value === "all"
-                ? "All issues"
-                : `${value[0].toUpperCase()}${value.slice(1)}`}
-            </Link>
-          ))}
-        </nav>
-        <Button size="small" onClick={page.retry}>
-          Refresh
-        </Button>
-      </div>
-      <Result state={page}>
-        {(data) => (
-          <>
-            {data.items.length ? (
-              <ul className="issue-list panel">
-                {data.items.map((issue) => (
-                  <li key={issue.number}>
-                    <span
-                      className={`issue-status-icon ${issue.state}`}
-                      role="img"
-                      aria-label={issue.state}
-                    >
-                      {issue.state === "open" ? (
-                        <IssueOpenedIcon />
-                      ) : (
-                        <IssueClosedIcon />
-                      )}
-                    </span>
-                    <div>
-                      <Link
-                        className="issue-link"
-                        href={repoHref(repo, {
-                          view: "issues",
-                          issue: String(issue.number),
-                        })}
+      <div className="issue-list-panel panel">
+        <div className="issues-filters">
+          <nav aria-label="Issue state">
+            {["open", "closed", "all"].map((value) => (
+              <Link
+                key={value}
+                className={state === value ? "active" : ""}
+                aria-current={state === value ? "page" : undefined}
+                href={repoHref(repo, {
+                  view: "issues",
+                  state: value,
+                  q: query || undefined,
+                })}
+              >
+                {value === "all"
+                  ? "All"
+                  : `${value[0].toUpperCase()}${value.slice(1)}`}
+              </Link>
+            ))}
+          </nav>
+        </div>
+        <Result state={page}>
+          {(data) => (
+            <>
+              {data.items.length ? (
+                <ul className="issue-list">
+                  {data.items.map((issue) => (
+                    <li key={issue.number}>
+                      <span
+                        className={`issue-status-icon ${issue.state}`}
+                        role="img"
+                        aria-label={issue.state}
                       >
-                        {issue.title}
-                      </Link>
-                      <LabelBadges labels={issue.labels} />
-                      <p className="muted">
-                        #{issue.number} opened {timestamp(issue.created_at)} by{" "}
-                        {issue.author}
-                      </p>
-                    </div>
-                    <AssigneeAvatars assignees={issue.assignees} />
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="notice issue-empty">
-                <IssueOpenedIcon size={32} />
-                <h3>
-                  {query
-                    ? `No issues match “${query}”`
-                    : data.next
-                      ? "No matching issues in this range"
-                      : "No matching issues"}
-                </h3>
-                <p>
-                  {query
-                    ? data.next
-                      ? "Try another search or continue to older issues."
-                      : "Try another title, description, or author."
-                    : data.next
-                      ? "Continue to older issues or choose another filter."
-                      : "Start a discussion by opening a new issue."}
-                </p>
+                        {issue.state === "open" ? (
+                          <IssueOpenedIcon />
+                        ) : (
+                          <IssueClosedIcon />
+                        )}
+                      </span>
+                      <div>
+                        <Link
+                          className="issue-link"
+                          href={repoHref(repo, {
+                            view: "issues",
+                            issue: String(issue.number),
+                          })}
+                        >
+                          {issue.title}
+                        </Link>
+                        <LabelBadges labels={issue.labels} />
+                        <p className="muted">
+                          #{issue.number} opened {timestamp(issue.created_at)}{" "}
+                          by {issue.author}
+                        </p>
+                      </div>
+                      <AssigneeAvatars assignees={issue.assignees} />
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="issue-empty">
+                  <IssueOpenedIcon size={32} />
+                  <h3>
+                    {query
+                      ? `No issues match “${query}”`
+                      : data.next
+                        ? "No matching issues in this range"
+                        : "No results"}
+                  </h3>
+                  <p className="muted">
+                    {query
+                      ? data.next
+                        ? "Try another search or continue to older issues."
+                        : "Try another title, description, or author."
+                      : data.next
+                        ? "Continue to older issues or choose another filter."
+                        : "Try adjusting your search filters."}
+                  </p>
+                </div>
+              )}
+              <div className="discussion-pagination">
+                {before && (
+                  <Link
+                    href={repoHref(repo, {
+                      view: "issues",
+                      state,
+                      q: query || undefined,
+                    })}
+                  >
+                    Newest issues
+                  </Link>
+                )}
+                {data.next && (
+                  <Link
+                    href={repoHref(repo, {
+                      view: "issues",
+                      state,
+                      q: query || undefined,
+                      before: String(data.next),
+                    })}
+                  >
+                    Older issues →
+                  </Link>
+                )}
               </div>
-            )}
-            <div className="discussion-pagination">
-              {before && (
-                <Link
-                  href={repoHref(repo, {
-                    view: "issues",
-                    state,
-                    q: query || undefined,
-                  })}
-                >
-                  Newest issues
-                </Link>
-              )}
-              {data.next && (
-                <Link
-                  href={repoHref(repo, {
-                    view: "issues",
-                    state,
-                    q: query || undefined,
-                    before: String(data.next),
-                  })}
-                >
-                  Older issues →
-                </Link>
-              )}
-            </div>
-          </>
-        )}
-      </Result>
+            </>
+          )}
+        </Result>
+      </div>
     </section>
   );
 }
