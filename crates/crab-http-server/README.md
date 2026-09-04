@@ -344,6 +344,12 @@ cooperative deadline, a 2-GiB wire/prepared-pack limit, one million incoming obj
 have further bounds. Temporary disk needs can exceed the wire limit. Buffered and
 chunked native pushes are supported; receive requires identity content encoding.
 
+Shallow Git clients can push normally. Crab accepts the protocol's bounded
+`shallow <oid>` declarations before the first ref command, but does not trust them
+as proof of connectivity or create a shallow server repository. Every omitted
+parent must still resolve from the committed remote object graph or the push is
+rejected as incomplete.
+
 The current symbolic HEAD cannot be deleted through HTTP push. Rejection applies
 to the entire atomic batch and Git reports `deletion is prohibited`; other branches
 and tags remain deletable. This follows the repository's recorded default rather
@@ -357,16 +363,16 @@ inspect remote refs before retrying: publication may have committed. Subsequent
 reads run catalog repair for committed journal work. This is not yet durable
 application-level push receipt or complete disaster-recovery support.
 
-Native Git integration and an isolated RustFS run cover initial branch and
-annotated-tag pushes, updates, atomic rewrite rejection, existing-object tags,
-deletion, API visibility and independent fetch. Remote objects are compared byte
-for byte after removing client repositories. The deletion flow also exposed and
-fixed a shared catalog bug: removed tips must be looked up even when no surviving
-ref or new evidence mentions them. These small-repository tests are not Kubernetes
-push throughput or production qualification. Protected branches, protected-view
-and active-active publication coexistence, LFS HTTP locking, and process-crash
-qualification remain unfinished; use this development server with standard Crab
-repository publication only.
+Native Git integration and isolated RustFS runs cover initial branch and
+annotated-tag pushes, a depth-one client's branch push, updates, atomic rewrite
+rejection, existing-object tags, deletion, API visibility and independent fetch.
+Remote objects are compared byte for byte after removing client repositories.
+The deletion flow also exposed and fixed a shared catalog bug: removed tips must
+be looked up even when no surviving ref or new evidence mentions them. These
+small-repository tests are not Kubernetes push throughput or production
+qualification. Protected branches, protected-view and active-active publication
+coexistence, LFS HTTP locking, and process-crash qualification remain unfinished;
+use this development server with standard Crab repository publication only.
 
 Tag-only initialization preserves an unborn default branch. The refs API returns
 `head: null` and its symbolic name in `unborn_head`; native protocol-v2 clone
@@ -405,7 +411,7 @@ Repeat with another fresh prefix and replace `native_http_push_rustfs` with
 `receive_faults_rustfs` to exercise the four injected failures and GC fence renewal
 while a cancelled writer drains beyond its initial lease expiry.
 
-## Issues and comments
+## Issues, pull requests and comments
 
 Repository members can create issues, write Markdown comments and browse open or
 closed discussions. Authors can edit their own content and close or reopen their
@@ -421,6 +427,17 @@ same UUID and original content after a lost response to recover the completed
 write. Reusing it with different content returns 409. Edits require the current
 `version`; stale updates return 409 without replacing another writer's changes.
 
+Pull requests use the corresponding `/pulls` collection and
+`/pulls/{number}` item routes. Creation records exact `refs/heads/*` base and head
+names plus their commit IDs. Detail reads refresh both IDs from live branches, so
+new head commits appear without rewriting the pull request. The original IDs
+remain immutable review evidence. If either branch is deleted, the conversation
+and original IDs remain available while live file comparison is disabled. Pull
+comments use `/pulls/{number}/comments` and the same conditional edit contract.
+Authors can close or reopen their own pull requests; repository writers can also
+change their state. Merge, approvals, requested changes, checks and branch
+protection are not implemented.
+
 Lists accept `limit` (1–50, default 30) and an exclusive numeric `before` cursor;
 issues also accept `state=open|closed|all`. Results are newest first. Each page
 scans at most 200 allocated numbers; an empty filtered page can still have `next`.
@@ -428,9 +445,9 @@ Clients must follow that cursor. Titles allow 1–256 characters; bodies allow
 64 KiB. Eight discussion operations run concurrently, with a 30-second deadline
 and an 80-KiB HTTP body limit. `Server-Timing: app` reports handling latency.
 
-Data lives under `<repository-prefix>/app/v1/issues`, independently of Git refs,
-packs and metadata. Each JSON document has `schema_version: 1`; unknown versions
-are rejected. Conditional counter updates allocate numbers, immutable
+Data lives under `<repository-prefix>/app/v1/issues` and `app/v1/pulls`,
+independently of Git refs, packs and metadata. Each JSON document has
+`schema_version: 1`; unknown versions are rejected. Conditional counter updates allocate numbers, immutable
 `requests/{uuid}.json` reservations make creation retries converge, and ETag
 updates protect visible issue/comment documents. Interrupted allocation can leave
 numbering gaps. A retry completes an existing reservation without overwriting a
@@ -441,14 +458,23 @@ addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Labels, assignees, deletion/moderation, edit history, notifications and pull
-requests remain unimplemented. Production backup/restore qualification is pending.
+Labels, assignees, deletion/moderation, edit history, notifications, merge,
+reviews and checks remain unimplemented. Production backup/restore qualification
+is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
 replayed both creation requests, edited content, closed/reopened the issue and
 rejected stale edits. Both edited records survived a process restart; replaying
 the original submission IDs recovered the same records. Git refs were unchanged.
-The new discussion UI still needs browser interaction and accessibility qualification.
+
+A separate RustFS qualification used a real depth-one Git client to push a pull
+request branch, created a pull request and comment, and compared the exact added
+file. Both records survived a process restart. After deleting the branch and
+removing the client checkout, the conversation retained its original commit IDs
+and reported that live comparison was unavailable. Warm detail, comment-list,
+pull-list and exact-change reads took 14.2, 1.3, 0.9 and 8.4 ms from the client;
+idempotent pull and comment replays took 552.7 and 581.5 ms. These localhost,
+shared-cache timings expose observed latency rather than production performance.
 
 ## Current verification
 
@@ -551,7 +577,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push and tag lifecycle have scoped RustFS proof; protected branches and administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues and comments with author edits and conditional writes; remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests and comments with author edits, conditional writes and live exact-branch comparison; merge, reviews, checks and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

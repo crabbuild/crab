@@ -4,6 +4,7 @@ import { ThemeProvider } from "@primer/react/next";
 import {
   CodeIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   HistoryIcon,
   IssueOpenedIcon,
   RepoIcon,
@@ -45,6 +46,9 @@ const CommitView = lazy(() =>
 );
 const Issues = lazy(() =>
   import("./issues").then((module) => ({ default: module.Issues })),
+);
+const PullRequests = lazy(() =>
+  import("./pulls").then((module) => ({ default: module.PullRequests })),
 );
 type Theme = "light" | "dark" | "auto";
 
@@ -331,6 +335,13 @@ function RepositoryPage({
             <HistoryIcon /> Commits
           </Link>
           <Link
+            className={view === "pulls" ? "active" : ""}
+            aria-current={view === "pulls" ? "page" : undefined}
+            href={repoHref(repo, { view: "pulls" })}
+          >
+            <GitPullRequestIcon /> Pull requests
+          </Link>
+          <Link
             className={view === "issues" ? "active" : ""}
             aria-current={view === "issues" ? "page" : undefined}
             href={repoHref(repo, { view: "issues" })}
@@ -350,6 +361,26 @@ function RepositoryPage({
           >
             <Issues repo={repo} url={url} csrf={csrf} />
           </Suspense>
+        ) : view === "pulls" ? (
+          <Result state={refs} showTiming={false}>
+            {(data) => (
+              <Suspense
+                fallback={
+                  <div className="notice" role="status">
+                    <Spinner size="small" /> Loading pull requests…
+                  </div>
+                }
+              >
+                <PullRequests
+                  repo={repo}
+                  refs={data}
+                  url={url}
+                  csrf={csrf}
+                  theme={theme}
+                />
+              </Suspense>
+            )}
+          </Result>
         ) : (
           <Result state={refs} showTiming={false}>
             {(data) =>

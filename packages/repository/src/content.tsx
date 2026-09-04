@@ -127,7 +127,6 @@ export function CommitView({
 }) {
   const commit = useRequest<Commit>(endpoint(repo, "commit", { rev }));
   const changes = useRequest<Changes>(endpoint(repo, "changes", { rev }));
-  const [selected, setSelected] = useState<string | null>(null);
   return (
     <>
       <Result state={commit}>
@@ -160,63 +159,115 @@ export function CommitView({
           </section>
         )}
       </Result>
-      <Result state={changes}>
-        {(value) => (
-          <>
-            <h3>
-              {value.changes.length} changed{" "}
-              {value.changes.length === 1 ? "file" : "files"}
-            </h3>
-            <section className="panel change-list">
-              {value.changes.map((change) => (
-                <button
-                  key={change.path_hex}
-                  className={selected === change.path_hex ? "selected" : ""}
-                  onClick={() => setSelected(change.path_hex)}
-                >
-                  <Label
-                    variant={
-                      change.kind === "Added"
-                        ? "success"
-                        : change.kind === "Deleted"
-                          ? "danger"
-                          : "secondary"
-                    }
-                  >
-                    {change.kind}
-                  </Label>
-                  <span>{change.path}</span>
-                  {change.old?.mode !== change.new?.mode && (
-                    <code>
-                      {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
-                    </code>
-                  )}
-                </button>
-              ))}
-            </section>
-            {selected ? (
-              <DiffView
-                key={selected}
-                repo={repo}
-                rev={rev}
-                path={selected}
-                theme={theme}
-              />
-            ) : (
-              value.changes.length > 0 && (
-                <p className="muted">Select a changed file to view its diff.</p>
-              )
-            )}
-          </>
-        )}
-      </Result>
+      <ChangeComparison state={changes} repo={repo} rev={rev} theme={theme} />
     </>
   );
 }
 
-function DiffView({ repo, rev, path, theme }: Omit<Props, "name">) {
+export function ComparisonView({
+  repo,
+  base,
+  head,
+  theme,
+}: {
+  repo: Repository;
+  base: string;
+  head: string;
+  theme: "light" | "dark";
+}) {
+  const changes = useRequest<Changes>(
+    endpoint(repo, "changes", { rev: head, base }),
+  );
+  return (
+    <ChangeComparison
+      key={`${base}:${head}`}
+      state={changes}
+      repo={repo}
+      rev={head}
+      base={base}
+      theme={theme}
+    />
+  );
+}
+
+function ChangeComparison({
+  state,
+  repo,
+  rev,
+  base,
+  theme,
+}: {
+  state: ReturnType<typeof useRequest<Changes>>;
+  repo: Repository;
+  rev: string;
+  base?: string;
+  theme: "light" | "dark";
+}) {
+  const [selected, setSelected] = useState<string | null>(null);
+  return (
+    <Result state={state}>
+      {(value) => (
+        <>
+          <h3>
+            {value.changes.length} changed{" "}
+            {value.changes.length === 1 ? "file" : "files"}
+          </h3>
+          <section className="panel change-list">
+            {value.changes.map((change) => (
+              <button
+                key={change.path_hex}
+                className={selected === change.path_hex ? "selected" : ""}
+                onClick={() => setSelected(change.path_hex)}
+              >
+                <Label
+                  variant={
+                    change.kind === "Added"
+                      ? "success"
+                      : change.kind === "Deleted"
+                        ? "danger"
+                        : "secondary"
+                  }
+                >
+                  {change.kind}
+                </Label>
+                <span>{change.path}</span>
+                {change.old?.mode !== change.new?.mode && (
+                  <code>
+                    {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
+                  </code>
+                )}
+              </button>
+            ))}
+          </section>
+          {selected ? (
+            <DiffView
+              key={selected}
+              repo={repo}
+              rev={rev}
+              base={base}
+              path={selected}
+              theme={theme}
+            />
+          ) : (
+            value.changes.length > 0 && (
+              <p className="muted">Select a changed file to view its diff.</p>
+            )
+          )}
+        </>
+      )}
+    </Result>
+  );
+}
+
+function DiffView({
+  repo,
+  rev,
+  base,
+  path,
+  theme,
+}: Omit<Props, "name"> & { base?: string }) {
   const state = useRequest<Diff>(
-    endpoint(repo, "diff", { rev, path_hex: path }),
+    endpoint(repo, "diff", { rev, base, path_hex: path }),
   );
   const [style, setStyle] = useState<"unified" | "split">("split");
   const options = useMemo(

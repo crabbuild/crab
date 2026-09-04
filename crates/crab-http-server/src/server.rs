@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets,
     auth::{self, Authentication, Principal},
-    git, issues, lfs, maintenance, receive,
+    git, issues, lfs, maintenance, pulls, receive,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -226,6 +226,7 @@ pub async fn serve(config: Config) -> Result<()> {
 pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .merge(issues::routes(Arc::clone(&server)))
+        .merge(pulls::routes(Arc::clone(&server)))
         .route(
             "/git/{owner}/{name}/info/lfs/objects/batch",
             post(lfs::batch).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
@@ -442,3 +443,7 @@ mod auth_tests;
 #[cfg(test)]
 #[path = "lfs_tests.rs"]
 mod lfs_tests;
+
+#[cfg(test)]
+#[path = "pulls_tests.rs"]
+mod pulls_tests;

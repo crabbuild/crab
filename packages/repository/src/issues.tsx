@@ -15,6 +15,7 @@ import {
   Editor,
   Failure,
   useReturnFocus,
+  useSubmission,
 } from "./discussion";
 
 interface Comment {
@@ -41,17 +42,6 @@ function timestamp(value: number) {
     timeStyle: "short",
   });
 }
-// Retain the key for an unchanged submission so retrying an ambiguous response cannot duplicate it.
-function useSubmission() {
-  const current = useRef({ body: "", id: crypto.randomUUID() });
-  return (input: object) => {
-    const body = JSON.stringify(input);
-    if (body !== current.current.body)
-      current.current = { body, id: crypto.randomUUID() };
-    return current.current.id;
-  };
-}
-
 function IssueBadge({ state }: { state: Issue["state"] }) {
   return (
     <span className={`issue-state ${state}`} aria-live="polite">
