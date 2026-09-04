@@ -4,6 +4,7 @@ mod assets;
 mod auth;
 mod config;
 mod git;
+mod issues;
 mod server;
 
 pub use config::{Config, OidcConfig, RepositoryConfig};

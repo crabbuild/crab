@@ -651,3 +651,317 @@ main {
     right: 16px;
   }
 }
+
+.issues-page {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+.issues-page h2 {
+  font-size: 24px;
+  line-height: 1.3;
+}
+.issues-filters,
+.issues-filters nav,
+.discussion-actions,
+.discussion-pagination,
+.issue-title-row,
+.issue-meta,
+.discussion-card header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.issues-filters,
+.issue-title-row {
+  justify-content: space-between;
+  margin: 20px 0;
+}
+.issues-filters nav a {
+  color: var(--fgColor-muted);
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+.issues-filters nav a.active {
+  color: var(--fgColor-default);
+  font-weight: 600;
+  background: var(--bgColor-muted);
+}
+.issue-list {
+  padding: 0;
+  list-style: none;
+  margin: 0;
+}
+.issue-list li {
+  display: flex;
+  gap: 12px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.issue-list li:last-child {
+  border-bottom: 0;
+}
+.issue-list li:hover {
+  background: var(--bgColor-muted);
+}
+.issue-list p {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+.issue-link {
+  color: var(--fgColor-default);
+  font-weight: 600;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+.issue-status-icon {
+  flex: 0 0 auto;
+  padding-top: 3px;
+}
+.issue-status-icon.open {
+  color: var(--fgColor-success);
+}
+.issue-status-icon.closed {
+  color: var(--fgColor-done);
+}
+.issue-empty {
+  text-align: center;
+  padding: 48px 24px;
+}
+.discussion-pagination {
+  justify-content: center;
+  margin: 24px 0;
+}
+.discussion-compose label {
+  display: block;
+  font-weight: 600;
+  margin: 16px 0 8px;
+}
+.discussion-compose input,
+.discussion-editor textarea {
+  width: 100%;
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  background: var(--bgColor-default);
+  color: var(--fgColor-default);
+  padding: 12px;
+  font: inherit;
+}
+.discussion-compose input:focus,
+.discussion-editor textarea:focus {
+  outline: 2px solid var(--focus-outlineColor);
+  outline-offset: 0;
+}
+.discussion-compose input {
+  margin-bottom: 16px;
+}
+.discussion-compose.panel {
+  padding: 20px;
+}
+.discussion-editor {
+  border: 1px solid var(--borderColor-default);
+  border-radius: 6px;
+  background: var(--bgColor-default);
+  overflow: hidden;
+}
+.editor-tabs {
+  display: flex;
+  background: var(--bgColor-muted);
+  border-bottom: 1px solid var(--borderColor-default);
+  gap: 8px;
+  padding: 8px 8px 0;
+}
+.editor-tabs button {
+  font: inherit;
+  color: var(--fgColor-muted);
+  padding: 10px 16px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+}
+.editor-tabs button[aria-selected="true"] {
+  color: var(--fgColor-default);
+  background: var(--bgColor-default);
+  border-color: var(--borderColor-default);
+  font-weight: 600;
+}
+.discussion-editor textarea {
+  border: 0;
+  border-radius: 0;
+  min-height: 170px;
+  resize: vertical;
+  line-height: 1.6;
+}
+.editor-preview {
+  min-height: 170px;
+}
+.editor-help {
+  padding: 0 12px 10px;
+  font-size: 12px;
+  margin: 0;
+}
+.discussion-actions {
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.issue-title-row {
+  align-items: flex-start;
+}
+.issue-title-row h2 {
+  font-size: 30px;
+  font-weight: 400;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+.issue-title-row .discussion-actions {
+  flex-shrink: 0;
+}
+.issue-meta {
+  flex-wrap: wrap;
+  font-size: 13px;
+  border-bottom: 1px solid var(--borderColor-muted);
+  padding-bottom: 24px;
+  margin: 0 0 24px;
+}
+.issue-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 20px;
+  padding: 6px 12px;
+  font-weight: 600;
+  color: var(--fgColor-onEmphasis);
+}
+.issue-state.open {
+  background: var(--bgColor-success-emphasis);
+}
+.issue-state.closed {
+  background: var(--bgColor-done-emphasis);
+}
+.discussion-card {
+  margin: 16px 0;
+}
+.discussion-card header {
+  background: var(--bgColor-muted);
+  border-bottom: 1px solid var(--borderColor-default);
+  padding: 12px 16px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.discussion-card header strong {
+  color: var(--fgColor-default);
+}
+.discussion-card header time {
+  color: var(--fgColor-muted);
+}
+.discussion-card header button {
+  margin-left: auto;
+}
+.discussion-markdown {
+  padding: 20px;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.discussion-markdown > :first-child {
+  margin-top: 0;
+}
+.discussion-markdown > :last-child {
+  margin-bottom: 0;
+}
+.discussion-markdown h1,
+.discussion-markdown h2 {
+  font-size: 22px;
+  border-bottom: 1px solid var(--borderColor-muted);
+  padding-bottom: 6px;
+  margin: 24px 0 14px;
+}
+.discussion-markdown h3 {
+  font-size: 18px;
+}
+.discussion-markdown pre {
+  overflow: auto;
+  padding: 16px;
+  border-radius: 6px;
+  background: var(--bgColor-muted);
+}
+.discussion-markdown code {
+  font-family: var(--fontStack-monospace);
+  font-size: 12px;
+  background: var(--bgColor-muted);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.discussion-markdown pre code {
+  padding: 0;
+}
+.discussion-markdown blockquote {
+  margin-left: 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--borderColor-default);
+  color: var(--fgColor-muted);
+}
+.discussion-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+.discussion-markdown td,
+.discussion-markdown th {
+  border: 1px solid var(--borderColor-default);
+  padding: 6px 12px;
+}
+.discussion-markdown .contains-task-list {
+  list-style: none;
+  padding-left: 20px;
+}
+.issue-state-controls {
+  margin: 16px 0 32px;
+}
+.issue-comments > .section-heading {
+  border-top: 1px solid var(--borderColor-muted);
+  padding-top: 12px;
+}
+.comment-edit {
+  padding: 16px;
+}
+.load-comments {
+  margin: 12px 0;
+  width: 100%;
+}
+.new-comment {
+  margin-top: 32px;
+  border-top: 1px solid var(--borderColor-muted);
+  padding-top: 16px;
+}
+@media (max-width: 640px) {
+  .issue-title-row {
+    display: block;
+  }
+  .issue-title-row h2 {
+    font-size: 24px;
+  }
+  .issues-filters {
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .issues-filters nav {
+    gap: 0;
+  }
+  .issues-filters nav a {
+    padding: 8px;
+  }
+  .discussion-markdown,
+  .discussion-compose.panel {
+    padding: 14px;
+  }
+  .discussion-card header {
+    gap: 6px;
+    padding: 10px;
+  }
+  .issue-list li {
+    padding: 14px;
+  }
+}

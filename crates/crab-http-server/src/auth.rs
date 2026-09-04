@@ -86,10 +86,11 @@ impl IntoResponse for AuthError {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct Identity {
-    subject: String,
-    name: String,
+    pub issuer: String,
+    pub subject: String,
+    pub name: String,
 }
 
 pub(crate) struct Session {
@@ -113,6 +114,17 @@ pub(crate) enum Principal {
 }
 
 impl Principal {
+    pub(crate) fn identity(&self) -> Option<Identity> {
+        match self {
+            Self::User(session) if session.active() => Some(session.identity.clone()),
+            Self::Local => Some(Identity {
+                issuer: "urn:crab:local".into(),
+                subject: "operator".into(),
+                name: "Local operator".into(),
+            }),
+            _ => None,
+        }
+    }
     pub fn can_read(&self, repository: &RepositoryConfig) -> bool {
         match self {
             Self::Anonymous => false,
@@ -482,7 +494,11 @@ async fn finish_login(
         .to_owned();
     let token = CsrfToken::new_random_len(32);
     let session = Arc::new(Session {
-        identity: Identity { subject, name },
+        identity: Identity {
+            issuer: auth.config.issuer.as_str().to_owned(),
+            subject,
+            name,
+        },
         csrf: CsrfToken::new_random_len(32).secret().clone(),
         expires: Instant::now() + lifetime,
         revoked: AtomicBool::new(false),
@@ -598,6 +614,7 @@ mod tests {
         );
         let session = Arc::new(Session {
             identity: Identity {
+                issuer: "https://identity.example".into(),
                 subject: "alice".into(),
                 name: "Alice".into(),
             },
