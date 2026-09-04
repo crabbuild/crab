@@ -1752,7 +1752,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-cache-server": {"crab", "crab-cache-store"},
 }
 WORKSPACE_DEPENDENCY_POLICY = {
-    "crab-write": {"normal": {"crab-git", "crab-metadata", "crab-storage", "crab-xet"}, "dev": {"crab-remote-git"}},
+    "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-storage", "crab-xet"}, "dev": {"crab-remote-git"}},
     "crab-http-server": {"normal": {"crab-read", "crab-remote-git", "crab-storage"}},
     "crab": {
         "normal": {

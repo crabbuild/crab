@@ -2799,8 +2799,6 @@ const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PUSH_ADMISSION_THROTTLE_COOLDOWN: Duration = Duration::from_secs(1);
-const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
-const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = PUSH_ADMISSION_SLOTS;
 const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const GIT_VISIBILITY_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
@@ -5574,187 +5572,6 @@ async fn acquire_push_admission_lock(
     }
 }
 
-async fn acquire_ref_journal_compaction_lock(
-    store: &Store,
-    router: &StoreLayout,
-    transaction_id: &str,
-    ttl: Duration,
-    cancel: &CancellationToken,
-) -> Result<Option<PushLock>> {
-    let deadline =
-        Instant::now() + ttl.saturating_mul(REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER);
-    let mut attempt = 0;
-    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-    loop {
-        if !crate::metadata::manifest::ref_journal_transaction_is_active(
-            store,
-            router,
-            transaction_id,
-        )
-        .await?
-        {
-            return Ok(None);
-        }
-        check_cancelled(cancel)?;
-        match acquire_context
-            .acquire_internal(
-                router.repo_prefix(),
-                crab_coordination::GIT_MANIFEST_RESOURCE,
-                ttl,
-            )
-            .await
-            .map_err(CrabError::from)
-        {
-            Ok(lock) => return Ok(Some(lock)),
-            Err(error @ CrabError::PushLockHeld { .. }) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                let delay = push_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
-                attempt = attempt.saturating_add(1);
-                debug!(
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    %transaction_id,
-                    "committed ref transaction is waiting for compaction handoff"
-                );
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-async fn try_acquire_ref_journal_compaction_lock(
-    store: &Store,
-    router: &StoreLayout,
-    transaction_id: &str,
-    ttl: Duration,
-) -> Result<Option<PushLock>> {
-    if !crate::metadata::manifest::ref_journal_transaction_is_active(store, router, transaction_id)
-        .await?
-    {
-        return Ok(None);
-    }
-
-    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-    match acquire_context
-        .try_acquire_internal(
-            router.repo_prefix(),
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            ttl,
-        )
-        .await
-        .map_err(CrabError::from)
-    {
-        Ok(lock) => Ok(Some(lock)),
-        Err(CrabError::PushLockHeld { .. }) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-async fn compact_ref_journal_until_idle(
-    store: &Store,
-    router: &StoreLayout,
-    pusher: Option<String>,
-) -> Result<Option<crate::metadata::manifest::RefJournalCompaction>> {
-    let mut latest = None;
-    let mut passes = 0;
-    while passes < MAX_REF_JOURNAL_COMPACTION_PASSES {
-        let compacted = crate::metadata::manifest::compact_ref_journal(
-            store,
-            router,
-            now_iso8601(),
-            pusher.clone(),
-            uuid::Uuid::now_v7().to_string(),
-        )
-        .await?;
-        let Some(compaction) = compacted else {
-            return Ok(latest);
-        };
-        passes += 1;
-        debug!(
-            pass = passes,
-            generation = compaction.manifest.generation,
-            "ref journal compactor drained one visible transaction wave"
-        );
-        for (ref_name, holder) in &compaction.edited_ref_lock_holders {
-            match PushLock::release_ref_if_holder(
-                store.inner(),
-                router.repo_prefix(),
-                ref_name,
-                holder,
-            )
-            .await
-            .map_err(CrabError::from)
-            {
-                Ok(true) => debug!(
-                    %ref_name,
-                    %holder,
-                    "released ref lock after journal compaction"
-                ),
-                Ok(false) => debug!(
-                    %ref_name,
-                    %holder,
-                    "ref lock was already handed off after journal compaction"
-                ),
-                Err(error) => warn!(
-                    %ref_name,
-                    %holder,
-                    %error,
-                    "ref lock cleanup after journal compaction failed"
-                ),
-            }
-        }
-        latest = Some(compaction);
-    }
-    // Bound ownership so a continuous push stream cannot monopolize the
-    // derived lock. Any transaction left active waits and becomes the next
-    // owner through the handoff protocol.
-    debug!(
-        passes,
-        "ref journal compactor reached its bounded drain limit"
-    );
-    Ok(latest)
-}
-
-async fn compact_ref_journal_with_lock(
-    store: &Store,
-    router: &StoreLayout,
-    mut lock: PushLock,
-    pusher: Option<String>,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    let operation = while_renewing_internal_lock_with_cancellation(
-        &mut lock,
-        cancel,
-        compact_ref_journal_until_idle(store, router, pusher),
-    )
-    .await;
-    let release = lock.release().await.map_err(CrabError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "ref journal compaction lock release also failed after owner error"
-            );
-            Err(error)
-        }
-    }
-}
-
-/// Compact committed ref-journal transactions under the generation owner.
-///
-/// A push only publishes the immutable transaction and its visibility
-/// evidence. The owner folds that bounded journal into the manifest after the
-/// ref lock is released, so repository-sized metadata work cannot delay the
-/// push acknowledgement.
 pub(crate) async fn compact_ref_journal_for_owner(
     store: &Store,
     router: &StoreLayout,
@@ -5762,25 +5579,22 @@ pub(crate) async fn compact_ref_journal_for_owner(
     pusher: Option<String>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    let active =
-        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
-    let Some(transaction_id) = active.first() else {
-        return Ok(false);
-    };
-    let Some(lock) =
-        acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
-            .await?
-    else {
-        return Ok(false);
-    };
-    compact_ref_journal_with_lock(store, router, lock, pusher, cancel).await
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::journal::compact_for_owner(
+        store.as_storage(),
+        &storage_router,
+        lock_ttl,
+        pusher,
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
-/// Make one bounded, non-blocking reader repair attempt for an active ref journal.
-///
-/// Upload-pack readers may arrive as a large fanout while a push is handing
-/// off its ref journal. Only one reader may compact; other readers retry their
-/// normal admission path without waiting on or probing the manifest lease.
 pub(crate) async fn compact_ref_journal_for_reader(
     store: &Store,
     router: &StoreLayout,
@@ -5788,47 +5602,20 @@ pub(crate) async fn compact_ref_journal_for_reader(
     pusher: Option<String>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    let active =
-        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
-    let Some(transaction_id) = active.first() else {
-        return Ok(false);
-    };
-    let Some(lock) =
-        try_acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl).await?
-    else {
-        debug!(
-            %transaction_id,
-            "reader skipped ref journal compaction because another actor owns the manifest lease"
-        );
-        return Ok(false);
-    };
-    let deadline = Instant::now() + (lock_ttl / 2).max(Duration::from_secs(1));
-    let mut lock = lock;
-    let operation = while_renewing_internal_lock_with_cancellation(&mut lock, cancel, async {
-        let mut compacted = false;
-        while Instant::now() < deadline {
-            check_cancelled(cancel)?;
-            let pass = compact_ref_journal_until_idle(store, router, pusher.clone()).await?;
-            if pass.is_none() {
-                break;
-            }
-            compacted = true;
-        }
-        Ok::<_, CrabError>(compacted)
-    })
-    .await;
-    let release = lock.release().await.map_err(CrabError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "reader ref journal lock release also failed after compaction error"
-            );
-            Err(error)
-        }
-    }
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::journal::compact_for_reader(
+        store.as_storage(),
+        &storage_router,
+        lock_ttl,
+        pusher,
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
@@ -5839,74 +5626,6 @@ pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
         }
         if let Err(e) = lock.release().await {
             warn!(error = %e, "failed to release push lock");
-        }
-    }
-}
-
-pub(crate) async fn while_renewing_internal_lock<T>(
-    lock: &mut PushLock,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    while_renewing_internal_lock_impl(lock, None, operation).await
-}
-
-pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
-    lock: &mut PushLock,
-    failure_cancel: &CancellationToken,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    while_renewing_internal_lock_impl(lock, Some(failure_cancel), operation).await
-}
-
-async fn while_renewing_internal_lock_impl<T>(
-    lock: &mut PushLock,
-    failure_cancel: Option<&CancellationToken>,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
-    let mut ticker = tokio::time::interval(renewal_interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await;
-    tokio::pin!(operation);
-    let mut renewal_error = None;
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut operation => {
-                return match result {
-                    Err(error) => Err(error),
-                    Ok(value) => match renewal_error {
-                        Some(error) => Err(CrabError::from(error)),
-                        None => Ok(value),
-                    },
-                };
-            }
-            _ = ticker.tick(), if renewal_error.is_none() => {
-                // A backend CAS may consume its full retry deadline. Keep polling completed
-                // maintenance so a successful operation can release a still-valid lease.
-                let renewal = lock.renew();
-                tokio::pin!(renewal);
-                tokio::select! {
-                    biased;
-                    result = &mut renewal => {
-                        if let Err(error) = result {
-                            if let Some(failure_cancel) = failure_cancel {
-                                failure_cancel.cancel();
-                            }
-                            renewal_error = Some(error);
-                        }
-                    }
-                    result = &mut operation => {
-                        return match result {
-                            Err(error) => Err(error),
-                            Ok(value) => match renewal_error {
-                                Some(error) => Err(CrabError::from(error)),
-                                None => Ok(value),
-                            },
-                        };
-                    }
-                }
-            }
         }
     }
 }
@@ -6243,7 +5962,7 @@ async fn publish_committed_pack_locators_with_mode(
         return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
     };
     let publication_started = Instant::now();
-    let write_result = Box::pin(while_renewing_internal_lock(&mut lock, async {
+    let write_result = Box::pin(crab_coordination::while_renewing(&mut lock, None, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != anchor.generation
             || current.pack_index_hash != anchor.pack_index_hash.hex()
@@ -6562,7 +6281,7 @@ async fn repair_git_visibility_if_current_with_options(
     let Some(mut lock) = lock else {
         return Ok(None);
     };
-    let repair = Box::pin(while_renewing_internal_lock(&mut lock, async {
+    let repair = Box::pin(crab_coordination::while_renewing(&mut lock, None, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != required_generation
             || current.pack_index_hash != manifest.pack_index_hash
@@ -25619,9 +25338,9 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async {
+            crab_coordination::while_renewing(&mut lock, Some(&cancel), async {
                 cancel.cancelled().await;
-                Ok(())
+                Ok::<_, CrabError>(())
             }),
         )
         .await
@@ -25662,13 +25381,13 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(1_500),
-            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async move {
+            crab_coordination::while_renewing(&mut lock, Some(&cancel), async move {
                 operation_started
                     .acquire()
                     .await
                     .expect("observe stalled renewal")
                     .forget();
-                Ok(())
+                Ok::<_, CrabError>(())
             }),
         )
         .await

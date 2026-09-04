@@ -2510,20 +2510,24 @@ name = "crab-write"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "crab-coordination",
  "crab-git",
  "crab-metadata",
  "crab-remote-git",
  "crab-storage",
+ "crab-types",
  "crab-xet",
  "futures-util",
  "gix-hash",
  "gix-object",
  "object_store",
+ "rand 0.9.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
