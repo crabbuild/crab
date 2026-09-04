@@ -1,8 +1,8 @@
 # Native Git writes: implementation boundary
 
-Status: native HTTP push is not yet available. Shared incoming-pack quarantine
-and exact graph/ref validation plus self-contained pack preparation are qualified; publication and
-HTTP receive wiring remain pending.
+Status: native HTTP push is not yet available. Shared incoming-pack quarantine,
+exact graph/ref validation, self-contained pack preparation and ref visibility
+planning are qualified; publication and HTTP receive wiring remain pending.
 The passing intake tests do not prove an accepted push or an updated ref.
 
 ## Implemented intake boundary
@@ -88,6 +88,43 @@ all five objects identically to the source. Local preparation took 2 ms; reposit
 open, intake, validation and preparation took 904 ms, without cache isolation.
 These artifacts are private and are not evidence of published refs or HTTP push.
 
+## Implemented per-ref visibility planning
+
+`receive_plan::plan_visibility` builds exact object sets for the existing
+`GitVisibilityEdit` publication format. A `VisibilitySource` pins one prior ref
+tip and its complete committed closure to the same generation as the object
+reader. Membership in a union of other refs is not a valid prior closure.
+
+The planner initially prunes objects in that prior closure. It emits additive
+evidence only if traversal actually reaches the prior tip, which proves the
+entire prior closure remains reachable. Otherwise it expands the pruned graph
+and emits a complete replacement closure. That distinction prevents force
+updates from retaining authorization for old, unreachable objects. Trusted
+commits/trees/tags still require their outgoing edges when expanding a closure;
+proven blobs are leaves and Gitlinks remain external references. Incoming objects
+not reachable from the selected ref do not enter its visibility evidence.
+
+The planner shares object parsing, identity checks, kind validation, cancellation
+and byte/step limits with ref validation. It does not enforce ref update policy,
+prove pointer payloads or write storage. The publisher must bind its output to the
+same pinned base and pass it through the canonical metadata transaction boundary.
+
+Five focused tests cover additive commit/tag evidence, shared-subtree rewrites,
+trusted objects outside a reusable ref, Gitlinks, malformed/missing objects,
+limits, cancellation and invalid prior-tip binding. The seven existing ref/graph
+tests still pass. Kubernetes/RustFS qualification matches native `git rev-list`
+exactly: the new commit adds three objects and its tag adds four, with no old
+object-body reads. Planning both proofs took 1,628 ms locally, including individual
+remote catalog lookups; this is not a cache-isolated or HTTP push benchmark.
+
+A separate orphan commit retains only the Kubernetes `.github` subtree under a
+new root. Native `git fsck --strict` passes. RustFS-backed replacement planning
+matches native Git's complete reachable sets: 12 objects for the orphan commit
+and 13 for its annotated tag, excluding the former main tip. Its 4,733-byte input
+carries all 13 objects; neither intake nor planning reads old object bodies.
+The two replacement proofs took 124 ms locally. This fixture and cache state
+differ from the additive measurement, so their times are not directly comparable.
+
 ## Existing code and the semantic mismatch
 
 `crates/crab-auth-server/src/receive/workflow.rs` exposes `prepare_receive`,
@@ -150,6 +187,15 @@ The relevant existing contracts include `PushLockAcquireContext::acquire_ref`,
 publication, the segmented pack index, `GitObjectLocatorWriter`, and the generation
 index receipts. The protected receive workflow demonstrates fencing and metadata
 ordering; its view translation is not part of native Git publication.
+
+The native CLI's `commit_ref_journal` makes an immutable transaction visible by
+its active marker; `compact_ref_journal_for_owner` subsequently folds it into a
+generation under the manifest owner lease. `crab-remote-git` deliberately returns
+`RepositoryIndexing` while committed journal transactions remain uncompacted.
+The HTTP server therefore needs a shared generation-owner path, including
+locator/visibility readiness and restart repair, as well as the journal commit.
+A raw manifest PUT or journal-only endpoint cannot meet immediate read/fetch
+visibility or coexist correctly with native CLI writers.
 
 ## Evidence required before exposing push
 
