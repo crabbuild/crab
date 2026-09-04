@@ -47,9 +47,10 @@ is process liveness, not storage readiness.
 
 ## Run the container
 
-The checked-in image builds the locked React application and Rust server, embeds
-the assets in one binary, and runs as UID/GID 10001 with a dedicated temporary
-directory. Build it from the repository root so both workspace and frontend
+The checked-in image builds the locked React application and Rust server from
+digest-pinned base images, embeds the assets in one binary, and runs as UID/GID
+10001 with a dedicated temporary directory. Its runtime layer installs no
+packages. Build it from the repository root so both workspace and frontend
 inputs are available:
 
 ```sh
@@ -73,9 +74,10 @@ docker run --rm --name crab-http-server \
   crab-http-server:local
 ```
 
-The container health check calls `/readyz`, so healthy means every configured
-repository can be opened from object storage. `SIGTERM` starts the same graceful
-drain as Ctrl-C. `/var/lib/crab/tmp` holds bounded transient receive/index files;
+The binary's `--healthcheck` mode calls the configured listener's `/readyz`, so
+healthy means every configured repository can be opened from object storage.
+`SIGTERM` starts the same graceful drain as Ctrl-C. `/var/lib/crab/tmp` holds
+bounded transient receive/index files;
 mount a larger writable temporary volume there when expected pushes exceed the
 container filesystem budget. Repository and application state remain in the
 configured bucket.
@@ -815,7 +817,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | In progress |
+| Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
 | Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress |
