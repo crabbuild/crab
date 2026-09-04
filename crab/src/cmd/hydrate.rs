@@ -2209,22 +2209,6 @@ pub fn resolve_hydrate_remote_url(config: &Config) -> Result<Option<crate::git::
     crate::git::url::CrabUrl::parse(url).map(Some)
 }
 
-/// Run local smudge-session hydration with a shared chunk cache.
-///
-/// This low-level entry point does not compose remote readers; CLI callers use
-/// [`run_hydrate`] so configured storage policy is honored.
-pub async fn run_hydrate_with_cache(
-    args: &HydrateArgs,
-    config: &Config,
-    cache: Arc<ChunkCache>,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let ctx = AppContext::new(config.clone(), cancel.clone());
-    let hydrator = SmudgeSessionHydrator::with_chunk_cache(ctx, cache);
-    run_hydrate_in(&cwd, args, config, &hydrator, cancel).await
-}
-
 /// Hydrate implementation that accepts an explicit root directory and hydrator.
 pub async fn run_hydrate_in(
     root: &Path,
@@ -2464,57 +2448,6 @@ async fn run_selected_hydration(
         && summary.failed == 0
     {
         mark_pending_worktree_hydration_applied(root, &pending.policy)?;
-    }
-
-    // Publish only descriptor-safe proofs captured by successful atomic
-    // writes. Sibling worktrees use this cache to locate CoW candidates;
-    // they still hash each candidate before publication. Best-effort: an
-    // unavailable cache only disables that local optimization.
-    if summary.hydrated > 0 {
-        let pointers = selected_to_hydrate
-            .iter()
-            .map(|(path, pointer)| (path.as_path(), pointer))
-            .collect::<HashMap<_, _>>();
-        let updates = summary
-            .verified_paths
-            .iter()
-            .filter_map(|verified| {
-                let pointer = pointers.get(verified.path.as_path())?;
-                if pointer.file_hash != verified.file_hash || pointer.size != verified.size {
-                    return None;
-                }
-                let rel = verified.path.strip_prefix(root).unwrap_or(&verified.path);
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                crate::cache::hydrated_pointer::entry_for_verified_stat(
-                    verified.index_stat,
-                    &pointer.serialize(),
-                )
-                .map(|entry| (rel_str, entry))
-            })
-            .collect::<Vec<_>>();
-        if !updates.is_empty() {
-            match crate::cache::hydrated_pointer::cache_path_for_worktree_root(root) {
-                Ok(cache_path) => {
-                    if let Err(e) =
-                        crate::cache::HydratedPointerCache::update_on_disk(&cache_path, updates)
-                    {
-                        debug!(
-                            path = %cache_path.display(),
-                            error = %e,
-                            "failed to persist hydrated-pointer cache (non-fatal)"
-                        );
-                    }
-                }
-                Err(e) => {
-                    debug!(
-                        root = %root.display(),
-                        error = %e,
-                        "hydrated-pointer cache unavailable for hydrate"
-                    );
-                }
-            }
-        }
-        refresh_hydrated_index_entries(root, &summary.verified_paths);
     }
 
     // Per-file events were drained above; finish ordinary progress counters.

@@ -18,6 +18,62 @@
 
 ## Status
 
+### Integration with native Git hardening on main, 2026-09-04
+
+Rebased the cache branch from `42f1739` onto `500bea2` (native Git compatibility
+and mirror reconciliation). Historical qualification below remains tied to its
+original source; it is not evidence for this combined artifact.
+
+Is this the best integration fix? Keep each invariant at its existing owner:
+main's command selection/reporting and origin-only verification, this branch's
+canonical shared read runtime and private payload lifecycle. Do not restore a
+second store client, recursive payload cleanup, or an upstream Xet patch.
+
+| Changed boundary | Entry/caller and retained callee | Combined acceptance |
+|---|---|---|
+| Hydration composition | CLI hydrate, clone, pull, literal LFS inventories → `configured_hydrator` → `read::build_cli_hydrator` | Preserve explicit roots, remote/replica failure policy and restore flags; reuse decoded ranges. |
+| Publication/reporting | `run_selected_hydration` → `execute::hydrate_selected_in` | One publication owner preserves literal Unix backslashes; completed JSONL outcomes drain before the terminal error. No duplicate cache/index publication. |
+| Clone checkout | `run_clone_in` → `checkout_head` → Git checkout/filter | Unborn repositories succeed; required filter failures stop clone; machine output stays clean. |
+| Cleanup ownership | Both CLI clean spellings → shared `clean_cache` → directory admission, pinned payload locks and catalog removal | Refuse active overlapping mirror owners before any payload deletion; preserve unknown/workspace/database state and read-only previews. One canonical root replaces the old separate-root admission list. |
+| Integrity and errors | Origin-only `verify_origin_recipe`; shared store fixtures; CLI read-failure conversion | Healthy cache cannot hide corrupt origin; initialize canonical fixture layouts; preserve Git-pack and multipart-journal typed diagnostics. |
+
+Rebase audit compares the resulting tree with Git's three-way integration of
+the original head and main, including non-conflicting files. The earlier merge
+commit's multipart-journal mapping is explicitly retained. Dependency lockfile
+changes from main remain; no dependency versions or overrides are added here.
+Upstream tests are adapted only at changed constructor/private-root/cleanup
+boundaries, without relaxing byte-identity, corruption or active-owner checks.
+
+Local integration verification passes:
+
+- Default CLI library/binary check and actual debug binary build.
+- Cache all-feature tests: **296**; range-only feature tests: **172**;
+  shared-read tests: **120**, including origin-only corruption checks.
+- CLI hydration **88**, clone **39**, diagnostics **65**, filter **55**,
+  shard sync **26**, and pull command **6** tests.
+- Actual CLI cleanup **2** and maintenance **13** tests, including both clean
+  spellings under an active mirror, unsafe roots, and unlimited/explicit caps.
+- Strict all-target cache Clippy, CI-configured CLI correctness/suspicious
+  Clippy, architecture gates and their **3** regressions, formatting and diff
+  checks. CLI Clippy retains existing warnings; this is not warnings-clean.
+- Web typecheck, lint (16 warnings), **9** tests, and link validation against
+  the existing production build (398 pages/4,292 fragments). Not a fresh MDX build.
+
+Real native/LFS filter-process framing smoke passes **31 checks**, including
+truncated packets, open-input terminal failures and consecutive smudges.
+Evidence: workspace-volume run `pr147-rebase-framing-20260904-0913/report.json`;
+debug binary SHA-256
+`842df7af84c7096fcf88fbde31dd016fbdfbf0ca6ae05158232dcba8ce8d4b5c`.
+Its version stamp is `6f3aa3f` plus the working-tree integration changes recorded
+with this checkpoint; it is not a separately installed release artifact.
+
+Initial integration checks caught a retired constructor in a replayed helper,
+checkout fixtures missing main's output-mode argument, and a new origin-proof
+fixture using a non-private root. Those are reconciled without weakening the
+production policy or assertions. The existing Darwin linker unwind warning
+remains. Native/provider/10–20 GiB RustFS gates below are not rerun by this
+conflict-resolution checkpoint; broad CI must qualify the rewritten head.
+
 ### Unlimited local retention with an opt-in cap
 
 The user-approved shared payload-cache default is now unlimited disk retention, not
@@ -3454,7 +3510,7 @@ Acceptance still open; do not infer full Phase 4 completion from these tests:
    contention against the existing workload. Repeat installed RustFS cold/warm,
    corrupt/unavailable-cache recovery, and concurrent hydration with this exact
    artifact. Earlier installed results predate this source and cannot qualify it.
-5. Reconcile `main` before the next pushed implementation checkpoint. CI for
+5. Qualify the combined branch after reconciling `main`. CI for
    `434915d` fails compilation of the synthetic merge because `main` adds
    `StorageError::MultipartJournal` and the borrowed diagnostic match lacks that
    variant. Rust quality run `33732227574`, job `100574723219`, and NFS gate run

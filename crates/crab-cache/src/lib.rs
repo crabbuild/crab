@@ -12,7 +12,7 @@ pub mod error;
 #[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
 pub mod health;
 pub mod key;
-#[cfg(feature = "local-cache")]
+#[cfg(any(feature = "local-cache", feature = "xet-chunk-cache"))]
 pub mod lifecycle;
 #[cfg(feature = "local-cache")]
 pub mod local_cache;

@@ -20,7 +20,10 @@ enum Cause<'a> {
     },
     Io(&'a std::io::Error),
     Network(&'a object_store::Error),
-    Store(&'a object_store::Error),
+    Store {
+        display: &'a dyn fmt::Display,
+        retry: RetryClass,
+    },
     Other,
 }
 
@@ -46,7 +49,20 @@ impl ReadFailure {
                     }
                     StorageError::NotSupported { source }
                     | StorageError::ObjectStore { source } => {
-                        return diagnostic(Cause::Store(source));
+                        return diagnostic(Cause::Store {
+                            display: source,
+                            retry: crate::storage::retry::classify_storage(source),
+                        });
+                    }
+                    StorageError::MultipartJournal { source, .. } => {
+                        // Direct conversion wraps this in object_store::Generic.
+                        // Borrow its display without replacing the opaque source
+                        // or bypassing that wrapper for a nested journal I/O error.
+                        let display = format_args!("Generic multipart journal error: {source}");
+                        return diagnostic(Cause::Store {
+                            display: &display,
+                            retry: RetryClass::Transient,
+                        });
                     }
                     StorageError::Io { source } => return diagnostic(Cause::Io(source)),
                     StorageError::Throttled { retry_after } => CrabError::Throttled {
@@ -129,7 +145,7 @@ impl ReadFailure {
             Cause::OriginIntegrity { .. } => "CRAB-E0020",
             Cause::Io(_) => "CRAB-E0070",
             Cause::Network(_) => "CRAB-E0001",
-            Cause::Store(_) => "CRAB-E0071",
+            Cause::Store { .. } => "CRAB-E0071",
             Cause::Other => "CRAB-E0099",
         })
     }
@@ -138,7 +154,7 @@ impl ReadFailure {
         self.with_cause(|cause| match cause {
             Cause::Product(error) => error.exit_code(),
             Cause::OriginIntegrity { .. } => 4,
-            Cause::Io(_) | Cause::Store(_) => 5,
+            Cause::Io(_) | Cause::Store { .. } => 5,
             Cause::Network(_) => 1,
             Cause::Other => 9,
         })
@@ -148,7 +164,7 @@ impl ReadFailure {
         self.with_cause(|cause| match cause {
             Cause::Product(error) => error.category(),
             Cause::OriginIntegrity { .. } => ErrorCategory::Integrity,
-            Cause::Io(_) | Cause::Store(_) => ErrorCategory::Transport,
+            Cause::Io(_) | Cause::Store { .. } => ErrorCategory::Transport,
             Cause::Network(_) => ErrorCategory::Transient,
             Cause::Other => ErrorCategory::Internal,
         })
@@ -169,7 +185,7 @@ impl ReadFailure {
                 class => class,
             },
             Cause::Network(_) => RetryClass::Transient,
-            Cause::Store(source) => crate::storage::retry::classify_storage(source),
+            Cause::Store { retry, .. } => retry,
             // Origin verification exhausted cache repair. Writer failures can
             // follow partial output; replaying that writer is not safe.
             Cause::OriginIntegrity { .. } | Cause::Io(_) | Cause::Other => RetryClass::Fatal,
@@ -185,9 +201,10 @@ impl ReadFailure {
                 "origin": "object-store",
             }),
             Cause::Io(error) => serde_json::json!({ "message": error.to_string() }),
-            Cause::Network(source) | Cause::Store(source) => {
+            Cause::Network(source) => {
                 serde_json::json!({ "source": source.to_string() })
             }
+            Cause::Store { display, .. } => serde_json::json!({ "source": display.to_string() }),
             Cause::Other => serde_json::json!({ "message": self.0.to_string() }),
         })
     }
@@ -195,7 +212,7 @@ impl ReadFailure {
     pub(super) fn hint(&self) -> Option<&'static str> {
         self.with_cause(|cause| match cause {
             Cause::Product(error) => error.hint(),
-            Cause::Store(_) => Some(super::STORAGE_HINT),
+            Cause::Store { .. } => Some(super::STORAGE_HINT),
             _ => None,
         })
     }
@@ -203,7 +220,7 @@ impl ReadFailure {
     pub(super) fn docs_anchor(&self) -> Option<&'static str> {
         self.with_cause(|cause| match cause {
             Cause::Product(error) => error.docs_anchor(),
-            Cause::Store(_) => Some(super::STORAGE_DOCS_ANCHOR),
+            Cause::Store { .. } => Some(super::STORAGE_DOCS_ANCHOR),
             _ => None,
         })
     }
@@ -222,7 +239,9 @@ impl fmt::Display for ReadFailure {
             Cause::Network(source) => {
                 write!(f, "network transient error [{}]: {source}", self.code())
             }
-            Cause::Store(source) => write!(f, "object store error [{}]: {source}", self.code()),
+            Cause::Store { display, .. } => {
+                write!(f, "object store error [{}]: {display}", self.code())
+            }
             Cause::Other => write!(f, "{} [{}]", self.0, self.code()),
         })
     }
@@ -305,6 +324,18 @@ mod tests {
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             StorageError::Cancelled,
+            StorageError::MultipartJournal {
+                operation: "claim",
+                source: Box::new(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+            },
+            StorageError::MultipartJournal {
+                operation: "record_part",
+                source: Box::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            },
+            StorageError::MultipartJournal {
+                operation: "renew",
+                source: "journal lease lost".into(),
+            },
             StorageError::ObjectStore {
                 source: transport(),
             },

@@ -1525,7 +1525,7 @@ mod tests {
         git_in(target.path(), &["config", "filter.crab.required", "true"]);
 
         assert!(matches!(
-            checkout_head(target.path(), "crab://bucket/repo"),
+            checkout_head(target.path(), "crab://bucket/repo", OutputMode::Text),
             Err(CrabError::Protocol(_))
         ));
     }
@@ -1535,7 +1535,7 @@ mod tests {
         let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
         let target = tempfile::tempdir().unwrap();
         git_in(target.path(), &["init"]);
-        checkout_head(target.path(), "crab://bucket/repo").unwrap();
+        checkout_head(target.path(), "crab://bucket/repo", OutputMode::Text).unwrap();
     }
 
     #[test]

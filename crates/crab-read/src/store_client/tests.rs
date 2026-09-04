@@ -77,6 +77,12 @@ fn store_client_uses_caching_store_local_cache() {
 }
 
 async fn seed_file_index(client: &StoreClient, entries: &[(MerkleHash, MerkleHash)]) {
+    crab_metadata::layout_descriptor::ensure_canonical_layout(
+        client.store.origin(),
+        &client.router,
+    )
+    .await
+    .expect("initialize canonical layout");
     let shard_hashes = entries
         .iter()
         .map(|(_, shard_hash)| shard_hash.hex())

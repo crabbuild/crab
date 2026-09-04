@@ -2366,7 +2366,9 @@ impl CrabError {
             Self::RefAlreadyExists { .. } => "CRAB-E0011",
             Self::PushLockHeld { .. } => "CRAB-E0012",
             Self::NonFastForward { .. } => "CRAB-E0017",
-            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) | Self::OriginIntegrity { .. } => "CRAB-E0020",
+            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) | Self::OriginIntegrity { .. } => {
+                "CRAB-E0020"
+            }
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",

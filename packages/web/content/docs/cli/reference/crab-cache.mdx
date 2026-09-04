@@ -93,8 +93,15 @@ crab cache clean
 Unknown files/subtrees, live workspaces, mirror repositories, retained profiles,
 databases and side files, and unpublished temporaries are preserved. Active
 readers and concurrent publishers are skipped. The command reports actual
-removals plus retained, busy, and unsafe entry counts; retained subtrees count
-once without inspecting their contents. Empty directories remain.
+removals plus retained, busy, and unsafe entry counts; the payload scan counts
+retained subtrees once. Empty directories remain.
+
+Before deleting any payload, cleanup checks directory ownership. An active
+mirror using an overlapping cache causes a nonzero refusal without payload
+deletion. New mirror owners also cannot start while cleanup holds its guard.
+Wait for the active operation and retry; do not delete its coordination files.
+Admission scans for coordination markers, but does not make mirror repositories
+or other retained state eligible for removal.
 
 The current cache subcommands do not add command-specific selection flags;
 use `crab cache <command> --help` for global logging options.

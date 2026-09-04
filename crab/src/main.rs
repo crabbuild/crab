@@ -6026,7 +6026,6 @@ async fn build_filter_process_remote_smudge(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;

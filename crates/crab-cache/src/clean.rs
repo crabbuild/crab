@@ -39,6 +39,14 @@ pub async fn clean_cache(
             }
             Err(error) => return Err(error),
         };
+        // Directory owners protect mutable mirror workspaces; payload locks
+        // protect individual fills/readers. Retain both through deletion, but
+        // keep previews read-only and never use the recursive cleanup method.
+        let _directory_owner = if dry_run {
+            None
+        } else {
+            Some(crate::lifecycle::CacheCleanGuard::acquire(&root, cancel)?)
+        };
         let mut removal = crate::catalog::PayloadRemoval::open(Some(&pinned), &root, dry_run)?;
         pinned.clean(dry_run, cancel, &mut |relative, operation| {
             removal.remove(relative, operation)
