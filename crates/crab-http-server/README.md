@@ -295,6 +295,12 @@ cooperative deadline, a 2-GiB wire/prepared-pack limit, one million incoming obj
 have further bounds. Temporary disk needs can exceed the wire limit. Buffered and
 chunked native pushes are supported; receive requires identity content encoding.
 
+The current symbolic HEAD cannot be deleted through HTTP push. Rejection applies
+to the entire atomic batch and Git reports `deletion is prohibited`; other branches
+and tags remain deletable. This follows the repository's recorded default rather
+than a hardcoded branch name. Default-branch administration and configurable
+branch protections remain pending.
+
 Disconnects and deadlines signal cancellation; owned workers retain admission
 and renew their GC fences until cleanup finishes. A known commit is never reported
 as a ref rejection due to later cleanup or indexing failure. If the response is lost or returns 503,
@@ -312,6 +318,11 @@ push throughput or production qualification. Protected branches, protected-view
 and active-active publication coexistence, LFS upload endpoints, and process-crash
 qualification remain unfinished; use this development server with standard Crab
 repository publication only.
+
+Initialization still uses the shared manifest requirement that HEAD resolve when
+refs exist. Tag-only initialization can therefore select a tag as HEAD; supporting
+an unborn default alongside existing tags requires coordinated manifest, reader
+and CLI changes. Such a HEAD is also protected from deletion by HTTP receive.
 
 Injected storage faults pass against both memory storage and RustFS: lost marker
 replies, rejected marker writes, and cancellation before and after the commit
