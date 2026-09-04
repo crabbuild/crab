@@ -148,6 +148,7 @@ pub fn run_mirror(args: &MirrorArgs, cancel: &CancellationToken) -> Result<Mirro
         helper_path,
         crab_binary,
         lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
+        initialize_destination: initialize_mirror_destination,
     };
     let mut runner = SystemCommandRunner::new(cancel.clone());
     run_mirror_with_runner(args, cancel, options, &mut runner)
@@ -165,6 +166,7 @@ pub async fn run_mirror_integrity(
         helper_path: helper_path_override(),
         crab_binary: crate::cmd::init::crab_binary_path(),
         lfs_object_id_collector: crate::lfs::discovery::collect_lfs_object_ids_from_range_in,
+        initialize_destination: initialize_mirror_destination,
     };
     let mut runner = SystemCommandRunner::new(cancel.clone());
     let store = async {
@@ -183,6 +185,7 @@ struct MirrorExecution {
     helper_path: Option<OsString>,
     crab_binary: String,
     lfs_object_id_collector: LfsObjectIdCollector,
+    initialize_destination: fn(&str, &Path, &CancellationToken) -> Result<()>,
 }
 
 type LfsObjectIdCollector =
@@ -217,6 +220,8 @@ fn run_mirror_with_runner(
     ensure_crab_remote(cache_dir, &args.destination, &options, runner)?;
     check_cancelled(cancel)?;
 
+    (options.initialize_destination)(&args.destination, cache_dir, cancel)?;
+    check_cancelled(cancel)?;
     let ref_delta = load_ref_delta(cache_dir, &options, runner)?;
     check_cancelled(cancel)?;
 
@@ -257,6 +262,38 @@ fn run_mirror_with_runner(
         start,
         options.mode,
     )
+}
+
+fn initialize_mirror_destination(
+    destination: &str,
+    cache_dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    crate::cmd::lfs::block_on_runtime(async {
+        let destination = CrabUrl::parse(destination)?;
+        let config = crate::core::config::Config::resolve_for_repo(cache_dir)?;
+        let repo_prefix = destination.repo_path.clone();
+        let store = crate::auth::build_store(&config, destination, "repo-create", cancel).await?;
+        let router = crate::storage::StoreLayout::new(store.clone(), repo_prefix);
+        match store.head(&router.layout_descriptor_path()).await {
+            // Existing repositories must pass the normal read validation;
+            // implicit mirroring must not repair a lost manifest in place.
+            Ok(_) => Ok(()),
+            Err(CrabError::NotFound { .. }) => {
+                // The owned cache HEAD came from the source advertisement.
+                // Using the configured default here can select a different,
+                // existing branch and silently change a fresh clone's checkout.
+                let source_head = std::fs::read_to_string(cache_dir.join("HEAD"))?;
+                let default_head = format!("refs/heads/{}", config.default_branch);
+                let head = source_head
+                    .trim()
+                    .strip_prefix("ref: ")
+                    .unwrap_or(&default_head);
+                crate::cmd::init::initialize_remote_repository_store(&store, &router, head).await
+            }
+            Err(error) => Err(error),
+        }
+    })
 }
 
 fn resolve_source(source: &str, invocation_dir: &Path) -> Result<String> {
@@ -385,6 +422,23 @@ fn ensure_crab_remote(
         options.mode,
     )?;
 
+    // Every cache ref belongs to the source. Git's post-push tracking update
+    // must not overwrite source-owned refs/remotes/crab/* with destination tips.
+    let command = git_command(
+        ["config", "--unset-all", "remote.crab.fetch"],
+        Some(cache_dir),
+        options,
+        false,
+    );
+    let output = runner.run(&command, options.mode)?;
+    if !output.status.success && output.status.code != Some(5) {
+        return Err(CrabError::Protocol(command_failure_detail(
+            &command,
+            &output,
+            "failed to disable destination tracking in mirror cache",
+        )));
+    }
+
     Ok(())
 }
 
@@ -451,7 +505,7 @@ fn load_local_refs(
             "failed to read local mirror refs",
         )));
     }
-    Ok(parse_ref_lines(&output.stdout, true))
+    Ok(parse_ref_lines(&output.stdout))
 }
 
 fn load_remote_refs(
@@ -466,10 +520,10 @@ fn load_remote_refs(
         false,
     );
     let output = run_required(runner, command, options.mode)?;
-    Ok(parse_ref_lines(&output.stdout, false))
+    Ok(parse_ref_lines(&output.stdout))
 }
 
-fn parse_ref_lines(output: &str, filter_local_crab_tracking: bool) -> BTreeMap<String, String> {
+fn parse_ref_lines(output: &str) -> BTreeMap<String, String> {
     let mut refs = BTreeMap::new();
     for line in output
         .lines()
@@ -484,9 +538,6 @@ fn parse_ref_lines(output: &str, filter_local_crab_tracking: bool) -> BTreeMap<S
             continue;
         };
         if sha == "ref:" || name == "HEAD" || name.ends_with("^{}") {
-            continue;
-        }
-        if filter_local_crab_tracking && name.starts_with("refs/remotes/crab/") {
             continue;
         }
         refs.insert(name.to_owned(), sha.to_owned());

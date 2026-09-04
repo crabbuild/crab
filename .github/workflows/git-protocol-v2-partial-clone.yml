@@ -37,6 +37,7 @@ on:
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/scripts/e2e/run_lfs_selection_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py"
       - "crab/scripts/verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_protocol_qualification_logs.py"
@@ -89,6 +90,7 @@ on:
       - "crab/scripts/e2e/run_concurrent_push_smoke.py"
       - "crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py"
       - "crab/scripts/e2e/run_lfs_selection_rustfs_smoke.py"
+      - "crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py"
       - "crab/scripts/verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_verify_git_capability_matrix.py"
       - "crab/scripts/tests/test_protocol_qualification_logs.py"
@@ -582,6 +584,16 @@ jobs:
             --run-id "${CRAB_E2E_RUN_ID}-lfs-selection" \
             --source-root "${GITHUB_WORKSPACE}"
 
+      - name: Verify fresh mirrors and complete source ref namespaces
+        run: |
+          python3 crab/scripts/e2e/run_mirror_namespace_rustfs_smoke.py \
+            --crab-bin "${CARGO_TARGET_DIR}/release/crab" \
+            --bucket "${CRAB_E2E_BUCKET}" \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            --root "${CRAB_E2E_ROOT}" \
+            --run-id "${CRAB_E2E_RUN_ID}-mirror-namespace" \
+            --source-root "${GITHUB_WORKSPACE}"
+
       # The four-agent cohort follows branch fan-out and recovery phases, so
       # its bounded locator baseline includes the resulting compaction state.
       - name: Run concurrent-push visibility and crash-recovery lifecycle
@@ -625,6 +637,8 @@ jobs:
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-concurrent/logs/**
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-lfs-selection/artifacts/**
             ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-lfs-selection/logs/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/artifacts/**
+            ${{ env.CRAB_E2E_ROOT }}/${{ env.CRAB_E2E_RUN_ID }}-mirror-namespace/logs/**
             ${{ env.CRAB_E2E_ROOT }}/rustfs.log
           if-no-files-found: warn
           retention-days: 14

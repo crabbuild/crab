@@ -44,6 +44,51 @@ fn source(path: &Path) {
 }
 
 #[test]
+fn destination_push_cannot_overwrite_source_owned_tracking_refs() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source");
+    source(&source_path);
+    git(
+        &source_path,
+        &["update-ref", "refs/remotes/crab/main", "HEAD"],
+    );
+    git(
+        &source_path,
+        &["commit", "--allow-empty", "-m", "advance main"],
+    );
+    let destination = temp.path().join("destination.git");
+    git(
+        temp.path(),
+        &["init", "--bare", destination.to_str().unwrap()],
+    );
+    let cache_path = temp.path().join("cache.git");
+    let mut args = base_args(cache_path.clone());
+    args.source = source_path.to_string_lossy().into_owned();
+    let cancel = CancellationToken::new();
+    let owner = CacheUseGuard::acquire(&cache_path, &cancel).unwrap();
+    let options = test_options();
+    let mut runner = SystemCommandRunner::default();
+    prepare_cache(&args, &owner, &cancel, &options, &mut runner).unwrap();
+    for _ in 0..2 {
+        super::super::ensure_crab_remote(
+            owner.path(),
+            destination.to_str().unwrap(),
+            &options,
+            &mut runner,
+        )
+        .unwrap();
+        git(owner.path(), &["push", "--mirror", "crab"]);
+        assert_eq!(refs(owner.path()), refs(&source_path));
+        assert_eq!(refs(&destination), refs(&source_path));
+        assert!(
+            super::super::load_local_refs(owner.path(), &options, &mut runner)
+                .unwrap()
+                .contains_key("refs/remotes/crab/main")
+        );
+    }
+}
+
+#[test]
 fn rebuild_preserves_nested_lock_identity_and_matches_native_mirror_refs() {
     let temp = tempfile::tempdir().unwrap();
     let source_path = temp.path().join("source");

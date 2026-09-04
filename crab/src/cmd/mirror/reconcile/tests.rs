@@ -44,6 +44,7 @@ fn options() -> MirrorExecution {
         helper_path: None,
         crab_binary: "crab".to_owned(),
         lfs_object_id_collector: no_lfs_ids,
+        initialize_destination: |_, _, _| Ok(()),
     }
 }
 

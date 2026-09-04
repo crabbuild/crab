@@ -83,7 +83,7 @@ pub(super) fn prepare_cache(
         ),
         options.mode,
     )?;
-    let expected_refs = parse_ref_lines(&advertisement.stdout, false);
+    let expected_refs = parse_ref_lines(&advertisement.stdout);
     let head = advertised_head(&advertisement.stdout)?;
     let mut fetch = vec![
         "fetch".to_owned(),
@@ -133,7 +133,7 @@ pub(super) fn prepare_cache(
     // Fetch can exit successfully while rejecting shallow refs. It may also
     // see a newer advertisement than the one above. Neither is an exact source
     // snapshot, so no caller may plan deletions from the resulting cache.
-    if parse_ref_lines(&fetched.stdout, false) != expected_refs {
+    if parse_ref_lines(&fetched.stdout) != expected_refs {
         return Err(CrabError::Protocol(
             "mirror source refs changed or were not completely fetched; retry from a complete, stable source".to_owned(),
         ));

@@ -29,6 +29,7 @@ fn test_options_with_collector(collector: LfsObjectIdCollector) -> MirrorExecuti
         helper_path: None,
         crab_binary: "crab".to_owned(),
         lfs_object_id_collector: collector,
+        initialize_destination: |_, _, _| Ok(()),
     }
 }
 
@@ -250,16 +251,19 @@ fn legacy_mirror_refuses_an_owned_cache_before_any_refresh() {
 }
 
 #[test]
-fn ref_parser_ignores_local_crab_tracking_and_remote_pseudo_refs() {
+fn ref_parser_preserves_source_tracking_refs_and_ignores_pseudo_refs() {
     let parsed = parse_ref_lines(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main\n\
          bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/remotes/crab/main\n\
          cccccccccccccccccccccccccccccccccccccccc HEAD\n\
          dddddddddddddddddddddddddddddddddddddddd refs/tags/v1^{}\n",
-        true,
     );
 
-    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(
+        parsed.get("refs/remotes/crab/main"),
+        Some(&"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned())
+    );
     assert_eq!(
         parsed.get("refs/heads/main"),
         Some(&"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned())
@@ -324,32 +328,37 @@ fn missing_cache_initializes_then_mirrors_lfs_and_git_refs()
             args.source.as_str()
         ]));
     let commands = destination_commands(&runner);
-    assert_eq!(commands.len(), 7);
+    assert_eq!(commands.len(), 8);
     assert_command(commands[0], "git", &["remote", "get-url", CRAB_REMOTE]);
     assert_command(
         commands[1],
         "git",
         &["remote", "add", CRAB_REMOTE, "crab://bucket/org/repo"],
     );
-    assert_command(commands[2], "git", &["show-ref"]);
-    assert_command(commands[3], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
     assert_command(
-        commands[4],
+        commands[2],
+        "git",
+        &["config", "--unset-all", "remote.crab.fetch"],
+    );
+    assert_command(commands[3], "git", &["show-ref"]);
+    assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
+    assert_command(
+        commands[5],
         "git",
         &["lfs", "fetch", "--all", ORIGIN_REMOTE, &oid(0xaa)],
     );
     assert_command(
-        commands[5],
+        commands[6],
         "crab",
         &["lfs", "push", CRAB_REMOTE, "--object-id", "--stdin"],
     );
-    assert_stdin(commands[5], &[lfs_oid(0xab)]);
+    assert_stdin(commands[6], &[lfs_oid(0xab)]);
     assert_command(
-        commands[6],
+        commands[7],
         "git",
         &["push", "--mirror", "--atomic", CRAB_REMOTE],
     );
-    assert_mirror_git_only_env(commands[6]);
+    assert_mirror_git_only_env(commands[7]);
     Ok(())
 }
 
@@ -377,27 +386,32 @@ fn existing_cache_updates_origin_and_existing_crab_remote()
 
     assert!(!summary.created_cache);
     let commands = destination_commands(&runner);
-    assert_eq!(commands.len(), 7);
+    assert_eq!(commands.len(), 8);
     assert_command(commands[0], "git", &["remote", "get-url", CRAB_REMOTE]);
     assert_command(
         commands[1],
         "git",
         &["remote", "set-url", CRAB_REMOTE, "crab://bucket/org/repo"],
     );
-    assert_command(commands[2], "git", &["show-ref"]);
-    assert_command(commands[3], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
     assert_command(
-        commands[4],
+        commands[2],
+        "git",
+        &["config", "--unset-all", "remote.crab.fetch"],
+    );
+    assert_command(commands[3], "git", &["show-ref"]);
+    assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
+    assert_command(
+        commands[5],
         "git",
         &["lfs", "fetch", "--all", ORIGIN_REMOTE, &oid(0xaa)],
     );
     assert_command(
-        commands[5],
+        commands[6],
         "crab",
         &["lfs", "push", CRAB_REMOTE, "--object-id", "--stdin"],
     );
     assert_command(
-        commands[6],
+        commands[7],
         "git",
         &["push", "--mirror", "--atomic", CRAB_REMOTE],
     );
@@ -458,8 +472,13 @@ fn matching_refs_skip_lfs_scan_and_git_push_by_default()
 
     assert!(!summary.created_cache);
     let commands = destination_commands(&runner);
-    assert_command(commands[2], "git", &["show-ref"]);
-    assert_command(commands[3], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
+    assert_command(
+        commands[2],
+        "git",
+        &["config", "--unset-all", "remote.crab.fetch"],
+    );
+    assert_command(commands[3], "git", &["show-ref"]);
+    assert_command(commands[4], "git", &["ls-remote", "--refs", CRAB_REMOTE]);
     assert!(!commands.iter().any(|command| {
         command.program == "git" && command.args.first().map(String::as_str) == Some("lfs")
     }));
@@ -496,17 +515,31 @@ fn force_lfs_check_runs_full_lfs_verification_without_git_push()
 
     assert!(summary.lfs_enabled);
     let commands = destination_commands(&runner);
-    assert_command(commands[4], "git", &["lfs", "ls-files", "--all"]);
+    assert_command(commands[5], "git", &["lfs", "ls-files", "--all"]);
     assert_command(
-        commands[5],
+        commands[6],
         "git",
         &["lfs", "fetch", "--all", ORIGIN_REMOTE],
     );
-    assert_command(commands[6], "crab", &["lfs", "push", "--all", CRAB_REMOTE]);
+    assert_command(commands[7], "crab", &["lfs", "push", "--all", CRAB_REMOTE]);
     assert!(!commands.iter().any(|command| {
         command.program == "git" && command.args.first().map(String::as_str) == Some("push")
     }));
     Ok(())
+}
+
+#[test]
+fn failed_destination_initialization_stops_before_discovery_or_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let args = base_args(temp.path().join("cache.git"));
+    let mut options = test_options();
+    options.initialize_destination = |_, _, _| Err(CrabError::Cancelled);
+    let mut runner = changed_ref_runner();
+    let result = run_mirror_with_runner(&args, &CancellationToken::new(), options, &mut runner);
+    assert!(matches!(result, Err(CrabError::Cancelled)));
+    assert!(!runner.commands.iter().any(|command| command.args
+        == ["ls-remote", "--refs", CRAB_REMOTE]
+        || command.args.first().is_some_and(|arg| arg == "push")));
 }
 
 #[test]

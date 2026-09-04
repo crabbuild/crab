@@ -21,6 +21,18 @@ crab mirror [OPTIONS] <SOURCE> <DESTINATION>
 Crab remote such as `crab://bucket/path`. The command preserves Git commits and
 refs; it does not rewrite history or convert files into Crab-native pointers.
 
+Full mirroring initializes a genuinely empty destination prefix using the
+source's symbolic HEAD as its initial default branch. It refuses
+nonempty prefixes missing their layout and does not repair existing repository
+metadata in place. Integrity inspection (`--check`) remains read-only; initialize
+the destination before using the plan-first workflow for a first import.
+
+The source namespace is complete, including `refs/remotes/crab/*`. Destination
+tracking is disabled in the mirror cache so pushing cannot overwrite genuine
+source refs. These refs participate in drift checks, pointer discovery and plans
+just like branches and tags; deletion approval cannot turn a source-present ref
+into a destination-only deletion.
+
 Without an integrity flag, `crab mirror` preserves its original full-mirror
 behavior: destination refs that no longer exist in the source are deleted.
 Review the destination before the first run. For automation and repair, use
@@ -28,19 +40,19 @@ the plan-first workflow below instead of the legacy full-mirror form.
 
 ## Options
 
-| Option | Description |
-| --- | --- |
-| `--cache-dir <DIR>` | Use this exact bare mirror cache directory |
-| `--no-atomic` | Push refs without Git's atomic push option |
-| `--skip-lfs` | Do not mirror Git LFS objects |
-| `--force-lfs-check` | Verify all LFS objects even when refs are already synchronized |
-| `--check` | Compare refs and prove source-reachable Crab pointer data without publishing ref updates |
+| Option                | Description                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `--cache-dir <DIR>`   | Use this exact bare mirror cache directory                                                   |
+| `--no-atomic`         | Push refs without Git's atomic push option                                                   |
+| `--skip-lfs`          | Do not mirror Git LFS objects                                                                |
+| `--force-lfs-check`   | Verify all LFS objects even when refs are already synchronized                               |
+| `--check`             | Compare refs and prove source-reachable Crab pointer data without publishing ref updates     |
 | `--write-plan <PATH>` | With `--check`, create an immutable reconciliation plan without overwriting an existing file |
-| `--apply-plan <PATH>` | Revalidate and apply a previously written plan |
-| `--allow-delete-refs` | Approve destination-only ref deletion when writing and applying a plan |
-| `--ci` | With `--check`, exit nonzero unless the integrity result passes |
-| `--json` | Emit one structured JSON result |
-| `--jsonl` | Emit streaming JSONL output |
+| `--apply-plan <PATH>` | Revalidate and apply a previously written plan                                               |
+| `--allow-delete-refs` | Approve destination-only ref deletion when writing and applying a plan                       |
+| `--ci`                | With `--check`, exit nonzero unless the integrity result passes                              |
+| `--json`              | Emit one structured JSON result                                                              |
+| `--jsonl`             | Emit streaming JSONL output                                                                  |
 
 When refs change, Crab mirrors changed LFS objects unless `--skip-lfs` is set,
 then publishes the Git refs. Use `--force-lfs-check` to verify LFS content on a
