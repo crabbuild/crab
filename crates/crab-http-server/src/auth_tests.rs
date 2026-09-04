@@ -395,7 +395,7 @@ async fn browser_sign_in_enforces_membership_csrf_logout_and_rotated_signing_key
             .is_empty()
     );
     for action in [
-        "refs", "commit", "commits", "tree", "file", "blob", "changes", "diff", "blame",
+        "refs", "commit", "commits", "tree", "file", "blob", "asset", "changes", "diff", "blame",
     ] {
         let response = h
             .http
