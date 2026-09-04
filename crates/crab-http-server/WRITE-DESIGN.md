@@ -340,9 +340,11 @@ protected-view behavior remains independently owned and unchanged.
    Publish/read back the required locator and visibility evidence so successful
    pushes can immediately be consumed by `crab-remote-git` and HTTP fetch.
    A lost response after commit must remain distinguishable from a failed commit.
-6. Return Git status for every requested ref. Cancel/reject paths must leave no
-   changed refs; atomic batches must have no partially updated subset. Cleanup
-   may remove this request's quarantine, never committed or grace-period data.
+6. Return Git status for every requested ref. Cancellation/rejection before the
+   marker attempt must leave refs unchanged; atomic batches must have no partially
+   updated subset. After a marker attempt, reconcile uncertain outcomes instead
+   of reporting cancellation as rejection. Cleanup may remove this request's
+   quarantine, never committed or grace-period data.
 
 The relevant existing contracts include `PushLockAcquireContext::acquire_ref`,
 `GcFenceLease::acquire_writer`, `GcFenceHeartbeat`, the manifest store's conditional
@@ -354,6 +356,17 @@ The native CLI's `commit_ref_journal` makes an immutable transaction visible by
 its active marker; `compact_ref_journal_for_owner` subsequently folds it into a
 generation under the manifest owner lease. `crab-remote-git` deliberately returns
 `RepositoryIndexing` while committed journal transactions remain uncompacted.
+The CLI now uses `crab-write::journal::commit_edits`, which checks the whole batch
+against a snapshot captured under retained ref leases, obtains causal parents
+and commits through the same metadata marker. A failed marker write is confirmed
+only by bounded readback of the exact expected bytes. Otherwise the typed
+`RefJournalCommitUncertain` preserves the transaction ID and write/readback errors.
+An absent marker is not a rejected push: generation compaction removes committed
+markers. HTTP receive must reconcile this outcome or fail the transport without
+inventing an unchanged-ref result; Git's [report-status contract](https://git-scm.com/docs/pack-protocol#_report_status)
+reports the actual outcome for each requested ref. Prepared heads are never
+rolled back after a marker write is attempted.
+
 `crab-write::journal` now owns both generation-owner and reader compaction.
 The CLI delegates to it, preserving bounded handoff waits, non-waiting reader
 admission, metadata CAS/visibility publication and holder-checked ref cleanup.
