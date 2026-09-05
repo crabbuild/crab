@@ -15,13 +15,15 @@ use crab_remote_git::{
 };
 use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
 use serde_json::json;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     Config, RepositoryConfig, Result, api, archive, assets, assignees,
     auth::{self, Authentication, Principal},
-    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, statuses,
+    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive,
+    repository_settings::{self, BranchProtections},
+    statuses,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -31,11 +33,16 @@ pub(crate) struct Repository {
     pub store: Store,
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
+    pub(crate) protections: RwLock<BranchProtections>,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
 }
 
 impl Repository {
+    pub(crate) async fn branch_protections(&self) -> BranchProtections {
+        self.protections.read().await.clone()
+    }
+
     pub(crate) async fn invalidate(&self) {
         *self.pinned.lock().await = None;
     }
@@ -178,6 +185,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let mut repositories = BTreeMap::new();
     for entry in config.repositories {
         let store = build_static_env_store(&entry.bucket, StorageProviderKind::S3)?;
+        let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
             layout: StoreLayout::new(store.clone(), entry.prefix.clone()),
             identity: RepositoryIdentity::new(
@@ -187,9 +195,16 @@ pub async fn serve(config: Config) -> Result<()> {
             )?,
             config: entry.clone(),
             store,
+            protections: RwLock::new(configured_protections),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };
+        let protections = repository_settings::load(&repository)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        *repository.protections.write().await = protections;
         repositories.insert((entry.owner, entry.name), repository);
     }
     let runtime = Arc::new(RemoteGitRuntime::default());
@@ -359,15 +374,23 @@ async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> Json<serde_json::Value> {
-    Json(
-        json!({"repositories": server.repositories.values().filter(|repository| principal.can_read(&repository.config)).map(|repository| json!({
-        "owner": repository.config.owner, "name": repository.config.name,
-        "description": repository.config.description,
-        "access": if principal.can_write(&repository.config) { "write" } else { "read" },
-        "can_admin": principal.can_admin(&repository.config),
-        "protected_branches": repository.config.protected_branches,
-    })).collect::<Vec<_>>()}),
-    )
+    let mut repositories = Vec::new();
+    for repository in server
+        .repositories
+        .values()
+        .filter(|repository| principal.can_read(&repository.config))
+    {
+        let protections = repository.branch_protections().await;
+        repositories.push(json!({
+            "owner": repository.config.owner, "name": repository.config.name,
+            "description": repository.config.description,
+            "access": if principal.can_write(&repository.config) { "write" } else { "read" },
+            "can_admin": principal.can_admin(&repository.config),
+            "protection_version": protections.version,
+            "protected_branches": protections.rules,
+        }));
+    }
+    Json(json!({"repositories":repositories}))
 }
 
 async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next: Next) -> Response {

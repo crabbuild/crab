@@ -38,6 +38,7 @@ pub(super) async fn fixture() -> Arc<Server> {
                 identity: RepositoryIdentity::new("memory", "maintenance", 1).unwrap(),
                 store,
                 layout,
+                protections: RwLock::new(BranchProtections::configured(&[])),
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
             },
