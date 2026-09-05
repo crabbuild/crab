@@ -28,7 +28,7 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
-import { CreateFile } from "./create-file";
+import { CreateFile, DeleteFile, EditFile } from "./content-editor";
 import { IssuesWorkspace } from "./issues-navigation";
 import {
   RepositoryRefControls,
@@ -324,8 +324,19 @@ function RepositoryPage({
   const issuesView = view === "issues" || view === "labels";
   const issueNavigation =
     view === "labels" || (view === "issues" && !url.searchParams.has("issue"));
+  const branch = selected?.name.startsWith("refs/heads/")
+    ? selected
+    : undefined;
+  const canChangeFile =
+    repo.access === "write" && branch && path && kind === "Blob";
   function selectEntry(entry: Entry) {
-    navigate(repoHref(repo, { rev, path: entry.path_hex, kind: entry.kind }));
+    navigate(
+      repoHref(repo, {
+        rev: branch?.name ?? rev,
+        path: entry.path_hex,
+        kind: entry.kind,
+      }),
+    );
   }
   function focusFileSearch() {
     setShowTree(true);
@@ -359,9 +370,15 @@ function RepositoryPage({
       <div className="repo-header">
         <nav aria-label="Repository">
           <Link
-            className={view === "code" || view === "create" ? "active" : ""}
+            className={
+              ["code", "create", "edit", "delete"].includes(view)
+                ? "active"
+                : ""
+            }
             aria-current={
-              view === "code" || view === "create" ? "page" : undefined
+              ["code", "create", "edit", "delete"].includes(view)
+                ? "page"
+                : undefined
             }
             href={repoHref(repo, { rev })}
           >
@@ -463,12 +480,11 @@ function RepositoryPage({
                     }
                   >
                     {view === "create" ? (
-                      repo.access === "write" &&
-                      selected?.name.startsWith("refs/heads/") ? (
+                      repo.access === "write" && branch ? (
                         <CreateFile
                           repo={repo}
-                          branch={selected.name}
-                          expectedHead={selected.oid}
+                          branch={branch.name}
+                          expectedHead={branch.oid}
                           directoryHex={
                             kind === "Tree" ? path : parentHex(path)
                           }
@@ -479,6 +495,27 @@ function RepositoryPage({
                           Write access to a branch is required to create files.
                         </div>
                       )
+                    ) : view === "edit" && canChangeFile ? (
+                      <EditFile
+                        repo={repo}
+                        branch={branch.name}
+                        expectedHead={branch.oid}
+                        pathHex={path}
+                        csrf={csrf}
+                      />
+                    ) : view === "delete" && canChangeFile ? (
+                      <DeleteFile
+                        repo={repo}
+                        branch={branch.name}
+                        expectedHead={branch.oid}
+                        pathHex={path}
+                        csrf={csrf}
+                      />
+                    ) : view === "edit" || view === "delete" ? (
+                      <div className="notice error" role="alert">
+                        Write access to a branch file is required for this
+                        change.
+                      </div>
                     ) : view === "commits" ? (
                       <>
                         <RepositoryToolbar
@@ -546,12 +583,11 @@ function RepositoryPage({
                                 }
                                 compact
                                 onCreate={
-                                  repo.access === "write" &&
-                                  selected?.name.startsWith("refs/heads/")
+                                  repo.access === "write" && branch
                                     ? () =>
                                         navigate(
                                           repoHref(repo, {
-                                            rev: selected.name,
+                                            rev: branch.name,
                                             view: "create",
                                             path:
                                               kind === "Tree"
@@ -595,7 +631,7 @@ function RepositoryPage({
                                 repo={repo}
                                 refs={data}
                                 revision={revisionLabel(data, revName ?? rev)}
-                                rev={rev}
+                                rev={branch?.name ?? rev}
                                 path={path}
                                 view={view}
                                 onOpenTree={() => setShowTree(true)}
@@ -603,7 +639,11 @@ function RepositoryPage({
                               />
                             ))}
                           {!overview && showTree && (
-                            <FileBreadcrumb repo={repo} rev={rev} path={path} />
+                            <FileBreadcrumb
+                              repo={repo}
+                              rev={branch?.name ?? rev}
+                              path={path}
+                            />
                           )}
                           {kind !== "Tree" && (
                             <LatestCommit
@@ -641,6 +681,13 @@ function RepositoryPage({
                               path={path}
                               name={displayHex(path)}
                               theme={theme}
+                              write={
+                                canChangeFile
+                                  ? {
+                                      branch: branch.name,
+                                    }
+                                  : undefined
+                              }
                             />
                           )}
                         </div>
