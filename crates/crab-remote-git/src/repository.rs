@@ -965,7 +965,26 @@ impl RemoteGitRepository {
                 )
             }
             Revision::Commit(commit) => {
-                if !prove_reachable(*commit, &self.state.refs, operation).await? {
+                let roots = self
+                    .state
+                    .refs
+                    .entries
+                    .iter()
+                    .map(|entry| entry.peeled.unwrap_or(entry.target))
+                    .collect::<Vec<_>>();
+                let reachable = match self.commits_reachable_from(
+                    &[*commit],
+                    &roots,
+                    operation.cancellation(),
+                )? {
+                    Some(reachable) => {
+                        reachable.first().copied().ok_or(Error::InternalInvariant {
+                            invariant: "commit graph reachability omitted its candidate",
+                        })?
+                    }
+                    None => prove_reachable(*commit, &self.state.refs, operation).await?,
+                };
+                if !reachable {
                     return Err(Error::Revision {
                         reason: RevisionError::NotReachable,
                     });
