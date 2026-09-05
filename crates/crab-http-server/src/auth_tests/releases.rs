@@ -24,6 +24,49 @@ async fn publish_release(
     (status, body)
 }
 
+async fn edit_release(
+    h: &Harness,
+    cookie: &str,
+    csrf: &str,
+    number: u64,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .patch(format!("{}{RELEASES}/{number}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
+async fn delete_release(
+    h: &Harness,
+    cookie: &str,
+    csrf: &str,
+    number: u64,
+    version: u64,
+) -> StatusCode {
+    h.http
+        .delete(format!("{}{RELEASES}/{number}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"version":version}).to_string())
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_release_publishes_and_recovers_native_git_tags() {
     let h = Harness::new(false).await;
@@ -95,6 +138,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(created.1["tag_name"], "v1.0.0");
     assert_eq!(created.1["tag_oid"], commit);
     assert_eq!(created.1["target_oid"], commit);
+    assert_eq!(created.1["version"], 1);
 
     crate::server::receive_tests::success(
         source.path(),
@@ -183,7 +227,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     let incompatible = publish_release(&h, &alice, csrf, &incompatible).await;
     assert_eq!(incompatible.0, StatusCode::CONFLICT);
     assert_eq!(incompatible.1["error"]["code"], "release_conflict");
-    let annotated = json!({
+    let annotated_input = json!({
         "request_id":"44444444-4444-4444-8444-444444444444",
         "tag_name":"v2.0.0",
         "target_oid":commit,
@@ -191,7 +235,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         "body":"Annotated tag release.",
         "prerelease":true
     });
-    let annotated = publish_release(&h, &alice, csrf, &annotated).await;
+    let annotated = publish_release(&h, &alice, csrf, &annotated_input).await;
     assert_eq!(annotated.0, StatusCode::CREATED, "{}", annotated.1);
     assert_eq!(annotated.1["number"], 2);
     assert_eq!(annotated.1["tag_oid"], tag_oid);
@@ -200,6 +244,80 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(releases["items"].as_array().unwrap().len(), 2);
     assert_eq!(releases["items"][0]["number"], annotated.1["number"]);
 
+    let edited = edit_release(
+        &h,
+        &alice,
+        csrf,
+        2,
+        &json!({
+            "version":1,
+            "title":"Crab 2.0 final",
+            "body":"Updated annotated release notes.",
+            "prerelease":false
+        }),
+    )
+    .await;
+    assert_eq!(edited.0, StatusCode::OK, "{}", edited.1);
+    assert_eq!(edited.1["version"], 2);
+    assert_eq!(edited.1["title"], "Crab 2.0 final");
+    let stale = edit_release(
+        &h,
+        &alice,
+        csrf,
+        2,
+        &json!({
+            "version":1,
+            "title":"Stale edit",
+            "body":"Must not replace newer notes.",
+            "prerelease":true
+        }),
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    assert_eq!(
+        delete_release(&h, &alice, csrf, 2, 2).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete_release(&h, &alice, csrf, 2, 2).await,
+        StatusCode::NO_CONTENT
+    );
+    let deleted = h
+        .http
+        .get(format!("{}{RELEASES}/2", h.origin))
+        .header(header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+    let retained_tag = crate::server::receive_tests::success(
+        source.path(),
+        &["ls-remote", git_url.as_str(), "refs/tags/v2.0.0"],
+    )
+    .await;
+    assert_eq!(retained_tag, format!("{tag_oid}\trefs/tags/v2.0.0"));
+    let deleted_replay = publish_release(&h, &alice, csrf, &annotated_input).await;
+    assert_eq!(deleted_replay.0, StatusCode::CONFLICT);
+    let replacement = json!({
+        "request_id":"77777777-7777-4777-8777-777777777777",
+        "tag_name":"v2.0.0",
+        "target_oid":commit,
+        "title":"Crab 2.0 restored",
+        "body":"Published again from the retained tag.",
+        "prerelease":false
+    });
+    let replacement = publish_release(&h, &alice, csrf, &replacement).await;
+    assert_eq!(replacement.0, StatusCode::CREATED, "{}", replacement.1);
+    assert_eq!(replacement.1["number"], 3);
+    assert_eq!(replacement.1["tag_oid"], tag_oid);
+    assert_eq!(replacement.1["version"], 1);
+    assert_eq!(
+        h.json(RELEASES, &alice).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     crate::repository_settings::replace_lifecycle(repo, 0, true)
         .await
         .unwrap();
@@ -216,6 +334,25 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     let blocked = publish_release(&h, &alice, csrf, &archived_release).await;
     assert_eq!(blocked.0, StatusCode::FORBIDDEN);
     assert_eq!(blocked.1["error"]["code"], "repository_archived");
+    let blocked_edit = edit_release(
+        &h,
+        &alice,
+        csrf,
+        3,
+        &json!({
+            "version":1,
+            "title":"Archived edit",
+            "body":"Must remain read-only.",
+            "prerelease":false
+        }),
+    )
+    .await;
+    assert_eq!(blocked_edit.0, StatusCode::FORBIDDEN);
+    assert_eq!(blocked_edit.1["error"]["code"], "repository_archived");
+    assert_eq!(
+        delete_release(&h, &alice, csrf, 3, 1).await,
+        StatusCode::FORBIDDEN
+    );
     crate::repository_settings::replace_lifecycle(repo, 1, false)
         .await
         .unwrap();
@@ -240,6 +377,24 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     )
     .await;
     assert_eq!(denied.0, StatusCode::FORBIDDEN);
+    let denied_edit = edit_release(
+        &h,
+        &bob,
+        bob_session["csrf"].as_str().unwrap(),
+        3,
+        &json!({
+            "version":1,
+            "title":"Reader edit",
+            "body":"Must be rejected.",
+            "prerelease":false
+        }),
+    )
+    .await;
+    assert_eq!(denied_edit.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        delete_release(&h, &bob, bob_session["csrf"].as_str().unwrap(), 3, 1,).await,
+        StatusCode::FORBIDDEN
+    );
 
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;

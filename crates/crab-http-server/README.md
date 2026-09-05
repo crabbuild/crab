@@ -110,7 +110,8 @@ searchable refs pages; the branch page separates the default branch, identifies
 exact protected branches, copies branch names, links immutable commit tips and
 opens a comparison against the default branch. The GitHub-style Releases and Tags
 views list durable releases, render their Markdown notes, link source ZIPs to exact
-tags, and let writers publish a release from an existing or new lightweight tag.
+tags, and let writers publish, edit, or delete a release. Publication accepts an
+existing tag or creates a new lightweight tag.
 Writers can delete an unprotected,
 non-default branch after an inline confirmation. The refs pages use the same
 GitHub-derived responsive hierarchy in light and dark themes. Appearance
@@ -244,7 +245,16 @@ visible through `GET /api/repos/{owner}/{name}/releases` and
 `GET /api/repos/{owner}/{name}/releases/{number}`. Lists return 20 releases by
 default, accept a maximum page size of 50, and use the `before` cursor. Request
 bodies are limited to 80 KiB; release notes to 64 KiB, tag names to 255 bytes and
-titles to 256 characters. Draft releases, attached assets, editing and deletion
+titles to 256 characters.
+
+Release updates use `PATCH /api/repos/{owner}/{name}/releases/{number}` with the
+displayed `version`, title, Markdown body and prerelease flag. The record's object
+ETag and version must both still match, so concurrent edits return 409 instead of
+overwriting newer notes. `DELETE` on the same route carries the displayed version,
+records a durable tombstone and releases the application tag claim while retaining
+the actual Git tag. Replaying that deletion with the same version repairs an
+interrupted claim release and returns 204. A later release can reuse the retained
+tag with a new submission and release number. Draft releases and attached assets
 are not implemented yet.
 
 Repository administrators change the default branch with `PATCH
@@ -1086,6 +1096,17 @@ the expected README bytes. Light desktop and dark 390-pixel release pages were
 inspected from the release binary. These localhost timings are functional
 observations rather than production latency guarantees.
 
+A second fresh RustFS prefix exercised the complete mutable release lifecycle.
+Create took 141 ms and a version-bound metadata edit took 1.6 ms. The edited
+title, notes and prerelease state returned byte-for-byte after restart in 2.8 ms.
+Deletion took 8.4 ms, its same-version recovery replay took 1.9 ms, the release
+disappeared from list/detail reads, and native `ls-remote` still advertised the
+exact tag. A new submission reused that retained tag in 40.7 ms with release
+number 2; another restart returned only the republished record in 3.5 ms. Light
+desktop and dark 390-pixel edit views were inspected from the release binary.
+These localhost timings are functional observations rather than production
+latency guarantees.
+
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue
 workspace hierarchy: a 256-pixel Issues/Labels rail, All issues heading,
@@ -1162,7 +1183,7 @@ audit reported zero vulnerabilities.
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser release publication, branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser release publication/edit/deletion, branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes; administrators can change the default branch and exact protection rules and archive/unarchive repositories with durable stale-state protection; repository creation/import, audit history and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |

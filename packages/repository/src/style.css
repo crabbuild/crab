@@ -2697,6 +2697,12 @@ main {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--borderColor-muted);
 }
+.release-header-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+}
 .release-content h3 {
   margin: 0 0 4px;
   font-size: 20px;
@@ -2715,6 +2721,35 @@ main {
   justify-content: flex-start;
   padding-top: 16px;
   border-top: 1px solid var(--borderColor-muted);
+}
+.release-delete-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--borderColor-danger-emphasis);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-danger-muted);
+}
+.release-delete-confirm > div {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+.release-delete-confirm > div:last-child {
+  align-items: center;
+  flex-direction: row;
+  flex: 0 0 auto;
+}
+.release-delete-confirm span {
+  color: var(--fgColor-muted);
+  font-size: 12px;
+}
+.release-delete-confirm .release-delete-error {
+  color: var(--fgColor-danger);
 }
 .release-archive,
 .release-back,
@@ -2756,6 +2791,19 @@ main {
   color: var(--fgColor-muted);
 }
 .new-release-heading > svg {
+  color: var(--fgColor-muted);
+}
+.release-edit-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-muted);
+}
+.release-edit-target code {
   color: var(--fgColor-muted);
 }
 .release-target-picker,
@@ -3710,6 +3758,13 @@ main {
   }
   .release-content > header {
     flex-wrap: wrap;
+  }
+  .release-delete-confirm {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .release-delete-confirm > div:last-child {
+    justify-content: flex-end;
   }
   .new-release {
     padding-bottom: 16px;

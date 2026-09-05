@@ -1,41 +1,24 @@
-import { useMemo, useState } from "react";
-import { Button, Label, TextInput } from "@primer/react";
-import { ChevronLeftIcon, DownloadIcon, TagIcon } from "@primer/octicons-react";
+import { useState } from "react";
+import { Button, IconButton, Label } from "@primer/react";
+import {
+  ChevronLeftIcon,
+  DownloadIcon,
+  PencilIcon,
+  TagIcon,
+  TrashIcon,
+} from "@primer/octicons-react";
 import {
   endpoint,
   navigate,
   repoHref,
   useRequest,
-  type Ref,
   type Refs,
   type Repository,
 } from "./api";
-import {
-  DiscussionMarkdown,
-  Editor,
-  Failure,
-  useSubmission,
-} from "./discussion";
+import { DiscussionMarkdown } from "./discussion";
+import { EditRelease, NewRelease } from "./release-form";
+import { mutateRelease, type Release, type ReleasePage } from "./release-api";
 import { Link, Result, short } from "./ui";
-
-interface Release {
-  number: number;
-  tag_name: string;
-  tag_oid: string;
-  target_oid: string;
-  title: string;
-  body: string;
-  prerelease: boolean;
-  author: string;
-  created_at: number;
-}
-
-interface ReleasePage {
-  items: Release[];
-  next: number | null;
-}
-
-const refName = (ref: Ref) => ref.name.replace(/^refs\/(?:heads|tags)\//, "");
 
 function timestamp(value: number) {
   return new Date(value).toLocaleString(undefined, {
@@ -93,10 +76,15 @@ function SourceArchive({
 function ReleaseCard({
   repo,
   release,
+  manage,
 }: {
   repo: Repository;
   release: Release;
+  manage?: { edit: () => void; remove: () => Promise<void> };
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string>();
   return (
     <article className="panel release-card">
       <aside className="release-tag">
@@ -124,8 +112,84 @@ function ReleaseCard({
             </h3>
             <ReleaseMeta release={release} />
           </div>
-          {release.prerelease && <Label variant="attention">Pre-release</Label>}
+          <div className="release-header-actions">
+            {release.prerelease && (
+              <Label variant="attention">Pre-release</Label>
+            )}
+            {manage && (
+              <>
+                <IconButton
+                  icon={PencilIcon}
+                  aria-label={`Edit ${release.title}`}
+                  title="Edit release"
+                  size="small"
+                  variant="invisible"
+                  onClick={manage.edit}
+                />
+                <IconButton
+                  icon={TrashIcon}
+                  aria-label={`Delete ${release.title}`}
+                  title="Delete release"
+                  size="small"
+                  variant="danger"
+                  onClick={() => {
+                    setError(undefined);
+                    setConfirming(true);
+                  }}
+                />
+              </>
+            )}
+          </div>
         </header>
+        {confirming && manage && (
+          <div className="release-delete-confirm">
+            <div>
+              <strong>Delete this release?</strong>
+              <span>
+                The release notes will be removed. Tag {release.tag_name} will
+                remain available to Git clients.
+              </span>
+              {error && (
+                <span className="release-delete-error" role="alert">
+                  {error}
+                </span>
+              )}
+            </div>
+            <div>
+              <Button
+                size="small"
+                disabled={deleting}
+                onClick={() => {
+                  setConfirming(false);
+                  setError(undefined);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                variant="danger"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  setError(undefined);
+                  try {
+                    await manage.remove();
+                  } catch (failure) {
+                    setError(
+                      failure instanceof Error
+                        ? failure.message
+                        : "The release could not be deleted",
+                    );
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? "Deleting…" : "Delete this release"}
+              </Button>
+            </div>
+          </div>
+        )}
         <DiscussionMarkdown>{release.body}</DiscussionMarkdown>
         <footer>
           <SourceArchive repo={repo} release={release} />
@@ -135,7 +199,17 @@ function ReleaseCard({
   );
 }
 
-function ReleaseList({ repo, before }: { repo: Repository; before?: string }) {
+function ReleaseList({
+  repo,
+  before,
+  csrf,
+  canManage,
+}: {
+  repo: Repository;
+  before?: string;
+  csrf: string;
+  canManage: boolean;
+}) {
   const releases = useRequest<ReleasePage>(
     endpoint(repo, "releases", { before, limit: "20" }),
   );
@@ -150,6 +224,26 @@ function ReleaseList({ repo, before }: { repo: Repository; before?: string }) {
                   key={release.number}
                   repo={repo}
                   release={release}
+                  manage={
+                    canManage
+                      ? {
+                          edit: () =>
+                            navigate(
+                              repoHref(repo, {
+                                view: "releases",
+                                release: String(release.number),
+                                action: "edit",
+                              }),
+                            ),
+                          remove: async () => {
+                            await mutateRelease(repo, csrf, release, "DELETE", {
+                              version: release.version,
+                            });
+                            releases.retry();
+                          },
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -181,7 +275,17 @@ function ReleaseList({ repo, before }: { repo: Repository; before?: string }) {
   );
 }
 
-function ReleaseDetail({ repo, number }: { repo: Repository; number: string }) {
+function ReleaseDetail({
+  repo,
+  number,
+  csrf,
+  canManage,
+}: {
+  repo: Repository;
+  number: string;
+  csrf: string;
+  canManage: boolean;
+}) {
   const release = useRequest<Release>(endpoint(repo, `releases/${number}`));
   return (
     <Result state={release} showTiming={false}>
@@ -193,197 +297,33 @@ function ReleaseDetail({ repo, number }: { repo: Repository; number: string }) {
           >
             <ChevronLeftIcon /> Releases
           </Link>
-          <ReleaseCard repo={repo} release={current} />
+          <ReleaseCard
+            repo={repo}
+            release={current}
+            manage={
+              canManage
+                ? {
+                    edit: () =>
+                      navigate(
+                        repoHref(repo, {
+                          view: "releases",
+                          release: number,
+                          action: "edit",
+                        }),
+                      ),
+                    remove: async () => {
+                      await mutateRelease(repo, csrf, current, "DELETE", {
+                        version: current.version,
+                      });
+                      navigate(repoHref(repo, { view: "releases" }));
+                    },
+                  }
+                : undefined
+            }
+          />
         </div>
       )}
     </Result>
-  );
-}
-
-function NewRelease({
-  repo,
-  refs,
-  csrf,
-  onPublished,
-}: {
-  repo: Repository;
-  refs: Refs;
-  csrf: string;
-  onPublished: () => void;
-}) {
-  const branches = useMemo(
-    () => refs.refs.filter((ref) => ref.name.startsWith("refs/heads/")),
-    [refs.refs],
-  );
-  const tags = useMemo(
-    () => refs.refs.filter((ref) => ref.name.startsWith("refs/tags/")),
-    [refs.refs],
-  );
-  const [tag, setTag] = useState("");
-  const [branch, setBranch] = useState(
-    refs.head?.name ?? branches[0]?.name ?? "",
-  );
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [prerelease, setPrerelease] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
-  const submission = useSubmission();
-  const existingTag = tags.find((ref) => refName(ref) === tag.trim());
-  const selectedBranch = branches.find((ref) => ref.name === branch);
-  const target = existingTag?.peeled ?? existingTag?.oid ?? selectedBranch?.oid;
-
-  if (repo.archived || repo.access !== "write")
-    return (
-      <div className="notice error" role="alert">
-        Write access to an active repository is required to publish a release.
-      </div>
-    );
-
-  return (
-    <form
-      className="new-release"
-      onSubmit={async (event) => {
-        event.preventDefault();
-        if (!target) return;
-        const input = {
-          tag_name: tag.trim(),
-          target_oid: target,
-          title,
-          body,
-          prerelease,
-        };
-        setPending(true);
-        setError(undefined);
-        try {
-          const response = await fetch(endpoint(repo, "releases"), {
-            method: "POST",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json",
-              "X-CSRF-Token": csrf,
-            },
-            body: JSON.stringify({ request_id: submission(input), ...input }),
-          });
-          if (response.status === 401)
-            window.dispatchEvent(new Event("crab-session-expired"));
-          const result = (await response.json()) as Release & {
-            error?: { message?: string };
-          };
-          if (!response.ok)
-            throw new Error(
-              result.error?.message ?? `Request failed (${response.status})`,
-            );
-          onPublished();
-          navigate(
-            repoHref(repo, {
-              view: "releases",
-              release: String(result.number),
-            }),
-          );
-        } catch (failure) {
-          setError(
-            failure instanceof Error
-              ? failure.message
-              : "The release could not be published",
-          );
-          setPending(false);
-        }
-      }}
-    >
-      <div className="new-release-heading">
-        <div>
-          <h2>New release</h2>
-          <p>Publish a Git tag with release notes and a source archive.</p>
-        </div>
-        <TagIcon size={24} />
-      </div>
-      <fieldset className="release-target-picker">
-        <legend>Choose a tag</legend>
-        <label htmlFor="release-tag">Tag name</label>
-        <TextInput
-          id="release-tag"
-          value={tag}
-          onChange={(event) => setTag(event.target.value)}
-          placeholder="v1.0.0"
-          maxLength={255}
-          required
-          disabled={pending}
-          autoFocus
-        />
-        <label htmlFor="release-target">Target</label>
-        <select
-          id="release-target"
-          value={existingTag ? "existing-tag" : branch}
-          onChange={(event) => setBranch(event.target.value)}
-          disabled={pending || Boolean(existingTag)}
-          required
-        >
-          {existingTag && (
-            <option value="existing-tag">
-              {refName(existingTag)} ({short(target ?? "")})
-            </option>
-          )}
-          {branches.map((ref) => (
-            <option key={ref.name} value={ref.name}>
-              {refName(ref)} ({short(ref.oid)})
-            </option>
-          ))}
-        </select>
-        {existingTag && (
-          <p className="muted release-existing-tag">
-            Existing tag <strong>{refName(existingTag)}</strong> targets{" "}
-            <code>{short(target ?? "")}</code>.
-          </p>
-        )}
-      </fieldset>
-      <div className="release-notes-form">
-        <label htmlFor="release-title">Release title</label>
-        <TextInput
-          id="release-title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="Release title"
-          maxLength={256}
-          required
-          disabled={pending}
-        />
-        <Editor
-          id="release-notes"
-          label="Release notes"
-          value={body}
-          onChange={setBody}
-          disabled={pending}
-        />
-      </div>
-      <label className="release-prerelease">
-        <input
-          type="checkbox"
-          checked={prerelease}
-          onChange={(event) => setPrerelease(event.target.checked)}
-          disabled={pending}
-        />
-        <span>
-          <strong>Set as a pre-release</strong>
-          <small>
-            This release may be unstable and not ready for production.
-          </small>
-        </span>
-      </label>
-      <Failure message={error} />
-      <div className="release-form-actions">
-        <Button
-          type="button"
-          onClick={() => navigate(repoHref(repo, { view: "releases" }))}
-          disabled={pending}
-        >
-          Cancel
-        </Button>
-        <Button type="submit" variant="primary" disabled={pending || !target}>
-          {pending ? "Publishing…" : "Publish release"}
-        </Button>
-      </div>
-    </form>
   );
 }
 
@@ -401,6 +341,7 @@ export function Releases({
   onPublished: () => void;
 }) {
   const selected = url.searchParams.get("release");
+  const canManage = repo.access === "write" && !repo.archived;
   if (selected === "new")
     return (
       <NewRelease
@@ -424,12 +365,27 @@ export function Releases({
         )}
       </div>
       <ReleaseNavigation repo={repo} />
-      {selected ? (
-        <ReleaseDetail repo={repo} number={selected} />
+      {selected && url.searchParams.get("action") === "edit" ? (
+        canManage ? (
+          <EditRelease repo={repo} number={selected} csrf={csrf} />
+        ) : (
+          <div className="notice error" role="alert">
+            Write access to an active repository is required to edit a release.
+          </div>
+        )
+      ) : selected ? (
+        <ReleaseDetail
+          repo={repo}
+          number={selected}
+          csrf={csrf}
+          canManage={canManage}
+        />
       ) : (
         <ReleaseList
           repo={repo}
           before={url.searchParams.get("before") ?? undefined}
+          csrf={csrf}
+          canManage={canManage}
         />
       )}
     </section>
