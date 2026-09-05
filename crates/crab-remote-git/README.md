@@ -153,10 +153,11 @@ and blob. Services should reserve separate admission for these expensive
 operations and should not infer archive or blame latency from root-listing
 latency.
 
-Resolving a full commit ID proves reachability by walking verified raw commits
-breadth-first from the pinned refs. Nearby merge parents are checked before
-older ancestry on either branch. Deep or unreachable revisions can still exceed
-the operation's history/object budgets; resolving a named ref avoids that walk.
+Resolving a full commit ID uses the validated complete split graph to prove
+reachability without object-store reads. When that acceleration is unavailable,
+the reader walks verified raw commits breadth-first from the pinned refs, checking
+nearby merge parents before older ancestry on either branch. That fallback remains
+bounded by the operation's history and object budgets.
 
 ## Live qualification example
 
