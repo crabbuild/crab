@@ -4,7 +4,9 @@ use std::{
     time::Duration,
 };
 
-use crab_coordination::{CoordinationError, GcFenceHeartbeat, GcFenceLease, PushLock};
+use crab_coordination::{
+    CoordinationError, GIT_MANIFEST_RESOURCE, GcFenceHeartbeat, GcFenceLease, PushLock,
+};
 use crab_git::receive_wire;
 use crab_metadata::{
     git_visibility, manifest_store, manifests::PackManifestEntry, ref_journal::RefJournalEdit,
@@ -146,6 +148,100 @@ pub(crate) async fn publish_existing_objects(
     )
     .await
     .map(drop)
+}
+
+pub(crate) async fn publish_default_branch(
+    server: &Server,
+    principal: &Principal,
+    key: &(String, String),
+    expected_head: &str,
+    branch: &str,
+    expected_oid: gix_hash::ObjectId,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
+    if !principal.can_admin(&entry.config) {
+        return Err(ReceiveError::Forbidden);
+    }
+    entry
+        .open_current(server, RepositoryOptions::default(), cancel)
+        .await?;
+    let lease = RefLease::acquire(entry, branch, cancel).await?;
+    let mut manifest_lock = match PushLock::acquire_internal(
+        entry.store.inner(),
+        entry.layout.repo_prefix(),
+        GIT_MANIFEST_RESOURCE,
+        TTL,
+    )
+    .await
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            lease.release().await;
+            return Err(error.into());
+        }
+    };
+    let result = crab_coordination::while_renewing(&mut manifest_lock, Some(cancel), async {
+        check_cancelled(cancel)?;
+        let snapshot =
+            manifest_store::read_repository_snapshot(&entry.store, &entry.layout).await?;
+        if snapshot.journal.head != expected_head {
+            return Err(ReceiveError::DefaultBranchChanged);
+        }
+        let oid = expected_oid.to_string();
+        if snapshot.journal.refs.get(branch) != Some(&oid) {
+            return Err(ReceiveError::BranchChanged);
+        }
+        if snapshot.journal.head == branch {
+            return Ok(());
+        }
+        let evidence = git_visibility::GitVisibilityEdit::from_delta_objects(
+            Some(oid.clone()),
+            oid.clone(),
+            vec![],
+            vec![],
+        );
+        let evidence_hash =
+            git_visibility::upload_edit(&entry.store, &entry.layout, &evidence).await?;
+        check_cancelled(cancel)?;
+        if !principal.can_admin(&entry.config) {
+            return Err(ReceiveError::Forbidden);
+        }
+        // Retargeting HEAD needs a journal parent and branch lease. This no-op
+        // ref edit preserves the branch's immutable visibility closure.
+        crab_write::journal::commit_edits(
+            &entry.store,
+            &entry.layout,
+            &snapshot,
+            vec![RefJournalEdit {
+                ref_name: branch.to_owned(),
+                old_oid: Some(oid.clone()),
+                new_oid: Some(oid),
+                peeled_oid: None,
+                lock_holder: Some(lease.holder.clone()),
+                visibility_evidence_hash: Some(evidence_hash),
+            }],
+            Some(branch.to_owned()),
+            vec![],
+            vec![],
+            cancel,
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = manifest_lock.release().await {
+        tracing::warn!(%error, "default branch manifest lease cleanup failed");
+    }
+    lease.release().await;
+    result?;
+    // The transaction is already committed. Reopening folds it into a new
+    // generation so browser and Git protocol readers observe the same HEAD.
+    entry.invalidate().await;
+    entry
+        .open_current(server, RepositoryOptions::default(), cancel)
+        .await?;
+    Ok(())
 }
 
 pub(super) async fn publish_pack(

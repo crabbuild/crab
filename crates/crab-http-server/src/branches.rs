@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{patch, post},
 };
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
@@ -21,12 +21,16 @@ use crate::{
 const MAX_BRANCH_BYTES: usize = 255;
 
 pub(crate) fn routes() -> Router<Arc<Server>> {
-    Router::new().route(
-        "/api/repos/{owner}/{name}/branches",
-        post(create)
-            .delete(remove)
-            .layer(axum::extract::DefaultBodyLimit::max(2048)),
-    )
+    Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/branches",
+            post(create).delete(remove),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/settings/default-branch",
+            patch(set_default),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(2048))
 }
 
 #[derive(Deserialize)]
@@ -55,12 +59,28 @@ struct DeleteOutput {
     deleted_oid: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultBranchInput {
+    name: String,
+    expected_head: String,
+    expected_oid: String,
+}
+
+#[derive(Serialize)]
+struct DefaultBranchOutput {
+    branch: String,
+    commit: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("{0}")]
     Input(&'static str),
     #[error("Write access is required to manage branches")]
     Permission,
+    #[error("Administrator access is required to change repository settings")]
+    AdminPermission,
     #[error("Protected branches cannot be changed in the browser")]
     Protected,
     #[error("The default branch cannot be deleted")]
@@ -96,12 +116,17 @@ impl IntoResponse for Error {
             Self::Body(_) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request",
-                "Enter a branch name and commit ID",
+                "Enter branch names and commit IDs",
             ),
             Self::Permission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Write access is required to manage branches",
+            ),
+            Self::AdminPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Administrator access is required to change repository settings",
             ),
             Self::Protected => (
                 StatusCode::FORBIDDEN,
@@ -117,6 +142,20 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "branch_changed",
                 "The branch changed or was already deleted; reload before retrying",
+            ),
+            Self::Receive(error)
+                if matches!(error.as_ref(), ReceiveError::DefaultBranchChanged) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "default_branch_changed",
+                    "The default branch changed; reload before retrying",
+                )
+            }
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::BranchChanged) => (
+                StatusCode::CONFLICT,
+                "branch_changed",
+                "The selected branch changed or was deleted; reload before retrying",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Forbidden) => (
                 StatusCode::FORBIDDEN,
@@ -264,6 +303,43 @@ async fn remove(
         ) => Err(Error::Changed),
         Err(error) => Err(error.into()),
     }
+}
+
+async fn set_default(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<DefaultBranchInput>, JsonRejection>,
+) -> Result<impl IntoResponse, Error> {
+    let Json(input) = input?;
+    let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    if !principal.can_admin(&repository.config) {
+        return Err(Error::AdminPermission);
+    }
+    let branch = branch_ref(&input.name).map_err(Error::Input)?;
+    let expected_head = input
+        .expected_head
+        .strip_prefix("refs/heads/")
+        .and_then(|name| branch_ref(name).ok())
+        .filter(|head| head == &input.expected_head)
+        .ok_or(Error::Input("Expected HEAD must be a full branch ref"))?;
+    let expected = ObjectId::from_hex(input.expected_oid.as_bytes())
+        .ok()
+        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
+        .ok_or(Error::Input("Expected tip must be a full SHA-1 commit ID"))?;
+    receive::set_default_branch(
+        Arc::clone(&server),
+        principal,
+        (owner, name),
+        expected_head,
+        branch.clone(),
+        expected,
+    )
+    .await?;
+    Ok(Json(DefaultBranchOutput {
+        branch,
+        commit: expected.to_string(),
+    }))
 }
 
 pub(crate) fn branch_ref(name: &str) -> Result<String, &'static str> {

@@ -155,13 +155,20 @@ impl Principal {
     }
 
     pub fn can_write(&self, repository: &RepositoryConfig) -> bool {
-        self.access(repository) == Some(RepositoryAccess::Write)
+        matches!(
+            self.access(repository),
+            Some(RepositoryAccess::Write | RepositoryAccess::Admin)
+        )
+    }
+
+    pub fn can_admin(&self, repository: &RepositoryConfig) -> bool {
+        self.access(repository) == Some(RepositoryAccess::Admin)
     }
 
     fn access(&self, repository: &RepositoryConfig) -> Option<RepositoryAccess> {
         let (session, ceiling) = match self {
-            Self::Local => return Some(RepositoryAccess::Write),
-            Self::User(session) => (session, RepositoryAccess::Write),
+            Self::Local => return Some(RepositoryAccess::Admin),
+            Self::User(session) => (session, RepositoryAccess::Admin),
             Self::Git(token)
                 if token.active()
                     && token.owner == repository.owner
@@ -178,13 +185,7 @@ impl Principal {
             .members
             .iter()
             .find(|member| member.subject == session.identity.subject)
-            .map(|member| {
-                if ceiling == RepositoryAccess::Read {
-                    ceiling
-                } else {
-                    member.access
-                }
-            })
+            .map(|member| std::cmp::min(member.access, ceiling))
     }
 
     pub fn authenticated(&self) -> bool {
@@ -631,6 +632,60 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member_repository(access: RepositoryAccess) -> RepositoryConfig {
+        RepositoryConfig {
+            owner: "team".into(),
+            name: "private".into(),
+            bucket: "bucket".into(),
+            prefix: "private".into(),
+            default_branch: "main".into(),
+            description: String::new(),
+            members: vec![crate::RepositoryMember {
+                subject: "alice".into(),
+                name: "Alice".into(),
+                access,
+            }],
+            protected_branches: vec![],
+        }
+    }
+
+    fn active_session() -> Arc<Session> {
+        Arc::new(Session {
+            identity: Identity {
+                issuer: "https://identity.example".into(),
+                subject: "alice".into(),
+                name: "Alice".into(),
+            },
+            csrf: "csrf".into(),
+            expires: Instant::now() + Duration::from_secs(60),
+            revoked: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn repository_administration_stays_out_of_write_scoped_git_tokens() {
+        let repository = member_repository(RepositoryAccess::Admin);
+        let session = active_session();
+        let browser = Principal::User(Arc::clone(&session));
+        assert!(browser.can_read(&repository));
+        assert!(browser.can_write(&repository));
+        assert!(browser.can_admin(&repository));
+
+        let git = Principal::Git(Arc::new(GitToken {
+            session,
+            owner: repository.owner.clone(),
+            repository: repository.name.clone(),
+            access: RepositoryAccess::Write,
+            revoked: AtomicBool::new(false),
+        }));
+        assert!(git.can_write(&repository));
+        assert!(!git.can_admin(&repository));
+        assert!(
+            !Principal::User(active_session())
+                .can_admin(&member_repository(RepositoryAccess::Write))
+        );
+    }
 
     #[tokio::test]
     async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {

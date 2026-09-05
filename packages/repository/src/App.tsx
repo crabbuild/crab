@@ -14,6 +14,7 @@ import {
   DeviceDesktopIcon,
   GitBranchIcon,
   GitPullRequestIcon,
+  GearIcon,
   HistoryIcon,
   IssueOpenedIcon,
   MoonIcon,
@@ -79,6 +80,9 @@ const LabelsPage = lazy(() =>
 );
 const RefsPage = lazy(() =>
   import("./refs").then((module) => ({ default: module.RefsPage })),
+);
+const Settings = lazy(() =>
+  import("./settings").then((module) => ({ default: module.Settings })),
 );
 type Theme = "light" | "dark" | "auto";
 
@@ -565,12 +569,46 @@ function RepositoryPage({
           >
             <IssueOpenedIcon /> Issues
           </Link>
+          {repo.can_admin && (
+            <Link
+              className={view === "settings" ? "active" : ""}
+              aria-current={view === "settings" ? "page" : undefined}
+              href={repoHref(repo, { view: "settings" })}
+            >
+              <GearIcon /> Settings
+            </Link>
+          )}
         </nav>
       </div>
       <div
-        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}`}
+        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {issuesView ? (
+        {view === "settings" ? (
+          repo.can_admin ? (
+            <Result state={visibleRefState} showTiming={false}>
+              {(data) => (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner size="small" /> Loading settings…
+                    </div>
+                  }
+                >
+                  <Settings
+                    repo={repo}
+                    refs={data}
+                    csrf={csrf}
+                    onChanged={refs.retry}
+                  />
+                </Suspense>
+              )}
+            </Result>
+          ) : (
+            <div className="notice error" role="alert">
+              Administrator access is required to view repository settings.
+            </div>
+          )
+        ) : issuesView ? (
           <IssuesWorkspace
             repo={repo}
             view={view}

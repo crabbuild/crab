@@ -58,6 +58,10 @@ pub(crate) enum ReceiveError {
     Remote(#[from] crab_remote_git::Error),
     #[error("repository service failed")]
     Service(#[from] crate::Error),
+    #[error("repository default branch changed")]
+    DefaultBranchChanged,
+    #[error("selected branch changed or was deleted")]
+    BranchChanged,
     #[error("receive metadata failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("receive storage failed")]
@@ -227,6 +231,9 @@ impl IntoResponse for ReceiveError {
                 "Git transfers are busy; retry shortly",
             ),
             Self::Request(message) => (StatusCode::BAD_REQUEST, message),
+            Self::DefaultBranchChanged | Self::BranchChanged => {
+                (StatusCode::CONFLICT, "Repository changed; retry")
+            }
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 2 GiB"),
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,
@@ -403,12 +410,14 @@ pub(crate) async fn fast_forward(
         server,
         principal,
         key,
-        crab_git::receive_plan::RefUpdate {
-            name,
-            old: Some(old),
-            new: Some(new),
+        RefPublication::Update {
+            update: crab_git::receive_plan::RefUpdate {
+                name,
+                old: Some(old),
+                new: Some(new),
+            },
+            publication: publish::Publication::PullRequest,
         },
-        publish::Publication::PullRequest,
     )
     .await
 }
@@ -424,12 +433,14 @@ pub(crate) async fn create_branch(
         server,
         principal,
         key,
-        crab_git::receive_plan::RefUpdate {
-            name,
-            old: None,
-            new: Some(new),
+        RefPublication::Update {
+            update: crab_git::receive_plan::RefUpdate {
+                name,
+                old: None,
+                new: Some(new),
+            },
+            publication: publish::Publication::NativePush,
         },
-        publish::Publication::NativePush,
     )
     .await
 }
@@ -445,22 +456,56 @@ pub(crate) async fn delete_branch(
         server,
         principal,
         key,
-        crab_git::receive_plan::RefUpdate {
-            name,
-            old: Some(old),
-            new: None,
+        RefPublication::Update {
+            update: crab_git::receive_plan::RefUpdate {
+                name,
+                old: Some(old),
+                new: None,
+            },
+            publication: publish::Publication::NativePush,
         },
-        publish::Publication::NativePush,
     )
     .await
+}
+
+pub(crate) async fn set_default_branch(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    expected_head: String,
+    branch: String,
+    expected_oid: gix_hash::ObjectId,
+) -> Result<()> {
+    publish_ref(
+        server,
+        principal,
+        key,
+        RefPublication::DefaultBranch {
+            expected_head,
+            branch,
+            expected_oid,
+        },
+    )
+    .await
+}
+
+enum RefPublication {
+    Update {
+        update: crab_git::receive_plan::RefUpdate,
+        publication: publish::Publication,
+    },
+    DefaultBranch {
+        expected_head: String,
+        branch: String,
+        expected_oid: gix_hash::ObjectId,
+    },
 }
 
 async fn publish_ref(
     server: Arc<Server>,
     principal: Principal,
     key: (String, String),
-    update: crab_git::receive_plan::RefUpdate,
-    publication: publish::Publication,
+    publication: RefPublication,
 ) -> Result<()> {
     let permit = Arc::clone(&server.git_admission)
         .try_acquire_owned()
@@ -471,14 +516,40 @@ async fn publish_ref(
     let (send, result) = tokio::sync::oneshot::channel();
     server.receives.spawn(async move {
         let _permit = permit;
-        let work = publish::publish_existing_objects(
-            &worker_server,
-            &principal,
-            &key,
-            update,
-            publication,
-            &worker_cancel,
-        );
+        let work = async {
+            match publication {
+                RefPublication::Update {
+                    update,
+                    publication,
+                } => {
+                    publish::publish_existing_objects(
+                        &worker_server,
+                        &principal,
+                        &key,
+                        update,
+                        publication,
+                        &worker_cancel,
+                    )
+                    .await
+                }
+                RefPublication::DefaultBranch {
+                    expected_head,
+                    branch,
+                    expected_oid,
+                } => {
+                    publish::publish_default_branch(
+                        &worker_server,
+                        &principal,
+                        &key,
+                        &expected_head,
+                        &branch,
+                        expected_oid,
+                        &worker_cancel,
+                    )
+                    .await
+                }
+            }
+        };
         tokio::pin!(work);
         let completed = tokio::select! {
             result = &mut work => result,

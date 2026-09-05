@@ -1,6 +1,7 @@
 use super::*;
 
 const ROOT: &str = "/api/repos/team/private/branches";
+const DEFAULT_BRANCH: &str = "/api/repos/team/private/settings/default-branch";
 
 async fn create_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (StatusCode, Value) {
     let response = h
@@ -23,6 +24,28 @@ async fn delete_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (S
     let response = h
         .http
         .delete(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
+async fn set_default_branch(
+    h: &Harness,
+    cookie: &str,
+    csrf: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .patch(format!("{}{DEFAULT_BRANCH}", h.origin))
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
@@ -106,6 +129,70 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     )
     .await;
     assert_eq!(advertised, format!("{commit}\trefs/heads/feature/browser"));
+
+    let changed_default = set_default_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "name":"feature/browser",
+            "expected_head":"refs/heads/main",
+            "expected_oid":commit
+        }),
+    )
+    .await;
+    assert_eq!(changed_default.0, StatusCode::OK, "{}", changed_default.1);
+    assert_eq!(changed_default.1["branch"], "refs/heads/feature/browser");
+    let refs = h.json("/api/repos/team/private/refs", &alice).await;
+    assert_eq!(refs["head"]["name"], "refs/heads/feature/browser");
+    assert_eq!(refs["head"]["oid"], commit);
+    let advertised_head = crate::server::receive_tests::success(
+        source.path(),
+        &["ls-remote", "--symref", git_url.as_str(), "HEAD"],
+    )
+    .await;
+    assert_eq!(
+        advertised_head,
+        format!("ref: refs/heads/feature/browser\tHEAD\n{commit}\tHEAD")
+    );
+    let stale_head = set_default_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "name":"main",
+            "expected_head":"refs/heads/main",
+            "expected_oid":commit
+        }),
+    )
+    .await;
+    assert_eq!(stale_head.0, StatusCode::CONFLICT);
+    assert_eq!(stale_head.1["error"]["code"], "default_branch_changed");
+    let stale_tip = set_default_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "name":"main",
+            "expected_head":"refs/heads/feature/browser",
+            "expected_oid":"a".repeat(40)
+        }),
+    )
+    .await;
+    assert_eq!(stale_tip.0, StatusCode::CONFLICT);
+    assert_eq!(stale_tip.1["error"]["code"], "branch_changed");
+    let restored_default = set_default_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "name":"main",
+            "expected_head":"refs/heads/feature/browser",
+            "expected_oid":commit
+        }),
+    )
+    .await;
+    assert_eq!(restored_default.0, StatusCode::OK, "{}", restored_default.1);
 
     let proposed = h
         .http
@@ -248,6 +335,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(invalid_delete.0, StatusCode::BAD_REQUEST);
     assert_eq!(invalid_delete.1["error"]["code"], "invalid_request");
+    for body in [
+        json!({"name":"refs/heads/other","expected_head":"refs/heads/main","expected_oid":&commit}),
+        json!({"name":"other","expected_head":"main","expected_oid":&commit}),
+        json!({"name":"other","expected_head":"refs/heads/main","expected_oid":"not-an-oid"}),
+    ] {
+        let invalid = set_default_branch(&h, &alice, csrf, body).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.1["error"]["code"], "invalid_request");
+    }
     let rejected_csrf = h
         .http
         .post(format!("{}{ROOT}", h.origin))
@@ -280,6 +376,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(denied_delete.0, StatusCode::FORBIDDEN);
     assert_eq!(denied_delete.1["error"]["code"], "forbidden");
+    let denied_default = set_default_branch(
+        &h,
+        &bob,
+        bob_session["csrf"].as_str().unwrap(),
+        json!({"name":"other","expected_head":"refs/heads/main","expected_oid":&commit}),
+    )
+    .await;
+    assert_eq!(denied_default.0, StatusCode::FORBIDDEN);
+    assert_eq!(denied_default.1["error"]["code"], "forbidden");
 
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
@@ -302,5 +407,14 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(hidden_delete.0, StatusCode::NOT_FOUND);
     assert_eq!(hidden_delete.1["error"]["code"], "repository_not_found");
+    let hidden_default = set_default_branch(
+        &h,
+        &outsider,
+        outsider_session["csrf"].as_str().unwrap(),
+        json!({"name":"other","expected_head":"refs/heads/main","expected_oid":&commit}),
+    )
+    .await;
+    assert_eq!(hidden_default.0, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_default.1["error"]["code"], "repository_not_found");
     h.close().await;
 }

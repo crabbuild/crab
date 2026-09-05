@@ -48,6 +48,7 @@ test.beforeEach(async ({ page }) => {
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              can_admin: true,
               protected_branches: page.url().includes("scenario=protected")
                 ? [
                     {
@@ -383,6 +384,7 @@ test("repository views pass automated WCAG A and AA checks", async ({
       `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
       "/team/project?view=issues",
       "/team/project?view=branches",
+      "/team/project?view=settings",
     ]) {
       await page.goto(location);
       await page.waitForLoadState("networkidle");
@@ -1199,6 +1201,79 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("repository settings changes the default branch with explicit confirmation", async ({
+  page,
+}) => {
+  let defaultName = "refs/heads/main";
+  const featureOid = "c".repeat(40);
+  let update: unknown;
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/refs",
+    (route) =>
+      route.fulfill({
+        json: {
+          head: {
+            name: defaultName,
+            oid: defaultName.endsWith("main") ? oid : featureOid,
+          },
+          unborn_head: null,
+          refs: [
+            { name: "refs/heads/main", oid },
+            { name: "refs/heads/feature/docs", oid: featureOid },
+          ],
+          generation: defaultName.endsWith("main") ? 1 : 2,
+        },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/settings/default-branch",
+    (route) => {
+      expect(route.request().method()).toBe("PATCH");
+      update = route.request().postDataJSON();
+      defaultName = "refs/heads/feature/docs";
+      return route.fulfill({
+        json: { branch: defaultName, commit: featureOid },
+      });
+    },
+  );
+
+  await page.goto("/team/project?view=settings");
+  await expect(
+    page.getByRole("link", { name: "Settings", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(
+    page.getByRole("heading", { name: "Default branch" }),
+  ).toBeVisible();
+  await expect(page.locator(".default-branch-current")).toContainText("main");
+  await page.getByRole("button", { name: "Change" }).click();
+  await page
+    .getByRole("combobox", { name: "Choose a branch" })
+    .selectOption("refs/heads/feature/docs");
+  await page.getByRole("button", { name: "Update", exact: true }).click();
+  await expect(
+    page.getByText("Change the default branch to feature/docs?"),
+  ).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "I understand, update the default branch",
+    })
+    .click();
+  expect(update).toEqual({
+    name: "feature/docs",
+    expected_head: "refs/heads/main",
+    expected_oid: featureOid,
+  });
+  await expect(page.locator(".default-branch-current")).toContainText(
+    "feature/docs",
+  );
+  await selectTheme(page, "dark");
+  await page.setViewportSize({ width: 390, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
 });
 
 test("revision picker creates a branch from the exact viewed commit", async ({

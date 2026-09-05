@@ -111,6 +111,11 @@ exact protected branches, copies branch names, links immutable commit tips and
 opens a comparison against the default branch. Writers can delete an unprotected,
 non-default branch after an inline confirmation. The refs pages use the same
 GitHub-derived responsive hierarchy in light and dark themes. The browser also
+gives repository administrators a Settings page for changing the default branch
+through the same explicit selection, update and warning-confirmation flow as
+[GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch).
+The new symbolic HEAD is published to object storage and immediately applies to
+browser defaults and native Git discovery. The browser also
 provides raw-byte path navigation, lazy Pierre Trees, paginated directories and
 repository/path-scoped first-parent history, highlighted files, exact Git blob
 downloads, commit changes, Pierre split/unified diffs and first-parent blame.
@@ -218,6 +223,13 @@ branches cannot be deleted. A changed or already deleted tip returns 409, and a
 successful deletion passes through the native ref lease, journal publication and
 cache invalidation path before the browser removes it from the refs page.
 
+Repository administrators change the default branch with `PATCH
+/api/repos/{owner}/{name}/settings/default-branch`. The request carries the short
+target `name`, the full current `expected_head`, and the target branch's exact
+`expected_oid`. The server holds the target ref and manifest leases, rejects a
+changed HEAD or branch tip with 409, and atomically records the new symbolic HEAD
+through the ref journal without copying Git objects or creating a checkout.
+
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
 always opens a fresh snapshot. Reads remain bounded to two minutes and 8 MiB per
@@ -303,8 +315,9 @@ protected_branches = [
   { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
 ]
 members = [
-  { subject = "provider-subject-for-alice", name = "Alice", access = "write" },
-  { subject = "provider-subject-for-bob", name = "Bob", access = "read" },
+  { subject = "provider-subject-for-alice", name = "Alice", access = "admin" },
+  { subject = "provider-subject-for-bob", name = "Bob", access = "write" },
+  { subject = "provider-subject-for-carol", name = "Carol", access = "read" },
 ]
 ```
 
@@ -316,8 +329,9 @@ listener. Production identity endpoints require HTTPS. Secret files may have a
 single trailing newline; other whitespace is preserved.
 
 `members` assigns each provider’s stable `sub`, display `name` and explicit
-`read` or `write` grant. Names are used in assignment controls. Write grants
-include reads; duplicate subjects or names and unspecified/unknown
+`read`, `write` or `admin` grant. Names are used in assignment controls. Write
+grants include reads; administrators can also change repository settings.
+Repository-scoped Git tokens remain limited to read or write. Duplicate subjects or names and unspecified/unknown
 access values are rejected. This unreleased server configuration requires all
 three fields. An authenticated account
 with no memberships sees an empty catalog and its user ID for requesting access.
@@ -539,8 +553,8 @@ to the entire atomic batch and Git reports `deletion is prohibited`; other branc
 and tags remain deletable. This follows the repository's recorded default rather
 than a hardcoded branch name. Exact names listed in `protected_branches` also
 reject direct creation, update or deletion after repository initialization and
-report `protected branch requires a pull request`. Default-branch and protection
-administration in the application remain pending.
+report `protected branch requires a pull request`. Administrators can change the
+default branch in the browser; protection administration remains pending.
 
 Disconnects and deadlines signal cancellation; owned workers retain admission
 and renew their GC fences until cleanup finishes. A known commit is never reported
@@ -950,10 +964,11 @@ while the tree and verified file contents remain usable. This local measurement
 is not a production latency guarantee.
 After the generation owner rebuilt the same repository's graph directly from
 its six remote packs, a cold blame of that 39-line file traversed nearly
-59,000 first-parent commits and returned all 39 line attributions in 46.3 seconds.
-Batched delta materialization and 1,024-commit graph waves charged 125,529
-logical objects and 102,461 storage requests; the immutable warm result returned
-in 36 ms with eight storage requests. The unindexed reader reached only
+59,000 first-parent commits and returned 18 ranges covering all 39 lines in
+44.45 seconds. Every line owner matched native `git blame --first-parent`.
+Batched delta materialization and 1,024-commit graph waves charged 125,525
+logical objects and 108,831 storage requests; the immutable warm result completed
+its read in 51 ms with two storage requests. The unindexed reader reached only
 24,429 logical objects in 103 seconds before cancellation.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
@@ -980,6 +995,13 @@ deleted an existing qualification branch in 820 ms from confirmation click to
 row removal; a fresh page read from RustFS still omitted that branch and kept the
 default branch without a delete control. This local shared-cache measurement is
 not a production latency guarantee.
+A no-auth release run then changed the same RustFS repository's symbolic HEAD
+from `main` to an existing qualification branch in 406 ms. The refs API and
+native `git ls-remote --symref HEAD` both returned that branch and its exact tip.
+Restoring `main` took 363 ms, and a fresh refs read confirmed its original tip.
+The integration suite performs the same round trip in memory and also rejects
+stale HEAD and branch-tip requests. These localhost timings are functional
+observations rather than production latency guarantees.
 A live Kubernetes/RustFS run committed a Markdown file and six-byte binary in one
 upload request in 771 ms. The signed-in browser immediately showed the new commit,
 kept the selected branch while opening the file and rendered its Markdown preview;
@@ -1067,12 +1089,12 @@ audit reported zero vulnerabilities.
 | Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state, exact compare links and guarded branch deletion now complement the existing picker and live repository reads |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
-| Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion and exact protected branches have scoped proof; administration pending |
+| Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion, default-branch administration and exact protected branches have scoped proof; protection administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
-| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server binary safely initializes configured empty prefixes with a selected default branch; browser administration and import remain pending |
+| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes and administrators can change the default branch with stale-state protection; repository creation/import and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
-| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 26-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
+| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 27-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
 
 Keep this matrix truthful as implementation advances. No placeholder navigation,
 mock collaboration data, or green narrow test is evidence of product completion.

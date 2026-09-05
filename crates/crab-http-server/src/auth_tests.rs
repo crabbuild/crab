@@ -192,7 +192,7 @@ impl Harness {
                     crate::RepositoryMember {
                         subject: "alice-id".into(),
                         name: "Alice".into(),
-                        access: crate::RepositoryAccess::Write,
+                        access: crate::RepositoryAccess::Admin,
                     },
                     crate::RepositoryMember {
                         subject: "bob-id".into(),
