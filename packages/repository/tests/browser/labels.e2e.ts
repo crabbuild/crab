@@ -1,4 +1,8 @@
 import { expect, test } from "@playwright/test";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 test("repository metadata can be managed and assigned to an issue", async ({
   page,
@@ -123,15 +127,19 @@ test("repository metadata can be managed and assigned to an issue", async ({
     .fill("Confirmed defect");
   await page.getByRole("button", { name: "Create label" }).click();
   await expect(page.getByText("bug", { exact: true })).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
 
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   const edit = page.locator(".label-row-edit");
+  await expectNoAccessibilityViolations(page);
   await edit.getByLabel("Name", { exact: true }).fill("kind/bug");
   await edit.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
   await page.goto("/team/project?view=issues&issue=1");
   await page.getByLabel("Edit labels").click();
+  await expectNoAccessibilityViolations(page);
   await page.getByRole("checkbox", { name: "kind/bug" }).check();
   await page.getByRole("button", { name: "Apply labels" }).click();
   const metadata = page.getByRole("complementary", { name: "Metadata" });
@@ -141,6 +149,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await page.getByRole("checkbox", { name: "Repository maintainer" }).check();
   await page.getByRole("button", { name: "Apply assignees" }).click();
   await expect(metadata).toContainText("Repository maintainer");
+  await expectNoAccessibilityViolations(page);
 
   await page.goto("/team/project?view=labels");
   page.once("dialog", (dialog) => dialog.accept());

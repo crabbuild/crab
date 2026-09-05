@@ -1,4 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 async function openDiscussion(page: Page) {
   const record = {
@@ -119,10 +123,13 @@ test("issue editing and state changes retain a keyboard continuation point", asy
   page,
 }) => {
   await openDiscussion(page);
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
   const edit = page.getByRole("button", { name: "Edit issue", exact: true });
   await edit.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
+  await expectNoAccessibilityViolations(page);
   await page.getByRole("button", { name: "Cancel edit", exact: true }).click();
   await expect(edit).toBeFocused();
   await page.keyboard.press("Enter");
