@@ -696,96 +696,105 @@ impl RemoteGitSnapshot {
         let mut visited = HashSet::new();
         visited.insert(current_commit.oid);
 
-        while let Some(parent_oid) = current_commit.parents.first().copied() {
-            operation.ensure_active()?;
-            if !visited.insert(parent_oid) {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::Commit,
-                });
+        'history: while let Some(parent_oid) = current_commit.parents.first().copied() {
+            let parent_commits =
+                blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation).await?;
+            for parent_commit in &parent_commits {
+                if !visited.insert(parent_commit.oid) {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Commit,
+                    });
+                }
             }
-            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let parent_commit = operation.read_commit(parent_oid).await?;
-            let Some(parent_blob) = read_optional_blame_blob(
-                self,
-                parent_commit.tree,
-                parent_commit.oid,
-                path,
-                operation,
-            )
-            .await?
-            else {
-                break;
-            };
-            if parent_blob.metadata.oid == current_oid {
+            let parent_entries = entries_at_trees(&parent_commits, path, operation).await?;
+            for (parent_commit, parent_entry) in parent_commits.into_iter().zip(parent_entries) {
+                let Some(parent_entry) = parent_entry.filter(|entry| entry.kind == EntryKind::Blob)
+                else {
+                    break 'history;
+                };
+                if parent_entry.oid == current_oid {
+                    let mut attributed = false;
+                    for final_line in tracked.iter().flatten() {
+                        origins[*final_line] = parent_commit.oid;
+                        attributed = true;
+                    }
+                    if attributed {
+                        commits.insert(parent_commit.oid, parent_commit.clone());
+                    }
+                    if !origins.contains(&current_commit.oid) {
+                        commits.remove(&current_commit.oid);
+                    }
+                    current_commit = parent_commit;
+                    continue;
+                }
+                let Some(parent_blob) =
+                    optional_blame_blob_for_entry(parent_entry, operation).await?
+                else {
+                    break 'history;
+                };
                 let mut attributed = false;
-                for final_line in tracked.iter().flatten() {
-                    origins[*final_line] = parent_commit.oid;
-                    attributed = true;
+                let parent_bytes = parent_blob.bytes;
+                let parent_line_count = line_count(&parent_bytes, operation.cancellation())?;
+                let parent_lines =
+                    line_ranges(&parent_bytes, parent_line_count, operation.cancellation())?;
+                let (equal_prefix, equal_suffix) = matching_ends(
+                    &parent_bytes,
+                    &parent_lines,
+                    &current_bytes,
+                    &current_lines,
+                    operation.cancellation(),
+                )?;
+                let comparison_cells = comparison_cells(
+                    parent_line_count - equal_prefix - equal_suffix,
+                    current_lines.len() - equal_prefix - equal_suffix,
+                )?;
+                operation
+                    .charge(BudgetDimension::BlameComparisons, comparison_cells)
+                    .await?;
+                let matches = lcs_matches(
+                    operation.runtime(),
+                    parent_bytes.clone(),
+                    parent_lines.clone(),
+                    current_bytes.clone(),
+                    current_lines,
+                    equal_prefix,
+                    equal_suffix,
+                    operation.cancellation().clone(),
+                )
+                .await?;
+                let mut parent_tracked = Vec::new();
+                parent_tracked
+                    .try_reserve_exact(parent_lines.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: parent_lines
+                            .len()
+                            .saturating_mul(mem::size_of::<Option<usize>>()),
+                        source,
+                    })?;
+                parent_tracked.resize(parent_lines.len(), None);
+                for (parent_line, current_line) in matches {
+                    if let Some(final_line) = tracked[current_line] {
+                        origins[final_line] = parent_commit.oid;
+                        parent_tracked[parent_line] = Some(final_line);
+                        attributed = true;
+                    }
                 }
                 if attributed {
                     commits.insert(parent_commit.oid, parent_commit.clone());
                 }
-                current_commit = parent_commit;
-                continue;
-            }
-            let parent_bytes = parent_blob.bytes;
-            let parent_line_count = line_count(&parent_bytes, operation.cancellation())?;
-            let parent_lines =
-                line_ranges(&parent_bytes, parent_line_count, operation.cancellation())?;
-            let (equal_prefix, equal_suffix) = matching_ends(
-                &parent_bytes,
-                &parent_lines,
-                &current_bytes,
-                &current_lines,
-                operation.cancellation(),
-            )?;
-            let comparison_cells = comparison_cells(
-                parent_line_count - equal_prefix - equal_suffix,
-                current_lines.len() - equal_prefix - equal_suffix,
-            )?;
-            operation
-                .charge(BudgetDimension::BlameComparisons, comparison_cells)
-                .await?;
-            let matches = lcs_matches(
-                operation.runtime(),
-                parent_bytes.clone(),
-                parent_lines.clone(),
-                current_bytes.clone(),
-                current_lines,
-                equal_prefix,
-                equal_suffix,
-                operation.cancellation().clone(),
-            )
-            .await?;
-            let mut parent_tracked = Vec::new();
-            parent_tracked
-                .try_reserve_exact(parent_lines.len())
-                .map_err(|source| Error::Allocation {
-                    requested: parent_lines
-                        .len()
-                        .saturating_mul(mem::size_of::<Option<usize>>()),
-                    source,
-                })?;
-            parent_tracked.resize(parent_lines.len(), None);
-            let mut attributed = false;
-            for (parent_line, current_line) in matches {
-                if let Some(final_line) = tracked[current_line] {
-                    origins[final_line] = parent_commit.oid;
-                    parent_tracked[parent_line] = Some(final_line);
-                    attributed = true;
+                // Keep metadata only for commits that still own a final line.
+                if !origins.contains(&current_commit.oid) {
+                    commits.remove(&current_commit.oid);
                 }
+                if parent_tracked.iter().all(Option::is_none) {
+                    break 'history;
+                }
+                current_commit = parent_commit;
+                current_oid = parent_blob.metadata.oid;
+                current_bytes = parent_bytes;
+                current_lines = parent_lines;
+                tracked = parent_tracked;
             }
-            if attributed {
-                commits.insert(parent_commit.oid, parent_commit.clone());
-            }
-            if parent_tracked.iter().all(Option::is_none) {
-                break;
-            }
-            current_commit = parent_commit;
-            current_oid = parent_blob.metadata.oid;
-            current_bytes = parent_bytes;
-            current_lines = parent_lines;
-            tracked = parent_tracked;
         }
 
         let ranges = blame_ranges(path, &origins, &commits, operation.cancellation())?;
@@ -1383,19 +1392,10 @@ async fn read_blame_blob(
     blame_blob_for_entry(entry, operation).await
 }
 
-async fn read_optional_blame_blob(
-    source: &RemoteGitSnapshot,
-    tree: ObjectId,
-    commit: ObjectId,
-    path: &GitPath,
+async fn optional_blame_blob_for_entry(
+    entry: TreeEntry,
     operation: &OperationContext,
 ) -> Result<Option<Blob>> {
-    let Some(entry) = entry_at_tree(source, tree, commit, path, operation).await? else {
-        return Ok(None);
-    };
-    if entry.kind != EntryKind::Blob {
-        return Ok(None);
-    }
     let blob = parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
     Ok(blame_unsupported_reason(&blob).is_none().then_some(blob))
 }
@@ -1687,6 +1687,49 @@ async fn path_history_commits(
         .charge(BudgetDimension::HistoryCommits, oids.len() as u64)
         .await?;
     operation.read_commits(oids).await
+}
+
+async fn blame_parent_commits(
+    start: ObjectId,
+    commit_graph: Option<&CommitGraphIndex>,
+    operation: &OperationContext,
+) -> Result<Vec<Commit>> {
+    const GRAPH_PREFETCH: usize = 512;
+    const RAW_PREFETCH: usize = 16;
+
+    if let Some(commit_graph) = commit_graph
+        && let Some(oids) = commit_graph.first_parent_chain(start, GRAPH_PREFETCH)
+        && !oids.is_empty()
+    {
+        let commits = path_history_commits(&oids, operation).await?;
+        let valid = commits
+            .iter()
+            .all(|commit| commit_graph.parents_match(commit.oid, &commit.parents))
+            && commits
+                .windows(2)
+                .all(|pair| pair[0].parents.first() == Some(&pair[1].oid));
+        if valid {
+            return Ok(commits);
+        }
+    }
+
+    let mut commits = Vec::new();
+    commits
+        .try_reserve_exact(RAW_PREFETCH)
+        .map_err(|source| Error::Allocation {
+            requested: RAW_PREFETCH.saturating_mul(mem::size_of::<Commit>()),
+            source,
+        })?;
+    let mut oid = Some(start);
+    while commits.len() < RAW_PREFETCH
+        && let Some(current_oid) = oid
+    {
+        operation.ensure_active()?;
+        let commit = path_history_commit(current_oid, operation).await?;
+        oid = commit.parents.first().copied();
+        commits.push(commit);
+    }
+    Ok(commits)
 }
 
 async fn entries_at_trees(
