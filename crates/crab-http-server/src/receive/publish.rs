@@ -33,6 +33,7 @@ pub(super) enum Publication {
 struct ReceiveInput {
     pack: Option<BufReader<std::fs::File>>,
     publication: Publication,
+    visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
 }
 
 struct RefLease {
@@ -105,6 +106,7 @@ pub(super) async fn run(
         ReceiveInput {
             pack: Some(input),
             publication: Publication::NativePush,
+            visibility_bases: BTreeMap::new(),
         },
         cancel,
     )
@@ -133,6 +135,7 @@ pub(crate) async fn publish_existing_objects(
         ReceiveInput {
             pack: None,
             publication,
+            visibility_bases: BTreeMap::new(),
         },
         cancel,
     )
@@ -147,8 +150,12 @@ pub(super) async fn publish_pack(
     directory: tempfile::TempDir,
     pack: BufReader<std::fs::File>,
     update: crab_git::receive_plan::RefUpdate,
+    visibility_base: Option<(String, gix_hash::ObjectId)>,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    let visibility_bases = visibility_base
+        .map(|base| BTreeMap::from([(update.name.clone(), base)]))
+        .unwrap_or_default();
     let request = receive_wire::ReceiveRequest {
         updates: vec![update],
         report_status: false,
@@ -162,6 +169,7 @@ pub(super) async fn publish_pack(
         ReceiveInput {
             pack: Some(pack),
             publication: Publication::NativePush,
+            visibility_bases,
         },
         cancel,
     )
@@ -280,6 +288,7 @@ async fn publish(
         directory.to_owned(),
         input.pack,
         request.updates.clone(),
+        input.visibility_bases,
         cancel,
     )
     .await

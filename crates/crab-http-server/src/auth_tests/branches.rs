@@ -90,6 +90,62 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     .await;
     assert_eq!(advertised, format!("{commit}\trefs/heads/feature/browser"));
 
+    let proposed = h
+        .http
+        .post(format!("{}/api/repos/team/private/contents", h.origin))
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(
+            json!({
+                "branch":"refs/heads/main",
+                "expected_head":commit,
+                "new_branch":"feature/proposed-edit",
+                "path_hex":"50524f504f53414c2e6d64",
+                "content":"proposed from protected main\n",
+                "message":"Propose browser edit"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proposed.status(), StatusCode::CREATED);
+    let proposed: Value = serde_json::from_slice(&proposed.bytes().await.unwrap()).unwrap();
+    assert_eq!(proposed["branch"], "refs/heads/feature/proposed-edit");
+    let proposal_commit = proposed["commit"].as_str().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    crate::server::receive_tests::success(checkout.path(), &["init", "--bare", "."]).await;
+    crate::server::receive_tests::success(
+        checkout.path(),
+        &[
+            "-c",
+            "protocol.version=2",
+            "fetch",
+            git_url.as_str(),
+            "feature/proposed-edit",
+        ],
+    )
+    .await;
+    assert_eq!(
+        crate::server::receive_tests::success(checkout.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        proposal_commit
+    );
+    assert_eq!(
+        crate::server::receive_tests::success(checkout.path(), &["show", "FETCH_HEAD:PROPOSAL.md"])
+            .await,
+        "proposed from protected main"
+    );
+    assert_eq!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/heads/main"]
+        )
+        .await,
+        format!("{commit}\trefs/heads/main")
+    );
+
     let duplicate = create_branch(
         &h,
         &alice,

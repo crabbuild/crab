@@ -2650,9 +2650,47 @@ main {
   margin-bottom: 8px;
   font-weight: 600;
 }
+.commit-target {
+  margin: 16px 0 0;
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.commit-target legend {
+  padding: 0;
+  font-weight: 600;
+}
+.commit-target label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+  font-weight: 400;
+  cursor: pointer;
+}
+.commit-target label:has(input:disabled) {
+  color: var(--fgColor-muted);
+  cursor: not-allowed;
+}
+.commit-target input[type="radio"] {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.commit-target label span {
+  display: grid;
+  gap: 2px;
+}
+.commit-target small {
+  color: var(--fgColor-muted);
+  font-weight: 400;
+}
+.commit-branch-name {
+  max-width: 440px;
+  margin: 0 0 8px 24px;
+}
 .create-file-actions {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
   margin-top: 16px;
 }

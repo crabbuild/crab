@@ -523,6 +523,124 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
             .status
             .success()
     );
+
+    let proposal = "browser/proposal";
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": proposal,
+                "path_hex": "70726f706f73616c2e6d64",
+                "content": "review this change\n",
+                "message": "Propose a browser change"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let proposed: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let proposed_commit = proposed["commit"].as_str().unwrap().to_owned();
+    assert_eq!(proposed["branch"], format!("refs/heads/{proposal}"));
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, proposal],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        proposed_commit
+    );
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:proposal.md"]).await,
+        "review this change"
+    );
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["rev-parse", "FETCH_HEAD"]).await,
+        sixth
+    );
+    assert!(
+        !git(reader.path(), &["cat-file", "-e", "FETCH_HEAD:proposal.md"])
+            .await
+            .status
+            .success(),
+        "proposal changed the source branch"
+    );
+    let duplicate = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": proposal,
+                "path_hex": "6e657665722e747874",
+                "content": "never published\n",
+                "message": "Reject duplicate proposal branch"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        success(reader.path(), &["ls-remote", &url, proposal]).await,
+        format!("{proposed_commit}\trefs/heads/{proposal}")
+    );
+    let upload_proposal = "browser/upload-proposal";
+    let proposal_binary = [7_u8, 0, 255, 42];
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "new_branch": upload_proposal,
+                "files": [{
+                    "path_hex": "70726f706f73616c2e62696e",
+                    "content_base64": base64::engine::general_purpose::STANDARD.encode(proposal_binary)
+                }],
+                "message": "Propose a browser upload"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let proposed_upload: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let proposed_upload_commit = proposed_upload["commit"].as_str().unwrap().to_owned();
+    assert_eq!(
+        proposed_upload["branch"],
+        format!("refs/heads/{upload_proposal}")
+    );
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, upload_proposal],
+    )
+    .await;
+    let raw = git(reader.path(), &["show", "FETCH_HEAD:proposal.bin"]).await;
+    assert!(raw.status.success());
+    assert_eq!(raw.stdout, proposal_binary);
     reader.close().unwrap();
 
     let repo = &server.repositories[&("team".into(), "repo".into())];
@@ -538,7 +656,14 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         .collect();
     assert_eq!(
         refs,
-        BTreeMap::from([(format!("refs/heads/{branch}"), sixth)])
+        BTreeMap::from([
+            (format!("refs/heads/{branch}"), sixth),
+            (format!("refs/heads/{proposal}"), proposed_commit),
+            (
+                format!("refs/heads/{upload_proposal}"),
+                proposed_upload_commit,
+            ),
+        ])
     );
     let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
     let mut expected = Vec::new();
