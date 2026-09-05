@@ -39,6 +39,7 @@ pub(super) async fn fixture() -> Arc<Server> {
                 store,
                 layout,
                 protections: RwLock::new(BranchProtections::configured(&[])),
+                lifecycle: RwLock::new(RepositoryLifecycle::active()),
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
             },

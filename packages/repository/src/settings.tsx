@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Label } from "@primer/react";
 import {
   AlertIcon,
+  ArchiveIcon,
   GitBranchIcon,
   PencilIcon,
   PlusIcon,
@@ -68,6 +69,7 @@ export function Settings({
           refs={refs}
           csrf={csrf}
           onChanged={onDefaultChanged}
+          onRepositoryChanged={onRepositoryChanged}
         />
       )}
     </div>
@@ -79,11 +81,13 @@ function DefaultBranchSettings({
   refs,
   csrf,
   onChanged,
+  onRepositoryChanged,
 }: {
   repo: Repository;
   refs: Refs;
   csrf: string;
   onChanged: () => void;
+  onRepositoryChanged: () => void;
 }) {
   const branches = useMemo(
     () =>
@@ -165,7 +169,7 @@ function DefaultBranchSettings({
               commits.
             </p>
           </div>
-          {!editing && choices.length > 0 && (
+          {!repo.archived && !editing && choices.length > 0 && (
             <Button
               size="small"
               leadingVisual={PencilIcon}
@@ -252,6 +256,154 @@ function DefaultBranchSettings({
           </div>
         )}
       </section>
+      <ArchiveSettings
+        repo={repo}
+        csrf={csrf}
+        onChanged={onRepositoryChanged}
+      />
+    </section>
+  );
+}
+
+function ArchiveSettings({
+  repo,
+  csrf,
+  onChanged,
+}: {
+  repo: Repository;
+  csrf: string;
+  onChanged: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const fullName = `${repo.owner}/${repo.name}`;
+  const action = repo.archived ? "unarchive" : "archive";
+
+  async function updateArchive() {
+    setSaving(true);
+    setError(undefined);
+    try {
+      const response = await fetch(endpoint(repo, "settings/archive"), {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+        },
+        body: JSON.stringify({
+          expected_version: repo.archive_version,
+          archived: !repo.archived,
+          repository: confirmation,
+        }),
+      });
+      if (response.status === 401)
+        window.dispatchEvent(new Event("crab-session-expired"));
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        const failure = body as { error?: { message?: string } };
+        throw new Error(
+          failure.error?.message ?? `Request failed (${response.status})`,
+        );
+      }
+      setConfirming(false);
+      setConfirmation("");
+      onChanged();
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : `The repository could not be ${action}d`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="danger-zone" aria-labelledby="danger-zone-heading">
+      <h2 id="danger-zone-heading">Danger Zone</h2>
+      <div className="danger-zone-row">
+        <div>
+          <strong>
+            {repo.archived
+              ? "Unarchive this repository"
+              : "Archive this repository"}
+          </strong>
+          <p>
+            {repo.archived
+              ? "Restore writes to code and collaboration data."
+              : "Make code and collaboration data read-only without deleting it."}
+          </p>
+        </div>
+        {!confirming && (
+          <Button
+            size="small"
+            variant="danger"
+            onClick={() => setConfirming(true)}
+          >
+            {repo.archived
+              ? "Unarchive this repository"
+              : "Archive this repository"}
+          </Button>
+        )}
+      </div>
+      {confirming && (
+        <div
+          className="archive-confirm"
+          role="region"
+          aria-label={`${action} repository`}
+        >
+          <AlertIcon size={20} />
+          <div>
+            <strong>
+              {repo.archived
+                ? "This will allow changes to the repository again."
+                : "This will make the repository read-only for every user."}
+            </strong>
+            <p>
+              To confirm, type <code>{fullName}</code> below.
+            </p>
+            <label htmlFor="archive-confirmation">Repository name</label>
+            <input
+              id="archive-confirmation"
+              value={confirmation}
+              autoComplete="off"
+              onChange={(event) => setConfirmation(event.target.value)}
+            />
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+            <div>
+              <Button
+                size="small"
+                disabled={saving}
+                onClick={() => {
+                  setConfirming(false);
+                  setConfirmation("");
+                  setError(undefined);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                variant="danger"
+                disabled={saving || confirmation !== fullName}
+                leadingVisual={ArchiveIcon}
+                onClick={updateArchive}
+              >
+                {saving
+                  ? `${repo.archived ? "Unarchiving" : "Archiving"}…`
+                  : `I understand the consequences, ${action} this repository`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -369,7 +521,7 @@ function BranchProtectionSettings({
           <h2 id="branch-settings">Branches</h2>
           <p>Control how changes reach important branches.</p>
         </div>
-        {editing === undefined && (
+        {!repo.archived && editing === undefined && (
           <Button
             size="small"
             variant="primary"
@@ -421,29 +573,31 @@ function BranchProtectionSettings({
                     </div>
                   )}
                 </div>
-                <div className="protection-actions">
-                  <Button
-                    size="small"
-                    leadingVisual={PencilIcon}
-                    aria-label={`Edit ${rule.branch}`}
-                    onClick={() => startEdit(index)}
-                  >
-                    Edit
-                  </Button>
-                  <Button
-                    size="small"
-                    variant="danger"
-                    leadingVisual={TrashIcon}
-                    aria-label={`Delete ${rule.branch}`}
-                    onClick={() => {
-                      setDeleting(index);
-                      setEditing(undefined);
-                      setError(undefined);
-                    }}
-                  >
-                    Delete
-                  </Button>
-                </div>
+                {!repo.archived && (
+                  <div className="protection-actions">
+                    <Button
+                      size="small"
+                      leadingVisual={PencilIcon}
+                      aria-label={`Edit ${rule.branch}`}
+                      onClick={() => startEdit(index)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="danger"
+                      leadingVisual={TrashIcon}
+                      aria-label={`Delete ${rule.branch}`}
+                      onClick={() => {
+                        setDeleting(index);
+                        setEditing(undefined);
+                        setError(undefined);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                )}
                 {deleting === index && (
                   <div
                     className="protection-delete-confirm"

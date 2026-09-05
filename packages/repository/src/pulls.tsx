@@ -180,7 +180,15 @@ export function PullRequests({
 }) {
   const pull = url.searchParams.get("pull");
   if (pull === "new")
-    return (
+    return repo.archived ? (
+      <div className="notice">
+        <h2>This repository is read-only</h2>
+        <p>Unarchive it before creating a pull request.</p>
+        <Link href={repoHref(repo, { view: "pulls" })}>
+          Back to pull requests
+        </Link>
+      </div>
+    ) : (
       <NewPull repo={repo} refs={refs} url={url} csrf={csrf} theme={theme} />
     );
   if (pull) {
@@ -219,14 +227,16 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
     <section className="pulls-page">
       <div className="section-heading">
         <h2>Pull requests</h2>
-        <Button
-          variant="primary"
-          onClick={() =>
-            navigate(repoHref(repo, { view: "pulls", pull: "new" }))
-          }
-        >
-          New pull request
-        </Button>
+        {!repo.archived && (
+          <Button
+            variant="primary"
+            onClick={() =>
+              navigate(repoHref(repo, { view: "pulls", pull: "new" }))
+            }
+          >
+            New pull request
+          </Button>
+        )}
       </div>
       <p className="muted">Review and discuss changes between branches.</p>
       <DiscussionSearch
@@ -651,7 +661,7 @@ function PullDetail({
                     head={data.head_oid}
                     theme={theme}
                   />
-                  {data.state === "open" && (
+                  {data.state === "open" && !repo.archived && (
                     <ReviewForm
                       repo={repo}
                       pull={data}
@@ -673,8 +683,8 @@ function PullDetail({
                   repo={repo}
                   assignees={data.assignees}
                   labels={data.labels}
-                  canAssign={data.can_assign}
-                  canLabel={data.can_label}
+                  canAssign={data.can_assign && !repo.archived}
+                  canLabel={data.can_label && !repo.archived}
                   version={data.version}
                   path={`pulls/${number}`}
                   csrf={csrf}
@@ -810,68 +820,72 @@ function PullConversation({
           </Result>
         )}
       </Result>
-      <form
-        className="panel discussion-form"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          const input = { body };
-          const created = await commentMutation.run<PullComment>(
-            commentsPath,
-            "POST",
-            { ...input, request_id: submission(input) },
-          );
-          if (created) {
-            setBody("");
-            comments.retry();
-          }
-        }}
-      >
-        <h3>Join the conversation</h3>
-        <Editor
-          id="pull-comment"
-          label="Comment"
-          value={body}
-          onChange={setBody}
-          disabled={commentMutation.pending}
-          required
-        />
-        <Failure message={commentMutation.error} />
-        <div className="discussion-actions">
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={commentMutation.pending || !body.trim()}
-          >
-            {commentMutation.pending ? "Commenting…" : "Comment"}
-          </Button>
-          {pull.can_manage && (
+      {!repo.archived && (
+        <form
+          className="panel discussion-form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const input = { body };
+            const created = await commentMutation.run<PullComment>(
+              commentsPath,
+              "POST",
+              { ...input, request_id: submission(input) },
+            );
+            if (created) {
+              setBody("");
+              comments.retry();
+            }
+          }}
+        >
+          <h3>Join the conversation</h3>
+          <Editor
+            id="pull-comment"
+            label="Comment"
+            value={body}
+            onChange={setBody}
+            disabled={commentMutation.pending}
+            required
+          />
+          <Failure message={commentMutation.error} />
+          <div className="discussion-actions">
             <Button
-              type="button"
-              variant={pull.state === "open" ? "danger" : "default"}
-              disabled={stateMutation.pending}
-              onClick={async () => {
-                const updated = await stateMutation.run<PullRequest>(
-                  endpoint(repo, `pulls/${pull.number}`),
-                  "PATCH",
-                  {
-                    version: pull.version,
-                    state: pull.state === "open" ? "closed" : "open",
-                  },
-                );
-                if (updated) refresh();
-              }}
+              type="submit"
+              variant="primary"
+              disabled={commentMutation.pending || !body.trim()}
             >
-              {pull.state === "open"
-                ? "Close pull request"
-                : "Reopen pull request"}
+              {commentMutation.pending ? "Commenting…" : "Comment"}
             </Button>
-          )}
+            {pull.can_manage && (
+              <Button
+                type="button"
+                variant={pull.state === "open" ? "danger" : "default"}
+                disabled={stateMutation.pending}
+                onClick={async () => {
+                  const updated = await stateMutation.run<PullRequest>(
+                    endpoint(repo, `pulls/${pull.number}`),
+                    "PATCH",
+                    {
+                      version: pull.version,
+                      state: pull.state === "open" ? "closed" : "open",
+                    },
+                  );
+                  if (updated) refresh();
+                }}
+              >
+                {pull.state === "open"
+                  ? "Close pull request"
+                  : "Reopen pull request"}
+              </Button>
+            )}
+          </div>
+          <Failure message={stateMutation.error} />
+        </form>
+      )}
+      {!repo.archived && (
+        <div className="notice pull-merge-note">
+          <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
         </div>
-        <Failure message={stateMutation.error} />
-      </form>
-      <div className="notice pull-merge-note">
-        <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
-      </div>
+      )}
     </div>
   );
 }

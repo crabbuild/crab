@@ -185,7 +185,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
       <Result state={catalog}>
         {(data) => (
           <>
-            {data.can_manage && (
+            {data.can_manage && !repo.archived && (
               <form
                 className="label-form panel"
                 onSubmit={async (event) => {
@@ -261,7 +261,7 @@ export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
                   <LabelRow
                     key={label.id}
                     label={label}
-                    canManage={data.can_manage}
+                    canManage={data.can_manage && !repo.archived}
                     editing={editing === label.id}
                     setEditing={setEditing}
                     csrf={csrf}

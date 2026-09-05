@@ -32,6 +32,8 @@ test("repository metadata can be managed and assigned to an issue", async ({
               name: "project",
               description: "",
               access: "write",
+              archive_version: 0,
+              archived: false,
               protection_version: 0,
               protected_branches: [],
             },

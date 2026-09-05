@@ -28,6 +28,8 @@ pub(crate) enum Error {
     CommitNotFound,
     #[error("Only the author can edit this content")]
     Forbidden,
+    #[error("Archived repositories are read-only")]
+    Archived,
     #[error("Pull request authors cannot approve or request changes on their own changes")]
     OwnReview,
     #[error("This content changed; reload before saving your draft")]
@@ -98,6 +100,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Only the author can edit this content",
+            ),
+            Self::Archived => (
+                StatusCode::FORBIDDEN,
+                "repository_archived",
+                "This repository is archived and read-only",
             ),
             Self::OwnReview => (
                 StatusCode::FORBIDDEN,

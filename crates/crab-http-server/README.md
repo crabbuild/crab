@@ -369,6 +369,19 @@ branch can still initialize an empty or tag-only repository. A fast-forward
 or two-parent pull request merge is the supported publication path for a
 protected branch.
 
+Repository administrators can archive or unarchive a repository under
+**Settings → General → Danger Zone** after entering its exact `owner/name`.
+The state is stored as a versioned `app/v1/settings/repository.json` object;
+compare-and-swap updates reject a stale settings page, and catalog reads reload
+completed changes made through another server. Archived repositories remain
+readable and searchable, while browser/API changes, native pushes and Git LFS
+uploads return a read-only error. The warning, action placement and exact-name
+confirmation follow
+[GitHub's repository archive flow](https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories).
+An application mutation already admitted at the HTTP boundary may finish while
+another administrator archives the repository; native Git and LFS check again
+immediately before publication.
+
 Sign-in verifies browser-bound state, PKCE, nonce, signature, issuer, audience,
 authorized party, expiry, issuance time and an access-token hash when supplied.
 Callbacks reload provider keys to handle rotation. HTTP identity requests reject
@@ -1006,6 +1019,12 @@ ordering, default/protected labels, copy feedback, exact compare parameters,
 case-insensitive search, peeled tag targets and a dark 390-pixel layout.
 It also covers branch deletion confirmation, inline conflict recovery, immediate
 row removal, and the absence of deletion controls on default and protected refs.
+Repository settings regression covers exact-name archive and unarchive
+confirmation, the global read-only warning, removal and restoration of issue
+creation, a dark 390-pixel layout and automated accessibility checks. Server
+integration proof persists the versioned state, rejects browser collaboration
+changes, native pushes and LFS uploads, keeps refs and LFS reads available, rejects
+stale unarchive requests and restores the same native push after unarchiving.
 The rebuilt release server read the persisted Kubernetes repository from RustFS,
 separated its default branch from three qualification branches, exposed exact
 commit-tip and comparison links, and rendered the empty Tags state without
@@ -1111,9 +1130,9 @@ audit reported zero vulnerabilities.
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
-| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes and administrators can change the default branch and exact protection rules with stale-state protection; repository creation/import and remaining settings are pending |
+| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes; administrators can change the default branch and exact protection rules and archive/unarchive repositories with durable stale-state protection; repository creation/import, audit history and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
-| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 28-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
+| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 29-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
 
 Keep this matrix truthful as implementation advances. No placeholder navigation,
 mock collaboration data, or green narrow test is evidence of product completion.

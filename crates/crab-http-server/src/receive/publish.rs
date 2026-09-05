@@ -371,7 +371,7 @@ async fn publish(
     let protections = entry
         .branch_protections()
         .await
-        .map_err(|error| ReceiveError::Policy(Box::new(error)))?;
+        .map_err(|error| ReceiveError::Settings(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
         && request.updates.iter().any(|update| {
             protections.protection(&update.name).is_some() && (update.old.is_some() || has_branch)
@@ -497,6 +497,14 @@ async fn publish(
     check_cancelled(cancel)?;
     if !principal.can_write(&entry.config) {
         return Err(ReceiveError::Forbidden);
+    }
+    if entry
+        .lifecycle()
+        .await
+        .map_err(|error| ReceiveError::Settings(Box::new(error)))?
+        .archived
+    {
+        return Err(ReceiveError::Archived);
     }
     if !repository.is_current(cancel).await? {
         return Err(ReceiveError::Request(

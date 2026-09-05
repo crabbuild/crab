@@ -34,6 +34,8 @@ test.beforeEach(async ({ page }) => {
   let currentReadmeOid = oid;
   let uploadedFiles: string[] = [];
   let protectionVersion = 0;
+  let archiveVersion = 0;
+  let archived = false;
   let protectionRules: Array<{
     branch: string;
     required_approvals: number;
@@ -55,6 +57,8 @@ test.beforeEach(async ({ page }) => {
               description: "A repository for our team.",
               access: "write",
               can_admin: true,
+              archive_version: archiveVersion,
+              archived,
               protection_version: protectionVersion,
               protected_branches: page.url().includes("scenario=protected")
                 ? [
@@ -69,6 +73,28 @@ test.beforeEach(async ({ page }) => {
           ],
         },
       });
+    if (url.pathname.endsWith("/settings/archive")) {
+      expect(route.request().method()).toBe("PUT");
+      const body = route.request().postDataJSON() as {
+        expected_version: number;
+        archived: boolean;
+        repository: string;
+      };
+      if (body.expected_version !== archiveVersion)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "settings_changed",
+              message: "Repository settings changed; reload before saving",
+            },
+          },
+        });
+      expect(body.repository).toBe("team/project");
+      archiveVersion += 1;
+      archived = body.archived;
+      return route.fulfill({ json: { version: archiveVersion, archived } });
+    }
     if (url.pathname.endsWith("/settings/branch-protections")) {
       expect(route.request().method()).toBe("PUT");
       const body = route.request().postDataJSON() as {
@@ -1098,6 +1124,8 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              archive_version: 0,
+              archived: false,
               protection_version: 0,
               protected_branches: [
                 {
@@ -1299,6 +1327,95 @@ test("repository settings changes the default branch with explicit confirmation"
   await expect(page.locator(".default-branch-current")).toContainText(
     "feature/docs",
   );
+  await selectTheme(page, "dark");
+  await page.setViewportSize({ width: 390, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+});
+
+test("repository settings archive and unarchive the repository with exact confirmation", async ({
+  page,
+}) => {
+  const updates: unknown[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "PUT" &&
+      new URL(request.url()).pathname.endsWith("/settings/archive")
+    )
+      updates.push(request.postDataJSON());
+  });
+
+  await page.goto("/team/project?view=settings");
+  await expect(
+    page.getByRole("heading", { name: "Danger Zone" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Archive this repository", exact: true })
+    .click();
+  const archive = page.getByRole("region", { name: "archive repository" });
+  const confirmArchive = archive.getByRole("button", {
+    name: "I understand the consequences, archive this repository",
+  });
+  await expect(confirmArchive).toBeDisabled();
+  await archive.getByLabel("Repository name").fill("team/project");
+  await confirmArchive.click();
+
+  await expect(
+    page.getByText("This repository was archived and is read-only."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Archived", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Unarchive this repository",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Change" })).toHaveCount(0);
+  await page.getByRole("link", { name: "Branches", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Add branch protection rule" }),
+  ).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Issues", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "New issue" })).toHaveCount(0);
+  await page.goto("/team/project?view=issues&issue=new");
+  await expect(
+    page.getByRole("heading", { name: "This repository is read-only" }),
+  ).toBeVisible();
+
+  await page.goto("/team/project?view=settings");
+  await page
+    .getByRole("button", { name: "Unarchive this repository", exact: true })
+    .click();
+  const unarchive = page.getByRole("region", { name: "unarchive repository" });
+  await unarchive.getByLabel("Repository name").fill("team/project");
+  await unarchive
+    .getByRole("button", {
+      name: "I understand the consequences, unarchive this repository",
+    })
+    .click();
+  await expect(
+    page.getByText("This repository was archived and is read-only."),
+  ).toHaveCount(0);
+  await page.getByRole("link", { name: "Issues", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "New issue" })).toBeVisible();
+  expect(updates).toEqual([
+    {
+      expected_version: 0,
+      archived: true,
+      repository: "team/project",
+    },
+    {
+      expected_version: 1,
+      archived: false,
+      repository: "team/project",
+    },
+  ]);
+
   await selectTheme(page, "dark");
   await page.setViewportSize({ width: 390, height: 800 });
   expect(
