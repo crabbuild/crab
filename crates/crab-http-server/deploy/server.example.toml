@@ -17,6 +17,6 @@ protected_branches = [
   { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
 ]
 members = [
-  { subject = "provider-subject-for-alice", name = "Alice", access = "write" },
+  { subject = "provider-subject-for-alice", name = "Alice", access = "admin" },
   { subject = "provider-subject-for-bob", name = "Bob", access = "read" },
 ]

@@ -55,12 +55,13 @@ pub struct RepositoryMember {
     pub access: RepositoryAccess,
 }
 
-/// Repository access, with write permission also allowing reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+/// Repository access, ordered from read-only through repository administration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RepositoryAccess {
     Read,
     Write,
+    Admin,
 }
 
 impl Config {
@@ -235,7 +236,7 @@ mod tests {
         for member in [
             "'alice'",
             "{subject='alice'}",
-            "{subject='alice',name='Alice',access='admin'}",
+            "{subject='alice',name='Alice',access='owner'}",
             "{subject='alice',name='Alice',access='read',extra=true}",
         ] {
             let source = format!(
@@ -243,6 +244,11 @@ mod tests {
             );
             assert!(toml::from_str::<RepositoryConfig>(&source).is_err());
         }
+        let administrator: RepositoryConfig = toml::from_str(
+            "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{subject='alice',name='Alice',access='admin'}]",
+        )
+        .unwrap();
+        assert_eq!(administrator.members[0].access, RepositoryAccess::Admin);
     }
 
     #[test]
