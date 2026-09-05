@@ -640,6 +640,9 @@ mod labels;
 #[path = "auth_tests/assignees.rs"]
 mod assignees;
 
+#[path = "auth_tests/branches.rs"]
+mod branches;
+
 #[path = "auth_tests/git_tokens.rs"]
 mod git_tokens;
 

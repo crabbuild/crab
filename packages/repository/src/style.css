@@ -2174,6 +2174,38 @@ main {
   padding: 16px;
   color: var(--fgColor-muted);
 }
+.revision-picker-create {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 0;
+  border-top: 1px solid var(--borderColor-default);
+  background: var(--overlay-bgColor);
+  color: var(--fgColor-default);
+  text-align: left;
+}
+.revision-picker-create:hover:not(:disabled),
+.revision-picker-create:focus-visible {
+  background: var(--control-transparent-bgColor-hover);
+}
+.revision-picker-create:disabled {
+  color: var(--fgColor-muted);
+  cursor: wait;
+}
+.revision-picker-create span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.revision-picker-error {
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--borderColor-default);
+  color: var(--fgColor-danger);
+  font-size: 12px;
+}
 .ref-count {
   display: inline-flex;
   align-items: center;

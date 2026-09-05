@@ -76,7 +76,7 @@ impl GraphSource for Source<'_> {
             return Ok(None);
         }
         let bytes = oid.as_bytes().try_into()?;
-        Ok(self
+        let kind = self
             .handle
             .block_on(self.operation.catalog_object_kinds(&[bytes]))?
             .into_iter()
@@ -87,7 +87,15 @@ impl GraphSource for Source<'_> {
                 GitObjectKind::Tree => Kind::Tree,
                 GitObjectKind::Blob => Kind::Blob,
                 GitObjectKind::Tag => Kind::Tag,
-            }))
+            });
+        if kind.is_some() {
+            return Ok(kind);
+        }
+        // Older imported catalogs may omit kind metadata. Reading this proven
+        // visible object establishes its kind without expanding its closure.
+        Ok(Some(
+            self.handle.block_on(self.operation.read_object(*oid))?.kind,
+        ))
     }
     fn read(&mut self, oid: &ObjectId) -> SourceResult<Option<BaseObject>> {
         // A locator hit alone cannot authorize a dangling object or thin base.
@@ -205,7 +213,22 @@ pub(super) async fn prepare(
                 let Some(new) = update.new else {
                     continue;
                 };
-                source.prior = update.old.map(|old| (update.name.clone(), old));
+                source.prior = update
+                    .old
+                    .map(|old| (update.name.clone(), old))
+                    .or_else(|| {
+                        // New refs at an existing tip can reuse that exact
+                        // committed ref closure instead of walking the graph.
+                        base.iter()
+                            .find(|(name, tip)| {
+                                **tip == new
+                                    && source
+                                        .proof
+                                        .as_ref()
+                                        .is_some_and(|proof| proof.contains_ref(name))
+                            })
+                            .map(|(name, tip)| (name.clone(), *tip))
+                    });
                 let proof = receive_plan::plan_visibility(
                     &incoming,
                     new,
@@ -213,17 +236,18 @@ pub(super) async fn prepare(
                     GRAPH_LIMITS,
                     || cancel.is_cancelled(),
                 )?;
-                let old = update.old.map(|oid| oid.to_string());
                 let evidence = match proof {
-                    RefVisibility::Additive { added, .. } => GitVisibilityEdit::from_delta_objects(
-                        old,
-                        new.to_string(),
-                        added.into_iter().map(|oid| oid.to_string()).collect(),
-                        vec![],
-                    ),
+                    RefVisibility::Additive { base, added } => {
+                        GitVisibilityEdit::from_delta_objects(
+                            Some(base.to_string()),
+                            new.to_string(),
+                            added.into_iter().map(|oid| oid.to_string()).collect(),
+                            vec![],
+                        )
+                    }
                     RefVisibility::Replacement { objects } => {
                         GitVisibilityEdit::from_replacement_objects(
-                            old,
+                            update.old.map(|oid| oid.to_string()),
                             new.to_string(),
                             objects.into_iter().map(|oid| oid.to_string()).collect(),
                         )

@@ -16,14 +16,16 @@ export function RepositoryRefControls({
   onSelect,
   compact = false,
   onSearch,
-  onCreate,
+  onCreateFile,
+  onCreateBranch,
 }: {
   refs: Refs;
   revision: string;
   onSelect: (name: string) => void;
   compact?: boolean;
   onSearch?: () => void;
-  onCreate?: () => void;
+  onCreateFile?: () => void;
+  onCreateBranch?: (name: string) => Promise<void>;
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
@@ -33,13 +35,18 @@ export function RepositoryRefControls({
   ).length;
   return (
     <div className={`ref-controls${compact ? " compact" : ""}`}>
-      <RevisionPicker refs={refs} revision={revision} onSelect={onSelect} />
-      {compact && onCreate && (
+      <RevisionPicker
+        refs={refs}
+        revision={revision}
+        onSelect={onSelect}
+        onCreateBranch={onCreateBranch}
+      />
+      {compact && onCreateFile && (
         <IconButton
           icon={PlusIcon}
           aria-label="Create new file"
           size="small"
-          onClick={onCreate}
+          onClick={onCreateFile}
         />
       )}
       {compact && onSearch ? (
@@ -80,6 +87,7 @@ export function RepositoryToolbar({
   kind,
   onRefresh,
   onBrowse,
+  onCreateBranch,
 }: {
   repo: Repository;
   refs: Refs;
@@ -89,6 +97,7 @@ export function RepositoryToolbar({
   kind?: string;
   onRefresh: () => void;
   onBrowse?: () => void;
+  onCreateBranch?: (name: string) => Promise<void>;
 }) {
   return (
     <div className="toolbar">
@@ -98,6 +107,7 @@ export function RepositoryToolbar({
         onSelect={(name) =>
           navigate(repoHref(repo, { rev: name, view, path, kind }))
         }
+        onCreateBranch={onCreateBranch}
       />
       <div className="repository-actions">
         {onBrowse && (

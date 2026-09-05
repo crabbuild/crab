@@ -25,7 +25,7 @@ use crate::{
 const TTL: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Publication {
+pub(super) enum Publication {
     NativePush,
     PullRequest,
 }
@@ -111,11 +111,12 @@ pub(super) async fn run(
     .await
 }
 
-pub(crate) async fn update_existing_ref(
+pub(crate) async fn publish_existing_objects(
     server: &Server,
     principal: &Principal,
     key: &(String, String),
     update: crab_git::receive_plan::RefUpdate,
+    publication: Publication,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
@@ -131,7 +132,7 @@ pub(crate) async fn update_existing_ref(
         request,
         ReceiveInput {
             pack: None,
-            publication: Publication::PullRequest,
+            publication,
         },
         cancel,
     )

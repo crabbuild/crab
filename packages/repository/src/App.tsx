@@ -21,6 +21,7 @@ import {
   useLocation,
   useRequest,
   type Entry,
+  type Ref,
   type Refs,
   type Repository,
   type Commit,
@@ -310,11 +311,24 @@ function RepositoryPage({
   const refs = useRequest<Refs>(
     view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
   );
+  const [createdRefs, setCreatedRefs] = useState<Ref[]>([]);
+  const visibleRefs = refs.data
+    ? {
+        ...refs.data,
+        refs: [
+          ...createdRefs,
+          ...refs.data.refs.filter(
+            (ref) => !createdRefs.some((created) => created.name === ref.name),
+          ),
+        ],
+      }
+    : undefined;
+  const visibleRefState = { ...refs, data: visibleRefs };
   const revName =
     url.searchParams.get("rev") ??
-    refs.data?.head?.name ??
-    refs.data?.refs[0]?.name;
-  const selected = refs.data?.refs.find((ref) => ref.name === revName);
+    visibleRefs?.head?.name ??
+    visibleRefs?.refs[0]?.name;
+  const selected = visibleRefs?.refs.find((ref) => ref.name === revName);
   const rev = selected?.peeled ?? selected?.oid ?? revName;
   const path = url.searchParams.get("path") ?? "";
   const kind = url.searchParams.get("kind") ?? "Tree";
@@ -343,6 +357,41 @@ function RepositoryPage({
   function focusFileSearch() {
     setShowTree(true);
     setSearchFocusRequest((request) => request + 1);
+  }
+  async function createBranch(name: string) {
+    if (!rev)
+      throw new Error("Select a source commit before creating a branch");
+    const response = await fetch(endpoint(repo, "branches"), {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrf,
+      },
+      body: JSON.stringify({ name, source_oid: rev }),
+    });
+    if (response.status === 401)
+      window.dispatchEvent(new Event("crab-session-expired"));
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const failure = body as { error?: { message?: string } };
+      throw new Error(
+        failure.error?.message ?? `Request failed (${response.status})`,
+      );
+    }
+    const created = body as { branch: string; commit: string };
+    setCreatedRefs((current) => [
+      { name: created.branch, oid: created.commit },
+      ...current.filter((ref) => ref.name !== created.branch),
+    ]);
+    navigate(
+      repoHref(repo, {
+        rev: created.branch,
+        view,
+        path: path || undefined,
+        kind: path ? kind : undefined,
+      }),
+    );
   }
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -442,7 +491,7 @@ function RepositoryPage({
             )}
           </IssuesWorkspace>
         ) : view === "pulls" ? (
-          <Result state={refs} showTiming={false}>
+          <Result state={visibleRefState} showTiming={false}>
             {(data) => (
               <Suspense
                 fallback={
@@ -462,7 +511,7 @@ function RepositoryPage({
             )}
           </Result>
         ) : (
-          <Result state={refs} showTiming={false}>
+          <Result state={visibleRefState} showTiming={false}>
             {(data) =>
               !data.refs.length ? (
                 <div className="notice">
@@ -525,6 +574,9 @@ function RepositoryPage({
                           path={path || undefined}
                           kind={path ? kind : undefined}
                           onRefresh={refs.retry}
+                          onCreateBranch={
+                            repo.access === "write" ? createBranch : undefined
+                          }
                         />
                         <History
                           key={`${rev}:${path}`}
@@ -542,6 +594,9 @@ function RepositoryPage({
                           revision={revisionLabel(data, revName ?? rev)}
                           view={view}
                           onRefresh={refs.retry}
+                          onCreateBranch={
+                            repo.access === "write" ? createBranch : undefined
+                          }
                         />
                         <CommitView
                           key={rev}
@@ -581,7 +636,12 @@ function RepositoryPage({
                                   navigate(repoHref(repo, { rev: name, view }))
                                 }
                                 compact
-                                onCreate={
+                                onCreateBranch={
+                                  repo.access === "write"
+                                    ? createBranch
+                                    : undefined
+                                }
+                                onCreateFile={
                                   repo.access === "write" && branch
                                     ? () =>
                                         navigate(
@@ -624,6 +684,11 @@ function RepositoryPage({
                                 revision={revisionLabel(data, revName ?? rev)}
                                 view={view}
                                 onRefresh={refs.retry}
+                                onCreateBranch={
+                                  repo.access === "write"
+                                    ? createBranch
+                                    : undefined
+                                }
                                 onBrowse={() => setShowTree(true)}
                               />
                             ) : (

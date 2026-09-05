@@ -83,8 +83,9 @@ container filesystem budget. Repository and application state remain in the
 configured bucket.
 
 The browser provides repository selection and a searchable branch/tag picker
-with default-branch identification and keyboard navigation, raw-byte path navigation, lazy
-Pierre Trees, paginated directories and repository/path-scoped first-parent history, highlighted files,
+with default-branch identification, keyboard navigation, and writer-only branch
+creation from the exact viewed commit, plus raw-byte path navigation, lazy Pierre
+Trees, paginated directories and repository/path-scoped first-parent history, highlighted files,
 exact Git blob downloads, commit changes, Pierre split/unified diffs and first-parent blame.
 The root view groups the selected commit and file table beside repository details.
 Markdown README files render beneath directory listings with GitHub-style typography;
@@ -139,6 +140,16 @@ objects in process and sends the resulting pack through the same quarantine,
 graph validation, ref lock, visibility, and journal publication path used by
 native smart-HTTP pushes. Empty trees created by deletion are pruned. No server
 checkout or local Git object database is created.
+
+Browser branch creation uses `POST /api/repos/{owner}/{name}/branches` with a
+short `name` and the full SHA-1 `source_oid` currently shown in the browser. The
+server accepts only canonical `refs/heads/*` names, verifies that the source is
+a visible commit in the current repository snapshot, and atomically requires
+the destination ref to be absent. Existing or namespace-conflicting branches
+return 409. Protected names, read-only members, non-members, and invalid CSRF
+requests are rejected. The ref passes through the same admission, ref lease,
+GC fences, graph and dependency validation, visibility evidence, and journal
+publication used by native smart-HTTP push; no objects or checkout are created.
 
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
@@ -788,10 +799,16 @@ of 1.5 seconds. Caches were not flushed; these measurements are not a production
 latency guarantee. An uncached Go-to-file search for `kubelet.go` traversed
 6,100 tree objects in 2.22 seconds, transferred 1.42 MB from RustFS, and returned
 the first 50 ranked paths without reading blob bodies. Keyboard selection opened
-`cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-seven Rust server
-tests, eight frontend navigation, model and Markdown tests, and nineteen Chromium
-tests passed. Identity integration
-tests exercise real HTTP redirects and signed Ed25519 tokens, including key
+`cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-nine Rust server
+tests, eight frontend navigation, model and Markdown tests, and twenty-one Chromium
+tests passed. An authenticated branch integration creates a browser branch from
+an existing commit, reads the exact new ref through both the repository API and
+native `git ls-remote`, and rejects duplicate publication atomically. A signed-in
+Kubernetes/RustFS browser run published an existing visible commit as a new branch
+in 49 ms of server handling and 422 ms from click to selected URL; the branch then
+appeared as the checked picker entry without reloading repository content. These
+local shared-cache measurements are not a production latency guarantee. Identity
+integration tests exercise real HTTP redirects and signed Ed25519 tokens, including key
 rotation, replay, invalid claims, outsider access and logout CSRF rejection, plus
 confidential-client secret-file authentication, Git token scope and revocation.
 Thirteen shared wire tests and nineteen remote-helper tests cover the extracted
@@ -893,7 +910,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle and exact protected branches have scoped proof; administration pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks and recoverable fast-forward merge with canonical ref publication; merge commits and remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |

@@ -15,6 +15,7 @@ const pathHex = (path: string) =>
 
 test.beforeEach(async ({ page }) => {
   let created = false;
+  let createdBranch: string | null = null;
   let deleted = false;
   let currentHead = oid;
   let currentReadme = readme;
@@ -91,11 +92,38 @@ test.beforeEach(async ({ page }) => {
         },
       });
     }
+    if (url.pathname.endsWith("/branches")) {
+      const body = route.request().postDataJSON() as {
+        name: string;
+        source_oid: string;
+      };
+      expect(route.request().method()).toBe("POST");
+      if (body.name === "existing")
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "branch_exists",
+              message: "A branch with this name already exists",
+            },
+          },
+        });
+      createdBranch = `refs/heads/${body.name}`;
+      return route.fulfill({
+        status: 201,
+        json: { branch: createdBranch, commit: body.source_oid },
+      });
+    }
     if (url.pathname.endsWith("/refs"))
       return route.fulfill({
         json: {
           head: { name: "refs/heads/main", oid: currentHead },
-          refs: [{ name: "refs/heads/main", oid: currentHead }],
+          refs: [
+            { name: "refs/heads/main", oid: currentHead },
+            ...(createdBranch
+              ? [{ name: createdBranch, oid: currentHead }]
+              : []),
+          ],
           generation: 1,
         },
       });
@@ -783,4 +811,57 @@ test("revision picker filters branches and tags and restores keyboard focus", as
     await page.getByLabel("Appearance", { exact: true }).selectOption(scheme);
     await expect(page.locator("html")).toHaveCSS("color-scheme", scheme);
   }
+});
+
+test("revision picker creates a branch from the exact viewed commit", async ({
+  page,
+}) => {
+  await page.goto("/team/project");
+  const anchor = page.getByRole("button", { name: /^Switch branches or tags/ });
+  await anchor.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Switch branches/tags",
+    exact: true,
+  });
+  const search = dialog.getByRole("textbox", {
+    name: "Filter branches",
+    exact: true,
+  });
+  await search.fill("existing");
+  await dialog
+    .getByRole("button", {
+      name: "Create branch: existing from 'main'",
+      exact: true,
+    })
+    .click();
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "A branch with this name already exists",
+  );
+  await expect(search).toHaveValue("existing");
+
+  await search.fill("feature/browser");
+  const request = page.waitForRequest(
+    (candidate) =>
+      candidate.url().endsWith("/api/repos/team/project/branches?") &&
+      candidate.method() === "POST",
+  );
+  await dialog
+    .getByRole("button", {
+      name: "Create branch: feature/browser from 'main'",
+      exact: true,
+    })
+    .click();
+  expect((await request).postDataJSON()).toEqual({
+    name: "feature/browser",
+    source_oid: oid,
+  });
+  await expect(page).toHaveURL(/rev=refs%2Fheads%2Ffeature%2Fbrowser/);
+  await expect(anchor).toHaveText("feature/browser");
+  await anchor.click();
+  await expect(
+    dialog.getByRole("menuitemradio", {
+      name: "feature/browser",
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-checked", "true");
 });
