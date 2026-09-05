@@ -3,14 +3,16 @@ import { endpoint, type Ref, type Repository } from "./api";
 export interface Release {
   number: number;
   tag_name: string;
-  tag_oid: string;
+  tag_oid: string | null;
   target_oid: string;
   title: string;
   body: string;
   prerelease: boolean;
+  draft: boolean;
   version: number;
   author: string;
   created_at: number;
+  published_at: number | null;
   updated_at: number;
 }
 

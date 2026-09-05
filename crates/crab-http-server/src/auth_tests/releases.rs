@@ -119,7 +119,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         "target_oid":commit,
         "title":"Crab 1.0",
         "body":"## Changes\n\nFirst release.",
-        "prerelease":false
+        "prerelease":false,
+        "draft":false
     });
     let rejected_csrf = h
         .http
@@ -222,7 +223,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         "target_oid":next_commit,
         "title":"Wrong target",
         "body":"This must not claim the existing tag.",
-        "prerelease":false
+        "prerelease":false,
+        "draft":false
     });
     let incompatible = publish_release(&h, &alice, csrf, &incompatible).await;
     assert_eq!(incompatible.0, StatusCode::CONFLICT);
@@ -233,7 +235,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         "target_oid":commit,
         "title":"Crab 2.0",
         "body":"Annotated tag release.",
-        "prerelease":true
+        "prerelease":true,
+        "draft":false
     });
     let annotated = publish_release(&h, &alice, csrf, &annotated_input).await;
     assert_eq!(annotated.0, StatusCode::CREATED, "{}", annotated.1);
@@ -253,7 +256,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             "version":1,
             "title":"Crab 2.0 final",
             "body":"Updated annotated release notes.",
-            "prerelease":false
+            "prerelease":false,
+            "draft":false
         }),
     )
     .await;
@@ -269,7 +273,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             "version":1,
             "title":"Stale edit",
             "body":"Must not replace newer notes.",
-            "prerelease":true
+            "prerelease":true,
+            "draft":false
         }),
     )
     .await;
@@ -304,7 +309,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         "target_oid":commit,
         "title":"Crab 2.0 restored",
         "body":"Published again from the retained tag.",
-        "prerelease":false
+        "prerelease":false,
+        "draft":false
     });
     let replacement = publish_release(&h, &alice, csrf, &replacement).await;
     assert_eq!(replacement.0, StatusCode::CREATED, "{}", replacement.1);
@@ -318,6 +324,54 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .len(),
         2
     );
+    let draft_input = json!({
+        "request_id":"88888888-8888-4888-8888-888888888888",
+        "tag_name":"v3.0.0",
+        "target_oid":next_commit,
+        "title":"Crab 3.0 draft",
+        "body":"Private draft notes.",
+        "prerelease":true,
+        "draft":true
+    });
+    let draft = publish_release(&h, &alice, csrf, &draft_input).await;
+    assert_eq!(draft.0, StatusCode::CREATED, "{}", draft.1);
+    assert_eq!(draft.1["number"], 4);
+    assert_eq!(draft.1["draft"], true);
+    assert!(draft.1["tag_oid"].is_null());
+    assert!(draft.1["published_at"].is_null());
+    assert!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/tags/v3.0.0"],
+        )
+        .await
+        .is_empty()
+    );
+    let draft = edit_release(
+        &h,
+        &alice,
+        csrf,
+        4,
+        &json!({
+            "version":1,
+            "title":"Crab 3.0 ready",
+            "body":"Reviewed draft notes.",
+            "prerelease":false,
+            "draft":true
+        }),
+    )
+    .await;
+    assert_eq!(draft.0, StatusCode::OK, "{}", draft.1);
+    assert_eq!(draft.1["version"], 2);
+    let matching_draft = h.json(&format!("{RELEASES}?query=READY"), &alice).await;
+    assert_eq!(matching_draft["items"].as_array().unwrap().len(), 1);
+    assert_eq!(matching_draft["items"][0]["number"], 4);
+    assert!(
+        h.json(&format!("{RELEASES}?query=missing"), &alice).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     crate::repository_settings::replace_lifecycle(repo, 0, true)
         .await
         .unwrap();
@@ -326,7 +380,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
     let mut archived_release = first.clone();
     archived_release["request_id"] = json!("55555555-5555-4555-8555-555555555555");
@@ -343,7 +397,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             "version":1,
             "title":"Archived edit",
             "body":"Must remain read-only.",
-            "prerelease":false
+            "prerelease":false,
+            "draft":false
         }),
     )
     .await;
@@ -366,6 +421,58 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .len(),
         2
     );
+    let hidden_draft = h
+        .http
+        .get(format!("{}{RELEASES}/4", h.origin))
+        .header(header::COOKIE, &bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden_draft.status(), StatusCode::NOT_FOUND);
+    assert!(
+        h.json(&format!("{RELEASES}?query=ready"), &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let published = edit_release(
+        &h,
+        &alice,
+        csrf,
+        4,
+        &json!({
+            "version":2,
+            "title":"Crab 3.0 ready",
+            "body":"Reviewed draft notes.",
+            "prerelease":false,
+            "draft":false
+        }),
+    )
+    .await;
+    assert_eq!(published.0, StatusCode::OK, "{}", published.1);
+    assert_eq!(published.1["version"], 3);
+    assert_eq!(published.1["draft"], false);
+    assert_eq!(published.1["tag_oid"], next_commit);
+    assert!(published.1["published_at"].is_number());
+    assert_eq!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/tags/v3.0.0"],
+        )
+        .await,
+        format!("{next_commit}\trefs/tags/v3.0.0")
+    );
+    assert_eq!(
+        h.json(RELEASES, &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        h.json(&format!("{RELEASES}?query=REVIEWED"), &bob).await["items"][0]["number"],
+        4
+    );
     let bob_session = h.json("/api/session", &bob).await;
     let mut denied_release = first;
     denied_release["request_id"] = json!("66666666-6666-4666-8666-666666666666");
@@ -386,7 +493,8 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             "version":1,
             "title":"Reader edit",
             "body":"Must be rejected.",
-            "prerelease":false
+            "prerelease":false,
+            "draft":false
         }),
     )
     .await;

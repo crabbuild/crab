@@ -14,14 +14,16 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     {
       number: 1,
       tag_name: "v0.9.0",
-      tag_oid: oldTag,
+      tag_oid: oldTag as string | null,
       target_oid: main,
       title: "Crab 0.9",
       body: "## Highlights\n\n- Browse code without cloning.",
       prerelease: true,
+      draft: false,
       version: 1,
       author: "Alice",
       created_at: 1_700_000_000_000,
+      published_at: 1_700_000_000_000 as number | null,
       updated_at: 1_700_000_000_000,
     },
   ];
@@ -81,26 +83,44 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         title: "Crab 1.0",
         body: "## Changes\n\nA stable release.",
         prerelease: true,
+        draft: true,
       });
-      publishedTag = { name: "refs/tags/v1.0.0", oid: main };
+      const draft = Boolean(submission.draft);
+      publishedTag = draft
+        ? undefined
+        : { name: "refs/tags/v1.0.0", oid: main };
       const release = {
         number: 2,
         tag_name: "v1.0.0",
-        tag_oid: main,
+        tag_oid: draft ? null : main,
         target_oid: main,
         title: "Crab 1.0",
         body: "## Changes\n\nA stable release.",
         prerelease: true,
+        draft,
         version: 1,
         author: "Alice",
         created_at: 1_710_000_000_000,
+        published_at: draft ? null : 1_710_000_000_000,
         updated_at: 1_710_000_000_000,
       };
       releases.unshift(release);
       return route.fulfill({ status: 201, json: release });
     }
-    if (url.pathname.endsWith("/releases"))
-      return route.fulfill({ json: { items: releases, next: null } });
+    if (url.pathname.endsWith("/releases")) {
+      const query = url.searchParams.get("query")?.toLowerCase();
+      const items = query
+        ? releases.filter((release) =>
+            [
+              release.tag_name,
+              release.title,
+              release.body,
+              release.author,
+            ].some((value) => value.toLowerCase().includes(query)),
+          )
+        : releases;
+      return route.fulfill({ json: { items, next: null } });
+    }
     const detail = url.pathname.match(/\/releases\/(\d+)$/);
     if (detail) {
       const index = releases.findIndex(
@@ -113,17 +133,18 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         });
       if (route.request().method() === "PATCH") {
         const edit = route.request().postDataJSON() as Record<string, unknown>;
-        expect(edit).toEqual({
-          version: releases[index].version,
-          title: "Crab 1.0 final",
-          body: "Updated release notes.",
-          prerelease: false,
-        });
+        expect(edit.version).toBe(releases[index].version);
+        const draft = Boolean(edit.draft);
+        if (releases[index].draft && !draft)
+          publishedTag = { name: "refs/tags/v1.0.0", oid: main };
         releases[index] = {
           ...releases[index],
           title: String(edit.title),
           body: String(edit.body),
           prerelease: Boolean(edit.prerelease),
+          draft,
+          tag_oid: draft ? releases[index].tag_oid : main,
+          published_at: draft ? null : 1_720_000_000_000,
           version: releases[index].version + 1,
           updated_at: 1_720_000_000_000,
         };
@@ -154,11 +175,26 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     page.getByRole("navigation", { name: "Releases and tags" }),
   ).toContainText("ReleasesTags");
   await expect(page.getByRole("heading", { name: "Crab 0.9" })).toBeVisible();
+  await expect(
+    page.getByRole("search", { name: "Search releases" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Release list" }),
+  ).toBeVisible();
   await expect(page.getByText("Browse code without cloning.")).toBeVisible();
   await expect(page.getByText("Pre-release")).toBeVisible();
   await expect(
     page.getByRole("link", { name: "Source code (zip)" }),
   ).toHaveAttribute("href", /archive\?rev=refs%2Ftags%2Fv0\.9\.0/);
+  await page.getByLabel("Find a release").fill("browse code");
+  await page.getByLabel("Find a release").press("Enter");
+  await expect(page).toHaveURL(/query=browse\+code/);
+  await expect(page.getByRole("heading", { name: "Crab 0.9" })).toBeVisible();
+  await page.getByLabel("Find a release").fill("missing release");
+  await page.getByLabel("Find a release").press("Enter");
+  await expect(page.getByText("There aren’t any releases here")).toBeVisible();
+  await page.getByLabel("Find a release").fill("");
+  await page.getByLabel("Find a release").press("Enter");
   await expectNoAccessibilityViolations(page);
 
   await page.getByRole("link", { name: "Tags", exact: true }).click();
@@ -183,11 +219,16 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     .fill("## Changes\n\nA stable release.");
   await page.getByLabel("Set as a pre-release").check();
   await expectNoAccessibilityViolations(page);
-  await page.getByRole("button", { name: "Publish release" }).click();
+  await page.getByRole("button", { name: "Save draft" }).click();
 
   await expect(page).toHaveURL(/view=releases&release=2/);
   await expect(page.getByRole("heading", { name: "Crab 1.0" })).toBeVisible();
   await expect(page.getByText("A stable release.")).toBeVisible();
+  await expect(page.getByText("Draft", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Source code (zip)" }),
+  ).toHaveCount(0);
+  expect(publishedTag).toBeUndefined();
   expect(submission).toBeDefined();
 
   await page.getByRole("button", { name: "Edit Crab 1.0" }).click();
@@ -198,13 +239,29 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     .getByRole("textbox", { name: "Release notes", exact: true })
     .fill("Updated release notes.");
   await page.getByLabel("Set as a pre-release").uncheck();
-  await page.getByRole("button", { name: "Update release" }).click();
+  await page.getByRole("button", { name: "Save draft" }).click();
   await expect(page).toHaveURL(/view=releases&release=2$/);
   await expect(
     page.getByRole("heading", { name: "Crab 1.0 final" }),
   ).toBeVisible();
   await expect(page.getByText("Updated release notes.")).toBeVisible();
   await expect(page.getByText("Pre-release")).toHaveCount(0);
+  await expect(page.getByText("Draft", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit Crab 1.0 final" }).click();
+  await page.getByRole("button", { name: "Publish release" }).click();
+  await expect(page.getByText("Draft", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: "Source code (zip)" }),
+  ).toBeVisible();
+  expect(publishedTag).toEqual({ name: "refs/tags/v1.0.0", oid: main });
+
+  await page.getByRole("button", { name: "Edit Crab 1.0 final" }).click();
+  await page.getByLabel("Release title").fill("Crab 1.0 patched");
+  await page.getByRole("button", { name: "Update release" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Crab 1.0 patched" }),
+  ).toBeVisible();
   await selectDarkTheme(page);
   await page.setViewportSize({ width: 390, height: 800 });
   await expectNoAccessibilityViolations(page);
@@ -212,7 +269,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
 
-  await page.getByRole("button", { name: "Delete Crab 1.0 final" }).click();
+  await page.getByRole("button", { name: "Delete Crab 1.0 patched" }).click();
   await expect(page.getByText("Delete this release?")).toBeVisible();
   await expect(page.getByText(/Tag v1\.0\.0 will remain/)).toBeVisible();
   await expectNoAccessibilityViolations(page);
@@ -220,7 +277,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
   await expect(page).toHaveURL(/view=releases$/);
   await expect(page.getByRole("heading", { name: "Crab 0.9" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Crab 1.0 final" }),
+    page.getByRole("heading", { name: "Crab 1.0 patched" }),
   ).toHaveCount(0);
   await page.getByRole("link", { name: "Tags", exact: true }).click();
   await expect(page.getByRole("link", { name: "v1.0.0" })).toBeVisible();
