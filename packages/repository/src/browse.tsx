@@ -4,6 +4,7 @@ import {
   BookIcon,
   FileDirectoryFillIcon,
   FileIcon,
+  GitCommitIcon,
 } from "@primer/octicons-react";
 import {
   displayHex,
@@ -247,32 +248,8 @@ export function History({
               <span className="muted">First-parent history</span>
             )}
           </div>
-          <section className="panel commit-list">
-            {page.items.map((commit) => (
-              <article key={commit.oid}>
-                <div>
-                  <Link
-                    className="commit-subject"
-                    href={repoHref(repo, {
-                      view: "commit",
-                      rev: commit.oid,
-                    })}
-                  >
-                    {commit.message.split("\n")[0]}
-                  </Link>
-                  <p className="muted">
-                    <strong>{commit.author}</strong> committed on{" "}
-                    {date(commit.author_seconds)}
-                  </p>
-                </div>
-                <Link
-                  className="oid"
-                  href={repoHref(repo, { rev: commit.oid })}
-                >
-                  {short(commit.oid)}
-                </Link>
-              </article>
-            ))}
+          <section className="panel">
+            <CommitList repo={repo} commits={page.items} />
             <div className="pagination">
               <Button
                 disabled={cursors.length === 1}
@@ -293,5 +270,46 @@ export function History({
         </>
       )}
     </Result>
+  );
+}
+
+export function CommitList({
+  repo,
+  commits,
+}: {
+  repo: Repository;
+  commits: Commit[];
+}) {
+  return (
+    <ol className="commit-list">
+      {commits.map((commit) => {
+        const subject = commit.message.split("\n", 1)[0].trim();
+        return (
+          <li key={commit.oid}>
+            <span className="commit-icon" aria-hidden="true">
+              <GitCommitIcon />
+            </span>
+            <div>
+              <Link
+                className="commit-subject"
+                href={repoHref(repo, {
+                  view: "commit",
+                  rev: commit.oid,
+                })}
+              >
+                {subject || "Untitled commit"}
+              </Link>
+              <p className="muted">
+                <strong>{commit.author}</strong> committed on{" "}
+                {date(commit.author_seconds)}
+              </p>
+            </div>
+            <Link className="oid" href={repoHref(repo, { rev: commit.oid })}>
+              {short(commit.oid)}
+            </Link>
+          </li>
+        );
+      })}
+    </ol>
   );
 }

@@ -10,9 +10,11 @@ const PATH_HISTORY_CURSOR_VERSION: u8 = 2;
 const DIRECTORY_CURSOR_KIND: u8 = 1;
 const HISTORY_CURSOR_KIND: u8 = 2;
 const PATH_HISTORY_CURSOR_KIND: u8 = 3;
+const AHEAD_HISTORY_CURSOR_KIND: u8 = 4;
 const DIRECTORY_CURSOR_FIXED_BYTES: usize = 2 + 20 + 20 + 8 + 4 + 4;
 const HISTORY_CURSOR_BYTES: usize = 2 + 20 + 1 + 8;
 const PATH_HISTORY_CURSOR_FIXED_BYTES: usize = HISTORY_CURSOR_BYTES + 20 + 4;
+const AHEAD_HISTORY_CURSOR_BYTES: usize = 2 + 20 + 20 + 8;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 
 /// Opaque continuation state owned and validated by the caller boundary.
@@ -36,6 +38,9 @@ impl PageCursor {
             }
             Some(&PATH_HISTORY_CURSOR_KIND) => {
                 cursor.decode_path_history()?;
+            }
+            Some(&AHEAD_HISTORY_CURSOR_KIND) => {
+                cursor.decode_ahead_history()?;
             }
             _ => return Err(malformed_cursor()),
         }
@@ -165,6 +170,28 @@ impl PageCursor {
         Ok(HistoryCursor { start, mode, skip })
     }
 
+    pub(crate) fn ahead_history(start: ObjectId, base: ObjectId, skip: u64) -> Self {
+        let mut bytes = Vec::with_capacity(AHEAD_HISTORY_CURSOR_BYTES);
+        bytes.extend_from_slice(&[CURSOR_VERSION, AHEAD_HISTORY_CURSOR_KIND]);
+        bytes.extend_from_slice(start.as_bytes());
+        bytes.extend_from_slice(base.as_bytes());
+        bytes.extend_from_slice(&skip.to_be_bytes());
+        Self(Bytes::from(bytes))
+    }
+
+    pub(crate) fn decode_ahead_history(&self) -> Result<AheadHistoryCursor> {
+        if self.0.len() != AHEAD_HISTORY_CURSOR_BYTES
+            || self.0[..2] != [CURSOR_VERSION, AHEAD_HISTORY_CURSOR_KIND]
+        {
+            return Err(malformed_cursor());
+        }
+        Ok(AheadHistoryCursor {
+            start: object_id(&self.0[2..22])?,
+            base: object_id(&self.0[22..42])?,
+            skip: u64::from_be_bytes(array(&self.0[42..50])?),
+        })
+    }
+
     pub(crate) fn path_history(
         start: ObjectId,
         mode: HistoryTraversal,
@@ -243,6 +270,12 @@ pub(crate) struct DirectoryCursor<'a> {
 pub(crate) struct HistoryCursor {
     pub(crate) start: ObjectId,
     pub(crate) mode: HistoryTraversal,
+    pub(crate) skip: u64,
+}
+
+pub(crate) struct AheadHistoryCursor {
+    pub(crate) start: ObjectId,
+    pub(crate) base: ObjectId,
     pub(crate) skip: u64,
 }
 

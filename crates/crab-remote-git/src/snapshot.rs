@@ -151,6 +151,106 @@ impl RemoteGitSnapshot {
         Ok(Page { items, next })
     }
 
+    /// Return commits reachable from this snapshot and not from the base snapshot.
+    ///
+    /// Every parent is considered, so merge-side commits remain visible while
+    /// commits already contained by the base are excluded. Continuations bind
+    /// both immutable commits and may rewalk their bounded history after cache loss.
+    pub async fn ahead_history(
+        &self,
+        base: &Self,
+        page: &PageRequest,
+        operation: &OperationContext,
+    ) -> Result<Page<Commit>> {
+        self.ensure_operation(operation)?;
+        base.ensure_operation(operation)?;
+        if !Arc::ptr_eq(&self.repository, &base.repository) {
+            return Err(Error::InternalInvariant {
+                invariant: "history snapshots belong to different repository generations",
+            });
+        }
+        let skip = match page.after() {
+            Some(cursor) => {
+                let decoded = cursor.decode_ahead_history()?;
+                if decoded.start != self.commit_oid || decoded.base != base.commit_oid {
+                    return Err(Error::InvalidCursor {
+                        reason: CursorError::ContextMismatch,
+                    });
+                }
+                decoded.skip
+            }
+            None => 0,
+        };
+        if self.commit_oid == base.commit_oid {
+            return Ok(Page {
+                items: vec![],
+                next: None,
+            });
+        }
+
+        let base_ancestors =
+            commit_ancestors(base.commit_oid, operation, self.commit_graph.as_deref()).await?;
+        let mut pending = vec![self.commit_oid];
+        let mut visited = HashSet::new();
+        let mut traversed = 0u64;
+        let mut items = Vec::new();
+        while let Some(oid) = pending.pop() {
+            operation.ensure_active()?;
+            if visited.contains(&oid) || base_ancestors.contains(&oid) {
+                continue;
+            }
+            if traversed >= skip && items.len() == page.limit() {
+                pending.push(oid);
+                break;
+            }
+            visited.insert(oid);
+            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+            let commit = operation.read_commit(oid).await?;
+            queue_all_parents(&mut pending, &commit, self.commit_graph.as_deref())?;
+            if traversed >= skip {
+                operation
+                    .charge(
+                        BudgetDimension::ResponseBytes,
+                        commit_response_bytes(&commit),
+                    )
+                    .await?;
+                items.try_reserve(1).map_err(|source| Error::Allocation {
+                    requested: mem::size_of::<Commit>(),
+                    source,
+                })?;
+                items.push(commit);
+            }
+            traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
+                limit: "history commits",
+                actual: u64::MAX,
+                maximum: u64::MAX,
+            })?;
+        }
+        while pending
+            .last()
+            .is_some_and(|oid| visited.contains(oid) || base_ancestors.contains(oid))
+        {
+            pending.pop();
+        }
+        let next = if pending.is_empty() {
+            None
+        } else {
+            let next_skip = skip
+                .checked_add(items.len() as u64)
+                .ok_or(Error::LimitExceeded {
+                    limit: "history commits",
+                    actual: u64::MAX,
+                    maximum: u64::MAX,
+                })?;
+            Some(PageCursor::ahead_history(
+                self.commit_oid,
+                base.commit_oid,
+                next_skip,
+            ))
+        };
+        Ok(Page { items, next })
+    }
+
     async fn first_parent_path_history(
         &self,
         start: ObjectId,
@@ -1711,6 +1811,25 @@ fn path_change_kind(
         .flatten()
         .any(|parent| parent.mode != current.mode)
         .then_some(ChangeKind::ModeChanged)
+}
+
+async fn commit_ancestors(
+    root: ObjectId,
+    operation: &OperationContext,
+    commit_graph: Option<&CommitGraphIndex>,
+) -> Result<HashSet<ObjectId>> {
+    let mut pending = vec![root];
+    let mut ancestors = HashSet::new();
+    while let Some(oid) = pending.pop() {
+        operation.ensure_active()?;
+        if !ancestors.insert(oid) {
+            continue;
+        }
+        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+        let commit = operation.read_commit(oid).await?;
+        queue_all_parents(&mut pending, &commit, commit_graph)?;
+    }
+    Ok(ancestors)
 }
 
 fn queue_all_parents(

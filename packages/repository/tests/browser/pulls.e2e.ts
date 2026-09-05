@@ -180,6 +180,26 @@ test("pull request creation, discussion, and files follow the GitHub review flow
           },
         },
       });
+    if (path === "/api/repos/team/project/commits") {
+      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("base")).toBe(base);
+      expect(url.searchParams.get("limit")).toBe("50");
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              oid: head,
+              tree: "e".repeat(40),
+              parents: [base],
+              author: "Alice",
+              author_seconds: 1_700_000_040,
+              message: "Document remote browsing\n\nExplain the workflow.",
+            },
+          ],
+          next: null,
+        },
+      });
+    }
     if (path === `/api/repos/team/project/commits/${head}/check-runs`) {
       expect(url.searchParams.get("limit")).toBe("50");
       return route.fulfill({
@@ -413,6 +433,20 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     "<script>alert(1)</script>",
   );
   await expect(page.locator(".check-steps script")).toHaveCount(0);
+
+  await page
+    .getByRole("navigation", { name: "Pull request" })
+    .getByRole("link", { name: "Commits", exact: true })
+    .click();
+  await expect(
+    page.getByRole("link", { name: "Document remote browsing", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".pull-commits .commit-list")).toContainText(
+    "Alice committed",
+  );
+  await expect(page.locator(".pull-commits .commit-list")).not.toContainText(
+    "Explain the workflow",
+  );
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible();

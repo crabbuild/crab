@@ -397,21 +397,43 @@ main {
 .repo-card p {
   margin-top: 16px;
 }
-.commit-list article {
-  display: flex;
+.commit-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.commit-list li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px;
+  gap: 10px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--borderColor-muted);
 }
+.commit-list li > div {
+  min-width: 0;
+}
+.commit-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  color: var(--fgColor-muted);
+  background: var(--bgColor-muted);
+  border: 1px solid var(--borderColor-default);
+  border-radius: 50%;
+}
 .commit-subject {
+  display: block;
+  overflow: hidden;
   color: var(--fgColor-default);
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .commit-list p {
+  margin: 4px 0 0;
   font-size: 12px;
-  margin-bottom: 0;
 }
 .commit-summary {
   padding: 24px;
@@ -698,6 +720,7 @@ main {
   display: flex;
   gap: 4px;
   margin-bottom: 24px;
+  overflow-x: auto;
   border-bottom: 1px solid var(--borderColor-default);
 }
 .pull-tabs a {
@@ -723,6 +746,20 @@ main {
   left: 8px;
   height: 2px;
   background: var(--underlineNav-borderColor-active);
+}
+.pull-commits > .section-heading {
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+.pull-commits h3,
+.pull-commits .section-heading p {
+  margin: 0;
+}
+.pull-commits .section-heading p {
+  margin-top: 4px;
+}
+.pull-commits .commit-list li:last-child {
+  border-bottom: 0;
 }
 .pull-conversation {
   max-width: 820px;
@@ -1150,7 +1187,16 @@ main {
     max-width: 70%;
   }
   .pull-tabs a {
-    padding: 10px 12px;
+    flex: 0 0 auto;
+    padding: 10px 9px;
+    font-size: 13px;
+  }
+  .commit-list li {
+    grid-template-columns: 28px minmax(0, 1fr);
+    padding: 12px;
+  }
+  .commit-list .oid {
+    display: none;
   }
   .review-event > header {
     align-items: flex-start;

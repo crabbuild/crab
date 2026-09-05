@@ -6,6 +6,7 @@ import {
   ClockIcon,
   CodeReviewIcon,
   CommentIcon,
+  GitCommitIcon,
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestIcon,
@@ -17,12 +18,14 @@ import {
   navigate,
   repoHref,
   useRequest,
+  type Commit,
   type Refs,
   type Repository,
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
 import { ComparisonView } from "./content";
+import { CommitList } from "./browse";
 import { CheckRuns } from "./check-runs";
 import { useMutation } from "./discussion-mutations";
 import { DiscussionSearch } from "./discussion-search";
@@ -127,6 +130,11 @@ interface PullReview {
 interface Page<T> {
   items: T[];
   next: number | null;
+}
+
+interface CursorPage<T> {
+  items: T[];
+  next: string | null;
 }
 
 function timestamp(value: number) {
@@ -525,7 +533,9 @@ function PullDetail({
   const pull = useRequest<PullRequest>(path);
   const requestedTab = url.searchParams.get("pull_tab");
   const tab =
-    requestedTab === "files" || requestedTab === "checks"
+    requestedTab === "commits" ||
+    requestedTab === "files" ||
+    requestedTab === "checks"
       ? requestedTab
       : "conversation";
   const requestedCheck = Number(url.searchParams.get("check"));
@@ -551,7 +561,10 @@ function PullDetail({
                 <PullBadge state={data.state} />
                 {data.merge ? (
                   <span>
-                    <strong>{data.merge.author}</strong> fast-forwarded{" "}
+                    <strong>{data.merge.author}</strong>{" "}
+                    {data.merge.method === "merge_commit"
+                      ? "created merge commit"
+                      : "fast-forwarded"}{" "}
                     <code>{short(data.merge.commit_oid)}</code> into{" "}
                     <code>{branch(data.base_ref)}</code>
                   </span>
@@ -575,6 +588,17 @@ function PullDetail({
                 })}
               >
                 <CommentIcon /> Conversation
+              </Link>
+              <Link
+                className={tab === "commits" ? "active" : ""}
+                aria-current={tab === "commits" ? "page" : undefined}
+                href={repoHref(repo, {
+                  view: "pulls",
+                  pull: String(number),
+                  pull_tab: "commits",
+                })}
+              >
+                <GitCommitIcon /> Commits
               </Link>
               <Link
                 className={tab === "checks" ? "active" : ""}
@@ -614,6 +638,10 @@ function PullDetail({
                 selected={selectedCheck}
                 before={checkBefore}
               />
+            ) : tab === "commits" ? (
+              data.branches_available ? (
+                <PullCommits repo={repo} pull={data} url={url} />
+              ) : null
             ) : tab === "files" ? (
               data.branches_available ? (
                 <>
@@ -654,6 +682,86 @@ function PullDetail({
                 />
               </div>
             )}
+          </>
+        )}
+      </Result>
+    </section>
+  );
+}
+
+function PullCommits({
+  repo,
+  pull,
+  url,
+}: {
+  repo: Repository;
+  pull: PullRequest;
+  url: URL;
+}) {
+  const cursor = url.searchParams.get("commit_after") ?? undefined;
+  const commits = useRequest<CursorPage<Commit>>(
+    endpoint(repo, "commits", {
+      rev: pull.head_oid,
+      base: pull.base_oid,
+      limit: "50",
+      cursor,
+    }),
+  );
+  return (
+    <section className="pull-commits" aria-labelledby="pull-commits-heading">
+      <div className="section-heading">
+        <div>
+          <h3 id="pull-commits-heading">Commits</h3>
+          <p className="muted">
+            Changes reachable from <code>{branch(pull.head_ref)}</code> and not
+            from <code>{branch(pull.base_ref)}</code>.
+          </p>
+        </div>
+        <Button size="small" onClick={commits.retry}>
+          Refresh
+        </Button>
+      </div>
+      <Result state={commits}>
+        {(page) => (
+          <>
+            {page.items.length ? (
+              <section className="panel">
+                <CommitList repo={repo} commits={page.items} />
+              </section>
+            ) : (
+              <div className="notice">
+                <GitCommitIcon size={24} />
+                <strong>No commits to show</strong>
+                <p>
+                  The head contains no commits that are absent from the base.
+                </p>
+              </div>
+            )}
+            <div className="discussion-pagination">
+              {cursor && (
+                <Link
+                  href={repoHref(repo, {
+                    view: "pulls",
+                    pull: String(pull.number),
+                    pull_tab: "commits",
+                  })}
+                >
+                  Newest commits
+                </Link>
+              )}
+              {page.next && (
+                <Link
+                  href={repoHref(repo, {
+                    view: "pulls",
+                    pull: String(pull.number),
+                    pull_tab: "commits",
+                    commit_after: page.next,
+                  })}
+                >
+                  Older commits →
+                </Link>
+              )}
+            </div>
           </>
         )}
       </Result>
