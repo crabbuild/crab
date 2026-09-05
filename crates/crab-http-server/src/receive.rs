@@ -437,6 +437,26 @@ pub(crate) async fn create_branch(
     name: String,
     new: gix_hash::ObjectId,
 ) -> Result<()> {
+    create_reference(server, principal, key, name, new).await
+}
+
+pub(crate) async fn create_tag(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    name: String,
+    new: gix_hash::ObjectId,
+) -> Result<()> {
+    create_reference(server, principal, key, name, new).await
+}
+
+async fn create_reference(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    name: String,
+    new: gix_hash::ObjectId,
+) -> Result<()> {
     publish_ref(
         server,
         principal,

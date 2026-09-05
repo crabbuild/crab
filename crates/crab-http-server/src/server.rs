@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
-    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive,
+    branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
 };
@@ -305,6 +305,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))
         .merge(labels::routes(Arc::clone(&server)))
+        .merge(releases::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))
         .merge(statuses::routes(Arc::clone(&server)))
         .route(

@@ -147,7 +147,9 @@ pub(crate) async fn require_commit(
 ) -> Result<String> {
     let cancellation = server.cancellation.child_token();
     let _cancel_on_drop = cancellation.clone().drop_guard();
-    let repository = repo.open(server, &cancellation).await?;
+    let repository = repo
+        .open_current(server, server.options, &cancellation)
+        .await?;
     let operation = repository
         .operation(OperationKind::Commit, &cancellation)
         .await
@@ -159,6 +161,7 @@ pub(crate) async fn require_commit(
         snapshot.commit(&operation).await
     }
     .await;
+    let result = operation.finish(result).await;
     match result {
         Ok(commit) => Ok(commit.oid.to_string()),
         Err(crab_remote_git::Error::Revision {

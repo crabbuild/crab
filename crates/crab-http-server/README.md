@@ -108,7 +108,10 @@ with default-branch identification, keyboard navigation, and writer-only branch
 creation from the exact viewed commit. Branch and tag counts open dedicated,
 searchable refs pages; the branch page separates the default branch, identifies
 exact protected branches, copies branch names, links immutable commit tips and
-opens a comparison against the default branch. Writers can delete an unprotected,
+opens a comparison against the default branch. The GitHub-style Releases and Tags
+views list durable releases, render their Markdown notes, link source ZIPs to exact
+tags, and let writers publish a release from an existing or new lightweight tag.
+Writers can delete an unprotected,
 non-default branch after an inline confirmation. The refs pages use the same
 GitHub-derived responsive hierarchy in light and dark themes. Appearance
 selection persists across navigation, and buttons switch tokens atomically so
@@ -225,6 +228,24 @@ name and its exact `expected_oid`. The default branch and configured protected
 branches cannot be deleted. A changed or already deleted tip returns 409, and a
 successful deletion passes through the native ref lease, journal publication and
 cache invalidation path before the browser removes it from the refs page.
+
+Browser release publication uses `POST /api/repos/{owner}/{name}/releases` with a
+stable UUID `request_id`, short `tag_name`, full SHA-1 `target_oid`, title, Markdown
+body and prerelease flag. The target must be a visible commit. An existing
+lightweight or annotated tag is accepted only when it peels to that exact commit;
+otherwise the request returns 409 without reserving the tag for a release. A new
+tag is published through the same admission, ref lease, visibility, journal and
+cache invalidation path as native smart-HTTP push. The request and tag claims,
+number reservation and completed release document live under the repository's
+versioned `app/v1/releases` namespace. Replaying the same request revalidates and, when
+needed, recovers the Git tag before returning the stored release, while a changed
+payload or competing tag claim returns 409. Only completed release documents are
+visible through `GET /api/repos/{owner}/{name}/releases` and
+`GET /api/repos/{owner}/{name}/releases/{number}`. Lists return 20 releases by
+default, accept a maximum page size of 50, and use the `before` cursor. Request
+bodies are limited to 80 KiB; release notes to 64 KiB, tag names to 255 bytes and
+titles to 256 characters. Draft releases, attached assets, editing and deletion
+are not implemented yet.
 
 Repository administrators change the default branch with `PATCH
 /api/repos/{owner}/{name}/settings/default-branch`. The request carries the short
@@ -1056,6 +1077,15 @@ ref stayed at `f1b63c52755b1c27befccd5bad654a5d564d7d79`; the proposal commit
 protocol-v2 fetch read the 95-byte Markdown blob byte for byte. These local
 shared-cache measurements are not a production latency guarantee.
 
+A separate no-auth RustFS qualification initialized a fresh bucket prefix,
+pushed a root commit with native Git, and published `v1.0.0` through the release
+API in 174 ms. The release list returned the completed record in 1.075 ms;
+`git ls-remote` advertised the exact tag and an independent bare fetch resolved
+the original commit. The tag-pinned source ZIP streamed in 29 ms and contained
+the expected README bytes. Light desktop and dark 390-pixel release pages were
+inspected from the release binary. These localhost timings are functional
+observations rather than production latency guarantees.
+
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue
 workspace hierarchy: a 256-pixel Issues/Labels rail, All issues heading,
@@ -1128,15 +1158,15 @@ audit reported zero vulnerabilities.
 | Surface | Required evidence | Status |
 | --- | --- | --- |
 | Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
-| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state, exact compare links and guarded branch deletion now complement the existing picker and live repository reads |
+| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag and release pages, default/protected branch state, exact compare links and guarded branch deletion now complement the existing picker and live repository reads |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser release publication, branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes; administrators can change the default branch and exact protection rules and archive/unarchive repositories with durable stale-state protection; repository creation/import, audit history and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
-| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 29-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
+| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 30-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
 
 Keep this matrix truthful as implementation advances. No placeholder navigation,
 mock collaboration data, or green narrow test is evidence of product completion.

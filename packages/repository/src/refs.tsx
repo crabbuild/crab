@@ -8,7 +8,13 @@ import {
   TagIcon,
   TrashIcon,
 } from "@primer/octicons-react";
-import { repoHref, type Ref, type Refs, type Repository } from "./api";
+import {
+  endpoint,
+  repoHref,
+  type Ref,
+  type Refs,
+  type Repository,
+} from "./api";
 import { Link, short } from "./ui";
 
 const names = new Intl.Collator("en", {
@@ -28,6 +34,7 @@ function RefRow({
   canCompare,
   base,
   onDelete,
+  tag,
 }: {
   repo: Repository;
   ref: Ref;
@@ -36,6 +43,7 @@ function RefRow({
   canCompare: boolean;
   base?: string;
   onDelete?: () => Promise<void>;
+  tag: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -73,6 +81,15 @@ function RefRow({
         {protectedBranch && <Label variant="accent">protected</Label>}
       </div>
       <div className="ref-actions">
+        {tag && (
+          <a
+            className="button-link ref-download"
+            href={endpoint(repo, "archive", { rev: ref.name })}
+            download={`${repo.name}-${name}.zip`}
+          >
+            Download zip
+          </a>
+        )}
         {canCompare && (
           <Link
             className="button-link ref-compare"
@@ -185,14 +202,22 @@ export function RefsPage({
   return (
     <section className="refs-page">
       <h2>{type === "branches" ? "Branches" : "Tags"}</h2>
-      <nav className="refs-tabs" aria-label="Repository refs">
-        <Link
-          className={type === "branches" ? "active" : ""}
-          aria-current={type === "branches" ? "page" : undefined}
-          href={repoHref(repo, { view: "branches" })}
-        >
-          <GitBranchIcon /> Branches
-        </Link>
+      <nav
+        className="refs-tabs"
+        aria-label={type === "tags" ? "Releases and tags" : "Repository refs"}
+      >
+        {type === "tags" && (
+          <Link href={repoHref(repo, { view: "releases" })}>Releases</Link>
+        )}
+        {type === "branches" && (
+          <Link
+            className="active"
+            aria-current="page"
+            href={repoHref(repo, { view: "branches" })}
+          >
+            <GitBranchIcon /> Branches
+          </Link>
+        )}
         <Link
           className={type === "tags" ? "active" : ""}
           aria-current={type === "tags" ? "page" : undefined}
@@ -273,7 +298,7 @@ function RefGroup({
             <span>{kind === "branch" ? "Branch" : "Tag"}</span>
             <span>{kind === "branch" ? "Commit" : "Target"}</span>
             {kind === "branch" && <span>Status</span>}
-            {kind === "branch" && <span>Actions</span>}
+            <span>{kind === "branch" ? "Actions" : "Source"}</span>
           </div>
           <ol className="ref-list">
             {refs.map((ref) => (
@@ -299,6 +324,7 @@ function RefGroup({
                     ? () => onDeleteBranch(ref.name, ref.oid)
                     : undefined
                 }
+                tag={kind === "tag"}
               />
             ))}
           </ol>
