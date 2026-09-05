@@ -39,8 +39,9 @@ The supported entry points are:
 - `RemoteGitRepository::{generate_pack,generate_pack_cached,generate_pack_request_cached}`:
   verified response packs, with immutable reuse after selection or before an
   exact request is planned;
-- `RemoteGitSnapshot::{entry,list_directory,blob_metadata,read_blob}`: browser
-  navigation and Git-representation content;
+- `RemoteGitSnapshot::{entry,list_directory,list_tree_recursive,blob_metadata,read_blob}`:
+  browser navigation, bounded metadata-only tree traversal, and Git-representation
+  content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
   semantics without a checkout;
 - `RemoteGitSnapshot::{archive,archive_stream}`: bounded traversal, with the
@@ -112,11 +113,13 @@ the source installation bounded by skipping an OID enumeration that the
 selection planner does not consume; exact response-set validation remains in
 place.
 
-Directory listing reads only the selected tree. Child sizes are absent unless
-the caller requests bounded page-only metadata. Directory cursors resume after
-an exact entry in the pinned tree, preserving Git order when files and
-directories share a name prefix. Comparison prunes equal tree IDs. History, diff, blame, archive, storage, inflation, and response work have
-independent aggregate limits.
+Directory listing reads only the selected tree. Recursive listing batches tree
+reads and returns metadata without reading blob bodies. Child sizes are absent
+unless the caller requests bounded page-only metadata. Directory cursors resume
+after an exact entry in the pinned tree, preserving Git order when files and
+directories share a name prefix. Comparison prunes equal tree IDs. History,
+diff, blame, archive, storage, inflation, and response work have independent
+aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
 manifest names an immutable split commit graph, open bounds the complete graph

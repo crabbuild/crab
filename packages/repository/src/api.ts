@@ -63,6 +63,11 @@ export interface Page<T> {
   next: string | null;
   commit: string;
 }
+export interface SearchResults {
+  items: Entry[];
+  commit: string;
+  truncated: boolean;
+}
 export interface Content {
   oid: string;
   size: number;

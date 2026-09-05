@@ -323,6 +323,16 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     let browser_path = "646f63732f62726f777365722e747874";
     let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/search?rev={third}&q=browser&limit=10"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let search: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(search["items"].as_array().unwrap().len(), 1);
+    assert_eq!(search["items"][0]["path_hex"], browser_path);
+    let response = reqwest::get(format!(
         "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={third}&path_hex={browser_path}"
     ))
     .await
@@ -414,6 +424,15 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     let deleted: serde_json::Value =
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     let fifth = deleted["commit"].as_str().unwrap().to_owned();
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/search?rev={fifth}&q=browser&limit=10"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let search: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(search["items"].as_array().unwrap().is_empty());
     success(
         reader.path(),
         &["-c", "protocol.version=2", "fetch", &url, branch],

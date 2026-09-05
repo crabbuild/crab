@@ -65,7 +65,7 @@ type Theme = "light" | "dark" | "auto";
 
 export function App() {
   const location = useLocation();
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (document.activeElement === document.body)
       document.getElementById("main")?.focus();
   }, [location]);
@@ -318,6 +318,7 @@ function RepositoryPage({
   const path = url.searchParams.get("path") ?? "";
   const kind = url.searchParams.get("kind") ?? "Tree";
   const [showTree, setShowTree] = useState(Boolean(path));
+  const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   useEffect(() => setShowTree(Boolean(path)), [path]);
   const overview = view === "code" && !path && !showTree;
   const fileWorkspace = view === "code" && !overview;
@@ -340,10 +341,7 @@ function RepositoryPage({
   }
   function focusFileSearch() {
     setShowTree(true);
-    window.setTimeout(
-      () => document.getElementById("repository-tree-search")?.focus(),
-      0,
-    );
+    setSearchFocusRequest((request) => request + 1);
   }
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -611,6 +609,7 @@ function RepositoryPage({
                               rev={rev}
                               activePath={path ? displayHex(path) : undefined}
                               activePathHex={path || undefined}
+                              focusRequest={searchFocusRequest}
                               onSelect={selectEntry}
                             />
                           </aside>

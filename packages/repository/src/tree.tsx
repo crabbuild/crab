@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FileTree, useFileTree, useFileTreeSearch } from "@pierre/trees/react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FileTree, useFileTree } from "@pierre/trees/react";
 import { Button } from "@primer/react";
-import { SearchIcon } from "@primer/octicons-react";
+import { FileIcon, SearchIcon } from "@primer/octicons-react";
 import {
   displayHex,
   endpoint,
@@ -10,19 +10,30 @@ import {
   type Entry,
   type Page,
   type Repository,
+  type SearchResults,
 } from "./api";
+
+type SearchState = {
+  query: string;
+  loading: boolean;
+  items: Entry[];
+  truncated: boolean;
+  error?: string;
+};
 
 export function RepositoryTree({
   repo,
   rev,
   activePath,
   activePathHex,
+  focusRequest,
   onSelect,
 }: {
   repo: Repository;
   rev: string;
   activePath?: string;
   activePathHex?: string;
+  focusRequest: number;
   onSelect: (entry: Entry) => void;
 }) {
   const entries = useRef(new Map<string, Entry>());
@@ -93,8 +104,86 @@ export function RepositoryTree({
       if (entry) select.current(entry);
     },
   });
-  const search = useFileTreeSearch(model);
+  const [query, setQuery] = useState("");
   const searchInput = useRef<HTMLInputElement>(null);
+  const [activeResult, setActiveResult] = useState(0);
+  const [searchState, setSearchState] = useState<SearchState>({
+    query: "",
+    loading: false,
+    items: [],
+    truncated: false,
+  });
+  const normalizedQuery = query.trim();
+  const searchResults =
+    searchState.query === normalizedQuery ? searchState.items : [];
+  useLayoutEffect(() => {
+    if (focusRequest > 0) searchInput.current?.focus();
+  }, [focusRequest]);
+  useEffect(() => {
+    if (!normalizedQuery || !searchResults[activeResult]) return;
+    document
+      .getElementById(`repository-search-result-${activeResult}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeResult, normalizedQuery, searchResults]);
+  useEffect(() => {
+    setActiveResult(0);
+    if (!normalizedQuery) {
+      setSearchState({
+        query: "",
+        loading: false,
+        items: [],
+        truncated: false,
+      });
+      return;
+    }
+    const controller = new AbortController();
+    setSearchState({
+      query: normalizedQuery,
+      loading: true,
+      items: [],
+      truncated: false,
+    });
+    const timer = window.setTimeout(() => {
+      void request<SearchResults>(
+        endpoint(repo, "search", {
+          rev,
+          q: normalizedQuery,
+          limit: "50",
+        }),
+        controller.signal,
+      )
+        .then(({ data }) => {
+          if (!controller.signal.aborted)
+            setSearchState({
+              query: normalizedQuery,
+              loading: false,
+              items: data.items,
+              truncated: data.truncated,
+            });
+        })
+        .catch((failure: unknown) => {
+          if (!controller.signal.aborted)
+            setSearchState({
+              query: normalizedQuery,
+              loading: false,
+              items: [],
+              truncated: false,
+              error:
+                failure instanceof Error
+                  ? failure.message
+                  : "Could not search repository files",
+            });
+        });
+    }, 200);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [repo.owner, repo.name, rev, normalizedQuery]);
+  function openSearchResult(entry: Entry) {
+    setQuery("");
+    select.current(entry);
+  }
   useEffect(() => {
     const controller = new AbortController();
     const loads = new Map<string, Promise<void>>();
@@ -189,47 +278,103 @@ export function RepositoryTree({
           ref={searchInput}
           id="repository-tree-search"
           type="search"
-          placeholder="Go to file"
-          value={search.value}
-          onFocus={() => search.open(search.value)}
-          onChange={(event) =>
-            search.isOpen
-              ? search.setValue(event.target.value)
-              : search.open(event.target.value)
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={searchResults.length > 0}
+          aria-controls={
+            searchResults.length ? "repository-search-results" : undefined
           }
+          aria-activedescendant={
+            searchResults[activeResult]
+              ? `repository-search-result-${activeResult}`
+              : undefined
+          }
+          placeholder="Go to file"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
-              search.setValue("");
-              search.close();
+              setQuery("");
               event.currentTarget.blur();
-            }
-            if (event.key !== "Enter" || search.matchingPaths.length !== 1)
               return;
-            const entry = entries.current.get(
-              search.matchingPaths[0].replace(/\/$/, ""),
-            );
-            if (entry) select.current(entry);
+            }
+            if (event.key === "ArrowDown" && searchResults.length) {
+              event.preventDefault();
+              setActiveResult((value) =>
+                Math.min(value + 1, searchResults.length - 1),
+              );
+            } else if (event.key === "ArrowUp" && searchResults.length) {
+              event.preventDefault();
+              setActiveResult((value) => Math.max(value - 1, 0));
+            } else if (event.key === "Enter" && searchResults[activeResult]) {
+              event.preventDefault();
+              openSearchResult(searchResults[activeResult]);
+            }
           }}
         />
         <kbd aria-hidden="true">T</kbd>
       </label>
-      <FileTree
-        model={model}
-        className="repository-tree"
-        aria-label="Repository files"
-      />
-      {pending > 0 && (
-        <p className="tree-hint" role="status">
-          Loading {pending} {pending === 1 ? "folder" : "folders"}…
-        </p>
-      )}
-      {error && (
-        <div className="error tree-hint" role="alert">
-          {error}
-          <Button onClick={() => setAttempt((value) => value + 1)}>
-            Reload tree
-          </Button>
+      {normalizedQuery ? (
+        <div
+          className="tree-search-results"
+          aria-label="Repository file search results"
+        >
+          {searchState.loading ? (
+            <p role="status">Searching repository…</p>
+          ) : searchState.error ? (
+            <p className="error" role="alert">
+              {searchState.error}
+            </p>
+          ) : searchResults.length ? (
+            <>
+              <ul id="repository-search-results" role="listbox">
+                {searchResults.map((entry, index) => (
+                  <li
+                    id={`repository-search-result-${index}`}
+                    key={entry.path_hex}
+                    role="option"
+                    className={index === activeResult ? "active" : undefined}
+                    aria-selected={index === activeResult}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setActiveResult(index)}
+                    onClick={() => openSearchResult(entry)}
+                  >
+                    <FileIcon aria-hidden="true" />
+                    <span>{entry.path}</span>
+                  </li>
+                ))}
+              </ul>
+              {searchState.truncated && (
+                <p role="status">
+                  Showing the first 50 matches. Refine your search.
+                </p>
+              )}
+            </>
+          ) : (
+            <p>No files match “{normalizedQuery}”.</p>
+          )}
         </div>
+      ) : (
+        <>
+          <FileTree
+            model={model}
+            className="repository-tree"
+            aria-label="Repository files"
+          />
+          {pending > 0 && (
+            <p className="tree-hint" role="status">
+              Loading {pending} {pending === 1 ? "folder" : "folders"}…
+            </p>
+          )}
+          {error && (
+            <div className="error tree-hint" role="alert">
+              {error}
+              <Button onClick={() => setAttempt((value) => value + 1)}>
+                Reload tree
+              </Button>
+            </div>
+          )}
+        </>
       )}
     </>
   );
