@@ -1,6 +1,10 @@
 * {
   box-sizing: border-box;
 }
+[data-color-mode="dark"] button[data-variant="primary"]:hover,
+[data-color-mode="dark"] button[data-variant="primary"]:active {
+  background-color: var(--bgColor-success-emphasis);
+}
 body {
   margin: 0;
 }
@@ -1965,6 +1969,10 @@ main {
   overflow-wrap: anywhere;
   font-size: 14px;
   line-height: 1.65;
+}
+.discussion-markdown a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
 .discussion-markdown > :first-child {
   margin-top: 0;

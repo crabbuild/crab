@@ -35,6 +35,7 @@ export function AssigneeAvatars({
   return (
     <span
       className="assignee-avatars"
+      role="img"
       aria-label={`Assigned to ${assignees.map((assignee) => assignee.name).join(", ")}`}
     >
       {assignees.map((assignee) => (

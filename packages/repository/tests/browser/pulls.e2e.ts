@@ -1,4 +1,8 @@
 import { expect, test } from "@playwright/test";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
@@ -366,6 +370,8 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("link", { name: "Improve the README", exact: true }),
   ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
   const search = page.getByRole("search", { name: "Search pull requests" });
   await search.getByRole("textbox").fill("missing workflow");
   await search.getByRole("button", { name: "Search", exact: true }).click();
@@ -386,6 +392,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("heading", { name: "Compare changes" }),
   ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
   await expect(page.getByLabel("base:")).toHaveValue("refs/heads/main");
   await expect(page.getByLabel("compare:")).toHaveValue(
     "refs/heads/feature/docs",
@@ -419,6 +426,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toHaveCount(0);
+  await expectNoAccessibilityViolations(page);
 
   await page.getByRole("link", { name: "Checks", exact: true }).click();
   await expect(page.getByRole("heading", { name: "ci/test" })).toBeVisible();
@@ -433,6 +441,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     "<script>alert(1)</script>",
   );
   await expect(page.locator(".check-steps script")).toHaveCount(0);
+  await expectNoAccessibilityViolations(page);
 
   await page
     .getByRole("navigation", { name: "Pull request" })
@@ -447,11 +456,13 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".pull-commits .commit-list")).not.toContainText(
     "Explain the workflow",
   );
+  await expectNoAccessibilityViolations(page);
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /Modified README.md/ }).click();
   await expect(page.locator(".diff-panel")).toContainText("New content");
+  await expectNoAccessibilityViolations(page);
 
   await page
     .getByRole("textbox", { name: "Review summary", exact: true })
@@ -513,6 +524,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   );
 
   await page.setViewportSize({ width: 360, height: 800 });
+  await expectNoAccessibilityViolations(page);
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(360);

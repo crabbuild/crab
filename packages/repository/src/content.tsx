@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
 import {
@@ -32,6 +32,11 @@ type Props = {
   write?: { branch: string };
 };
 const themes = { light: "github-light", dark: "github-dark" } as const;
+const diffColors = {
+  "--diffs-addition-color-override": "var(--fgColor-success)",
+  "--diffs-deletion-color-override": "var(--button-danger-fgColor-rest)",
+  "--diffs-modified-color-override": "var(--fgColor-accent)",
+} as CSSProperties;
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
@@ -419,7 +424,7 @@ function DiffView({
             </SegmentedControl>
           </div>
           {files ? (
-            <MultiFileDiff {...files} options={options} />
+            <MultiFileDiff {...files} options={options} style={diffColors} />
           ) : (
             <div className="notice">
               Binary content changed. Browse the corresponding revision to
