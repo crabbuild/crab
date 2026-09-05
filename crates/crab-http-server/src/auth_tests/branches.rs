@@ -2,6 +2,7 @@ use super::*;
 
 const ROOT: &str = "/api/repos/team/private/branches";
 const DEFAULT_BRANCH: &str = "/api/repos/team/private/settings/default-branch";
+const PROTECTIONS: &str = "/api/repos/team/private/settings/branch-protections";
 
 async fn create_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (StatusCode, Value) {
     let response = h
@@ -46,6 +47,28 @@ async fn set_default_branch(
     let response = h
         .http
         .patch(format!("{}{DEFAULT_BRANCH}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
+async fn set_branch_protections(
+    h: &Harness,
+    cookie: &str,
+    csrf: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .put(format!("{}{PROTECTIONS}", h.origin))
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
@@ -129,6 +152,86 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     )
     .await;
     assert_eq!(advertised, format!("{commit}\trefs/heads/feature/browser"));
+
+    let policy = create_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"feature/policy","source_oid":commit}),
+    )
+    .await;
+    assert_eq!(policy.0, StatusCode::CREATED, "{}", policy.1);
+    let protected = set_branch_protections(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "expected_version":0,
+            "rules":[
+                {"branch":"main","required_approvals":1,"required_checks":["ci/test"]},
+                {"branch":"feature/policy","required_approvals":2,"required_checks":["build","security"]}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(protected.0, StatusCode::OK, "{}", protected.1);
+    assert_eq!(protected.1["version"], 1);
+    let catalog = h.json("/api/repos", &alice).await;
+    assert_eq!(catalog["repositories"][0]["protection_version"], 1);
+    assert_eq!(
+        catalog["repositories"][0]["protected_branches"][1]["branch"],
+        "feature/policy"
+    );
+    let persisted = crate::repository_settings::load(repo).await.unwrap();
+    assert_eq!(persisted, repo.branch_protections().await);
+
+    crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/policy"])
+        .await;
+    std::fs::write(source.path().join("POLICY.md"), "protected by Crab\n").unwrap();
+    crate::server::receive_tests::success(source.path(), &["add", "POLICY.md"]).await;
+    crate::server::receive_tests::success(source.path(), &["commit", "-m", "policy change"]).await;
+    let policy_commit =
+        crate::server::receive_tests::success(source.path(), &["rev-parse", "HEAD"]).await;
+    let rejected = crate::server::receive_tests::git(
+        source.path(),
+        &["push", git_url.as_str(), "HEAD:feature/policy"],
+    )
+    .await;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("protected branch requires a pull request")
+    );
+    let stale =
+        set_branch_protections(&h, &alice, csrf, json!({"expected_version":0,"rules":[]})).await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    assert_eq!(stale.1["error"]["code"], "settings_changed");
+    let unprotected = set_branch_protections(
+        &h,
+        &alice,
+        csrf,
+        json!({
+            "expected_version":1,
+            "rules":[{"branch":"main","required_approvals":1,"required_checks":["ci/test"]}]
+        }),
+    )
+    .await;
+    assert_eq!(unprotected.0, StatusCode::OK, "{}", unprotected.1);
+    assert_eq!(unprotected.1["version"], 2);
+    crate::server::receive_tests::success(
+        source.path(),
+        &["push", git_url.as_str(), "HEAD:feature/policy"],
+    )
+    .await;
+    assert_eq!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/heads/feature/policy"]
+        )
+        .await,
+        format!("{policy_commit}\trefs/heads/feature/policy")
+    );
+    crate::server::receive_tests::success(source.path(), &["checkout", "main"]).await;
 
     let changed_default = set_default_branch(
         &h,
@@ -323,6 +426,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
         assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
         assert_eq!(invalid.1["error"]["code"], "invalid_request");
     }
+    for body in [
+        json!({"expected_version":0,"rules":[{"branch":"refs/heads/main","required_approvals":0,"required_checks":[]}]}),
+        json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":21,"required_checks":[]}]}),
+        json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":0,"required_checks":["ci/test","CI/Test"]}]}),
+    ] {
+        let invalid = set_branch_protections(&h, &alice, csrf, body).await;
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.1["error"]["code"], "invalid_request");
+    }
     let incomplete = create_branch(&h, &alice, csrf, json!({})).await;
     assert_eq!(incomplete.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(incomplete.1["error"]["code"], "invalid_request");
@@ -385,6 +497,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(denied_default.0, StatusCode::FORBIDDEN);
     assert_eq!(denied_default.1["error"]["code"], "forbidden");
+    let denied_protection = set_branch_protections(
+        &h,
+        &bob,
+        bob_session["csrf"].as_str().unwrap(),
+        json!({"expected_version":0,"rules":[]}),
+    )
+    .await;
+    assert_eq!(denied_protection.0, StatusCode::FORBIDDEN);
+    assert_eq!(denied_protection.1["error"]["code"], "forbidden");
 
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
@@ -416,5 +537,14 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(hidden_default.0, StatusCode::NOT_FOUND);
     assert_eq!(hidden_default.1["error"]["code"], "repository_not_found");
+    let hidden_protection = set_branch_protections(
+        &h,
+        &outsider,
+        outsider_session["csrf"].as_str().unwrap(),
+        json!({"expected_version":0,"rules":[]}),
+    )
+    .await;
+    assert_eq!(hidden_protection.0, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_protection.1["error"]["code"], "repository_not_found");
     h.close().await;
 }

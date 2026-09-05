@@ -7,6 +7,7 @@ const repo = {
   description: "",
   access: "read" as const,
   can_admin: false,
+  protection_version: 0,
   protected_branches: [],
 };
 afterEach(() => vi.unstubAllGlobals());

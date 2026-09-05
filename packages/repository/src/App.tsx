@@ -296,6 +296,7 @@ export function App() {
                     url={url}
                     theme={resolved}
                     csrf={session.data?.csrf ?? ""}
+                    onRepositoryChanged={catalog.retry}
                   />
                 ) : (
                   <div className="notice">
@@ -366,11 +367,13 @@ function RepositoryPage({
   url,
   theme,
   csrf,
+  onRepositoryChanged,
 }: {
   repo: Repository;
   url: URL;
   theme: "light" | "dark";
   csrf: string;
+  onRepositoryChanged: () => void;
 }) {
   const view = url.searchParams.get("view") ?? "code";
   const refs = useRequest<Refs>(
@@ -611,7 +614,13 @@ function RepositoryPage({
                     repo={repo}
                     refs={data}
                     csrf={csrf}
-                    onChanged={refs.retry}
+                    section={
+                      url.searchParams.get("section") === "branches"
+                        ? "branches"
+                        : "general"
+                    }
+                    onDefaultChanged={refs.retry}
+                    onRepositoryChanged={onRepositoryChanged}
                   />
                 </Suspense>
               )}

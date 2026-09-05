@@ -233,6 +233,14 @@ target `name`, the full current `expected_head`, and the target branch's exact
 changed HEAD or branch tip with 409, and atomically records the new symbolic HEAD
 through the ref journal without copying Git objects or creating a checkout.
 
+Repository administrators replace the exact protection-rule set with `PUT
+/api/repos/{owner}/{name}/settings/branch-protections`. The request includes the
+catalog's `expected_version` and every rule; concurrent or stale edits return
+409. Rules are conditionally persisted under the repository prefix and become
+the shared policy for browser edits, native receive, and pull-request admission
+before the response returns. The configured rules seed version zero. After the
+first administrative save, the stored rule set is authoritative across restart.
+
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
 always opens a fresh snapshot. Reads remain bounded to two minutes and 8 MiB per
@@ -343,10 +351,14 @@ and unauthorized repositories both return 404. Membership changes currently
 require a configuration update and server restart, which invalidates every session.
 Organization and membership administration in the application remain future work.
 
-`protected_branches` contains exact branch names without the `refs/heads/`
-prefix. `required_approvals` accepts 0–20 and defaults to zero when omitted.
+`protected_branches` contains at most 100 exact branch names without the
+`refs/heads/` prefix. `required_approvals` accepts 0–20 and defaults to zero when omitted.
 `required_checks` accepts at most 50 unique, case-insensitive context names of
-1–100 characters. It defaults to an empty list.
+1–100 characters. It defaults to an empty list. Repository administrators can
+create, edit, and remove these exact rules under **Settings → Branches**; writes
+use the displayed version so one administrator cannot silently overwrite
+another administrator's update. The hierarchy and action names follow
+[GitHub's classic branch protection flow](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule).
 Once a repository has a branch, native Git cannot create, update or delete a
 protected name; an atomic push containing one is rejected in full. The first
 branch can still initialize an empty or tag-only repository. A fast-forward
@@ -557,7 +569,7 @@ and tags remain deletable. This follows the repository's recorded default rather
 than a hardcoded branch name. Exact names listed in `protected_branches` also
 reject direct creation, update or deletion after repository initialization and
 report `protected branch requires a pull request`. Administrators can change the
-default branch in the browser; protection administration remains pending.
+default branch and branch-protection rules in the browser.
 
 Disconnects and deadlines signal cancellation; owned workers retain admission
 and renew their GC fences until cleanup finishes. A known commit is never reported
@@ -1093,11 +1105,11 @@ audit reported zero vulnerabilities.
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion, default-branch administration and exact protected branches have scoped proof; protection administration pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
-| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes and administrators can change the default branch with stale-state protection; repository creation/import and remaining settings are pending |
+| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes and administrators can change the default branch and exact protection rules with stale-state protection; repository creation/import and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
-| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 27-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
+| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 28-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
 
 Keep this matrix truthful as implementation advances. No placeholder navigation,
 mock collaboration data, or green narrow test is evidence of product completion.

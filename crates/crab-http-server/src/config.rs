@@ -36,7 +36,7 @@ pub struct RepositoryConfig {
 }
 
 /// An exact branch whose direct updates are disabled.
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BranchProtection {
     pub branch: String,
@@ -119,28 +119,10 @@ impl Config {
                     ));
                 }
             }
-            let mut protected = HashSet::new();
-            for rule in &repository.protected_branches {
-                let reference = format!("refs/heads/{}", rule.branch);
-                let mut checks = HashSet::new();
-                if rule.branch.is_empty()
-                    || rule.branch.starts_with("refs/")
-                    || crab_git::validate_push_refname(&reference).is_err()
-                    || rule.required_approvals > 20
-                    || rule.required_checks.len() > 50
-                    || rule.required_checks.iter().any(|check| {
-                        check.trim() != check
-                            || check.is_empty()
-                            || check.chars().count() > 100
-                            || check.chars().any(char::is_control)
-                            || !checks.insert(check.to_lowercase())
-                    })
-                    || !protected.insert(&rule.branch)
-                {
-                    return Err(Error::Config(
-                        "protected branches require unique valid names, at most 20 approvals, and at most 50 unique check names",
-                    ));
-                }
+            if !valid_branch_protections(&repository.protected_branches) {
+                return Err(Error::Config(
+                    "protected branches require at most 100 unique valid names, at most 20 approvals, and at most 50 unique check names",
+                ));
             }
             if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
                 return Err(Error::Config(
@@ -184,17 +166,32 @@ impl Config {
     }
 }
 
-fn default_repository_branch() -> String {
-    "main".to_owned()
+pub(crate) fn valid_branch_protections(rules: &[BranchProtection]) -> bool {
+    if rules.len() > 100 {
+        return false;
+    }
+    let mut protected = HashSet::new();
+    rules.iter().all(|rule| {
+        let reference = format!("refs/heads/{}", rule.branch);
+        let mut checks = HashSet::new();
+        !rule.branch.is_empty()
+            && !rule.branch.starts_with("refs/")
+            && crab_git::validate_push_refname(&reference).is_ok()
+            && rule.required_approvals <= 20
+            && rule.required_checks.len() <= 50
+            && rule.required_checks.iter().all(|check| {
+                check.trim() == check
+                    && !check.is_empty()
+                    && check.chars().count() <= 100
+                    && !check.chars().any(char::is_control)
+                    && checks.insert(check.to_lowercase())
+            })
+            && protected.insert(&rule.branch)
+    })
 }
 
-impl RepositoryConfig {
-    pub(crate) fn protection(&self, reference: &str) -> Option<&BranchProtection> {
-        let branch = reference.strip_prefix("refs/heads/")?;
-        self.protected_branches
-            .iter()
-            .find(|rule| rule.branch == branch)
-    }
+fn default_repository_branch() -> String {
+    "main".to_owned()
 }
 
 /// Browser identity provider and the application's canonical external origin.
@@ -323,24 +320,18 @@ mod tests {
         )
         .unwrap();
         assert!(config.validate().is_ok());
-        assert_eq!(
-            config.repositories[0]
-                .protection("refs/heads/main")
-                .unwrap()
-                .required_approvals,
-            2
-        );
-        assert_eq!(
-            config.repositories[0]
-                .protection("refs/heads/main")
-                .unwrap()
-                .required_checks,
-            ["ci/test"]
-        );
+        let main = config.repositories[0]
+            .protected_branches
+            .iter()
+            .find(|rule| rule.branch == "main")
+            .unwrap();
+        assert_eq!(main.required_approvals, 2);
+        assert_eq!(main.required_checks, ["ci/test"]);
         assert!(
-            config.repositories[0]
-                .protection("refs/heads/Main")
-                .is_none()
+            !config.repositories[0]
+                .protected_branches
+                .iter()
+                .any(|rule| rule.branch == "Main")
         );
     }
 
