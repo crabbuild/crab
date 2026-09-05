@@ -216,6 +216,10 @@ main {
   font-size: 16px;
   overflow-wrap: anywhere;
 }
+.breadcrumb .copy-path-button {
+  flex: 0 0 auto;
+  color: var(--fgColor-muted);
+}
 .muted,
 .timing {
   color: var(--fgColor-muted);

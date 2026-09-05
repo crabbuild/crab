@@ -1,6 +1,8 @@
-import { Fragment } from "react";
-import { Button } from "@primer/react";
+import { Fragment, useState } from "react";
+import { Button, IconButton } from "@primer/react";
 import {
+  CheckIcon,
+  CopyIcon,
   KebabHorizontalIcon,
   SearchIcon,
   SidebarExpandIcon,
@@ -37,7 +39,10 @@ export function FileBreadcrumb({
   rev: string;
   path: string;
 }) {
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const parts = splitPathHex(path);
+  const displayedPath = displayHex(path);
+  const copied = copiedPath === path;
   const ancestors = parts.slice(0, -1).map((part, index) => ({
     name: displayHex(part),
     path: parts.slice(0, index + 1).join("2f"),
@@ -57,6 +62,22 @@ export function FileBreadcrumb({
             </Fragment>
           ))}
           <strong>{displayHex(parts.at(-1) ?? "")}</strong>
+          <IconButton
+            className="copy-path-button"
+            icon={copied ? CheckIcon : CopyIcon}
+            aria-label={copied ? "Path copied" : "Copy path"}
+            title={copied ? "Path copied" : "Copy path"}
+            variant="invisible"
+            size="small"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(displayedPath);
+                setCopiedPath(path);
+              } catch {
+                setCopiedPath(null);
+              }
+            }}
+          />
         </>
       )}
     </div>

@@ -162,8 +162,10 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("overview groups files with their commit and opens the tree when navigating", async ({
+  context,
   page,
 }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/team/project");
   await expect(
     page.getByRole("complementary", { name: "About this repository" }),
@@ -212,7 +214,14 @@ test("overview groups files with their commit and opens the tree when navigating
   );
   await panel.getByRole("link", { name: "README.md", exact: true }).click();
   await expect(page.locator(".tree-sidebar")).toBeVisible();
-  await expect(page.locator(".breadcrumb")).toHaveText("project/README.md");
+  await expect(page.locator(".breadcrumb")).toContainText("project/README.md");
+  await page.getByRole("button", { name: "Copy path", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Path copied", exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("README.md");
   await expect(page.locator(".file-panel")).toBeVisible();
   await expect(page.locator(".latest-commit")).toContainText(
     "Update this path",
@@ -226,7 +235,7 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(
     page.getByRole("button", { name: "Open file tree", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".file-navigation .breadcrumb")).toHaveText(
+  await expect(page.locator(".file-navigation .breadcrumb")).toContainText(
     "project/README.md",
   );
   await page.keyboard.press("t");
