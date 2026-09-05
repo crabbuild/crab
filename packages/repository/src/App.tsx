@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useLayoutEffect, useState } from "react";
 import { BaseStyles, Button, Label, Spinner } from "@primer/react";
 import { ThemeProvider } from "@primer/react/next";
 import {
+  AlertIcon,
   CodeIcon,
   GitBranchIcon,
   GitPullRequestIcon,
@@ -758,6 +759,12 @@ function LatestCommit({
   path?: string;
   kind?: string;
 }) {
+  const historyHref = repoHref(repo, {
+    view: "commits",
+    rev,
+    path: path || undefined,
+    kind: path ? kind : undefined,
+  });
   const state = useRequest<Commit>(
     endpoint(repo, "commit", { rev, path_hex: path || undefined }),
   );
@@ -766,6 +773,25 @@ function LatestCommit({
       <div className="latest-commit" role="status">
         <Spinner size="small" />
         <span className="muted">Loading latest commit…</span>
+      </div>
+    );
+  if (state.error)
+    return (
+      <div className="latest-commit latest-commit-error" role="alert">
+        <AlertIcon aria-hidden="true" />
+        <span className="truncate">
+          <strong>Latest commit unavailable.</strong> {state.error}
+        </span>
+        <Button
+          size="small"
+          aria-label="Retry latest commit"
+          onClick={state.retry}
+        >
+          Retry
+        </Button>
+        <Link className="commit-history-link" href={historyHref}>
+          <HistoryIcon /> History
+        </Link>
       </div>
     );
   return (
@@ -791,15 +817,7 @@ function LatestCommit({
           <span className="muted commit-date">
             {date(commit.author_seconds)}
           </span>
-          <Link
-            className="commit-history-link"
-            href={repoHref(repo, {
-              view: "commits",
-              rev,
-              path: path || undefined,
-              kind: path ? kind : undefined,
-            })}
-          >
+          <Link className="commit-history-link" href={historyHref}>
             <HistoryIcon /> History
           </Link>
         </div>

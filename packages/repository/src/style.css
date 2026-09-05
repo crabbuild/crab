@@ -236,6 +236,19 @@ main {
 .latest-commit a {
   color: var(--fgColor-default);
 }
+.latest-commit-error {
+  color: var(--fgColor-muted);
+}
+.latest-commit-error > svg {
+  flex: 0 0 auto;
+  color: var(--fgColor-attention);
+}
+.latest-commit-error button {
+  flex: 0 0 auto;
+}
+.latest-commit-error strong {
+  color: var(--fgColor-default);
+}
 .truncate {
   overflow: hidden;
   text-overflow: ellipsis;
