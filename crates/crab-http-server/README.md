@@ -808,6 +808,9 @@ from object storage, expand the path, select the active file and center it in
 the virtualized tree. The `T` shortcut focuses file search in either pane state.
 Search covers the full pinned repository tree, including paths whose parents
 have not been expanded, and retains the same compact 32-pixel row rhythm.
+If exact path history exceeds a repository read budget, the 52-pixel commit
+strip reports that local failure with retry and History controls while the tree
+and verified file contents remain usable.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
 forms were inspected against the real Kubernetes repository in light desktop and

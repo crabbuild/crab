@@ -99,7 +99,19 @@ test.beforeEach(async ({ page }) => {
           generation: 1,
         },
       });
-    if (url.pathname.endsWith("/commit"))
+    if (url.pathname.endsWith("/commit")) {
+      if (
+        route.request().headers()["x-test-latest-commit"] === "fail-once" &&
+        url.searchParams.get("path_hex") === pathHex("src/index.ts")
+      )
+        return route.fulfill({
+          status: 422,
+          json: {
+            error: {
+              message: "This request exceeds the repository read budget",
+            },
+          },
+        });
       return route.fulfill({
         json: {
           oid: url.searchParams.has("path_hex") ? pathOid : oid,
@@ -112,6 +124,7 @@ test.beforeEach(async ({ page }) => {
             : "Make the repository easier to browse",
         },
       });
+    }
     if (url.pathname.endsWith("/commits"))
       return route.fulfill({
         json: (() => {
@@ -356,6 +369,7 @@ test("overview groups files with their commit and opens the tree when navigating
 test("Go to file finds a deep repository path before its directory is expanded", async ({
   page,
 }) => {
+  await page.setExtraHTTPHeaders({ "x-test-latest-commit": "fail-once" });
   await page.goto("/team/project");
   await expect(
     page.getByRole("button", { name: "Browse files", exact: true }),
@@ -375,6 +389,17 @@ test("Go to file finds a deep repository path before its directory is expanded",
   await expect(page.getByLabel("Repository files")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toContainText(
     "project/src/index.ts",
+  );
+  const latestCommit = page.locator(".latest-commit-error");
+  await expect(latestCommit).toContainText("Latest commit unavailable");
+  await expect(latestCommit).toContainText("repository read budget");
+  await expect(page.locator(".file-panel")).toBeVisible();
+  expect((await latestCommit.boundingBox())?.height).toBeLessThanOrEqual(60);
+  await page.setExtraHTTPHeaders({});
+  await page.getByRole("button", { name: "Retry latest commit" }).click();
+  await expect(latestCommit).toHaveCount(0);
+  await expect(page.locator(".latest-commit")).toContainText(
+    "Update this path",
   );
 });
 
