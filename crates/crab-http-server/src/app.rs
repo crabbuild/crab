@@ -58,7 +58,7 @@ pub(crate) enum Error {
     LabelNotFound,
     #[error("Write access is required to manage assignees")]
     AssigneePermission,
-    #[error("Write access is required to publish releases")]
+    #[error("Write access is required to manage releases")]
     ReleasePermission,
     #[error("A release already exists for this tag or the tag points to another commit")]
     ReleaseConflict,
@@ -186,7 +186,7 @@ impl IntoResponse for Error {
             Self::ReleasePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to publish releases",
+                "Write access is required to manage releases",
             ),
             Self::ReleaseConflict => (
                 StatusCode::CONFLICT,

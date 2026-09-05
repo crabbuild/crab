@@ -63,7 +63,23 @@ struct Release {
     title: String,
     body: String,
     prerelease: bool,
+    version: u64,
     created_at: u64,
+    updated_at: u64,
+    deleted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum TagClaim {
+    Active {
+        claim: ReleaseClaim,
+    },
+    Deleted {
+        request_id: String,
+        number: u64,
+        version: u64,
+    },
 }
 
 #[derive(Deserialize)]
@@ -75,6 +91,21 @@ struct NewRelease {
     title: String,
     body: String,
     prerelease: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseEdit {
+    version: u64,
+    title: String,
+    body: String,
+    prerelease: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseDelete {
+    version: u64,
 }
 
 #[derive(Default, Deserialize)]
@@ -101,7 +132,10 @@ impl ListParameters {
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .route("/api/repos/{owner}/{name}/releases", get(list).post(create))
-        .route("/api/repos/{owner}/{name}/releases/{number}", get(detail))
+        .route(
+            "/api/repos/{owner}/{name}/releases/{number}",
+            get(detail).patch(edit).delete(remove),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -171,9 +205,6 @@ fn same_release(
         && release.tag_name == reservation.tag_name
         && release.tag_oid == expected_tag_oid
         && release.target_oid == reservation.target_oid
-        && release.title == reservation.title
-        && release.body == reservation.body
-        && release.prerelease == reservation.prerelease
         && release.created_at == reservation.created_at
 }
 
@@ -186,9 +217,109 @@ fn view(release: &Release) -> Value {
         "title": release.title,
         "body": release.body,
         "prerelease": release.prerelease,
+        "version": release.version,
         "author": release.author.name,
         "created_at": release.created_at,
+        "updated_at": release.updated_at,
     })
+}
+
+async fn claim_tag(repo: &Repository, claim: &ReleaseClaim) -> Result<()> {
+    let path = tag_path(&claim.tag_name);
+    for _ in 0..10 {
+        let stored = app_storage::read::<TagClaim>(repo, &path).await?;
+        let tag = match stored {
+            Some((TagClaim::Active { claim: current }, _)) => {
+                if same_claim(&current, claim) {
+                    return Ok(());
+                }
+                return Err(Error::ReleaseConflict);
+            }
+            Some((TagClaim::Deleted { request_id, .. }, _)) if request_id == claim.request_id => {
+                return Err(Error::ReleaseConflict);
+            }
+            Some((TagClaim::Deleted { .. }, etag)) => {
+                match app_storage::update(
+                    repo,
+                    &path,
+                    &TagClaim::Active {
+                        claim: claim.clone(),
+                    },
+                    etag,
+                )
+                .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            None => {
+                app_storage::create_or_read(
+                    repo,
+                    &path,
+                    TagClaim::Active {
+                        claim: claim.clone(),
+                    },
+                )
+                .await?
+            }
+        };
+        match tag {
+            TagClaim::Active { claim: current } if same_claim(&current, claim) => return Ok(()),
+            TagClaim::Active { .. } => return Err(Error::ReleaseConflict),
+            TagClaim::Deleted { .. } => continue,
+        }
+    }
+    Err(Error::Conflict)
+}
+
+async fn release_tag_claim(repo: &Repository, release: &Release, version: u64) -> Result<()> {
+    let path = tag_path(&release.tag_name);
+    for _ in 0..10 {
+        let (claim, etag) = app_storage::read::<TagClaim>(repo, &path)
+            .await?
+            .ok_or(Error::ReleaseConflict)?;
+        match claim {
+            TagClaim::Deleted {
+                request_id,
+                number,
+                version: deleted_version,
+            } if request_id == release.request_id
+                && number == release.number
+                && deleted_version == version =>
+            {
+                return Ok(());
+            }
+            TagClaim::Deleted { .. } => return Err(Error::ReleaseConflict),
+            TagClaim::Active { claim } if claim.request_id != release.request_id => return Ok(()),
+            TagClaim::Active { claim }
+                if claim.tag_name != release.tag_name || claim.target_oid != release.target_oid =>
+            {
+                return Err(Error::ReleaseConflict);
+            }
+            TagClaim::Active { .. } => {}
+        }
+        match app_storage::update(
+            repo,
+            &path,
+            &TagClaim::Deleted {
+                request_id: release.request_id.clone(),
+                number: release.number,
+                version,
+            },
+            etag,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(Error::Storage(crab_storage::StorageError::StateConflict { .. })) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
 }
 
 async fn reserve(
@@ -215,10 +346,7 @@ async fn reserve(
     if !same_claim(&request, &claim) {
         return Err(Error::RequestConflict);
     }
-    let tag = app_storage::create_or_read(repo, &tag_path(&tag_name), claim.clone()).await?;
-    if !same_claim(&tag, &claim) {
-        return Err(Error::ReleaseConflict);
-    }
+    claim_tag(repo, &claim).await?;
     let existing =
         app_storage::read::<ReleaseReservation>(repo, &reservation_path(&request_id)).await?;
     let (number, created_at) = match existing.as_ref() {
@@ -362,10 +490,13 @@ async fn create(
         title: reservation.title.clone(),
         body: reservation.body.clone(),
         prerelease: reservation.prerelease,
+        version: 1,
         created_at: reservation.created_at,
+        updated_at: reservation.created_at,
+        deleted: false,
     };
     let release = app_storage::create_or_read(repo, &release_path(release.number), release).await?;
-    if !same_release(&release, &reservation, &tag_oid) {
+    if release.deleted || !same_release(&release, &reservation, &tag_oid) {
         return Err(Error::ReleaseConflict);
     }
     Ok((StatusCode::CREATED, Json(view(&release))))
@@ -380,8 +511,86 @@ async fn detail(
     let release = app_storage::read::<Release>(repo, &release_path(app::number(number)?))
         .await?
         .map(|(release, _)| release)
+        .filter(|release| !release.deleted)
         .ok_or(Error::ReleaseNotFound)?;
     Ok(Json(view(&release)))
+}
+
+async fn edit(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number)): Path<(String, String, u64)>,
+    input: std::result::Result<Json<ReleaseEdit>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    let Json(input) = input?;
+    let title = app::title(&input.title)?;
+    app::body(&input.body, false)?;
+    let path = release_path(app::number(number)?);
+    let (mut release, etag) = app_storage::read::<Release>(repo, &path)
+        .await?
+        .filter(|(release, _)| !release.deleted)
+        .ok_or(Error::ReleaseNotFound)?;
+    if release.version != input.version {
+        return Err(Error::Conflict);
+    }
+    release.title = title;
+    release.body = input.body;
+    release.prerelease = input.prerelease;
+    release.version = release
+        .version
+        .checked_add(1)
+        .filter(|version| *version < app_storage::MAX_NUMBER)
+        .ok_or(Error::Conflict)?;
+    release.updated_at = app_storage::now()?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    app_storage::update(repo, &path, &release, etag).await?;
+    Ok(Json(view(&release)))
+}
+
+async fn remove(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number)): Path<(String, String, u64)>,
+    input: std::result::Result<Json<ReleaseDelete>, JsonRejection>,
+) -> Result<StatusCode> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    let Json(input) = input?;
+    let path = release_path(app::number(number)?);
+    let (mut release, etag) = app_storage::read::<Release>(repo, &path)
+        .await?
+        .ok_or(Error::ReleaseNotFound)?;
+    if release.deleted {
+        if input.version.checked_add(1) != Some(release.version) {
+            return Err(Error::ReleaseNotFound);
+        }
+        release_tag_claim(repo, &release, input.version).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if release.version != input.version {
+        return Err(Error::Conflict);
+    }
+    release.version = release
+        .version
+        .checked_add(1)
+        .filter(|version| *version < app_storage::MAX_NUMBER)
+        .ok_or(Error::Conflict)?;
+    release.updated_at = app_storage::now()?;
+    release.deleted = true;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    app_storage::update(repo, &path, &release, etag).await?;
+    release_tag_claim(repo, &release, input.version).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list(
@@ -408,7 +617,9 @@ async fn list(
         for entry in batch {
             next -= 1;
             scanned += 1;
-            if let Some((release, _)) = entry {
+            if let Some((release, _)) = entry
+                && !release.deleted
+            {
                 items.push(view(&release));
             }
             if items.len() == limit || scanned == 200 {
