@@ -758,12 +758,28 @@ impl OperationContext {
         name: &[u8],
     ) -> Result<Vec<Option<TreeEntry>>> {
         check_cancelled(&self.cancellation)?;
+        // Old path histories often repeat directory OIDs across adjacent commits.
+        // Charge and decode each tree once while retaining request-order results.
+        let mut unique_oids = Vec::new();
+        unique_oids
+            .try_reserve_exact(oids.len())
+            .map_err(|source| Error::Allocation {
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+                source,
+            })?;
+        for oid in oids {
+            if !unique_oids.contains(oid) {
+                unique_oids.push(*oid);
+            }
+        }
         self.budget
-            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .charge(BudgetDimension::LogicalObjects, unique_oids.len() as u64)
             .await?;
-        let objects = self.read_objects_uncharged(oids).await?;
-        let mut found = Vec::new();
-        found
+        let objects = self.read_objects_uncharged(&unique_oids).await?;
+        let mut unique_found = Vec::new();
+        unique_found
             .try_reserve_exact(objects.len())
             .map_err(|source| Error::Allocation {
                 requested: objects
@@ -786,11 +802,32 @@ impl OperationContext {
                 .await;
             let (entry, entry_comparisons) = find_tree_entry(&tree, parent, name)?;
             comparisons = comparisons.saturating_add(entry_comparisons);
-            found.push(entry);
+            unique_found.push(entry);
         }
         self.budget
             .charge(BudgetDimension::Entries, comparisons)
             .await?;
+        let mut found = Vec::new();
+        found
+            .try_reserve_exact(oids.len())
+            .map_err(|source| Error::Allocation {
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<TreeEntry>>()),
+                source,
+            })?;
+        for oid in oids {
+            let position = unique_oids
+                .iter()
+                .position(|candidate| candidate == oid)
+                .ok_or(Error::InternalInvariant {
+                    invariant: "tree batch lost a requested object ID",
+                })?;
+            let entry = unique_found.get(position).ok_or(Error::InternalInvariant {
+                invariant: "tree batch result did not match requested object IDs",
+            })?;
+            found.push(entry.clone());
+        }
         Ok(found)
     }
 

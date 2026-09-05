@@ -356,59 +356,66 @@ impl RemoteGitSnapshot {
         operation: &OperationContext,
         mut items: Vec<PathHistoryEntry>,
     ) -> Result<Page<PathHistoryEntry>> {
-        let commit = path_history_commit(start, operation).await?;
-        let (entry, parent) = match commit.parents.first().copied() {
-            Some(parent) => {
-                let (entry, parent) = tokio::try_join!(
-                    entry_at_tree(self, commit.tree, commit.oid, path, operation),
-                    path_history_commit(parent, operation),
-                )?;
-                (entry, Some(parent))
-            }
-            None => (
-                entry_at_tree(self, commit.tree, commit.oid, path, operation).await?,
-                None,
-            ),
-        };
-        let mut current = Some((commit, entry, parent));
-        while let Some((commit, entry, parent)) = current {
-            operation.ensure_active()?;
-            let (parent_entry, next_parent) = match parent.as_ref() {
-                Some(parent) => match parent.parents.first().copied() {
-                    Some(next) => {
-                        let (entry, next) = tokio::try_join!(
-                            entry_at_tree(self, parent.tree, parent.oid, path, operation),
-                            path_history_commit(next, operation),
-                        )?;
-                        (entry, Some(next))
-                    }
-                    None => (
-                        entry_at_tree(self, parent.tree, parent.oid, path, operation).await?,
-                        None,
-                    ),
-                },
-                None => (None, None),
-            };
-            let parent_entries = parent
-                .as_ref()
-                .map(|_| std::slice::from_ref(&parent_entry))
-                .unwrap_or_default();
-            let resume = parent.as_ref().map(|parent| parent.oid);
-            if append_path_history_change(
-                &mut items,
-                commit,
-                entry.as_ref(),
-                parent_entries,
-                page,
-                operation,
-            )
-            .await?
+        const PREFETCH: usize = 16;
+
+        let mut carry: Option<(Commit, Option<TreeEntry>)> = None;
+        let mut next_oid = start;
+        loop {
+            let mut commits = Vec::new();
+            commits
+                .try_reserve_exact(PREFETCH)
+                .map_err(|source| Error::Allocation {
+                    requested: PREFETCH.saturating_mul(mem::size_of::<Commit>()),
+                    source,
+                })?;
+            let mut oid = Some(next_oid);
+            while commits.len() < PREFETCH
+                && let Some(current_oid) = oid
             {
-                return self.first_parent_path_page(path, items, resume);
+                operation.ensure_active()?;
+                let commit = path_history_commit(current_oid, operation).await?;
+                oid = commit.parents.first().copied();
+                commits.push(commit);
             }
-            current = parent.map(|parent| (parent, parent_entry, next_parent));
+            let entries = entries_at_trees(&commits, path, operation).await?;
+            let mut batch = commits.into_iter().zip(entries);
+            let mut current = match carry.take() {
+                Some(carry) => carry,
+                None => batch.next().ok_or(Error::InternalInvariant {
+                    invariant: "first-parent prefetch produced no commits",
+                })?,
+            };
+            for parent in batch {
+                let resume = parent.0.oid;
+                if append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    std::slice::from_ref(&parent.1),
+                    page,
+                    operation,
+                )
+                .await?
+                {
+                    return self.first_parent_path_page(path, items, Some(resume));
+                }
+                current = parent;
+            }
+            let Some(parent) = current.0.parents.first().copied() else {
+                let _ = append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    &[],
+                    page,
+                    operation,
+                )
+                .await?;
+                return Ok(Page { items, next: None });
+            };
+            carry = Some(current);
+            next_oid = parent;
         }
-        Ok(Page { items, next: None })
     }
 
     fn first_parent_path_page(

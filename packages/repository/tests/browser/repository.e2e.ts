@@ -382,6 +382,19 @@ test("overview groups files with their commit and opens the tree when navigating
   ).toBeVisible();
   await expect(page.locator(".tree-sidebar")).toHaveCount(0);
   const panel = page.getByRole("region", { name: "Folders and files" });
+  const toolbar = page.locator(".repo-overview .toolbar");
+  await expect(toolbar).toHaveCSS("margin-bottom", "16px");
+  await expect
+    .poll(async () => {
+      const toolbarBottom = await toolbar.evaluate(
+        (node) => node.getBoundingClientRect().bottom,
+      );
+      const panelTop = await panel.evaluate(
+        (node) => node.getBoundingClientRect().top,
+      );
+      return panelTop - toolbarBottom;
+    })
+    .toBeGreaterThanOrEqual(16);
   await expect(
     panel.getByText("Make the repository easier to browse"),
   ).toBeVisible();
