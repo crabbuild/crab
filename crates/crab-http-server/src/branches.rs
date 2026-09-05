@@ -164,7 +164,7 @@ async fn create(
     if !principal.can_write(&repository.config) {
         return Err(Error::Permission);
     }
-    let branch = branch_ref(&input.name)?;
+    let branch = branch_ref(&input.name).map_err(Error::Input)?;
     let source = ObjectId::from_hex(input.source_oid.as_bytes())
         .ok()
         .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
@@ -186,17 +186,16 @@ async fn create(
     ))
 }
 
-fn branch_ref(name: &str) -> Result<String, Error> {
+pub(crate) fn branch_ref(name: &str) -> Result<String, &'static str> {
     if name.is_empty()
         || name.len() > MAX_BRANCH_BYTES
         || name.trim() != name
         || name.starts_with("refs/")
         || name.chars().any(char::is_control)
     {
-        return Err(Error::Input("Enter a valid branch name"));
+        return Err("Enter a valid branch name");
     }
     let branch = format!("refs/heads/{name}");
-    crab_git::validate_push_refname(&branch)
-        .map_err(|_| Error::Input("Enter a valid branch name"))?;
+    crab_git::validate_push_refname(&branch).map_err(|_| "Enter a valid branch name")?;
     Ok(branch)
 }

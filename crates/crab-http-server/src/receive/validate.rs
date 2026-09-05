@@ -131,6 +131,7 @@ pub(super) async fn prepare(
     directory: std::path::PathBuf,
     input: Option<BufReader<File>>,
     updates: Vec<RefUpdate>,
+    visibility_bases: BTreeMap<String, (String, ObjectId)>,
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
     let default_branch = repository
@@ -213,22 +214,30 @@ pub(super) async fn prepare(
                 let Some(new) = update.new else {
                     continue;
                 };
-                source.prior = update
-                    .old
-                    .map(|old| (update.name.clone(), old))
-                    .or_else(|| {
-                        // New refs at an existing tip can reuse that exact
-                        // committed ref closure instead of walking the graph.
-                        base.iter()
-                            .find(|(name, tip)| {
-                                **tip == new
-                                    && source
-                                        .proof
-                                        .as_ref()
-                                        .is_some_and(|proof| proof.contains_ref(name))
-                            })
-                            .map(|(name, tip)| (name.clone(), *tip))
-                    });
+                source.prior = match visibility_bases.get(&update.name) {
+                    Some((name, tip)) if base.get(name) == Some(tip) => Some((name.clone(), *tip)),
+                    Some(_) => {
+                        return Err(ReceiveError::Request(
+                            "Visibility base changed during receive admission; retry",
+                        ));
+                    }
+                    None => update
+                        .old
+                        .map(|old| (update.name.clone(), old))
+                        .or_else(|| {
+                            // New refs at an existing tip can reuse that exact
+                            // committed ref closure instead of walking the graph.
+                            base.iter()
+                                .find(|(name, tip)| {
+                                    **tip == new
+                                        && source
+                                            .proof
+                                            .as_ref()
+                                            .is_some_and(|proof| proof.contains_ref(name))
+                                })
+                                .map(|(name, tip)| (name.clone(), *tip))
+                        }),
+                };
                 let proof = receive_plan::plan_visibility(
                     &incoming,
                     new,

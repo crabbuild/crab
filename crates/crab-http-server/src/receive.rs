@@ -123,6 +123,7 @@ pub(crate) async fn publish_objects(
     key: (String, String),
     update: crab_git::receive_plan::RefUpdate,
     objects: Vec<(gix_object::Kind, Vec<u8>)>,
+    visibility_base: Option<(String, gix_hash::ObjectId)>,
 ) -> Result<()> {
     let permit = Arc::clone(&server.git_admission)
         .try_acquire_owned()
@@ -146,6 +147,7 @@ pub(crate) async fn publish_objects(
                 directory,
                 std::io::BufReader::new(file),
                 update,
+                visibility_base,
                 &worker_cancel,
             )
             .await

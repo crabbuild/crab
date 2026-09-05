@@ -170,7 +170,9 @@ export function PullRequests({
 }) {
   const pull = url.searchParams.get("pull");
   if (pull === "new")
-    return <NewPull repo={repo} refs={refs} csrf={csrf} theme={theme} />;
+    return (
+      <NewPull repo={repo} refs={refs} url={url} csrf={csrf} theme={theme} />
+    );
   if (pull) {
     const number = Number(pull);
     if (!Number.isSafeInteger(number) || number <= 0)
@@ -356,23 +358,35 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
 function NewPull({
   repo,
   refs,
+  url,
   csrf,
   theme,
 }: {
   repo: Repository;
   refs: Refs;
+  url: URL;
   csrf: string;
   theme: "light" | "dark";
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
   );
-  const initialBase = refs.head?.name ?? branches[0]?.name ?? "";
+  const requestedBase = url.searchParams.get("base");
+  const initialBase =
+    branches.find((ref) => ref.name === requestedBase)?.name ??
+    refs.head?.name ??
+    branches[0]?.name ??
+    "";
+  const requestedHead = url.searchParams.get("head");
   const [base, setBase] = useState(initialBase);
   const [head, setHead] = useState(
-    branches.find((ref) => ref.name !== initialBase)?.name ?? initialBase,
+    branches.find((ref) => ref.name === requestedHead)?.name ??
+      branches.find((ref) => ref.name !== initialBase)?.name ??
+      initialBase,
   );
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(
+    (url.searchParams.get("title") ?? "").slice(0, 256),
+  );
   const [body, setBody] = useState("");
   const mutation = useMutation(csrf);
   const submission = useSubmission();

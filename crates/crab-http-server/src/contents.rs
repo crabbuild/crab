@@ -46,6 +46,8 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
 struct CreateInput {
     branch: String,
     expected_head: String,
+    #[serde(default)]
+    new_branch: Option<String>,
     path_hex: String,
     content: String,
     message: String,
@@ -56,6 +58,8 @@ struct CreateInput {
 struct UpdateInput {
     branch: String,
     expected_head: String,
+    #[serde(default)]
+    new_branch: Option<String>,
     expected_blob: String,
     path_hex: String,
     content: String,
@@ -67,6 +71,8 @@ struct UpdateInput {
 struct DeleteInput {
     branch: String,
     expected_head: String,
+    #[serde(default)]
+    new_branch: Option<String>,
     expected_blob: String,
     path_hex: String,
     message: String,
@@ -77,6 +83,8 @@ struct DeleteInput {
 struct UploadInput {
     branch: String,
     expected_head: String,
+    #[serde(default)]
+    new_branch: Option<String>,
     files: Vec<UploadFileInput>,
     message: String,
 }
@@ -108,6 +116,14 @@ impl ChangeInput {
             Self::Create(input) => &input.expected_head,
             Self::Update(input) => &input.expected_head,
             Self::Delete(input) => &input.expected_head,
+        }
+    }
+
+    fn new_branch(&self) -> Option<&str> {
+        match self {
+            Self::Create(input) => input.new_branch.as_deref(),
+            Self::Update(input) => input.new_branch.as_deref(),
+            Self::Delete(input) => input.new_branch.as_deref(),
         }
     }
 
@@ -173,6 +189,8 @@ enum Error {
     Permission,
     #[error("The branch changed; reload before committing")]
     Conflict,
+    #[error("A branch with this name already exists or conflicts with another branch")]
+    BranchExists,
     #[error("A file or directory already exists at this path")]
     Exists,
     #[error("The file no longer exists")]
@@ -243,6 +261,11 @@ impl IntoResponse for Error {
                 "conflict",
                 "The branch changed; reload before committing",
             ),
+            Self::BranchExists => (
+                StatusCode::CONFLICT,
+                "branch_exists",
+                "A branch with this name already exists or conflicts with another branch",
+            ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Request(_)) => (
                 StatusCode::CONFLICT,
                 "conflict",
@@ -261,6 +284,19 @@ impl IntoResponse for Error {
                     StatusCode::CONFLICT,
                     "conflict",
                     "The branch changed; reload before committing",
+                )
+            }
+            Self::Receive(error)
+                if matches!(
+                    error.as_ref(),
+                    ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Namespace(_))
+                        | ReceiveError::Write(crab_write::WriteError::Namespace(_))
+                ) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "branch_exists",
+                    "A branch with this name already exists or conflicts with another branch",
                 )
             }
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Graph(_)) => (
@@ -389,6 +425,7 @@ async fn upload(
         return Err(Error::Permission);
     }
     validate_branch(&input.branch)?;
+    let publication_branch = publication_branch(&input.branch, input.new_branch.as_deref())?;
     validate_message(&input.message)?;
     let expected = parse_oid(
         &input.expected_head,
@@ -409,6 +446,15 @@ async fn upload(
         .ok_or(Error::Conflict)?;
     if current != expected {
         return Err(Error::Conflict);
+    }
+    if publication_branch != input.branch
+        && repository
+            .refs()
+            .entries
+            .iter()
+            .any(|reference| reference.name == publication_branch)
+    {
+        return Err(Error::BranchExists);
     }
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -441,17 +487,18 @@ async fn upload(
         principal,
         (owner, name),
         crab_git::receive_plan::RefUpdate {
-            name: input.branch.clone(),
-            old: Some(expected),
+            name: publication_branch.clone(),
+            old: (publication_branch == input.branch).then_some(expected),
             new: Some(built.oid),
         },
         built.objects,
+        visibility_base(&input.branch, &publication_branch, expected),
     )
     .await?;
     Ok((
         StatusCode::CREATED,
         Json(UploadOutput {
-            branch: input.branch,
+            branch: publication_branch,
             commit: built.oid.to_string(),
             paths_hex: upload.paths_hex,
         }),
@@ -470,6 +517,7 @@ async fn change(
         return Err(Error::Permission);
     }
     let path = validate_input(&input)?;
+    let publication_branch = publication_branch(input.branch(), input.new_branch())?;
     let expected = parse_oid(
         input.expected_head(),
         "Expected head must be a full SHA-1 commit ID",
@@ -488,6 +536,15 @@ async fn change(
         .ok_or(Error::Conflict)?;
     if current != expected {
         return Err(Error::Conflict);
+    }
+    if publication_branch != input.branch()
+        && repository
+            .refs()
+            .entries
+            .iter()
+            .any(|reference| reference.name == publication_branch)
+    {
+        return Err(Error::BranchExists);
     }
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -521,17 +578,18 @@ async fn change(
         principal,
         (owner, name),
         crab_git::receive_plan::RefUpdate {
-            name: input.branch().to_owned(),
-            old: Some(expected),
+            name: publication_branch.clone(),
+            old: (publication_branch == input.branch()).then_some(expected),
             new: Some(built.oid),
         },
         built.objects,
+        visibility_base(input.branch(), &publication_branch, expected),
     )
     .await?;
     Ok((
         status,
         Json(ChangeOutput {
-            branch: input.branch().to_owned(),
+            branch: publication_branch,
             commit: built.oid.to_string(),
             path_hex: input.path_hex().to_ascii_lowercase(),
         }),
@@ -566,6 +624,29 @@ fn validate_branch(branch: &str) -> Result<(), Error> {
         return Err(Error::Input("Select an existing branch"));
     }
     Ok(())
+}
+
+fn publication_branch(source: &str, new_branch: Option<&str>) -> Result<String, Error> {
+    let Some(name) = new_branch else {
+        return Ok(source.to_owned());
+    };
+    let branch = crate::branches::branch_ref(name).map_err(Error::Input)?;
+    if branch == source {
+        return Err(Error::Input(
+            "New branch must differ from the source branch",
+        ));
+    }
+    Ok(branch)
+}
+
+fn visibility_base(
+    source: &str,
+    destination: &str,
+    expected: ObjectId,
+) -> Option<(String, ObjectId)> {
+    // A new destination has no old OID for its absent-ref comparison. Carry the
+    // exact source separately so visibility validation can reuse its proven closure.
+    (destination != source).then(|| (source.to_owned(), expected))
 }
 
 fn validate_path(path_hex: &str) -> Result<crab_remote_git::GitPath, Error> {

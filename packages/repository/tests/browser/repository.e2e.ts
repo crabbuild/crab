@@ -26,6 +26,7 @@ async function selectTheme(page: Page, theme: "light" | "dark") {
 test.beforeEach(async ({ page }) => {
   let created = false;
   let createdBranch: string | null = null;
+  let createdBranchHead = oid;
   let deleted = false;
   let currentHead = oid;
   let currentReadme = readme;
@@ -46,7 +47,15 @@ test.beforeEach(async ({ page }) => {
               name: "project",
               description: "A repository for our team.",
               access: "write",
-              protected_branches: [],
+              protected_branches: page.url().includes("scenario=protected")
+                ? [
+                    {
+                      branch: "main",
+                      required_approvals: 1,
+                      required_checks: [],
+                    },
+                  ]
+                : [],
             },
           ],
         },
@@ -89,12 +98,35 @@ test.beforeEach(async ({ page }) => {
       const body = route.request().postDataJSON() as {
         branch: string;
         expected_head: string;
+        new_branch?: string;
         expected_blob?: string;
         path_hex: string;
         content?: string;
         message: string;
       };
       const method = route.request().method();
+      if (body.new_branch) {
+        expect(method).toBe("PATCH");
+        expect(body).toEqual({
+          branch: "refs/heads/main",
+          expected_head: oid,
+          new_branch: "docs/readme-review",
+          expected_blob: oid,
+          path_hex: pathHex("README.md"),
+          content: "# Proposed in Crab\n",
+          message: "Propose README update",
+        });
+        createdBranch = `refs/heads/${body.new_branch}`;
+        createdBranchHead = "3".repeat(40);
+        return route.fulfill({
+          status: 200,
+          json: {
+            branch: createdBranch,
+            commit: createdBranchHead,
+            path_hex: body.path_hex,
+          },
+        });
+      }
       if (method === "POST") {
         expect(body).toEqual({
           branch: "refs/heads/main",
@@ -154,6 +186,7 @@ test.beforeEach(async ({ page }) => {
           },
         });
       createdBranch = `refs/heads/${body.name}`;
+      createdBranchHead = body.source_oid;
       return route.fulfill({
         status: 201,
         json: { branch: createdBranch, commit: body.source_oid },
@@ -166,7 +199,7 @@ test.beforeEach(async ({ page }) => {
           refs: [
             { name: "refs/heads/main", oid: currentHead },
             ...(createdBranch
-              ? [{ name: createdBranch, oid: currentHead }]
+              ? [{ name: createdBranch, oid: createdBranchHead }]
               : []),
           ],
           generation: 1,
@@ -693,6 +726,40 @@ test("file-tree add menu uploads text and binary files in one commit", async ({
   await expect(
     page.getByRole("region", { name: "Folders and files" }),
   ).toContainText("raw.bin");
+});
+
+test("protected file edits create a review branch and open the exact comparison", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob&view=edit&scenario=protected`,
+  );
+  await expect(
+    page.getByRole("heading", { name: "Editing README.md" }),
+  ).toBeVisible();
+  const direct = page.getByRole("radio", {
+    name: /Commit directly to main/,
+  });
+  await expect(direct).toBeDisabled();
+  await expect(
+    page.getByRole("radio", {
+      name: /Create a new branch for this commit/,
+    }),
+  ).toBeChecked();
+  await page.getByLabel("File content").fill("# Proposed in Crab\n");
+  await page.getByLabel("Commit message").fill("Propose README update");
+  await page.getByLabel("New branch name").fill("docs/readme-review");
+  await page.getByRole("button", { name: "Propose changes" }).click();
+  await expect(page).toHaveURL(/view=pulls&pull=new/);
+  await expect(page.locator(".compare-picker select").nth(0)).toHaveValue(
+    "refs/heads/main",
+  );
+  await expect(page.locator(".compare-picker select").nth(1)).toHaveValue(
+    "refs/heads/docs/readme-review",
+  );
+  await expect(page.getByLabel("Title", { exact: true })).toHaveValue(
+    "Propose README update",
+  );
 });
 
 test("branch file actions edit and delete through reviewable commit pages", async ({

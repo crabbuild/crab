@@ -138,21 +138,30 @@ Browser file commits use `POST`, `PATCH`, and `DELETE` on
 `/api/repos/{owner}/{name}/contents`. Every request names an existing
 `refs/heads/*` branch, its exact `expected_head`, a raw `path_hex`, and a bounded
 commit message. Create and edit include UTF-8 `content`; edit and delete also
-include the exact `expected_blob`. The server rejects stale branch or blob state,
-existing/missing path races, unsupported entry kinds, unchanged edits, invalid
-paths, files larger than 900 KiB, and protected-branch writes. It creates Git
-objects in process and sends the resulting pack through the same quarantine,
-graph validation, ref lock, visibility, and journal publication path used by
-native smart-HTTP pushes. Empty trees created by deletion are pruned. No server
-checkout or local Git object database is created.
+include the exact `expected_blob`. An optional short `new_branch` publishes the
+commit directly to a new `refs/heads/*` ref while leaving the source branch
+unchanged. The new ref must be absent; its visibility proof reuses the exact,
+generation-pinned source ref closure only after proving the new commit reaches
+that source tip. This lets browser changes leave protected source branches through
+an unprotected proposal branch without weakening protected-ref publication.
+The server rejects stale branch or blob state, existing or namespace-conflicting
+proposal branches, existing/missing path races, unsupported entry kinds,
+unchanged edits, invalid paths, files larger than 900 KiB, and direct
+protected-branch writes. It creates Git objects in process and sends the resulting
+pack through the same quarantine, graph validation, ref lock, visibility, and
+journal publication path used by native smart-HTTP pushes. Empty trees created by
+deletion are pruned. No server checkout or local Git object database is created.
 
 Browser uploads use `POST /api/repos/{owner}/{name}/uploads` with the same branch,
 exact-head, commit-message, authorization, CSRF and protected-branch contracts.
-The request carries 1–100 raw `path_hex` and base64-content pairs. Each file is
-limited to 900 KiB and the batch to 4 MiB. The server rejects duplicate or
-overlapping paths and existing entries before publishing one commit, so a failed
-file leaves the entire batch unpublished. Binary bytes survive unchanged and the
-resulting objects use the canonical native-push publication path.
+It accepts the same optional `new_branch` proposal target. The request carries
+1–100 raw `path_hex` and base64-content pairs. Each file is limited to 900 KiB and
+the batch to 4 MiB. The server rejects duplicate or overlapping paths and existing
+entries before publishing one commit, so a failed file leaves the entire batch
+unpublished. Binary bytes survive unchanged and the resulting objects use the
+canonical native-push publication path. After a proposal succeeds, the browser
+opens the pull-request composer with the exact source and destination refs and the
+commit message as its initial title.
 
 Browser branch creation uses `POST /api/repos/{owner}/{name}/branches` with a
 short `name` and the full SHA-1 `source_oid` currently shown in the browser. The
@@ -813,7 +822,7 @@ latency guarantee. An uncached Go-to-file search for `kubelet.go` traversed
 6,100 tree objects in 2.22 seconds, transferred 1.42 MB from RustFS, and returned
 the first 50 ranked paths without reading blob bodies. Keyboard selection opened
 `cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-nine Rust server
-tests, nine frontend navigation, model and Markdown tests, and twenty-three Chromium
+tests, nine frontend navigation, model and Markdown tests, and twenty-four Chromium
 tests passed. An authenticated branch integration creates a browser branch from
 an existing commit, reads the exact new ref through both the repository API and
 native `git ls-remote`, and rejects duplicate publication atomically. A signed-in
@@ -859,7 +868,13 @@ A live Kubernetes/RustFS run committed a Markdown file and six-byte binary in on
 upload request in 771 ms. The signed-in browser immediately showed the new commit,
 kept the selected branch while opening the file and rendered its Markdown preview;
 a separate blob read matched the binary byte for byte. This local shared-cache
-measurement is not a production latency guarantee.
+measurement is not a production latency guarantee. A second signed-in run edited
+that Markdown file into a new proposal branch in 887 ms of server publication and
+reached the prefilled pull-request composer 1.77 seconds after clicking. The source
+ref stayed at `f1b63c52755b1c27befccd5bad654a5d564d7d79`; the proposal commit
+`d582073d614d070f5bec5c7c78710b4ddfbc585b` named that exact parent. An independent
+protocol-v2 fetch read the 95-byte Markdown blob byte for byte. These local
+shared-cache measurements are not a production latency guarantee.
 
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue
