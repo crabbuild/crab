@@ -110,8 +110,8 @@ searchable refs pages; the branch page separates the default branch, identifies
 exact protected branches, copies branch names, links immutable commit tips and
 opens a comparison against the default branch. The GitHub-style Releases and Tags
 views list durable releases, render their Markdown notes, link source ZIPs to exact
-tags, and let writers publish, edit, or delete a release. Publication accepts an
-existing tag or creates a new lightweight tag.
+tags, and let writers save private drafts, publish, edit, or delete a release.
+Publication accepts an existing tag or creates a new lightweight tag.
 Writers can delete an unprotected,
 non-default branch after an inline confirmation. The refs pages use the same
 GitHub-derived responsive hierarchy in light and dark themes. Appearance
@@ -232,30 +232,48 @@ cache invalidation path before the browser removes it from the refs page.
 
 Browser release publication uses `POST /api/repos/{owner}/{name}/releases` with a
 stable UUID `request_id`, short `tag_name`, full SHA-1 `target_oid`, title, Markdown
-body and prerelease flag. The target must be a visible commit. An existing
+body, prerelease flag and `draft` state. The target must be a visible commit. An existing
 lightweight or annotated tag is accepted only when it peels to that exact commit;
 otherwise the request returns 409 without reserving the tag for a release. A new
 tag is published through the same admission, ref lease, visibility, journal and
-cache invalidation path as native smart-HTTP push. The request and tag claims,
+cache invalidation path as native smart-HTTP push. A draft reserves its release
+tag but does not publish a new Git tag until a version-bound edit sets `draft` to
+false. Drafts persist across restart and are returned only to writers; readers
+receive neither draft list entries nor draft details. The request and tag claims,
 number reservation and completed release document live under the repository's
 versioned `app/v1/releases` namespace. Replaying the same request revalidates and, when
 needed, recovers the Git tag before returning the stored release, while a changed
-payload or competing tag claim returns 409. Only completed release documents are
-visible through `GET /api/repos/{owner}/{name}/releases` and
+payload or competing tag claim returns 409. Non-deleted release documents are
+visible according to that draft policy through `GET /api/repos/{owner}/{name}/releases` and
 `GET /api/repos/{owner}/{name}/releases/{number}`. Lists return 20 releases by
-default, accept a maximum page size of 50, and use the `before` cursor. Request
+default, accept a maximum page size of 50, use the `before` cursor, and accept a
+case-insensitive `query` across tag, title, notes and author. Request
 bodies are limited to 80 KiB; release notes to 64 KiB, tag names to 255 bytes and
 titles to 256 characters.
 
 Release updates use `PATCH /api/repos/{owner}/{name}/releases/{number}` with the
-displayed `version`, title, Markdown body and prerelease flag. The record's object
+displayed `version`, title, Markdown body, prerelease flag and draft state. Publishing
+a draft creates or adopts its exact lightweight or annotated tag through canonical
+ref publication, records `published_at`, and refreshes the browser refs snapshot.
+The record's object
 ETag and version must both still match, so concurrent edits return 409 instead of
 overwriting newer notes. `DELETE` on the same route carries the displayed version,
 records a durable tombstone and releases the application tag claim while retaining
 the actual Git tag. Replaying that deletion with the same version repairs an
 interrupted claim release and returns 204. A later release can reuse the retained
-tag with a new submission and release number. Draft releases and attached assets
-are not implemented yet.
+tag with a new submission and release number. Attached release assets are not
+implemented yet.
+
+A fresh isolated RustFS qualification saved a private draft without advertising
+its reserved tag, recovered the same draft after a graceful restart, and then
+published it as the exact target commit. Draft creation took 19 ms, the restart
+read took 3 ms, and publication took 156 ms locally. An independent protocol-v2
+fetch returned the exact commit and README bytes; a second restart retained the
+published title and version. The Releases view was also compared with GitHub's
+current public Kubernetes release page: both now use segmented Releases/Tags
+navigation, a release search, a compact release index, inline tag and commit
+metadata, and an Assets disclosure. These local timings are not production
+latency guarantees.
 
 Repository administrators change the default branch with `PATCH
 /api/repos/{owner}/{name}/settings/default-branch`. The request carries the short
@@ -1183,7 +1201,7 @@ audit reported zero vulnerabilities.
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions, configured read/write/admin grants and repository-scoped read/write Git tokens; membership administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser release publication/edit/deletion, branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, private release drafts and browser release publication/edit/deletion, branch creation/deletion, default-branch administration, and durable exact protection-rule administration have scoped proof |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server safely initializes configured prefixes; administrators can change the default branch and exact protection rules and archive/unarchive repositories with durable stale-state protection; repository creation/import, audit history and remaining settings are pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |

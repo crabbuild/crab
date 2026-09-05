@@ -35,6 +35,7 @@ struct ReleaseClaim {
     title: String,
     body: String,
     prerelease: bool,
+    draft: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,6 +49,7 @@ struct ReleaseReservation {
     title: String,
     body: String,
     prerelease: bool,
+    draft: bool,
     created_at: u64,
 }
 
@@ -58,13 +60,15 @@ struct Release {
     request_id: String,
     author: Identity,
     tag_name: String,
-    tag_oid: String,
+    tag_oid: Option<String>,
     target_oid: String,
     title: String,
     body: String,
     prerelease: bool,
+    draft: bool,
     version: u64,
     created_at: u64,
+    published_at: Option<u64>,
     updated_at: u64,
     deleted: bool,
 }
@@ -91,6 +95,7 @@ struct NewRelease {
     title: String,
     body: String,
     prerelease: bool,
+    draft: bool,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +105,7 @@ struct ReleaseEdit {
     title: String,
     body: String,
     prerelease: bool,
+    draft: bool,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +119,7 @@ struct ReleaseDelete {
 struct ListParameters {
     before: Option<u64>,
     limit: Option<usize>,
+    query: Option<String>,
 }
 
 impl ListParameters {
@@ -126,6 +133,14 @@ impl ListParameters {
             return Err(Error::Invalid("Release page size or cursor is invalid"));
         }
         Ok(limit)
+    }
+
+    fn query(&self) -> Result<Option<String>> {
+        let query = self.query.as_deref().map(str::trim).unwrap_or_default();
+        if query.chars().count() > 256 || query.chars().any(char::is_control) {
+            return Err(Error::Invalid("Release search is invalid"));
+        }
+        Ok((!query.is_empty()).then(|| query.to_lowercase()))
     }
 }
 
@@ -182,6 +197,7 @@ fn same_reservation(left: &ReleaseReservation, right: &ReleaseReservation) -> bo
         && left.title == right.title
         && left.body == right.body
         && left.prerelease == right.prerelease
+        && left.draft == right.draft
 }
 
 fn same_claim(left: &ReleaseClaim, right: &ReleaseClaim) -> bool {
@@ -192,18 +208,14 @@ fn same_claim(left: &ReleaseClaim, right: &ReleaseClaim) -> bool {
         && left.title == right.title
         && left.body == right.body
         && left.prerelease == right.prerelease
+        && left.draft == right.draft
 }
 
-fn same_release(
-    release: &Release,
-    reservation: &ReleaseReservation,
-    expected_tag_oid: &str,
-) -> bool {
+fn same_release(release: &Release, reservation: &ReleaseReservation) -> bool {
     release.number == reservation.number
         && release.request_id == reservation.request_id
         && app_storage::same_author(&release.author, &reservation.author)
         && release.tag_name == reservation.tag_name
-        && release.tag_oid == expected_tag_oid
         && release.target_oid == reservation.target_oid
         && release.created_at == reservation.created_at
 }
@@ -217,10 +229,25 @@ fn view(release: &Release) -> Value {
         "title": release.title,
         "body": release.body,
         "prerelease": release.prerelease,
+        "draft": release.draft,
         "version": release.version,
         "author": release.author.name,
         "created_at": release.created_at,
+        "published_at": release.published_at,
         "updated_at": release.updated_at,
+    })
+}
+
+fn matches_query(release: &Release, query: Option<&str>) -> bool {
+    query.is_none_or(|query| {
+        [
+            &release.tag_name,
+            &release.title,
+            &release.body,
+            &release.author.name,
+        ]
+        .iter()
+        .any(|value| value.to_lowercase().contains(query))
     })
 }
 
@@ -322,33 +349,15 @@ async fn release_tag_claim(repo: &Repository, release: &Release, version: u64) -
     Err(Error::Conflict)
 }
 
-async fn reserve(
-    repo: &Repository,
-    request_id: String,
-    author: Identity,
-    tag_name: String,
-    target_oid: String,
-    title: String,
-    body: String,
-    prerelease: bool,
-) -> Result<ReleaseReservation> {
-    let claim = ReleaseClaim {
-        request_id: request_id.clone(),
-        author: author.clone(),
-        tag_name: tag_name.clone(),
-        target_oid: target_oid.clone(),
-        title: title.clone(),
-        body: body.clone(),
-        prerelease,
-    };
+async fn reserve(repo: &Repository, claim: ReleaseClaim) -> Result<ReleaseReservation> {
     let request =
-        app_storage::create_or_read(repo, &request_path(&request_id), claim.clone()).await?;
+        app_storage::create_or_read(repo, &request_path(&claim.request_id), claim.clone()).await?;
     if !same_claim(&request, &claim) {
         return Err(Error::RequestConflict);
     }
     claim_tag(repo, &claim).await?;
     let existing =
-        app_storage::read::<ReleaseReservation>(repo, &reservation_path(&request_id)).await?;
+        app_storage::read::<ReleaseReservation>(repo, &reservation_path(&claim.request_id)).await?;
     let (number, created_at) = match existing.as_ref() {
         Some((reservation, _)) => (reservation.number, reservation.created_at),
         None => (
@@ -358,13 +367,14 @@ async fn reserve(
     };
     let proposed = ReleaseReservation {
         number,
-        request_id: request_id.clone(),
-        author,
-        tag_name,
-        target_oid,
-        title,
-        body,
-        prerelease,
+        request_id: claim.request_id.clone(),
+        author: claim.author.clone(),
+        tag_name: claim.tag_name.clone(),
+        target_oid: claim.target_oid.clone(),
+        title: claim.title.clone(),
+        body: claim.body.clone(),
+        prerelease: claim.prerelease,
+        draft: claim.draft,
         created_at,
     };
     let request = if let Some((reservation, _)) = existing {
@@ -373,7 +383,8 @@ async fn reserve(
         }
         reservation
     } else {
-        app_storage::create_or_read(repo, &reservation_path(&request_id), proposed.clone()).await?
+        app_storage::create_or_read(repo, &reservation_path(&claim.request_id), proposed.clone())
+            .await?
     };
     if !same_reservation(&request, &proposed) {
         return Err(Error::RequestConflict);
@@ -468,18 +479,27 @@ async fn create(
     current_tag(&server, repo, &reference, target).await?;
     let reservation = reserve(
         repo,
-        request_id,
-        app::actor(&principal)?,
-        tag_name,
-        target_oid,
-        title,
-        input.body,
-        input.prerelease,
+        ReleaseClaim {
+            request_id,
+            author: app::actor(&principal)?,
+            tag_name,
+            target_oid,
+            title,
+            body: input.body,
+            prerelease: input.prerelease,
+            draft: input.draft,
+        },
     )
     .await?;
-    let tag_oid = ensure_tag(Arc::clone(&server), principal, key, repo, reference, target)
-        .await?
-        .to_string();
+    let tag_oid = if reservation.draft {
+        None
+    } else {
+        Some(
+            ensure_tag(Arc::clone(&server), principal, key, repo, reference, target)
+                .await?
+                .to_string(),
+        )
+    };
     let release = Release {
         number: reservation.number,
         request_id: reservation.request_id.clone(),
@@ -490,13 +510,18 @@ async fn create(
         title: reservation.title.clone(),
         body: reservation.body.clone(),
         prerelease: reservation.prerelease,
+        draft: reservation.draft,
         version: 1,
         created_at: reservation.created_at,
+        published_at: (!reservation.draft).then_some(reservation.created_at),
         updated_at: reservation.created_at,
         deleted: false,
     };
     let release = app_storage::create_or_read(repo, &release_path(release.number), release).await?;
-    if release.deleted || !same_release(&release, &reservation, &tag_oid) {
+    if release.deleted
+        || !same_release(&release, &reservation)
+        || tag_oid.is_some_and(|tag_oid| release.tag_oid.as_deref() != Some(&tag_oid))
+    {
         return Err(Error::ReleaseConflict);
     }
     Ok((StatusCode::CREATED, Json(view(&release))))
@@ -508,10 +533,11 @@ async fn detail(
     Path((owner, name, number)): Path<(String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let include_drafts = principal.can_write(&repo.config);
     let release = app_storage::read::<Release>(repo, &release_path(app::number(number)?))
         .await?
         .map(|(release, _)| release)
-        .filter(|release| !release.deleted)
+        .filter(|release| !release.deleted && (include_drafts || !release.draft))
         .ok_or(Error::ReleaseNotFound)?;
     Ok(Json(view(&release)))
 }
@@ -522,7 +548,8 @@ async fn edit(
     Path((owner, name, number)): Path<(String, String, u64)>,
     input: std::result::Result<Json<ReleaseEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let key = (owner, name);
+    let repo = app::repository(&server, &principal, &key)?;
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -537,15 +564,37 @@ async fn edit(
     if release.version != input.version {
         return Err(Error::Conflict);
     }
+    let now = app_storage::now()?;
+    if release.draft && !input.draft {
+        let target = ObjectId::from_hex(release.target_oid.as_bytes())
+            .map_err(|_| Error::ReleaseConflict)?;
+        let (_, reference) = tag_name(&release.tag_name)?;
+        release.tag_oid = Some(
+            ensure_tag(
+                Arc::clone(&server),
+                principal.clone(),
+                key,
+                repo,
+                reference,
+                target,
+            )
+            .await?
+            .to_string(),
+        );
+        release.published_at = Some(now);
+    } else if !release.draft && input.draft {
+        release.published_at = None;
+    }
     release.title = title;
     release.body = input.body;
     release.prerelease = input.prerelease;
+    release.draft = input.draft;
     release.version = release
         .version
         .checked_add(1)
         .filter(|version| *version < app_storage::MAX_NUMBER)
         .ok_or(Error::Conflict)?;
-    release.updated_at = app_storage::now()?;
+    release.updated_at = now;
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -600,7 +649,9 @@ async fn list(
     Query(parameters): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
+    let include_drafts = principal.can_write(&repo.config);
     let limit = parameters.limit()?;
+    let query = parameters.query()?;
     let last = app_storage::last_number(repo, ROOT).await?;
     let mut next = last.min(parameters.before.map_or(last, |before| before - 1));
     let mut items = Vec::new();
@@ -619,6 +670,8 @@ async fn list(
             scanned += 1;
             if let Some((release, _)) = entry
                 && !release.deleted
+                && (include_drafts || !release.draft)
+                && matches_query(&release, query.as_deref())
             {
                 items.push(view(&release));
             }

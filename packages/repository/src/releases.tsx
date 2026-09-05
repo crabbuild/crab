@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Button, IconButton, Label } from "@primer/react";
+import { Button, IconButton, Label, TextInput } from "@primer/react";
 import {
   ChevronLeftIcon,
   DownloadIcon,
+  GitCommitIcon,
   PencilIcon,
+  SearchIcon,
   TagIcon,
   TrashIcon,
 } from "@primer/octicons-react";
@@ -27,27 +29,64 @@ function timestamp(value: number) {
   });
 }
 
-function ReleaseNavigation({ repo }: { repo: Repository }) {
+function ReleaseNavigation({
+  repo,
+  query,
+}: {
+  repo: Repository;
+  query?: string;
+}) {
+  const [search, setSearch] = useState(query ?? "");
   return (
-    <nav className="refs-tabs release-tabs" aria-label="Releases and tags">
-      <Link
-        className="active"
-        aria-current="page"
-        href={repoHref(repo, { view: "releases" })}
-      >
-        Releases
-      </Link>
-      <Link href={repoHref(repo, { view: "tags" })}>Tags</Link>
-    </nav>
+    <div className="release-navigation">
+      <nav className="release-tabs" aria-label="Releases and tags">
+        <Link
+          className="active"
+          aria-current="page"
+          href={repoHref(repo, { view: "releases" })}
+        >
+          Releases
+        </Link>
+        <Link href={repoHref(repo, { view: "tags" })}>Tags</Link>
+      </nav>
+      {query !== undefined && (
+        <form
+          role="search"
+          aria-label="Search releases"
+          onSubmit={(event) => {
+            event.preventDefault();
+            navigate(
+              repoHref(repo, {
+                view: "releases",
+                query: search.trim() || undefined,
+              }),
+            );
+          }}
+        >
+          <TextInput
+            aria-label="Find a release"
+            leadingVisual={SearchIcon}
+            placeholder="Find a release"
+            value={search}
+            maxLength={256}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </form>
+      )}
+    </div>
   );
 }
 
 function ReleaseMeta({ release }: { release: Release }) {
+  const occurredAt = release.draft
+    ? release.updated_at
+    : (release.published_at ?? release.created_at);
   return (
     <p className="release-meta muted">
-      <strong>{release.author}</strong> released this on{" "}
-      <time dateTime={new Date(release.created_at).toISOString()}>
-        {timestamp(release.created_at)}
+      <strong>{release.author}</strong>{" "}
+      {release.draft ? "saved this draft" : "released this"} on{" "}
+      <time dateTime={new Date(occurredAt).toISOString()}>
+        {timestamp(occurredAt)}
       </time>
     </p>
   );
@@ -61,15 +100,19 @@ function SourceArchive({
   release: Release;
 }) {
   return (
-    <a
-      className="button-link release-archive"
-      href={endpoint(repo, "archive", {
-        rev: `refs/tags/${release.tag_name}`,
-      })}
-      download={`${repo.name}-${release.tag_name}.zip`}
-    >
-      <DownloadIcon /> Source code (zip)
-    </a>
+    <details className="release-assets" open>
+      <summary>
+        Assets <span>1</span>
+      </summary>
+      <a
+        href={endpoint(repo, "archive", {
+          rev: `refs/tags/${release.tag_name}`,
+        })}
+        download={`${repo.name}-${release.tag_name}.zip`}
+      >
+        <DownloadIcon /> Source code (zip)
+      </a>
+    </details>
   );
 }
 
@@ -87,16 +130,6 @@ function ReleaseCard({
   const [error, setError] = useState<string>();
   return (
     <article className="panel release-card">
-      <aside className="release-tag">
-        <TagIcon />
-        <Link href={repoHref(repo, { view: "tags" })}>{release.tag_name}</Link>
-        <Link
-          className="release-target"
-          href={repoHref(repo, { view: "commit", rev: release.target_oid })}
-        >
-          {short(release.target_oid)}
-        </Link>
-      </aside>
       <div className="release-content">
         <header>
           <div>
@@ -111,8 +144,28 @@ function ReleaseCard({
               </Link>
             </h3>
             <ReleaseMeta release={release} />
+            <div className="release-ref-meta">
+              <TagIcon />
+              {release.draft ? (
+                <span>{release.tag_name}</span>
+              ) : (
+                <Link href={repoHref(repo, { view: "tags" })}>
+                  {release.tag_name}
+                </Link>
+              )}
+              <GitCommitIcon />
+              <Link
+                href={repoHref(repo, {
+                  view: "commit",
+                  rev: release.target_oid,
+                })}
+              >
+                {short(release.target_oid)}
+              </Link>
+            </div>
           </div>
           <div className="release-header-actions">
+            {release.draft && <Label variant="accent">Draft</Label>}
             {release.prerelease && (
               <Label variant="attention">Pre-release</Label>
             )}
@@ -146,8 +199,10 @@ function ReleaseCard({
             <div>
               <strong>Delete this release?</strong>
               <span>
-                The release notes will be removed. Tag {release.tag_name} will
-                remain available to Git clients.
+                The release notes will be removed.{" "}
+                {release.draft
+                  ? "No Git tag will be published."
+                  : `Tag ${release.tag_name} will remain available to Git clients.`}
               </span>
               {error && (
                 <span className="release-delete-error" role="alert">
@@ -191,9 +246,11 @@ function ReleaseCard({
           </div>
         )}
         <DiscussionMarkdown>{release.body}</DiscussionMarkdown>
-        <footer>
-          <SourceArchive repo={repo} release={release} />
-        </footer>
+        {!release.draft && (
+          <footer>
+            <SourceArchive repo={repo} release={release} />
+          </footer>
+        )}
       </div>
     </article>
   );
@@ -204,55 +261,80 @@ function ReleaseList({
   before,
   csrf,
   canManage,
+  query,
 }: {
   repo: Repository;
   before?: string;
   csrf: string;
   canManage: boolean;
+  query: string;
 }) {
   const releases = useRequest<ReleasePage>(
-    endpoint(repo, "releases", { before, limit: "20" }),
+    endpoint(repo, "releases", { before, limit: "20", query }),
   );
   return (
     <Result state={releases} showTiming={false}>
       {(page) => (
         <>
           {page.items.length ? (
-            <div className="release-list">
-              {page.items.map((release) => (
-                <ReleaseCard
-                  key={release.number}
-                  repo={repo}
-                  release={release}
-                  manage={
-                    canManage
-                      ? {
-                          edit: () =>
-                            navigate(
-                              repoHref(repo, {
-                                view: "releases",
-                                release: String(release.number),
-                                action: "edit",
-                              }),
-                            ),
-                          remove: async () => {
-                            await mutateRelease(repo, csrf, release, "DELETE", {
-                              version: release.version,
-                            });
-                            releases.retry();
-                          },
-                        }
-                      : undefined
-                  }
-                />
-              ))}
+            <div className="release-workspace">
+              <aside className="release-index" aria-label="Release list">
+                <h3>Release list</h3>
+                {page.items.map((release, index) => (
+                  <Link
+                    key={release.number}
+                    className={index === 0 ? "active" : undefined}
+                    href={repoHref(repo, {
+                      view: "releases",
+                      release: String(release.number),
+                    })}
+                  >
+                    {release.tag_name}
+                  </Link>
+                ))}
+              </aside>
+              <div className="release-list">
+                {page.items.map((release) => (
+                  <ReleaseCard
+                    key={release.number}
+                    repo={repo}
+                    release={release}
+                    manage={
+                      canManage
+                        ? {
+                            edit: () =>
+                              navigate(
+                                repoHref(repo, {
+                                  view: "releases",
+                                  release: String(release.number),
+                                  action: "edit",
+                                }),
+                              ),
+                            remove: async () => {
+                              await mutateRelease(
+                                repo,
+                                csrf,
+                                release,
+                                "DELETE",
+                                { version: release.version },
+                              );
+                              releases.retry();
+                            },
+                          }
+                        : undefined
+                    }
+                  />
+                ))}
+              </div>
             </div>
           ) : (
             <div className="notice release-empty">
               <TagIcon size={24} />
               <h3>There aren’t any releases here</h3>
               <p>
-                Published releases and their source archives will appear here.
+                {query
+                  ? "No release tag, title, notes, or author matches this search."
+                  : "Published releases and their source archives will appear here."}
               </p>
             </div>
           )}
@@ -263,6 +345,7 @@ function ReleaseList({
                 href={repoHref(repo, {
                   view: "releases",
                   before: String(page.next),
+                  query: query || undefined,
                 })}
               >
                 Older releases
@@ -364,10 +447,18 @@ export function Releases({
           </Link>
         )}
       </div>
-      <ReleaseNavigation repo={repo} />
+      <ReleaseNavigation
+        repo={repo}
+        query={selected ? undefined : (url.searchParams.get("query") ?? "")}
+      />
       {selected && url.searchParams.get("action") === "edit" ? (
         canManage ? (
-          <EditRelease repo={repo} number={selected} csrf={csrf} />
+          <EditRelease
+            repo={repo}
+            number={selected}
+            csrf={csrf}
+            onPublished={onPublished}
+          />
         ) : (
           <div className="notice error" role="alert">
             Write access to an active repository is required to edit a release.
@@ -386,6 +477,7 @@ export function Releases({
           before={url.searchParams.get("before") ?? undefined}
           csrf={csrf}
           canManage={canManage}
+          query={url.searchParams.get("query") ?? ""}
         />
       )}
     </section>

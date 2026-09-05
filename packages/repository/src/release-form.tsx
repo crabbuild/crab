@@ -73,49 +73,65 @@ function EditReleaseForm({
   repo,
   release,
   csrf,
+  onPublished,
 }: {
   repo: Repository;
   release: Release;
   csrf: string;
+  onPublished: () => void;
 }) {
   const [title, setTitle] = useState(release.title);
   const [body, setBody] = useState(release.body);
   const [prerelease, setPrerelease] = useState(release.prerelease);
-  const [pending, setPending] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"draft" | "publish">();
   const [error, setError] = useState<string>();
+  const pending = Boolean(pendingAction);
   const detailHref = repoHref(repo, {
     view: "releases",
     release: String(release.number),
   });
+  const update = async (draft: boolean) => {
+    setPendingAction(draft ? "draft" : "publish");
+    setError(undefined);
+    try {
+      await mutateRelease(repo, csrf, release, "PATCH", {
+        version: release.version,
+        title,
+        body,
+        prerelease,
+        draft,
+      });
+      if (release.draft && !draft) onPublished();
+      navigate(detailHref);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : !release.draft
+            ? "The release could not be updated"
+            : draft
+              ? "The draft could not be saved"
+              : "The release could not be published",
+      );
+      setPendingAction(undefined);
+    }
+  };
   return (
     <form
       className="new-release edit-release"
       onSubmit={async (event) => {
         event.preventDefault();
-        setPending(true);
-        setError(undefined);
-        try {
-          await mutateRelease(repo, csrf, release, "PATCH", {
-            version: release.version,
-            title,
-            body,
-            prerelease,
-          });
-          navigate(detailHref);
-        } catch (failure) {
-          setError(
-            failure instanceof Error
-              ? failure.message
-              : "The release could not be updated",
-          );
-          setPending(false);
-        }
+        await update(release.draft);
       }}
     >
       <div className="new-release-heading">
         <div>
           <h2>Edit release</h2>
-          <p>Update the release title, notes, and pre-release status.</p>
+          <p>
+            {release.draft
+              ? "Review this private draft, then publish it when it is ready."
+              : "Update the release title, notes, and pre-release status."}
+          </p>
         </div>
         <PencilIcon size={24} />
       </div>
@@ -142,9 +158,27 @@ function EditReleaseForm({
         >
           Cancel
         </Button>
-        <Button type="submit" variant="primary" disabled={pending}>
-          {pending ? "Updating…" : "Update release"}
-        </Button>
+        <div className="release-form-submit">
+          {release.draft && (
+            <Button type="submit" disabled={pending}>
+              {pendingAction === "draft" ? "Saving…" : "Save draft"}
+            </Button>
+          )}
+          <Button
+            type={release.draft ? "button" : "submit"}
+            variant="primary"
+            disabled={pending}
+            onClick={release.draft ? () => void update(false) : undefined}
+          >
+            {release.draft
+              ? pendingAction === "publish"
+                ? "Publishing…"
+                : "Publish release"
+              : pending
+                ? "Updating…"
+                : "Update release"}
+          </Button>
+        </div>
       </div>
     </form>
   );
@@ -154,10 +188,12 @@ export function EditRelease({
   repo,
   number,
   csrf,
+  onPublished,
 }: {
   repo: Repository;
   number: string;
   csrf: string;
+  onPublished: () => void;
 }) {
   const release = useRequest<Release>(endpoint(repo, `releases/${number}`));
   return (
@@ -168,6 +204,7 @@ export function EditRelease({
           repo={repo}
           release={current}
           csrf={csrf}
+          onPublished={onPublished}
         />
       )}
     </Result>
@@ -200,12 +237,63 @@ export function NewRelease({
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [prerelease, setPrerelease] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"draft" | "publish">();
   const [error, setError] = useState<string>();
   const submission = useSubmission();
   const existingTag = tags.find((ref) => refName(ref) === tag.trim());
   const selectedBranch = branches.find((ref) => ref.name === branch);
   const target = existingTag?.peeled ?? existingTag?.oid ?? selectedBranch?.oid;
+  const pending = Boolean(pendingAction);
+
+  const submit = async (draft: boolean) => {
+    if (!target) return;
+    const input = {
+      tag_name: tag.trim(),
+      target_oid: target,
+      title,
+      body,
+      prerelease,
+      draft,
+    };
+    setPendingAction(draft ? "draft" : "publish");
+    setError(undefined);
+    try {
+      const response = await fetch(endpoint(repo, "releases"), {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+        },
+        body: JSON.stringify({ request_id: submission(input), ...input }),
+      });
+      if (response.status === 401)
+        window.dispatchEvent(new Event("crab-session-expired"));
+      const result = (await response.json()) as Release & {
+        error?: { message?: string };
+      };
+      if (!response.ok)
+        throw new Error(
+          result.error?.message ?? `Request failed (${response.status})`,
+        );
+      if (!draft) onPublished();
+      navigate(
+        repoHref(repo, {
+          view: "releases",
+          release: String(result.number),
+        }),
+      );
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : draft
+            ? "The draft could not be saved"
+            : "The release could not be published",
+      );
+      setPendingAction(undefined);
+    }
+  };
 
   if (repo.archived || repo.access !== "write")
     return (
@@ -219,50 +307,7 @@ export function NewRelease({
       className="new-release"
       onSubmit={async (event) => {
         event.preventDefault();
-        if (!target) return;
-        const input = {
-          tag_name: tag.trim(),
-          target_oid: target,
-          title,
-          body,
-          prerelease,
-        };
-        setPending(true);
-        setError(undefined);
-        try {
-          const response = await fetch(endpoint(repo, "releases"), {
-            method: "POST",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json",
-              "X-CSRF-Token": csrf,
-            },
-            body: JSON.stringify({ request_id: submission(input), ...input }),
-          });
-          if (response.status === 401)
-            window.dispatchEvent(new Event("crab-session-expired"));
-          const result = (await response.json()) as Release & {
-            error?: { message?: string };
-          };
-          if (!response.ok)
-            throw new Error(
-              result.error?.message ?? `Request failed (${response.status})`,
-            );
-          onPublished();
-          navigate(
-            repoHref(repo, {
-              view: "releases",
-              release: String(result.number),
-            }),
-          );
-        } catch (failure) {
-          setError(
-            failure instanceof Error
-              ? failure.message
-              : "The release could not be published",
-          );
-          setPending(false);
-        }
+        await submit(false);
       }}
     >
       <div className="new-release-heading">
@@ -329,9 +374,18 @@ export function NewRelease({
         >
           Cancel
         </Button>
-        <Button type="submit" variant="primary" disabled={pending || !target}>
-          {pending ? "Publishing…" : "Publish release"}
-        </Button>
+        <div className="release-form-submit">
+          <Button
+            type="button"
+            disabled={pending || !target}
+            onClick={() => void submit(true)}
+          >
+            {pendingAction === "draft" ? "Saving…" : "Save draft"}
+          </Button>
+          <Button type="submit" variant="primary" disabled={pending || !target}>
+            {pendingAction === "publish" ? "Publishing…" : "Publish release"}
+          </Button>
+        </div>
       </div>
     </form>
   );
