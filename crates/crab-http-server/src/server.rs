@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Config, RepositoryConfig, Result, api, assets, assignees,
+    Config, RepositoryConfig, Result, api, archive, assets, assignees,
     auth::{self, Authentication, Principal},
     branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, statuses,
 };
@@ -314,6 +314,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .route("/auth/callback", get(auth::callback))
         .route("/auth/logout", post(auth::logout))
         .route("/api/repos", get(catalog))
+        .route("/api/repos/{owner}/{name}/archive", get(archive::download))
         .route("/api/repos/{owner}/{name}/{action}", get(api::read))
         .fallback(assets::serve)
         .layer(middleware::from_fn_with_state(
