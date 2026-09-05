@@ -283,9 +283,25 @@ test("deep links expand the active path and select its file", async ({
       const folderContent = folder?.querySelector(
         '[data-item-section="content"]',
       );
+      const selectedStyle = active ? getComputedStyle(active) : null;
+      const selectedRail = active ? getComputedStyle(active, "::after") : null;
+      const tokenProbe = document.createElement("span");
+      tokenProbe.style.backgroundColor =
+        "var(--control-transparent-bgColor-hover)";
+      tokenProbe.style.color = "var(--fgColor-accent)";
+      tree.closest(".app-shell")?.append(tokenProbe);
+      const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
+      const accentColor = getComputedStyle(tokenProbe).color;
+      tokenProbe.remove();
       return {
         active: active?.getAttribute("aria-label"),
         activeHeight: active?.getBoundingClientRect().height,
+        activeBackground: selectedStyle?.backgroundColor,
+        activeRailBackground: selectedRail?.backgroundColor,
+        activeRailLeft: selectedRail?.left,
+        activeRailWidth: selectedRail?.width,
+        neutralBackground,
+        accentColor,
         expanded: rows
           .filter((row) => row.getAttribute("aria-expanded") === "true")
           .map((row) => row.getAttribute("aria-label")),
@@ -296,6 +312,10 @@ test("deep links expand the active path and select its file", async ({
     });
   expect(state.active).toBe("index.ts");
   expect(state.activeHeight).toBe(32);
+  expect(state.activeBackground).toBe(state.neutralBackground);
+  expect(state.activeRailBackground).toBe(state.accentColor);
+  expect(state.activeRailLeft).toBe("-16px");
+  expect(state.activeRailWidth).toBe("3px");
   expect(state.expanded).toContain("src");
   expect(state.folderIconWidth).toBe("16px");
 });
