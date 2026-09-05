@@ -198,7 +198,6 @@ main {
   --trees-font-size-override: 14px;
   --trees-item-margin-x-override: 0px;
   --trees-item-padding-x-override: 6px;
-  --trees-selected-bg-override: var(--control-transparent-bgColor-selected);
 }
 .tree-hint {
   font-size: 12px;
@@ -1164,7 +1163,7 @@ main {
   --trees-bg-muted-override: var(--bgColor-muted);
   --trees-border-color-override: var(--borderColor-default);
   --trees-accent-override: var(--fgColor-accent);
-  --trees-selected-bg-override: var(--bgColor-accent-muted);
+  --trees-selected-bg-override: var(--control-transparent-bgColor-hover);
   --trees-selected-fg-override: var(--fgColor-default);
   --trees-search-bg-override: var(--bgColor-default);
   --trees-font-family-override: var(--fontStack-system);
