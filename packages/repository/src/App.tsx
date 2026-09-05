@@ -15,6 +15,7 @@ import {
   displayHex,
   endpoint,
   navigate,
+  parentHex,
   repoHref,
   useLocation,
   useRequest,
@@ -27,6 +28,7 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
+import { CreateFile } from "./create-file";
 import { IssuesWorkspace } from "./issues-navigation";
 import {
   RepositoryRefControls,
@@ -357,8 +359,10 @@ function RepositoryPage({
       <div className="repo-header">
         <nav aria-label="Repository">
           <Link
-            className={view === "code" ? "active" : ""}
-            aria-current={view === "code" ? "page" : undefined}
+            className={view === "code" || view === "create" ? "active" : ""}
+            aria-current={
+              view === "code" || view === "create" ? "page" : undefined
+            }
             href={repoHref(repo, { rev })}
           >
             <CodeIcon /> Code
@@ -458,7 +462,24 @@ function RepositoryPage({
                       </div>
                     }
                   >
-                    {view === "commits" ? (
+                    {view === "create" ? (
+                      repo.access === "write" &&
+                      selected?.name.startsWith("refs/heads/") ? (
+                        <CreateFile
+                          repo={repo}
+                          branch={selected.name}
+                          expectedHead={selected.oid}
+                          directoryHex={
+                            kind === "Tree" ? path : parentHex(path)
+                          }
+                          csrf={csrf}
+                        />
+                      ) : (
+                        <div className="notice error" role="alert">
+                          Write access to a branch is required to create files.
+                        </div>
+                      )
+                    ) : view === "commits" ? (
                       <>
                         <RepositoryToolbar
                           repo={repo}
@@ -524,6 +545,23 @@ function RepositoryPage({
                                   navigate(repoHref(repo, { rev: name, view }))
                                 }
                                 compact
+                                onCreate={
+                                  repo.access === "write" &&
+                                  selected?.name.startsWith("refs/heads/")
+                                    ? () =>
+                                        navigate(
+                                          repoHref(repo, {
+                                            rev: selected.name,
+                                            view: "create",
+                                            path:
+                                              kind === "Tree"
+                                                ? path
+                                                : parentHex(path),
+                                            kind: "Tree",
+                                          }),
+                                        )
+                                    : undefined
+                                }
                                 onSearch={() =>
                                   document
                                     .getElementById("repository-tree-search")

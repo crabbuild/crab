@@ -7,6 +7,7 @@ mod assignees;
 mod auth;
 mod checks;
 mod config;
+mod contents;
 mod git;
 mod issues;
 mod labels;

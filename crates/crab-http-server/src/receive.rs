@@ -66,6 +66,8 @@ pub(crate) enum ReceiveError {
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("receive publication failed")]
     Write(#[from] crab_write::WriteError),
+    #[error("Git object hashing failed")]
+    Hash(#[from] gix_hash::hasher::Error),
     #[error("pointer content rejected")]
     Dependency(#[source] Box<crab_read::dependency_proof::DependencyProofError>),
     #[error("receive failed and its remote reader also failed to close")]
@@ -74,6 +76,95 @@ pub(crate) enum ReceiveError {
         operation: Box<ReceiveError>,
         close: crab_remote_git::Error,
     },
+}
+
+fn pack_header(kind: gix_object::Kind, size: usize, output: &mut Vec<u8>) {
+    let kind = match kind {
+        gix_object::Kind::Commit => 1,
+        gix_object::Kind::Tree => 2,
+        gix_object::Kind::Blob => 3,
+        gix_object::Kind::Tag => 4,
+    };
+    let mut remaining = size >> 4;
+    let mut byte = (kind << 4) | (size as u8 & 0x0f);
+    while remaining != 0 {
+        output.push(byte | 0x80);
+        byte = (remaining as u8) & 0x7f;
+        remaining >>= 7;
+    }
+    output.push(byte);
+}
+
+fn write_pack(path: &std::path::Path, objects: &[(gix_object::Kind, Vec<u8>)]) -> Result<()> {
+    use std::io::Write as _;
+
+    let count = u32::try_from(objects.len())
+        .map_err(|_| ReceiveError::Request("Too many generated Git objects"))?;
+    let mut bytes = b"PACK\0\0\0\x02".to_vec();
+    bytes.extend_from_slice(&count.to_be_bytes());
+    for (kind, data) in objects {
+        pack_header(*kind, data.len(), &mut bytes);
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(&mut bytes, flate2::Compression::default());
+        encoder.write_all(data)?;
+        encoder.finish()?;
+    }
+    let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
+    hasher.update(&bytes);
+    let checksum = hasher.try_finalize()?;
+    bytes.extend_from_slice(checksum.as_bytes());
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+pub(crate) async fn publish_objects(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+) -> Result<()> {
+    let permit = Arc::clone(&server.git_admission)
+        .try_acquire_owned()
+        .map_err(|_| ReceiveError::Busy)?;
+    let cancel = server.cancellation.child_token();
+    let worker_cancel = cancel.clone();
+    let worker_server = Arc::clone(&server);
+    let (send, result) = tokio::sync::oneshot::channel();
+    server.receives.spawn(async move {
+        let _permit = permit;
+        let work = async {
+            let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+            let path = directory.path().join("generated.pack");
+            let pack_path = path.clone();
+            tokio::task::spawn_blocking(move || write_pack(&pack_path, &objects)).await??;
+            let file = tokio::task::spawn_blocking(move || std::fs::File::open(path)).await??;
+            publish::publish_pack(
+                &worker_server,
+                &principal,
+                &key,
+                directory,
+                std::io::BufReader::new(file),
+                update,
+                &worker_cancel,
+            )
+            .await
+        };
+        tokio::pin!(work);
+        let completed = tokio::select! {
+            result = &mut work => result,
+            () = tokio::time::sleep(REQUEST_BUDGET) => {
+                worker_cancel.cancel();
+                work.await
+            }
+        };
+        if let Err(Err(error)) = send.send(completed) {
+            tracing::error!(error = ?error, "disconnected browser Git publication failed");
+        }
+    });
+    result
+        .await
+        .map_err(|_| ReceiveError::Request("Browser publication worker stopped"))?
 }
 
 impl IntoResponse for ReceiveError {
