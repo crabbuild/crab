@@ -60,6 +60,18 @@ export function RepositoryTree({
       [data-file-tree-search-container] {
         display: none;
       }
+      [data-type="item"][data-item-selected="true"]::after {
+        background: var(--fgColor-accent);
+        border-radius: 0 6px 6px 0;
+        content: "";
+        inset-block: 0;
+        inset-inline-start: calc(-1 * var(--trees-padding-inline));
+        position: absolute;
+        width: 3px;
+      }
+      [data-type="item"][data-item-selected="true"] > [data-item-section="icon"] {
+        color: var(--trees-fg-muted);
+      }
       [data-type="item"][data-item-type="folder"] > [data-item-section="content"] {
         align-items: center;
         display: flex;
