@@ -80,7 +80,12 @@ impl Repository {
             )
         };
         match open().await {
-            Ok(repository) => return Ok(repository),
+            Ok(repository)
+                if repository.refs().is_empty() || repository.commit_graph_available() =>
+            {
+                return Ok(repository);
+            }
+            Ok(_) => {}
             Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
             Err(error) => return Err(error.into()),
         }
@@ -91,13 +96,21 @@ impl Repository {
         if worker.is_none() {
             // A preceding request may have finished maintenance while this one waited.
             match open().await {
-                Ok(repository) => return Ok(repository),
+                Ok(repository)
+                    if repository.refs().is_empty() || repository.commit_graph_available() =>
+                {
+                    return Ok(repository);
+                }
+                Ok(_) => {}
                 Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
             *worker = Some(tokio::spawn(maintenance::run(
                 self.store.clone(),
                 self.layout.clone(),
+                self.identity.clone(),
+                Arc::clone(&server.runtime),
+                options,
                 Arc::clone(&server.maintenance_admission),
                 server.cancellation.clone(),
             )));

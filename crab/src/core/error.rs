@@ -1864,6 +1864,7 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),
+            crab_write::WriteError::RemoteGit(source) => Self::Io(std::io::Error::other(source)),
             crab_write::WriteError::Git(source) => Self::from(source),
             crab_write::WriteError::Io(source) => Self::Io(source),
             crab_write::WriteError::CorruptObject { path, reason } => {

@@ -14,6 +14,7 @@ rand = "0.9"
 uuid = { workspace = true }
 crab-git = { workspace = true }
 crab-metadata = { workspace = true, features = ["remote-index"] }
+crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-xet = { workspace = true }
 futures-util = { workspace = true }
@@ -26,6 +27,5 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-crab-remote-git = { workspace = true }
 object_store = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
