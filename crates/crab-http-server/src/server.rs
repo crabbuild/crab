@@ -364,6 +364,7 @@ async fn catalog(
         "owner": repository.config.owner, "name": repository.config.name,
         "description": repository.config.description,
         "access": if principal.can_write(&repository.config) { "write" } else { "read" },
+        "can_admin": principal.can_admin(&repository.config),
         "protected_branches": repository.config.protected_branches,
     })).collect::<Vec<_>>()}),
     )

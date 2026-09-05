@@ -7,7 +7,14 @@ use super::*;
 pub(crate) struct TokenRequest {
     owner: String,
     repository: String,
-    access: RepositoryAccess,
+    access: GitTokenAccess,
+}
+
+#[derive(Clone, Copy, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum GitTokenAccess {
+    Read,
+    Write,
 }
 
 impl Authentication {
@@ -54,8 +61,8 @@ pub(crate) async fn issue_git_token(
         .repositories
         .get(&(request.owner.clone(), request.repository.clone()))
         .filter(|repo| match request.access {
-            RepositoryAccess::Read => principal.can_read(&repo.config),
-            RepositoryAccess::Write => principal.can_write(&repo.config),
+            GitTokenAccess::Read => principal.can_read(&repo.config),
+            GitTokenAccess::Write => principal.can_write(&repo.config),
         })
         .ok_or(AuthError::Forbidden)?;
     let Principal::User(session) = principal else {
@@ -86,7 +93,10 @@ pub(crate) async fn issue_git_token(
             session,
             owner: repository.config.owner.clone(),
             repository: repository.config.name.clone(),
-            access: request.access,
+            access: match request.access {
+                GitTokenAccess::Read => RepositoryAccess::Read,
+                GitTokenAccess::Write => RepositoryAccess::Write,
+            },
             revoked: AtomicBool::new(false),
         }),
     );
