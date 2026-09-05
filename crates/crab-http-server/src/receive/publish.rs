@@ -30,6 +30,11 @@ pub(super) enum Publication {
     PullRequest,
 }
 
+pub(super) struct PackPublication {
+    pub visibility_base: Option<(String, gix_hash::ObjectId)>,
+    pub kind: Publication,
+}
+
 struct ReceiveInput {
     pack: Option<BufReader<std::fs::File>>,
     publication: Publication,
@@ -150,10 +155,11 @@ pub(super) async fn publish_pack(
     directory: tempfile::TempDir,
     pack: BufReader<std::fs::File>,
     update: crab_git::receive_plan::RefUpdate,
-    visibility_base: Option<(String, gix_hash::ObjectId)>,
+    publication: PackPublication,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let visibility_bases = visibility_base
+    let visibility_bases = publication
+        .visibility_base
         .map(|base| BTreeMap::from([(update.name.clone(), base)]))
         .unwrap_or_default();
     let request = receive_wire::ReceiveRequest {
@@ -168,7 +174,7 @@ pub(super) async fn publish_pack(
         request,
         ReceiveInput {
             pack: Some(pack),
-            publication: Publication::NativePush,
+            publication: publication.kind,
             visibility_bases,
         },
         cancel,

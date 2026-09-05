@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@primer/react";
+import { ActionList, ActionMenu, Button, TextInput } from "@primer/react";
 import {
   CheckCircleFillIcon,
   ChecklistIcon,
@@ -75,17 +75,19 @@ interface PullRequest extends PullSummary {
   branches_available: boolean;
   merge: {
     author: string;
-    method: "fast_forward";
+    method: "fast_forward" | "merge_commit";
     commit_oid: string;
+    message: string;
     created_at: number;
   } | null;
   merge_pending: {
     request_id: string;
     author: string;
-    method: "fast_forward";
+    method: "fast_forward" | "merge_commit";
     pull_version: number;
     base_oid: string;
     head_oid: string;
+    message: string;
     created_at: number;
   } | null;
   merge_requirements: {
@@ -780,6 +782,12 @@ function MergePanel({
   const mutation = useMutation(csrf);
   const submission = useSubmission();
   const pending = pull.merge_pending;
+  const [method, setMethod] = useState<"merge_commit" | "fast_forward">(
+    "merge_commit",
+  );
+  const defaultMessage = `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`;
+  const [message, setMessage] = useState(defaultMessage);
+  const selectedMethod = pending?.method ?? method;
   const requirements = pull.merge_requirements;
   const protection = repo.protected_branches.find(
     (rule) => rule.branch === branch(pull.base_ref),
@@ -795,7 +803,10 @@ function MergePanel({
         <div>
           <strong>Pull request merged</strong>
           <p>
-            {pull.merge.author} fast-forwarded commit{" "}
+            {pull.merge.author}{" "}
+            {pull.merge.method === "merge_commit"
+              ? "created merge commit"
+              : "fast-forwarded commit"}{" "}
             <code>{short(pull.merge.commit_oid)}</code> into{" "}
             <code>{branch(pull.base_ref)}</code>{" "}
             {timestamp(pull.merge.created_at)}.
@@ -829,10 +840,10 @@ function MergePanel({
       <div className="merge-action">
         <strong>
           {pending
-            ? `${pending.author} started a fast-forward merge`
+            ? `${pending.author} started ${pending.method === "merge_commit" ? "a merge commit" : "a fast-forward merge"}`
             : !requirements.satisfied
               ? "Merging is blocked"
-              : "This branch can be checked for a fast-forward merge"}
+              : "Merge requirements are satisfied"}
         </strong>
         <p>
           Crab verifies ancestry, dependency content, visibility, and the exact
@@ -855,40 +866,86 @@ function MergePanel({
           refresh={refresh}
         />
         {pull.can_merge ? (
-          <Button
-            variant="primary"
-            disabled={mutation.pending}
-            onClick={async () => {
-              const input = pending
-                ? {
-                    version: pending.pull_version,
-                    method: pending.method,
-                    base_oid: pending.base_oid,
-                    head_oid: pending.head_oid,
-                  }
-                : {
-                    version: pull.version,
-                    method: "fast_forward" as const,
-                    base_oid: pull.base_oid,
-                    head_oid: pull.head_oid,
-                  };
-              const merged = await mutation.run<PullRequest>(
-                endpoint(repo, `pulls/${pull.number}/merge`),
-                "POST",
-                {
-                  ...input,
-                  request_id: pending?.request_id ?? submission(input),
-                },
-              );
-              if (merged) refresh();
-            }}
-          >
-            {mutation.pending
-              ? "Merging…"
-              : pending
-                ? "Retry merge"
-                : "Merge pull request"}
-          </Button>
+          <div className="merge-controls">
+            {!pending && (
+              <>
+                <ActionMenu>
+                  <ActionMenu.Button>
+                    {method === "merge_commit"
+                      ? "Create a merge commit"
+                      : "Fast-forward only"}
+                  </ActionMenu.Button>
+                  <ActionMenu.Overlay width="medium">
+                    <ActionList selectionVariant="single">
+                      <ActionList.Item
+                        selected={method === "merge_commit"}
+                        onSelect={() => setMethod("merge_commit")}
+                      >
+                        Create a merge commit
+                        <ActionList.Description variant="block">
+                          Add all commits with a two-parent merge commit.
+                        </ActionList.Description>
+                      </ActionList.Item>
+                      <ActionList.Item
+                        selected={method === "fast_forward"}
+                        onSelect={() => setMethod("fast_forward")}
+                      >
+                        Fast-forward only
+                        <ActionList.Description variant="block">
+                          Move the base branch only when it is an ancestor.
+                        </ActionList.Description>
+                      </ActionList.Item>
+                    </ActionList>
+                  </ActionMenu.Overlay>
+                </ActionMenu>
+                {method === "merge_commit" && (
+                  <TextInput
+                    block
+                    aria-label="Merge commit message"
+                    value={message}
+                    maxLength={256}
+                    onChange={(event) => setMessage(event.target.value)}
+                  />
+                )}
+              </>
+            )}
+            <Button
+              variant="primary"
+              disabled={mutation.pending}
+              onClick={async () => {
+                const input = pending
+                  ? {
+                      version: pending.pull_version,
+                      method: pending.method,
+                      base_oid: pending.base_oid,
+                      head_oid: pending.head_oid,
+                      message: pending.message,
+                    }
+                  : {
+                      version: pull.version,
+                      method: selectedMethod,
+                      base_oid: pull.base_oid,
+                      head_oid: pull.head_oid,
+                      message: selectedMethod === "merge_commit" ? message : "",
+                    };
+                const merged = await mutation.run<PullRequest>(
+                  endpoint(repo, `pulls/${pull.number}/merge`),
+                  "POST",
+                  {
+                    ...input,
+                    request_id: pending?.request_id ?? submission(input),
+                  },
+                );
+                if (merged) refresh();
+              }}
+            >
+              {mutation.pending
+                ? "Merging…"
+                : pending
+                  ? "Retry merge"
+                  : "Merge pull request"}
+            </Button>
+          </div>
         ) : repo.access === "write" && !reviewsSatisfied ? (
           <p className="merge-blocked-note">
             <XCircleFillIcon />

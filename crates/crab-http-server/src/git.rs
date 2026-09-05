@@ -70,6 +70,9 @@ impl IntoResponse for GitError {
         if let Self::Body(error) = self {
             return error.into_response();
         }
+        if matches!(self, Self::Remote(_) | Self::Read(_)) {
+            tracing::error!(error = ?self, "Git repository read failed");
+        }
         let (status, message) = match self {
             Self::Request(message) => (StatusCode::BAD_REQUEST, message),
             Self::NotFound => (StatusCode::NOT_FOUND, "Repository not found"),

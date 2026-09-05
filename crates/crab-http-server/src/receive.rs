@@ -125,6 +125,46 @@ pub(crate) async fn publish_objects(
     objects: Vec<(gix_object::Kind, Vec<u8>)>,
     visibility_base: Option<(String, gix_hash::ObjectId)>,
 ) -> Result<()> {
+    publish_generated_objects(
+        server,
+        principal,
+        key,
+        update,
+        objects,
+        visibility_base,
+        publish::Publication::NativePush,
+    )
+    .await
+}
+
+pub(crate) async fn publish_pull_request_objects(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+) -> Result<()> {
+    publish_generated_objects(
+        server,
+        principal,
+        key,
+        update,
+        objects,
+        None,
+        publish::Publication::PullRequest,
+    )
+    .await
+}
+
+async fn publish_generated_objects(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    objects: Vec<(gix_object::Kind, Vec<u8>)>,
+    visibility_base: Option<(String, gix_hash::ObjectId)>,
+    publication: publish::Publication,
+) -> Result<()> {
     let permit = Arc::clone(&server.git_admission)
         .try_acquire_owned()
         .map_err(|_| ReceiveError::Busy)?;
@@ -147,7 +187,10 @@ pub(crate) async fn publish_objects(
                 directory,
                 std::io::BufReader::new(file),
                 update,
-                visibility_base,
+                publish::PackPublication {
+                    visibility_base,
+                    kind: publication,
+                },
                 &worker_cancel,
             )
             .await

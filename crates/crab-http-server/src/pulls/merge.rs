@@ -12,7 +12,7 @@ use gix_hash::ObjectId;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{merge_requirements, pull_view, storage};
+use super::{merge_requirements, merge_tree, pull_view, storage};
 use crate::{
     app::{self, Error, Result},
     app_storage,
@@ -39,6 +39,8 @@ struct MergeInput {
     method: MergeMethod,
     base_oid: String,
     head_oid: String,
+    #[serde(default)]
+    message: String,
 }
 
 fn oid(value: &str) -> Result<ObjectId> {
@@ -82,6 +84,57 @@ fn same_request(record: &PullMerge, input: &NewPullMerge) -> bool {
         && record.pull_version == input.pull_version
         && record.base_oid == input.base_oid
         && record.head_oid == input.head_oid
+        && record.message == input.message
+}
+
+async fn build_merge_commit(
+    repository: &crab_remote_git::RemoteGitRepository,
+    cancellation: &tokio_util::sync::CancellationToken,
+    base: ObjectId,
+    head: ObjectId,
+    actor: &crate::auth::Identity,
+    message: &str,
+    created_at: u64,
+) -> Result<merge_tree::Plan> {
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::Repository, cancellation)
+        .await
+        .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
+    let built = merge_tree::build(
+        repository, &operation, base, head, actor, message, created_at,
+    )
+    .await;
+    match built {
+        Ok(plan) => {
+            operation
+                .finish(Ok(()))
+                .await
+                .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
+            Ok(plan)
+        }
+        Err(merge_tree::Error::Object(crate::git_objects::Error::Remote(error))) => {
+            let error = operation.finish::<()>(Err(error)).await.err().unwrap_or(
+                crab_remote_git::Error::InternalInvariant {
+                    invariant: "failed pull request merge read unexpectedly succeeded",
+                },
+            );
+            Err(Error::Repository(crate::Error::Remote(error)))
+        }
+        Err(merge_tree::Error::Conflict | merge_tree::Error::History) => {
+            operation
+                .finish(Ok(()))
+                .await
+                .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
+            Err(Error::MergeConflict)
+        }
+        Err(merge_tree::Error::Object(error)) => {
+            operation
+                .finish(Ok(()))
+                .await
+                .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
+            Err(Error::MergeObject(Box::new(error)))
+        }
+    }
 }
 
 async fn finish(
@@ -96,7 +149,7 @@ async fn finish(
         .await?;
     let base = current_ref(&repository, &pull.base_ref);
     let head = current_ref(&repository, &pull.head_ref);
-    if base.as_deref() != Some(record.head_oid.as_str()) {
+    if base.as_deref() != Some(record.commit_oid.as_str()) {
         if base.as_deref() != Some(record.base_oid.as_str())
             || head.as_deref() != Some(record.head_oid.as_str())
         {
@@ -116,20 +169,61 @@ async fn finish(
             storage::abort_merge(repo, pull.number, record).await?;
             return Err(Error::MergeConflict);
         }
-        let update = receive::fast_forward(
-            Arc::clone(server),
-            principal.clone(),
-            (repo.config.owner.clone(), repo.config.name.clone()),
-            pull.base_ref.clone(),
-            oid(&record.base_oid)?,
-            oid(&record.head_oid)?,
-        )
-        .await;
+        let update = match record.method {
+            MergeMethod::FastForward => {
+                receive::fast_forward(
+                    Arc::clone(server),
+                    principal.clone(),
+                    (repo.config.owner.clone(), repo.config.name.clone()),
+                    pull.base_ref.clone(),
+                    oid(&record.base_oid)?,
+                    oid(&record.head_oid)?,
+                )
+                .await
+            }
+            MergeMethod::MergeCommit => {
+                let plan = match build_merge_commit(
+                    &repository,
+                    &server.cancellation,
+                    oid(&record.base_oid)?,
+                    oid(&record.head_oid)?,
+                    &record.author,
+                    &record.message,
+                    record.created_at / 1_000,
+                )
+                .await
+                {
+                    Ok(plan) if plan.oid.to_string() == record.commit_oid => plan,
+                    Ok(_) => {
+                        storage::abort_merge(repo, pull.number, record).await?;
+                        return Err(Error::MergeConflict);
+                    }
+                    Err(Error::MergeConflict) => {
+                        storage::abort_merge(repo, pull.number, record).await?;
+                        return Err(Error::MergeConflict);
+                    }
+                    Err(error) => return Err(error),
+                };
+                receive::publish_pull_request_objects(
+                    Arc::clone(server),
+                    principal.clone(),
+                    (repo.config.owner.clone(), repo.config.name.clone()),
+                    crab_git::receive_plan::RefUpdate {
+                        name: pull.base_ref.clone(),
+                        old: Some(oid(&record.base_oid)?),
+                        new: Some(plan.oid),
+                    },
+                    plan.objects,
+                )
+                .await
+            }
+        };
         if let Err(error) = update {
             let repository = repo
                 .open_current(server, RepositoryOptions::default(), &server.cancellation)
                 .await?;
-            if current_ref(&repository, &pull.base_ref).as_deref() != Some(record.head_oid.as_str())
+            if current_ref(&repository, &pull.base_ref).as_deref()
+                != Some(record.commit_oid.as_str())
             {
                 let error = map_receive(error);
                 if matches!(&error, Error::MergeConflict) {
@@ -174,6 +268,33 @@ async fn execute(
         pull_version: input.version,
         base_oid: input.base_oid,
         head_oid: input.head_oid,
+        message: match input.method {
+            MergeMethod::FastForward => String::new(),
+            MergeMethod::MergeCommit => {
+                let message = input.message.trim();
+                let message = if message.is_empty() {
+                    format!(
+                        "Merge pull request #{} from {}",
+                        id,
+                        pull.head_ref
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(&pull.head_ref)
+                    )
+                } else {
+                    message.to_owned()
+                };
+                if message.chars().count() > 256
+                    || message
+                        .chars()
+                        .any(|character| character.is_control() && character != '\n')
+                {
+                    return Err(Error::Invalid(
+                        "Merge commit message must contain 1–256 characters",
+                    ));
+                }
+                message
+            }
+        },
     };
     if let Some(record) = &pull.merge {
         if !same_request(record, &candidate) {
@@ -230,7 +351,24 @@ async fn execute(
     {
         return Err(Error::MergeBlocked);
     }
-    let record = storage::reserve_merge(repo, id, &candidate).await?;
+    let created_at = app_storage::now()?;
+    let commit_oid = match candidate.method {
+        MergeMethod::FastForward => oid(&candidate.head_oid)?,
+        MergeMethod::MergeCommit => {
+            build_merge_commit(
+                &repository,
+                &server.cancellation,
+                oid(&candidate.base_oid)?,
+                oid(&candidate.head_oid)?,
+                &candidate.author,
+                &candidate.message,
+                created_at / 1_000,
+            )
+            .await?
+            .oid
+        }
+    };
+    let record = storage::reserve_merge(repo, id, &candidate, commit_oid, created_at).await?;
     let pull = storage::begin_merge(repo, id, &record).await?;
     let value = finish(&server, &principal, repo, &pull, &record).await?;
     Ok((StatusCode::OK, Json(value)))

@@ -1045,8 +1045,14 @@ main {
 .merge-action {
   flex: 1;
 }
-.merge-action button {
+.merge-controls {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
   margin-top: 12px;
+}
+.merge-controls > span {
+  width: min(100%, 520px);
 }
 .protected-branch-note {
   display: flex;

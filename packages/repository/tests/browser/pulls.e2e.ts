@@ -15,6 +15,8 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   let branchesAvailable = true;
   let mergePending = false;
   let mergeRequest = "";
+  let mergeMethod: "fast_forward" | "merge_commit" = "merge_commit";
+  let mergeMessage = "";
   let checkState: "success" | null = null;
   const comments: Array<Record<string, unknown>> = [];
   const reviews: Array<Record<string, unknown>> = [];
@@ -68,8 +70,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         state === "merged"
           ? {
               author: "Local operator",
-              method: "fast_forward",
+              method: mergeMethod,
               commit_oid: head,
+              message: mergeMessage,
               created_at: 1_700_000_200_000,
             }
           : null,
@@ -77,10 +80,11 @@ test("pull request creation, discussion, and files follow the GitHub review flow
         ? {
             request_id: mergeRequest,
             author: "Local operator",
-            method: "fast_forward",
+            method: mergeMethod,
             pull_version: 1,
             base_oid: base,
             head_oid: head,
+            message: mergeMessage,
             created_at: 1_700_000_150_000,
           }
         : null,
@@ -313,6 +317,10 @@ test("pull request creation, discussion, and files follow the GitHub review flow
       if (!mergePending) {
         mergePending = true;
         mergeRequest = input.request_id;
+        mergeMethod = input.method;
+        mergeMessage = input.message;
+        expect(input.method).toBe("merge_commit");
+        expect(input.message).toBe("Merge pull request #2 from feature/docs");
         return route.fulfill({
           status: 503,
           json: {
@@ -425,6 +433,9 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create a merge commit", exact: true }),
+  ).toBeVisible();
   await page
     .getByRole("textbox", { name: "Comment", exact: true })
     .fill("Verified in the browser.");
@@ -464,7 +475,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await page.getByRole("button", { name: "Retry merge", exact: true }).click();
   await expect(page.locator(".pull-state")).toHaveText("Merged");
   await expect(page.locator(".pull-merge-note")).toContainText(
-    "Local operator fast-forwarded commit",
+    "Local operator created merge commit",
   );
 
   await page.setViewportSize({ width: 360, height: 800 });
