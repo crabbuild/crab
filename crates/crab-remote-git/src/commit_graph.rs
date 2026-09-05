@@ -75,6 +75,24 @@ impl CommitGraphIndex {
             .map(|entry| entry.corrected_generation)
     }
 
+    pub(crate) fn first_parent_chain(
+        &self,
+        start: ObjectId,
+        maximum: usize,
+    ) -> Option<Vec<ObjectId>> {
+        let mut ordinal = self.graph.ordinal(&sha1_bytes(start)?)?;
+        let mut chain = Vec::new();
+        for _ in 0..maximum {
+            let record = self.graph.record(ordinal)?;
+            chain.push(ObjectId::Sha1(record.oid));
+            let Some(parent) = record.parents.first().copied() else {
+                break;
+            };
+            ordinal = parent;
+        }
+        Some(chain)
+    }
+
     pub(crate) fn reachable_from_roots(
         &self,
         candidates: &[ObjectId],
@@ -213,6 +231,49 @@ mod tests {
             }]),
         };
         assert!(!index.parents_match(ObjectId::Sha1(oid(2)), &[]));
+    }
+
+    #[test]
+    fn first_parent_chain_is_bounded_and_positional() {
+        let index = CommitGraphIndex {
+            graph: graph(vec![
+                CommitGraphRecord {
+                    oid: oid(1),
+                    tree_oid: oid(101),
+                    commit_time: 10,
+                    corrected_generation: 10,
+                    parents: vec![],
+                },
+                CommitGraphRecord {
+                    oid: oid(2),
+                    tree_oid: oid(102),
+                    commit_time: 20,
+                    corrected_generation: 20,
+                    parents: vec![0],
+                },
+                CommitGraphRecord {
+                    oid: oid(3),
+                    tree_oid: oid(103),
+                    commit_time: 30,
+                    corrected_generation: 30,
+                    parents: vec![1, 0],
+                },
+            ]),
+        };
+
+        assert_eq!(
+            index.first_parent_chain(ObjectId::Sha1(oid(3)), 2),
+            Some(vec![ObjectId::Sha1(oid(3)), ObjectId::Sha1(oid(2))])
+        );
+        assert_eq!(
+            index.first_parent_chain(ObjectId::Sha1(oid(2)), 8),
+            Some(vec![ObjectId::Sha1(oid(2)), ObjectId::Sha1(oid(1))])
+        );
+        assert_eq!(
+            index.first_parent_chain(ObjectId::Sha1(oid(3)), 0),
+            Some(Vec::new())
+        );
+        assert_eq!(index.first_parent_chain(ObjectId::Sha1(oid(9)), 1), None);
     }
 
     #[test]

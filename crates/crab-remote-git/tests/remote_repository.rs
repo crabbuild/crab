@@ -3664,6 +3664,29 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
             );
         }
 
+        let mode_path = GitPath::new(Bytes::from_static(b"mode.txt"))?;
+        let first = head
+            .path_history(
+                &mode_path,
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(1, None)?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(first.items[0].commit.oid, fixture.semantic_head_commit);
+        assert_eq!(first.items[0].kind, ChangeKind::ModeChanged);
+        let second = head
+            .path_history(
+                &mode_path,
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(1, first.next)?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(second.items[0].commit.oid, fixture.semantic_base_commit);
+        assert_eq!(second.items[0].kind, ChangeKind::Added);
+        assert!(second.next.is_none());
+
         let binary = head
             .diff(
                 &base,

@@ -153,75 +153,182 @@ impl RemoteGitSnapshot {
 
     async fn first_parent_path_history(
         &self,
+        start: ObjectId,
         path: &GitPath,
         page: &PageRequest,
         operation: &OperationContext,
-        skip: u64,
     ) -> Result<Page<PathHistoryEntry>> {
-        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-        let commit = operation.read_commit(self.commit_oid).await?;
-        let entry = entry_at_tree(self, commit.tree, commit.oid, path, operation).await?;
-        let mut current = Some((commit, entry));
-        let mut traversed = 0u64;
+        if let Some(commit_graph) = self.commit_graph.as_deref() {
+            return self
+                .commit_graph_path_history(start, path, page, operation, commit_graph)
+                .await;
+        }
+        self.raw_first_parent_path_history(start, path, page, operation, Vec::new())
+            .await
+    }
+
+    async fn commit_graph_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        commit_graph: &CommitGraphIndex,
+    ) -> Result<Page<PathHistoryEntry>> {
+        // Keep speculative reads below the aggregate object budget when the
+        // requested page ends inside a batch.
+        const PREFETCH: usize = 16;
+
         let mut items = Vec::new();
-        while let Some((commit, entry)) = current {
-            operation.ensure_active()?;
-            let parent = match commit.parents.first() {
-                Some(oid) => {
-                    let parent = operation.read_commit(*oid).await?;
-                    let entry =
-                        entry_at_tree(self, parent.tree, parent.oid, path, operation).await?;
-                    Some((parent, entry))
+        let mut carry: Option<(Commit, Option<TreeEntry>)> = None;
+        let mut next_oid = start;
+        loop {
+            let Some(oids) = commit_graph.first_parent_chain(next_oid, PREFETCH) else {
+                let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
+                return self
+                    .raw_first_parent_path_history(fallback, path, page, operation, items)
+                    .await;
+            };
+            if oids.is_empty() {
+                return Err(Error::InternalInvariant {
+                    invariant: "commit graph returned an empty first-parent batch",
+                });
+            }
+            let commits = path_history_commits(&oids, operation).await?;
+            // The graph only supplies the batch shape. Raw commit objects must
+            // confirm every positional parent before the batch can affect history.
+            if commits
+                .iter()
+                .any(|commit| !commit_graph.parents_match(commit.oid, &commit.parents))
+            {
+                let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
+                return self
+                    .raw_first_parent_path_history(fallback, path, page, operation, items)
+                    .await;
+            }
+            let entries = entries_at_trees(&commits, path, operation).await?;
+            let batch = commits.into_iter().zip(entries);
+            let mut batch = batch.into_iter();
+            let mut current = match carry.take() {
+                Some(carry) => carry,
+                None => batch.next().ok_or(Error::InternalInvariant {
+                    invariant: "first-parent prefetch produced no commits",
+                })?,
+            };
+            for parent in batch {
+                let resume = parent.0.oid;
+                if append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    std::slice::from_ref(&parent.1),
+                    page,
+                    operation,
+                )
+                .await?
+                {
+                    return self.first_parent_path_page(path, items, Some(resume));
                 }
-                None => None,
+                current = parent;
+            }
+            let Some(parent) = current.0.parents.first().copied() else {
+                let _ = append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    &[],
+                    page,
+                    operation,
+                )
+                .await?;
+                return Ok(Page { items, next: None });
+            };
+            carry = Some(current);
+            next_oid = parent;
+        }
+    }
+
+    async fn raw_first_parent_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        mut items: Vec<PathHistoryEntry>,
+    ) -> Result<Page<PathHistoryEntry>> {
+        let commit = path_history_commit(start, operation).await?;
+        let (entry, parent) = match commit.parents.first().copied() {
+            Some(parent) => {
+                let (entry, parent) = tokio::try_join!(
+                    entry_at_tree(self, commit.tree, commit.oid, path, operation),
+                    path_history_commit(parent, operation),
+                )?;
+                (entry, Some(parent))
+            }
+            None => (
+                entry_at_tree(self, commit.tree, commit.oid, path, operation).await?,
+                None,
+            ),
+        };
+        let mut current = Some((commit, entry, parent));
+        while let Some((commit, entry, parent)) = current {
+            operation.ensure_active()?;
+            let (parent_entry, next_parent) = match parent.as_ref() {
+                Some(parent) => match parent.parents.first().copied() {
+                    Some(next) => {
+                        let (entry, next) = tokio::try_join!(
+                            entry_at_tree(self, parent.tree, parent.oid, path, operation),
+                            path_history_commit(next, operation),
+                        )?;
+                        (entry, Some(next))
+                    }
+                    None => (
+                        entry_at_tree(self, parent.tree, parent.oid, path, operation).await?,
+                        None,
+                    ),
+                },
+                None => (None, None),
             };
             let parent_entries = parent
                 .as_ref()
-                .map(|(_, entry)| std::slice::from_ref(entry))
+                .map(|_| std::slice::from_ref(&parent_entry))
                 .unwrap_or_default();
-            if traversed >= skip
-                && let Some(kind) = path_change_kind(entry.as_ref(), parent_entries)
+            let resume = parent.as_ref().map(|parent| parent.oid);
+            if append_path_history_change(
+                &mut items,
+                commit,
+                entry.as_ref(),
+                parent_entries,
+                page,
+                operation,
+            )
+            .await?
             {
-                operation
-                    .charge(
-                        BudgetDimension::ResponseBytes,
-                        commit_response_bytes(&commit)
-                            .saturating_add(mem::size_of::<PathHistoryEntry>() as u64),
-                    )
-                    .await?;
-                items.try_reserve(1).map_err(|source| Error::Allocation {
-                    requested: mem::size_of::<PathHistoryEntry>(),
-                    source,
-                })?;
-                items.push(PathHistoryEntry { commit, kind });
-                if items.len() == page.limit() {
-                    let next = match parent {
-                        Some(_) => Some(PageCursor::path_history(
-                            self.commit_oid,
-                            HistoryTraversal::FirstParent,
-                            path,
-                            traversed.checked_add(1).ok_or(Error::LimitExceeded {
-                                limit: "history commits",
-                                actual: u64::MAX,
-                                maximum: u64::MAX,
-                            })?,
-                        )?),
-                        None => None,
-                    };
-                    return Ok(Page { items, next });
-                }
+                return self.first_parent_path_page(path, items, resume);
             }
-            traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
-                limit: "history commits",
-                actual: u64::MAX,
-                maximum: u64::MAX,
-            })?;
-            if parent.is_some() {
-                operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            }
-            current = parent;
+            current = parent.map(|parent| (parent, parent_entry, next_parent));
         }
         Ok(Page { items, next: None })
+    }
+
+    fn first_parent_path_page(
+        &self,
+        path: &GitPath,
+        items: Vec<PathHistoryEntry>,
+        resume: Option<ObjectId>,
+    ) -> Result<Page<PathHistoryEntry>> {
+        let next = resume
+            .map(|resume| {
+                PageCursor::path_history(
+                    self.commit_oid,
+                    HistoryTraversal::FirstParent,
+                    path,
+                    0,
+                    resume,
+                )
+            })
+            .transpose()?;
+        Ok(Page { items, next })
     }
 
     /// Return commits that changed one exact path under a parent policy.
@@ -236,7 +343,7 @@ impl RemoteGitSnapshot {
         operation: &OperationContext,
     ) -> Result<Page<PathHistoryEntry>> {
         self.ensure_operation(operation)?;
-        let skip = match page.after() {
+        let (skip, first_parent_start) = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_path_history()?;
                 if decoded.start != self.commit_oid
@@ -247,13 +354,13 @@ impl RemoteGitSnapshot {
                         reason: CursorError::ContextMismatch,
                     });
                 }
-                decoded.skip
+                (decoded.skip, decoded.resume)
             }
-            None => 0,
+            None => (0, self.commit_oid),
         };
         if traversal == HistoryTraversal::FirstParent {
             return self
-                .first_parent_path_history(path, page, operation, skip)
+                .first_parent_path_history(first_parent_start, path, page, operation)
                 .await;
         }
         let mut pending = vec![self.commit_oid];
@@ -312,7 +419,9 @@ impl RemoteGitSnapshot {
             }
         }
         let next = next_skip
-            .map(|skip| PageCursor::path_history(self.commit_oid, traversal, path, skip))
+            .map(|skip| {
+                PageCursor::path_history(self.commit_oid, traversal, path, skip, self.commit_oid)
+            })
             .transpose()?;
         Ok(Page { items, next })
     }
@@ -1392,6 +1501,115 @@ async fn path_change(
         parents.push(entry_at_tree(snapshot, parent.tree, parent.oid, path, operation).await?);
     }
     Ok(path_change_kind(current.as_ref(), &parents))
+}
+
+async fn path_history_commit(oid: ObjectId, operation: &OperationContext) -> Result<Commit> {
+    operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+    operation.read_commit(oid).await
+}
+
+async fn path_history_commits(
+    oids: &[ObjectId],
+    operation: &OperationContext,
+) -> Result<Vec<Commit>> {
+    operation
+        .charge(BudgetDimension::HistoryCommits, oids.len() as u64)
+        .await?;
+    operation.read_commits(oids).await
+}
+
+async fn entries_at_trees(
+    commits: &[Commit],
+    path: &GitPath,
+    operation: &OperationContext,
+) -> Result<Vec<Option<TreeEntry>>> {
+    if path.is_root() {
+        return Ok(commits
+            .iter()
+            .map(|commit| {
+                Some(TreeEntry {
+                    path: GitPath::root(),
+                    oid: commit.tree,
+                    mode: EntryMode::Tree,
+                    kind: EntryKind::Tree,
+                    size: None,
+                })
+            })
+            .collect());
+    }
+
+    let mut trees = commits
+        .iter()
+        .map(|commit| Some(commit.tree))
+        .collect::<Vec<_>>();
+    let mut result = vec![None; commits.len()];
+    let mut parent = GitPath::root();
+    let mut components = path.components().peekable();
+    let mut depth = 0u64;
+    while let Some(component) = components.next() {
+        operation.ensure_active()?;
+        depth = depth.checked_add(1).ok_or(Error::LimitExceeded {
+            limit: "traversal depth",
+            actual: u64::MAX,
+            maximum: u64::MAX,
+        })?;
+        let active = trees
+            .iter()
+            .enumerate()
+            .filter_map(|(index, oid)| oid.map(|oid| (index, oid)))
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            return Ok(result);
+        }
+        operation.charge(BudgetDimension::Depth, depth).await?;
+        let oids = active.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let entries = operation
+            .read_tree_entries(&oids, &parent, component)
+            .await?;
+        if components.peek().is_none() {
+            for ((index, _), entry) in active.into_iter().zip(entries) {
+                result[index] = entry;
+            }
+            return Ok(result);
+        }
+        for ((index, _), entry) in active.into_iter().zip(entries) {
+            trees[index] = match entry {
+                Some(entry) if entry.kind == EntryKind::Tree => Some(entry.oid),
+                Some(entry) => return Err(Error::PathComponentNotTree { actual: entry.kind }),
+                None => None,
+            };
+        }
+        parent = parent.join(component)?;
+    }
+    Err(Error::InternalInvariant {
+        invariant: "non-root path traversal had no components",
+    })
+}
+
+async fn append_path_history_change(
+    items: &mut Vec<PathHistoryEntry>,
+    commit: Commit,
+    entry: Option<&TreeEntry>,
+    parent_entries: &[Option<TreeEntry>],
+    page: &PageRequest,
+    operation: &OperationContext,
+) -> Result<bool> {
+    let Some(kind) = path_change_kind(entry, parent_entries) else {
+        return Ok(false);
+    };
+    operation
+        .charge(
+            BudgetDimension::ResponseBytes,
+            commit_response_bytes(&commit)
+                .saturating_add(mem::size_of::<PathHistoryEntry>() as u64),
+        )
+        .await?;
+    items.try_reserve(1).map_err(|source| Error::Allocation {
+        requested: mem::size_of::<PathHistoryEntry>(),
+        source,
+    })?;
+    items.push(PathHistoryEntry { commit, kind });
+    Ok(items.len() == page.limit())
 }
 
 fn path_change_kind(

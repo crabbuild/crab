@@ -6,12 +6,13 @@ use std::pin::Pin;
 use crate::{Commit, CursorError, EntryKind, EntryMode, Error, GitPath, Result, TreeEntry};
 
 const CURSOR_VERSION: u8 = 1;
+const PATH_HISTORY_CURSOR_VERSION: u8 = 2;
 const DIRECTORY_CURSOR_KIND: u8 = 1;
 const HISTORY_CURSOR_KIND: u8 = 2;
 const PATH_HISTORY_CURSOR_KIND: u8 = 3;
 const DIRECTORY_CURSOR_FIXED_BYTES: usize = 2 + 20 + 20 + 8 + 4 + 4;
 const HISTORY_CURSOR_BYTES: usize = 2 + 20 + 1 + 8;
-const PATH_HISTORY_CURSOR_FIXED_BYTES: usize = HISTORY_CURSOR_BYTES + 4;
+const PATH_HISTORY_CURSOR_FIXED_BYTES: usize = HISTORY_CURSOR_BYTES + 20 + 4;
 const MAX_CURSOR_BYTES: usize = 64 * 1024;
 
 /// Opaque continuation state owned and validated by the caller boundary.
@@ -169,6 +170,7 @@ impl PageCursor {
         mode: HistoryTraversal,
         path: &GitPath,
         skip: u64,
+        resume: ObjectId,
     ) -> Result<Self> {
         let path_len = u32::try_from(path.as_bytes().len()).map_err(|_| Error::LimitExceeded {
             limit: "cursor bytes",
@@ -190,10 +192,11 @@ impl PageCursor {
             });
         }
         let mut bytes = Vec::with_capacity(length);
-        bytes.extend_from_slice(&[CURSOR_VERSION, PATH_HISTORY_CURSOR_KIND]);
+        bytes.extend_from_slice(&[PATH_HISTORY_CURSOR_VERSION, PATH_HISTORY_CURSOR_KIND]);
         bytes.extend_from_slice(start.as_bytes());
         bytes.push(mode as u8);
         bytes.extend_from_slice(&skip.to_be_bytes());
+        bytes.extend_from_slice(resume.as_bytes());
         bytes.extend_from_slice(&path_len.to_be_bytes());
         bytes.extend_from_slice(path.as_bytes());
         Ok(Self(Bytes::from(bytes)))
@@ -202,26 +205,28 @@ impl PageCursor {
     pub(crate) fn decode_path_history(&self) -> Result<PathHistoryCursor<'_>> {
         if self.0.len() < PATH_HISTORY_CURSOR_FIXED_BYTES
             || self.0.len() > MAX_CURSOR_BYTES
-            || self.0[..2] != [CURSOR_VERSION, PATH_HISTORY_CURSOR_KIND]
+            || self.0[..2] != [PATH_HISTORY_CURSOR_VERSION, PATH_HISTORY_CURSOR_KIND]
         {
             return Err(malformed_cursor());
         }
         let start = object_id(&self.0[2..22])?;
         let mode = HistoryTraversal::try_from(self.0[22])?;
         let skip = u64::from_be_bytes(array(&self.0[23..31])?);
-        let path_len = u32::from_be_bytes(array(&self.0[31..35])?) as usize;
+        let resume = object_id(&self.0[31..51])?;
+        let path_len = u32::from_be_bytes(array(&self.0[51..55])?) as usize;
         let end = PATH_HISTORY_CURSOR_FIXED_BYTES
             .checked_add(path_len)
             .ok_or_else(malformed_cursor)?;
         if end != self.0.len() {
             return Err(malformed_cursor());
         }
-        let path = &self.0[35..end];
+        let path = &self.0[55..end];
         GitPath::new(Bytes::copy_from_slice(path)).map_err(|_| malformed_cursor())?;
         Ok(PathHistoryCursor {
             start,
             mode,
             skip,
+            resume,
             path,
         })
     }
@@ -245,6 +250,7 @@ pub(crate) struct PathHistoryCursor<'a> {
     pub(crate) start: ObjectId,
     pub(crate) mode: HistoryTraversal,
     pub(crate) skip: u64,
+    pub(crate) resume: ObjectId,
     pub(crate) path: &'a [u8],
 }
 
