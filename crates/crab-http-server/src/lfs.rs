@@ -15,6 +15,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
+    app,
     auth::Principal,
     server::{Repository, Server},
 };
@@ -31,6 +32,8 @@ pub(crate) enum Error {
     NotFound,
     #[error("write access required")]
     Forbidden,
+    #[error("repository is archived and read-only")]
+    Archived,
     #[error("LFS transfer exceeds server limits")]
     TooLarge,
     #[error("Git transfers are busy")]
@@ -49,6 +52,8 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
     #[error("LFS worker failed")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("repository settings failed")]
+    Settings(#[source] Box<app::Error>),
 }
 
 impl IntoResponse for Error {
@@ -60,6 +65,10 @@ impl IntoResponse for Error {
                 (StatusCode::NOT_FOUND, "Repository or LFS object not found")
             }
             Self::Forbidden => (StatusCode::FORBIDDEN, "Write access required"),
+            Self::Archived => (
+                StatusCode::FORBIDDEN,
+                "Repository is archived and read-only",
+            ),
             Self::TooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "LFS allows at most 200 objects per batch and 512 MiB per object",
@@ -149,6 +158,18 @@ fn repository<'a>(
     Ok(entry)
 }
 
+async fn ensure_active(repository: &Repository) -> Result<()> {
+    if repository
+        .lifecycle()
+        .await
+        .map_err(|error| Error::Settings(Box::new(error)))?
+        .archived
+    {
+        return Err(Error::Archived);
+    }
+    Ok(())
+}
+
 pub(crate) async fn batch(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
@@ -164,6 +185,9 @@ pub(crate) async fn batch(
     };
     let upload = matches!(batch.operation, Operation::Upload);
     let entry = repository(&server, &principal, &owner, &name, upload)?;
+    if upload {
+        ensure_active(entry).await?;
+    }
     if batch.objects.len() > 200 {
         return Err(Error::TooLarge);
     }
@@ -283,7 +307,7 @@ pub(crate) async fn upload(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response> {
-    repository(&server, &principal, &owner, &name, true)?;
+    ensure_active(repository(&server, &principal, &owner, &name, true)?).await?;
     let pointer = pointer(&oid, size.size)?;
     if headers
         .get(header::CONTENT_ENCODING)
@@ -332,6 +356,7 @@ pub(crate) async fn upload(
                 return Err(Error::Cancelled);
             }
             let entry = repository(&worker_server, &principal, &owner, &name, true)?;
+            ensure_active(entry).await?;
             let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
             // Once multipart publication starts, drain it through completion/abort.
             // Dropping this future on disconnect could strand uploaded parts.

@@ -70,7 +70,16 @@ export function Issues({
   csrf: string;
 }) {
   const issue = url.searchParams.get("issue");
-  if (issue === "new") return <NewIssue key="new" repo={repo} csrf={csrf} />;
+  if (issue === "new")
+    return repo.archived ? (
+      <div className="notice">
+        <h2>This repository is read-only</h2>
+        <p>Unarchive it before creating an issue.</p>
+        <Link href={repoHref(repo, { view: "issues" })}>Back to issues</Link>
+      </div>
+    ) : (
+      <NewIssue key="new" repo={repo} csrf={csrf} />
+    );
   if (issue) {
     const number = Number(issue);
     if (!Number.isSafeInteger(number) || number <= 0)
@@ -96,14 +105,16 @@ function IssueList({ repo, url }: { repo: Repository; url: URL }) {
     <section className="issues-page">
       <div className="issues-heading">
         <h2>All issues</h2>
-        <Button
-          variant="primary"
-          onClick={() =>
-            navigate(repoHref(repo, { view: "issues", issue: "new" }))
-          }
-        >
-          New issue
-        </Button>
+        {!repo.archived && (
+          <Button
+            variant="primary"
+            onClick={() =>
+              navigate(repoHref(repo, { view: "issues", issue: "new" }))
+            }
+          >
+            New issue
+          </Button>
+        )}
       </div>
       <DiscussionSearch
         label="Search issues"
@@ -329,7 +340,7 @@ function IssueDetail({
           >
             Refresh
           </Button>
-          {current.can_edit && (
+          {current.can_edit && !repo.archived && (
             <Button
               ref={editTrigger}
               size="small"
@@ -383,7 +394,7 @@ function IssueDetail({
               <DiscussionMarkdown>{current.body}</DiscussionMarkdown>
             </article>
           )}
-          {current.can_edit && (
+          {current.can_edit && !repo.archived && (
             <div className="issue-state-controls">
               <Button
                 ref={stateTrigger}
@@ -415,8 +426,8 @@ function IssueDetail({
           repo={repo}
           assignees={current.assignees}
           labels={current.labels}
-          canAssign={current.can_assign}
-          canLabel={current.can_label}
+          canAssign={current.can_assign && !repo.archived}
+          canLabel={current.can_label && !repo.archived}
           version={current.version}
           path={`issues/${number}`}
           csrf={csrf}
@@ -604,7 +615,9 @@ function Comments({
             onSaved={upsert}
           />
         ))}
-      <NewComment repo={repo} issue={issue} csrf={csrf} onCreated={upsert} />
+      {!repo.archived && (
+        <NewComment repo={repo} issue={issue} csrf={csrf} onCreated={upsert} />
+      )}
     </section>
   );
 }
@@ -700,7 +713,7 @@ function CommentCard({
           {timestamp(comment.created_at)}
         </time>
         {comment.version > 1 && <span className="muted">edited</span>}
-        {comment.can_edit && !draft && (
+        {comment.can_edit && !repo.archived && !draft && (
           <Button
             ref={editTrigger}
             size="small"

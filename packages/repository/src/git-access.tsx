@@ -34,6 +34,8 @@ export function GitAccess({
   const repository = repositories.find(
     (repo) => `${repo.owner}/${repo.name}` === selected,
   );
+  const requestedAccess =
+    repository?.access === "write" && !repository.archived ? access : "read";
   async function change(method: "POST" | "DELETE") {
     if (method === "POST" && !repository) return;
     setPending(true);
@@ -51,7 +53,7 @@ export function GitAccess({
             ? JSON.stringify({
                 owner: repository.owner,
                 repository: repository.name,
-                access,
+                access: requestedAccess,
               })
             : undefined,
       });
@@ -111,7 +113,7 @@ export function GitAccess({
         <label htmlFor="git-token-access">Access</label>
         <select
           id="git-token-access"
-          value={access}
+          value={requestedAccess}
           disabled={pending || !repository}
           onChange={(event) => {
             setAccess(event.target.value === "write" ? "write" : "read");
@@ -120,7 +122,7 @@ export function GitAccess({
           }}
         >
           <option value="read">Read (clone and fetch)</option>
-          {repository?.access === "write" && (
+          {repository?.access === "write" && !repository.archived && (
             <option value="write">Read and write (push)</option>
           )}
         </select>

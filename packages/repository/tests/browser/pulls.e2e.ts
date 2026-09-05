@@ -111,6 +111,8 @@ test("pull request creation, discussion, and files follow the GitHub review flow
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              archive_version: 0,
+              archived: false,
               protection_version: 0,
               protected_branches: [
                 {

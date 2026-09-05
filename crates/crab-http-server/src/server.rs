@@ -22,7 +22,7 @@ use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
     branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive,
-    repository_settings::{self, BranchProtections},
+    repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
 };
 
@@ -34,6 +34,7 @@ pub(crate) struct Repository {
     pub layout: StoreLayout<Store>,
     pub identity: RepositoryIdentity,
     pub(crate) protections: RwLock<BranchProtections>,
+    pub(crate) lifecycle: RwLock<RepositoryLifecycle>,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
 }
@@ -41,6 +42,10 @@ pub(crate) struct Repository {
 impl Repository {
     pub(crate) async fn branch_protections(&self) -> app::Result<BranchProtections> {
         repository_settings::refresh(self).await
+    }
+
+    pub(crate) async fn lifecycle(&self) -> app::Result<RepositoryLifecycle> {
+        repository_settings::refresh_lifecycle(self).await
     }
 
     pub(crate) async fn invalidate(&self) {
@@ -196,6 +201,7 @@ pub async fn serve(config: Config) -> Result<()> {
             config: entry.clone(),
             store,
             protections: RwLock::new(configured_protections),
+            lifecycle: RwLock::new(RepositoryLifecycle::active()),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };
@@ -205,6 +211,12 @@ pub async fn serve(config: Config) -> Result<()> {
                 source: Box::new(source),
             })?;
         *repository.protections.write().await = protections;
+        let lifecycle = repository_settings::load_lifecycle(&repository)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        *repository.lifecycle.write().await = lifecycle;
         repositories.insert((entry.owner, entry.name), repository);
     }
     let runtime = Arc::new(RemoteGitRuntime::default());
@@ -381,6 +393,7 @@ async fn catalog(
         .filter(|repository| principal.can_read(&repository.config))
     {
         let protections = repository.branch_protections().await?;
+        let lifecycle = repository.lifecycle().await?;
         repositories.push(json!({
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
@@ -388,6 +401,8 @@ async fn catalog(
             "can_admin": principal.can_admin(&repository.config),
             "protection_version": protections.version,
             "protected_branches": protections.rules,
+            "archive_version": lifecycle.version,
+            "archived": lifecycle.archived,
         }));
     }
     Ok(Json(json!({"repositories":repositories})))
@@ -436,6 +451,11 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
             .auth
             .as_ref()
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
+    let archived_response = if !denied && !rejected_mutation && unsafe_method && !git_request {
+        archived_mutation_response(&server, &principal, request.uri().path()).await
+    } else {
+        None
+    };
     request.extensions_mut().insert(principal);
     let mut response = if denied && git_request {
         (
@@ -451,6 +471,8 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
         (StatusCode::UNAUTHORIZED, Json(json!({"error":{"code":"sign_in_required","message":"Sign in to access repositories"}}))).into_response()
     } else if rejected_mutation {
         (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"csrf_rejected","message":"Reload the page before trying again"}}))).into_response()
+    } else if let Some(response) = archived_response {
+        response
     } else {
         next.run(request).await
     };
@@ -465,6 +487,32 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
             ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
+}
+
+async fn archived_mutation_response(
+    server: &Server,
+    principal: &Principal,
+    path: &str,
+) -> Option<Response> {
+    let mut segments = path.strip_prefix("/api/repos/")?.split('/');
+    let owner = segments.next()?;
+    let name = segments.next()?;
+    segments.next()?;
+    if owner.is_empty()
+        || name.is_empty()
+        || path == format!("/api/repos/{owner}/{name}/settings/archive")
+    {
+        return None;
+    }
+    let repository = server
+        .repositories
+        .get(&(owner.to_owned(), name.to_owned()))
+        .filter(|repository| principal.can_read(&repository.config))?;
+    match repository.lifecycle().await {
+        Ok(lifecycle) if lifecycle.archived => Some(app::Error::Archived.into_response()),
+        Ok(_) => None,
+        Err(error) => Some(error.into_response()),
+    }
 }
 
 fn integration_api_path(path: &str) -> bool {

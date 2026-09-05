@@ -285,6 +285,7 @@ function RefGroup({
                 protectedBranch={protectedNames.has(ref.name)}
                 canCompare={
                   repo.access === "write" &&
+                  !repo.archived &&
                   ref.name.startsWith("refs/heads/") &&
                   Boolean(defaultName) &&
                   ref.name !== defaultName

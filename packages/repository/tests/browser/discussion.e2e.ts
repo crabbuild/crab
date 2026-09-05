@@ -35,6 +35,8 @@ async function openDiscussion(page: Page) {
             name: "project",
             description: "",
             access: "write",
+            archive_version: 0,
+            archived: false,
             protection_version: 0,
             protected_branches: [],
           },

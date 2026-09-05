@@ -35,6 +35,10 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/settings/branch-protections",
             put(set_branch_protections),
         )
+        .route(
+            "/api/repos/{owner}/{name}/settings/archive",
+            put(set_archive),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
 }
 
@@ -85,6 +89,14 @@ struct BranchProtectionsInput {
     rules: Vec<BranchProtection>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveInput {
+    expected_version: u64,
+    archived: bool,
+    repository: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("{0}")]
@@ -131,7 +143,7 @@ impl IntoResponse for Error {
             ) => (
                 StatusCode::CONFLICT,
                 "settings_changed",
-                "Branch protection settings changed; reload before saving",
+                "Repository settings changed; reload before saving",
             ),
             Self::Body(_) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -186,6 +198,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "protected_branch",
                 "Protected branches cannot be changed in the browser",
+            ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Archived) => (
+                StatusCode::FORBIDDEN,
+                "repository_archived",
+                "This repository is archived and read-only",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Busy) => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -375,6 +392,26 @@ async fn set_branch_protections(
     }
     Ok(Json(
         repository_settings::replace(repository, input.expected_version, input.rules).await?,
+    ))
+}
+
+async fn set_archive(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<ArchiveInput>, JsonRejection>,
+) -> Result<Json<crate::repository_settings::RepositoryLifecycle>, Error> {
+    let Json(input) = input?;
+    let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    if !principal.can_admin(&repository.config) {
+        return Err(Error::AdminPermission);
+    }
+    if input.repository != format!("{owner}/{name}") {
+        return Err(Error::Input("Enter the full repository name to confirm"));
+    }
+    Ok(Json(
+        repository_settings::replace_lifecycle(repository, input.expected_version, input.archived)
+            .await?,
     ))
 }
 

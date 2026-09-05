@@ -257,6 +257,11 @@ impl IntoResponse for Error {
                 "protected_branch",
                 "Protected branch requires a pull request",
             ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Archived) => (
+                StatusCode::FORBIDDEN,
+                "repository_archived",
+                "This repository is archived and read-only",
+            ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 "conflict",

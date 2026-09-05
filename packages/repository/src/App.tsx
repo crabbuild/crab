@@ -10,6 +10,7 @@ import {
 import { ThemeProvider } from "@primer/react/next";
 import {
   AlertIcon,
+  ArchiveIcon,
   CodeIcon,
   DeviceDesktopIcon,
   GitBranchIcon,
@@ -183,6 +184,7 @@ export function App() {
                   <strong>{repo.name}</strong>
                 </Link>
               </h1>
+              {repo.archived && <Label>Archived</Label>}
             </div>
           ) : (
             <Link className="global-catalog-link" href="/">
@@ -281,6 +283,7 @@ export function App() {
                               {repo.owner} / <strong>{repo.name}</strong>
                             </Link>
                           </h2>
+                          {repo.archived && <Label>Archived</Label>}
                           <p className="muted">
                             {repo.description ||
                               "Browse files, history, and changes."}
@@ -376,6 +379,7 @@ function RepositoryPage({
   onRepositoryChanged: () => void;
 }) {
   const view = url.searchParams.get("view") ?? "code";
+  const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
     view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
   );
@@ -422,8 +426,7 @@ function RepositoryPage({
   const branch = selected?.name.startsWith("refs/heads/")
     ? selected
     : undefined;
-  const canChangeFile =
-    repo.access === "write" && branch && path && kind === "Blob";
+  const canChangeFile = canWrite && branch && path && kind === "Blob";
   function selectEntry(entry: Entry) {
     navigate(
       repoHref(repo, {
@@ -596,6 +599,12 @@ function RepositoryPage({
           )}
         </nav>
       </div>
+      {repo.archived && (
+        <div className="archived-banner" role="status">
+          <ArchiveIcon size={16} />
+          <span>This repository was archived and is read-only.</span>
+        </div>
+      )}
       <div
         className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${issueNavigation ? " repo-issues-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
@@ -694,9 +703,7 @@ function RepositoryPage({
                     repo={repo}
                     refs={data}
                     type={view === "branches" ? "branches" : "tags"}
-                    onDeleteBranch={
-                      repo.access === "write" ? deleteBranch : undefined
-                    }
+                    onDeleteBranch={canWrite ? deleteBranch : undefined}
                   />
                 </Suspense>
               ) : !data.refs.length ? (
@@ -714,7 +721,7 @@ function RepositoryPage({
                     }
                   >
                     {view === "upload" ? (
-                      repo.access === "write" && branch ? (
+                      canWrite && branch ? (
                         <UploadFiles
                           repo={repo}
                           branch={branch.name}
@@ -730,7 +737,7 @@ function RepositoryPage({
                         </div>
                       )
                     ) : view === "create" ? (
-                      repo.access === "write" && branch ? (
+                      canWrite && branch ? (
                         <CreateFile
                           repo={repo}
                           branch={branch.name}
@@ -777,9 +784,7 @@ function RepositoryPage({
                           path={path || undefined}
                           kind={path ? kind : undefined}
                           onRefresh={refs.retry}
-                          onCreateBranch={
-                            repo.access === "write" ? createBranch : undefined
-                          }
+                          onCreateBranch={canWrite ? createBranch : undefined}
                         />
                         <History
                           key={`${rev}:${path}`}
@@ -798,9 +803,7 @@ function RepositoryPage({
                           archiveRevision={rev}
                           view={view}
                           onRefresh={refs.retry}
-                          onCreateBranch={
-                            repo.access === "write" ? createBranch : undefined
-                          }
+                          onCreateBranch={canWrite ? createBranch : undefined}
                         />
                         <CommitView
                           key={rev}
@@ -842,12 +845,10 @@ function RepositoryPage({
                                 }
                                 compact
                                 onCreateBranch={
-                                  repo.access === "write"
-                                    ? createBranch
-                                    : undefined
+                                  canWrite ? createBranch : undefined
                                 }
                                 onCreateFile={
-                                  repo.access === "write" && branch
+                                  canWrite && branch
                                     ? () =>
                                         navigate(
                                           repoHref(repo, {
@@ -863,7 +864,7 @@ function RepositoryPage({
                                     : undefined
                                 }
                                 onUploadFiles={
-                                  repo.access === "write" && branch
+                                  canWrite && branch
                                     ? () =>
                                         navigate(
                                           repoHref(repo, {
@@ -907,9 +908,7 @@ function RepositoryPage({
                                 view={view}
                                 onRefresh={refs.retry}
                                 onCreateBranch={
-                                  repo.access === "write"
-                                    ? createBranch
-                                    : undefined
+                                  canWrite ? createBranch : undefined
                                 }
                                 onBrowse={() => setShowTree(true)}
                               />

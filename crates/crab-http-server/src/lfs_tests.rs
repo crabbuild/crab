@@ -96,6 +96,39 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
 }
 
 #[tokio::test]
+async fn archived_repository_rejects_lfs_writes_and_keeps_reads_available() {
+    let server = maintenance_tests::fixture().await;
+    let repository = &server.repositories[&("team".into(), "repo".into())];
+    repository_settings::replace_lifecycle(repository, 0, true)
+        .await
+        .unwrap();
+    let batch = |operation| {
+        Body::from(json!({"operation":operation,"objects":[{"oid":HELLO,"size":5}]}).to_string())
+    };
+
+    assert_eq!(
+        request(&server, "POST", BATCH, batch("upload"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&server, "POST", BATCH, batch("download"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let path = format!("/git/team/repo.git/info/lfs/objects/{HELLO}?size=5");
+    assert_eq!(
+        request(&server, "PUT", &path, Body::from("hello"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
     let server = maintenance_tests::fixture().await;
     for body in [
