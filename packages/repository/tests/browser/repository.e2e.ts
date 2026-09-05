@@ -142,6 +142,28 @@ test.beforeEach(async ({ page }) => {
           };
         })(),
       });
+    if (url.pathname.endsWith("/search")) {
+      const query = url.searchParams.get("q")?.toLowerCase() ?? "";
+      return route.fulfill({
+        json: {
+          items: [
+            ...(!deleted ? ["README.md"] : []),
+            "src/index.ts",
+            ...(created ? ["NEW.md"] : []),
+          ]
+            .filter((path) => path.toLowerCase().includes(query))
+            .map((path) => ({
+              path,
+              path_hex: pathHex(path),
+              kind: "Blob",
+              oid,
+              mode: "100644",
+            })),
+          commit: currentHead,
+          truncated: false,
+        },
+      });
+    }
     if (url.pathname.endsWith("/tree"))
       return route.fulfill({
         json: {
@@ -305,17 +327,12 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.getByPlaceholder("Go to file")).toBeFocused();
   await page.getByPlaceholder("Go to file").fill("README");
-  await expect
-    .poll(() =>
-      page
-        .locator('[aria-label="Repository files"]')
-        .evaluate((tree) =>
-          [
-            ...(tree.shadowRoot?.querySelectorAll('[role="treeitem"]') ?? []),
-          ].map((row) => row.getAttribute("aria-label")),
-        ),
-    )
-    .toEqual(["README.md"]);
+  await expect(
+    page
+      .getByLabel("Repository file search results")
+      .getByRole("option", { name: "README.md" }),
+  ).toBeVisible();
+  await page.getByPlaceholder("Go to file").press("Escape");
   await page.getByRole("link", { name: "History", exact: true }).click();
   await expect(page).toHaveURL(
     new RegExp(`view=commits.*path=${pathHex("README.md")}.*kind=Blob`),
@@ -334,6 +351,31 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.getByRole("button", { name: "Older" })).toBeDisabled();
   await page.getByRole("button", { name: "Newer" }).click();
   await expect(page.locator(".commit-list")).toContainText("Update this path");
+});
+
+test("Go to file finds a deep repository path before its directory is expanded", async ({
+  page,
+}) => {
+  await page.goto("/team/project");
+  await expect(
+    page.getByRole("button", { name: "Browse files", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("t");
+  await expect(page.getByPlaceholder("Go to file")).toBeFocused();
+  await page.getByPlaceholder("Go to file").fill("index");
+  const result = page
+    .getByLabel("Repository file search results")
+    .getByRole("option", { name: "src/index.ts" });
+  await expect(result).toBeVisible();
+  await page.getByPlaceholder("Go to file").press("Enter");
+  await expect(page).toHaveURL(
+    new RegExp(`path=${pathHex("src/index.ts")}.*kind=Blob`),
+  );
+  await expect(page.getByPlaceholder("Go to file")).toHaveValue("");
+  await expect(page.getByLabel("Repository files")).toBeVisible();
+  await expect(page.locator(".breadcrumb")).toContainText(
+    "project/src/index.ts",
+  );
 });
 
 test("deep links expand the active path and select its file", async ({

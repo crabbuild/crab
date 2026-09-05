@@ -769,6 +769,70 @@ impl RemoteGitSnapshot {
         Ok(entries)
     }
 
+    /// Traverse all snapshot entries without reading blob bodies.
+    ///
+    /// Results use deterministic raw path order. Tree reads are batched while the
+    /// operation's object, entry, response-byte, depth, time, and cancellation
+    /// limits bound the traversal.
+    pub async fn list_tree_recursive(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<Vec<TreeEntry>> {
+        const TREE_READ_BATCH: usize = 64;
+
+        self.ensure_operation(operation)?;
+        let mut pending = vec![(self.root_tree_oid, GitPath::root(), 0u64)];
+        let mut entries = Vec::new();
+        while !pending.is_empty() {
+            operation.ensure_active()?;
+            let start = pending.len().saturating_sub(TREE_READ_BATCH);
+            let batch = pending.split_off(start);
+            let trees = futures_util::future::try_join_all(
+                batch
+                    .iter()
+                    .map(|(oid, parent, _)| operation.read_tree(*oid, parent)),
+            )
+            .await?;
+            for ((_, _, depth), tree) in batch.into_iter().zip(trees) {
+                entries
+                    .try_reserve(tree.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: tree.len().saturating_mul(mem::size_of::<TreeEntry>()),
+                        source,
+                    })?;
+                pending
+                    .try_reserve(tree.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: tree.len().saturating_mul(mem::size_of::<(
+                            ObjectId,
+                            GitPath,
+                            u64,
+                        )>()),
+                        source,
+                    })?;
+                for entry in tree {
+                    let entry_depth = next_depth(depth)?;
+                    operation
+                        .charge(BudgetDimension::Depth, entry_depth)
+                        .await?;
+                    operation.charge(BudgetDimension::Entries, 1).await?;
+                    operation
+                        .charge(
+                            BudgetDimension::ResponseBytes,
+                            entry.path.as_bytes().len() as u64,
+                        )
+                        .await?;
+                    if entry.kind == EntryKind::Tree {
+                        pending.push((entry.oid, entry.path.clone(), entry_depth));
+                    }
+                    entries.push(entry);
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(entries)
+    }
+
     /// Stream bounded archive entries while owning and finalizing the operation.
     ///
     /// The stream reads no descendants until polled. Dropping it triggers the

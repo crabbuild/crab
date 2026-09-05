@@ -2435,6 +2435,50 @@ main {
   font: 11px/18px var(--fontStack-monospace);
   text-align: center;
 }
+.tree-search-results {
+  height: min(68vh, 760px);
+  min-height: 360px;
+  padding: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.tree-search-results ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tree-search-results [role="option"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--fgColor-default);
+  background: transparent;
+  border-radius: var(--borderRadius-medium);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tree-search-results [role="option"]:hover,
+.tree-search-results [role="option"].active {
+  background: var(--control-transparent-bgColor-hover);
+}
+.tree-search-results [role="option"] svg {
+  flex: 0 0 auto;
+  color: var(--fgColor-muted);
+}
+.tree-search-results [role="option"] span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-search-results p {
+  margin: 12px 8px;
+  color: var(--fgColor-muted);
+}
 .repo-file-workspace {
   max-width: none;
   padding: 0;
@@ -2732,6 +2776,10 @@ main {
     border-radius: var(--borderRadius-medium);
   }
   .repo-file-workspace .repository-tree {
+    height: 300px;
+    min-height: 0;
+  }
+  .repo-file-workspace .tree-search-results {
     height: 300px;
     min-height: 0;
   }

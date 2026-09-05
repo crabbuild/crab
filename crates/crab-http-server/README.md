@@ -101,13 +101,15 @@ regular files through reviewable commit forms. Historical commits and tags remai
 read-only; binary, symlink, and pointer-backed content cannot be edited in the
 browser. Light and dark themes support desktop and narrow screens. Crab/LFS pointer
 downloads contain the pointer Git blob; artifact hydration is not yet part of
-the HTTP application. Tree search covers loaded directories.
+the HTTP application. Go to file performs bounded fuzzy search across the full
+pinned repository tree without reading blob bodies; `T` opens and focuses it.
 
 `GET /api/repos` returns the configured catalog. Repository reads use
 `GET /api/repos/{owner}/{name}/{action}`, where `action` is `refs`, `commit`,
-`commits`, `tree`, `file`, `blob`, `asset`, `changes`, `diff`, or `blame`. `asset`
-accepts only raster blobs whose signatures identify PNG, JPEG, GIF or WebP and
-serves them inline; `blob` remains an exact octet-stream attachment. Parameters:
+`commits`, `tree`, `search`, `file`, `blob`, `asset`, `changes`, `diff`, or
+`blame`. `asset` accepts only raster blobs whose signatures identify PNG, JPEG,
+GIF or WebP and serves them inline; `blob` remains an exact octet-stream
+attachment. Parameters:
 
 - `rev`: ref or full commit OID; defaults to HEAD. Responses identify their commit
   and generation. Browser links preserve a selected branch and pin historical
@@ -116,7 +118,11 @@ serves them inline; `blob` remains an exact octet-stream attachment. Parameters:
   normalization; hex supports names that are not UTF-8. `commit` returns the
   latest commit that changed a supplied path, and `commits` paginates that path's
   first-parent history.
-- `limit` (1–200) and signed `cursor`: directory/history pagination.
+- `q`: required 1–128-character path query for `search`. Exact and prefix file
+  names rank before path substrings and fuzzy subsequences. Results exclude
+  directories and report when the requested result limit truncates matches.
+- `limit` (1–200) and signed `cursor`: directory/history pagination and the
+  maximum number of search results.
 - `base`: optional comparison base; defaults to the first parent. A root commit
   compares against an empty tree.
 
@@ -777,8 +783,12 @@ three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
-latency guarantee. Forty-six Rust server tests, eight frontend navigation,
-model and Markdown tests, and eighteen Chromium tests passed. Identity integration
+latency guarantee. An uncached Go-to-file search for `kubelet.go` traversed
+6,100 tree objects in 2.22 seconds, transferred 1.42 MB from RustFS, and returned
+the first 50 ranked paths without reading blob bodies. Keyboard selection opened
+`cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-seven Rust server
+tests, eight frontend navigation, model and Markdown tests, and nineteen Chromium
+tests passed. Identity integration
 tests exercise real HTTP redirects and signed Ed25519 tokens, including key
 rotation, replay, invalid claims, outsider access and logout CSRF rejection, plus
 confidential-client secret-file authentication, Git token scope and revocation.
@@ -796,6 +806,8 @@ and file icons, compact branch/search controls, segmented path breadcrumbs and
 the matching collapsed navigation row. Direct links now load every ancestor
 from object storage, expand the path, select the active file and center it in
 the virtualized tree. The `T` shortcut focuses file search in either pane state.
+Search covers the full pinned repository tree, including paths whose parents
+have not been expanded, and retains the same compact 32-pixel row rhythm.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
 forms were inspected against the real Kubernetes repository in light desktop and

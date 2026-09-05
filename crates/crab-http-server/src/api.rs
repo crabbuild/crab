@@ -24,6 +24,7 @@ pub(crate) enum Action {
     Commit,
     Commits,
     Tree,
+    Search,
     Blob,
     Asset,
     File,
@@ -41,6 +42,7 @@ pub(crate) struct Parameters {
     path_hex: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
+    q: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -199,6 +201,22 @@ pub(crate) async fn read(
             .map(|value| decode_cursor(&server.cursor_key, value))
             .transpose()?;
         let page = PageRequest::new(limit, cursor)?;
+        let search_query = if matches!(action, Action::Search) {
+            let query = params
+                .q
+                .as_deref()
+                .map(str::trim)
+                .filter(|query| !query.is_empty())
+                .ok_or(ApiError::Input("q must contain a file name or path"))?;
+            if query.chars().count() > 128 || query.chars().any(char::is_control) {
+                return Err(ApiError::Input(
+                    "q must contain at most 128 non-control characters",
+                ));
+            }
+            Some(query)
+        } else {
+            None
+        };
         let timer = Instant::now();
         let repository = entry.open(&server, &cancellation).await;
         open_ms = timer.elapsed().as_secs_f64() * 1000.0;
@@ -211,6 +229,7 @@ pub(crate) async fn read(
             &params,
             path,
             page,
+            search_query,
             &cancellation,
         )
         .await?;
@@ -272,6 +291,7 @@ async fn execute(
     params: &Parameters,
     path: GitPath,
     page: PageRequest,
+    search_query: Option<&str>,
     cancellation: &CancellationToken,
 ) -> crab_remote_git::Result<Payload> {
     if matches!(action, Action::Refs) {
@@ -310,7 +330,7 @@ async fn execute(
         Action::Commit => OperationKind::Commit,
         Action::Commits if path_history => OperationKind::PathHistory,
         Action::Commits => OperationKind::History,
-        Action::Tree => OperationKind::Tree,
+        Action::Tree | Action::Search => OperationKind::Tree,
         Action::Blob | Action::Asset | Action::File => OperationKind::Content,
         Action::Changes => OperationKind::Compare,
         Action::Diff => OperationKind::Diff,
@@ -358,6 +378,36 @@ async fn execute(
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
                 json!({"items":result.items.iter().map(entry_json).collect::<Vec<_>>(), "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+            }
+            Action::Search => {
+                let query = search_query.ok_or(Error::InternalInvariant {
+                    invariant: "validated repository search had no query",
+                })?;
+                let mut matches = Vec::new();
+                for entry in snapshot.list_tree_recursive(&operation).await? {
+                    if entry.kind == EntryKind::Tree {
+                        continue;
+                    }
+                    let Some(score) = search_score(&display_path(entry.path.as_bytes()), query)
+                    else {
+                        continue;
+                    };
+                    matches
+                        .try_reserve(1)
+                        .map_err(|source| Error::Allocation {
+                            requested: std::mem::size_of::<((u8, usize), TreeEntry)>(),
+                            source,
+                        })?;
+                    matches.push((score, entry));
+                }
+                matches.sort_by(|left, right| {
+                    left.0.cmp(&right.0).then_with(|| {
+                        left.1.path.as_bytes().cmp(right.1.path.as_bytes())
+                    })
+                });
+                let truncated = matches.len() > page.limit();
+                matches.truncate(page.limit());
+                json!({"items":matches.iter().map(|(_,entry)|entry_json(entry)).collect::<Vec<_>>(),"truncated":truncated})
             }
             Action::Blob => return Ok(Payload::Blob(snapshot.read_blob(&path, &operation).await?)),
             Action::Asset => {
@@ -492,6 +542,41 @@ fn display_path(bytes: &[u8]) -> String {
         .join("/")
 }
 
+fn search_score(path: &str, query: &str) -> Option<(u8, usize)> {
+    let path = path.to_lowercase();
+    let query = query.to_lowercase();
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    if name == query {
+        return Some((0, path.len()));
+    }
+    if name.starts_with(&query) {
+        return Some((1, name.len().saturating_sub(query.len())));
+    }
+    if path.starts_with(&query) {
+        return Some((2, path.len().saturating_sub(query.len())));
+    }
+    if let Some(position) = name.find(&query) {
+        return Some((3, position.saturating_add(name.len())));
+    }
+    if let Some(position) = path.find(&query) {
+        return Some((4, position.saturating_add(path.len())));
+    }
+    fuzzy_cost(&path, &query).map(|cost| (5, cost.saturating_add(path.len())))
+}
+
+fn fuzzy_cost(path: &str, query: &str) -> Option<usize> {
+    let mut cursor = 0;
+    let mut cost = 0usize;
+    for character in query.chars() {
+        let offset = path[cursor..].find(character)?;
+        cost = cost.saturating_add(offset);
+        cursor = cursor
+            .saturating_add(offset)
+            .saturating_add(character.len_utf8());
+    }
+    Some(cost)
+}
+
 fn encode_cursor(key: &[u8; 32], cursor: PageCursor) -> String {
     format!(
         "{}.{}",
@@ -572,6 +657,20 @@ mod tests {
         assert_ne!(display_path(b"\xff"), display_path(b"%FF"));
         assert_eq!(display_path(b"dir/\xff"), "dir/%FF");
         assert_eq!(decode_hex(&encode_hex(b"dir/\xff")).unwrap(), b"dir/\xff");
+    }
+
+    #[test]
+    fn file_search_prioritizes_names_then_paths_and_supports_fuzzy_input() {
+        assert_eq!(search_score("src/Main.rs", "main.rs").unwrap().0, 0);
+        assert!(
+            search_score("src/main_test.rs", "main").unwrap()
+                < search_score("main/examples.rs", "main").unwrap()
+        );
+        assert!(
+            search_score("src/engine/chunk_file.rs", "engine").unwrap()
+                < search_score("src/engine/chunk_file.rs", "cfr").unwrap()
+        );
+        assert!(search_score("src/engine/chunk_file.rs", "not-here").is_none());
     }
 
     #[test]
