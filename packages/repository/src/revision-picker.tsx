@@ -24,16 +24,21 @@ export function RevisionPicker({
   refs,
   revision,
   onSelect,
+  onCreateBranch,
 }: {
   refs: Refs;
   revision: string;
   onSelect: (name: string) => void;
+  onCreateBranch?: (name: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [type, setType] = useState<RefType>("branches");
   const [filter, setFilter] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const menu = useRef<HTMLUListElement>(null);
+  const createAction = useRef<HTMLButtonElement>(null);
   const id = useId();
   const selected = refs.refs.find((ref) => ref.name === revision);
   const label = selected
@@ -53,12 +58,37 @@ export function RevisionPicker({
         .toLowerCase()
         .includes(filter.toLowerCase()),
   );
+  const candidate = filter.trim();
+  const canCreate =
+    type === "branches" &&
+    Boolean(onCreateBranch) &&
+    candidate.length > 0 &&
+    candidate === filter &&
+    !refs.refs.some((ref) => ref.name === `refs/heads/${candidate}`);
+  async function createBranch() {
+    if (!onCreateBranch || !canCreate || creating) return;
+    setCreating(true);
+    setCreateError("");
+    try {
+      await onCreateBranch(candidate);
+      setOpen(false);
+    } catch (error) {
+      setCreateError(
+        error instanceof Error
+          ? error.message
+          : "The branch could not be created",
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
   return (
     <AnchoredOverlay
       open={open}
       onOpen={() => {
         setType(revision.startsWith("refs/tags/") ? "tags" : "branches");
         setFilter("");
+        setCreateError("");
         setOpen(true);
       }}
       onClose={() => setOpen(false)}
@@ -103,13 +133,20 @@ export function RevisionPicker({
           aria-label={`Filter ${type}`}
           placeholder={`Find a ${type === "branches" ? "branch" : "tag"}…`}
           value={filter}
-          onChange={(event) => setFilter(event.target.value)}
+          onChange={(event) => {
+            setFilter(event.target.value);
+            setCreateError("");
+          }}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              menu.current
-                ?.querySelector<HTMLElement>('[role="menuitemradio"]')
-                ?.focus();
+              const first = menu.current?.querySelector<HTMLElement>(
+                '[role="menuitemradio"]',
+              );
+              (first ?? createAction.current)?.focus();
+            } else if (event.key === "Enter" && canCreate && !matches.length) {
+              event.preventDefault();
+              void createBranch();
             }
           }}
         />
@@ -128,7 +165,10 @@ export function RevisionPicker({
             aria-selected={type === tab}
             aria-controls={`${id}-results`}
             tabIndex={type === tab ? 0 : -1}
-            onClick={() => setType(tab)}
+            onClick={() => {
+              setType(tab);
+              setCreateError("");
+            }}
             onKeyDown={(event) => {
               if (
                 ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
@@ -189,6 +229,26 @@ export function RevisionPicker({
           </p>
         )}
       </div>
+      {canCreate && (
+        <button
+          ref={createAction}
+          type="button"
+          className="revision-picker-create"
+          disabled={creating}
+          onClick={() => void createBranch()}
+        >
+          <GitBranchIcon />
+          <span>
+            {creating ? "Creating branch" : "Create branch"}:{" "}
+            <strong>{candidate}</strong> from &apos;{label}&apos;
+          </span>
+        </button>
+      )}
+      {createError && (
+        <p className="revision-picker-error" role="alert">
+          {createError}
+        </p>
+      )}
     </AnchoredOverlay>
   );
 }
