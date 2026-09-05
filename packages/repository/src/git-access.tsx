@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { Button } from "@primer/react";
-import { CodeIcon, TriangleDownIcon } from "@primer/octicons-react";
+import {
+  CodeIcon,
+  DownloadIcon,
+  TriangleDownIcon,
+} from "@primer/octicons-react";
 import type { Icon } from "@primer/octicons-react";
 import type { Repository, Session } from "./api";
 
@@ -174,16 +178,19 @@ export function GitAccess({
 
 export function CloneMenu({
   repo,
+  revision,
   compact = false,
   icon: CompactIcon = CodeIcon,
   label = "Code",
 }: {
   repo: Repository;
+  revision: string;
   compact?: boolean;
   icon?: Icon;
   label?: string;
 }) {
   const url = `${window.location.origin}/git/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}.git`;
+  const archive = `/api/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/archive?${new URLSearchParams({ rev: revision })}`;
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
   return (
@@ -227,6 +234,9 @@ export function CloneMenu({
         <p className="muted">
           Push requires write access. Non-fast-forward updates are rejected.
         </p>
+        <a className="download-archive" href={archive}>
+          <DownloadIcon /> Download ZIP
+        </a>
         {error && (
           <p role="status">Select the URL field and copy it manually.</p>
         )}

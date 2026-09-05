@@ -1363,6 +1363,20 @@ main {
 .clone-menu summary::-webkit-details-marker {
   display: none;
 }
+.download-archive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px -16px -16px;
+  padding: 12px 16px;
+  color: var(--fgColor-default);
+  border-top: 1px solid var(--borderColor-muted);
+  text-decoration: none;
+}
+.download-archive:hover {
+  background: var(--control-transparent-bgColor-hover);
+  text-decoration: none;
+}
 
 @media (max-width: 640px) {
   .git-access {

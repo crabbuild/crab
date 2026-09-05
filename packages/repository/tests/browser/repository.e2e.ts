@@ -845,6 +845,9 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await expect(
       page.getByRole("button", { name: "Copy URL", exact: true }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download ZIP" }),
+    ).toHaveAttribute("href", `/api/repos/team/project/archive?rev=${oid}`);
     const geometry = await page
       .locator(".clone-menu .git-popover")
       .evaluate((menu) => {
