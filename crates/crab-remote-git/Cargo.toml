@@ -20,6 +20,7 @@ crab-xet = { workspace = true }
 flate2 = { workspace = true }
 gix-features = { workspace = true, features = ["crc32", "zlib"] }
 gix-hash = { workspace = true, features = ["sha1"] }
+gix-imara-diff = { workspace = true }
 gix-object = { workspace = true }
 gix-pack = { workspace = true, features = ["sha1"] }
 object_store = { workspace = true }

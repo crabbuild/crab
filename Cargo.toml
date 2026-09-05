@@ -69,6 +69,7 @@ gix-fsck = "0.21.0"
 gix-glob = "0.26.0"
 gix-hash = "0.25.0"
 gix-ignore = "0.21.0"
+gix-imara-diff = "0.2.3"
 gix-index = "0.51.0"
 gix-merge = { version = "0.16.0", default-features = false, features = ["sha1"] }
 gix-lock = "23.0.0"

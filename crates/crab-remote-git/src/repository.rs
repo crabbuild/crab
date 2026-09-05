@@ -144,7 +144,7 @@ pub struct OperationLimits {
     pub max_diff_input_bytes: u64,
     pub max_diff_output_bytes: u64,
     pub max_blame_lines: u64,
-    /// Maximum dynamic-programming cells used by line attribution.
+    /// Maximum conservative comparison work charged by line attribution.
     pub max_blame_comparison_cells: u64,
     pub max_archive_entries: u64,
     pub max_archive_bytes: u64,
