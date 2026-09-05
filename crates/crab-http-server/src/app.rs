@@ -58,6 +58,16 @@ pub(crate) enum Error {
     LabelNotFound,
     #[error("Write access is required to manage assignees")]
     AssigneePermission,
+    #[error("Write access is required to publish releases")]
+    ReleasePermission,
+    #[error("A release already exists for this tag or the tag points to another commit")]
+    ReleaseConflict,
+    #[error("Git writes are busy")]
+    ReleaseBusy,
+    #[error("Release not found")]
+    ReleaseNotFound,
+    #[error("Release tag publication failed")]
+    Release(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge object construction failed")]
@@ -89,6 +99,7 @@ impl IntoResponse for Error {
                 | Self::Repository(_)
                 | Self::Merge(_)
                 | Self::MergeObject(_)
+                | Self::Release(_)
         ) {
             tracing::error!(error = ?self, "collaboration request failed");
         }
@@ -172,6 +183,22 @@ impl IntoResponse for Error {
                 "forbidden",
                 "Write access is required to manage assignees",
             ),
+            Self::ReleasePermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to publish releases",
+            ),
+            Self::ReleaseConflict => (
+                StatusCode::CONFLICT,
+                "release_conflict",
+                "A release already exists for this tag or the tag points to another commit",
+            ),
+            Self::ReleaseBusy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Git writes are busy; retry this release shortly",
+            ),
+            Self::ReleaseNotFound => (StatusCode::NOT_FOUND, "not_found", "Release not found"),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
@@ -186,6 +213,11 @@ impl IntoResponse for Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "merge_failed",
                 "The merge may have completed. Reload the pull request before retrying the same submission",
+            ),
+            Self::Release(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "release_failed",
+                "The release tag may have been published. Retry the same submission to recover it",
             ),
             _ => (
                 StatusCode::BAD_GATEWAY,

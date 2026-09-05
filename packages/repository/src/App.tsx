@@ -22,6 +22,7 @@ import {
   RepoIcon,
   SidebarCollapseIcon,
   SunIcon,
+  TagIcon,
 } from "@primer/octicons-react";
 import {
   displayHex,
@@ -81,6 +82,9 @@ const LabelsPage = lazy(() =>
 );
 const RefsPage = lazy(() =>
   import("./refs").then((module) => ({ default: module.RefsPage })),
+);
+const Releases = lazy(() =>
+  import("./releases").then((module) => ({ default: module.Releases })),
 );
 const Settings = lazy(() =>
   import("./settings").then((module) => ({ default: module.Settings })),
@@ -542,6 +546,7 @@ function RepositoryPage({
                 "delete",
                 "branches",
                 "tags",
+                "releases",
               ].includes(view)
                 ? "active"
                 : ""
@@ -555,6 +560,7 @@ function RepositoryPage({
                 "delete",
                 "branches",
                 "tags",
+                "releases",
               ].includes(view)
                 ? "page"
                 : undefined
@@ -690,7 +696,23 @@ function RepositoryPage({
         ) : (
           <Result state={visibleRefState} showTiming={false}>
             {(data) =>
-              view === "branches" || view === "tags" ? (
+              view === "releases" ? (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner size="small" /> Loading releases…
+                    </div>
+                  }
+                >
+                  <Releases
+                    repo={repo}
+                    refs={data}
+                    url={url}
+                    csrf={csrf}
+                    onPublished={refs.retry}
+                  />
+                </Suspense>
+              ) : view === "branches" || view === "tags" ? (
                 <Suspense
                   fallback={
                     <div className="notice" role="status">
@@ -1004,6 +1026,9 @@ function RepositoryPage({
                               </Link>
                               <Link href={repoHref(repo, { view: "issues" })}>
                                 <IssueOpenedIcon /> Issues
+                              </Link>
+                              <Link href={repoHref(repo, { view: "releases" })}>
+                                <TagIcon /> Releases
                               </Link>
                             </div>
                             {data.refs.some((ref) =>

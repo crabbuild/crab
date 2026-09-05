@@ -19,6 +19,7 @@ mod lfs;
 mod maintenance;
 mod pulls;
 mod receive;
+mod releases;
 mod repository_settings;
 mod server;
 mod statuses;
