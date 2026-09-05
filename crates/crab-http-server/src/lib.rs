@@ -12,6 +12,7 @@ mod config;
 mod contents;
 mod git;
 mod git_objects;
+mod initialize;
 mod issues;
 mod labels;
 mod lfs;
@@ -24,6 +25,7 @@ mod statuses;
 pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
 };
+pub use initialize::initialize_repositories;
 pub use server::serve;
 
 /// Startup and server lifecycle errors with their original sources retained.
@@ -46,6 +48,8 @@ pub enum Error {
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]
     Maintenance(#[from] crab_write::WriteError),
+    #[error("repository initialization failed")]
+    Initialization(#[source] crab_write::WriteError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
     #[error("server logging initialization failed")]

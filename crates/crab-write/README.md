@@ -5,6 +5,11 @@ ref-journal commit and compaction extracted from CLI push, reader repair and gen
 paths. Those CLI callers use these implementations; HTTP receive can compose it without depending
 on the CLI or another server.
 
+`initialize::initialize_repository` owns canonical empty-repository creation for
+the CLI and HTTP server. It creates the layout only for an empty repository prefix,
+conditionally publishes the generation-zero manifest, and adopts concurrent or
+previous initialization after validating the persisted canonical roots.
+
 `catalog::publish_inventory` accepts a caller-owned locator writer, a committed
 inventory/coverage anchor and optional validated local index evidence. Missing
 evidence is read from storage: the pack trailer, bounded Git index/reverse index,

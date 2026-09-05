@@ -9,6 +9,12 @@ struct Arguments {
     config: PathBuf,
     #[arg(long, help = "Check the configured listener's readiness and exit")]
     healthcheck: bool,
+    #[arg(
+        long,
+        conflicts_with = "healthcheck",
+        help = "Initialize or adopt every configured repository and exit"
+    )]
+    initialize: bool,
 }
 
 #[tokio::main]
@@ -20,6 +26,10 @@ async fn main() -> crab_http_server::Result<()> {
         .map_err(|source| crab_http_server::Error::Logging { source })?;
     let arguments = Arguments::parse();
     let config = crab_http_server::Config::read(&arguments.config)?;
+    if arguments.initialize {
+        crab_http_server::initialize_repositories(&config).await?;
+        return Ok(());
+    }
     if arguments.healthcheck {
         let url = format!("http://127.0.0.1:{}/readyz", config.listen.port());
         reqwest::Client::builder()

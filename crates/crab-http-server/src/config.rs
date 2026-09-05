@@ -25,6 +25,8 @@ pub struct RepositoryConfig {
     pub name: String,
     pub bucket: String,
     pub prefix: String,
+    #[serde(default = "default_repository_branch")]
+    pub default_branch: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -160,6 +162,14 @@ impl Config {
             if repository.bucket.is_empty() || repository.prefix.is_empty() {
                 return Err(Error::Config("repository bucket and prefix are required"));
             }
+            let default_ref = format!("refs/heads/{}", repository.default_branch);
+            if repository.default_branch.starts_with("refs/")
+                || crab_git::validate_push_refname(&default_ref).is_err()
+            {
+                return Err(Error::Config(
+                    "repository default_branch must be a valid short branch name",
+                ));
+            }
             if !names.insert((
                 repository.owner.to_lowercase(),
                 repository.name.to_lowercase(),
@@ -171,6 +181,10 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn default_repository_branch() -> String {
+    "main".to_owned()
 }
 
 impl RepositoryConfig {
@@ -229,6 +243,28 @@ mod tests {
             );
             assert!(toml::from_str::<RepositoryConfig>(&source).is_err());
         }
+    }
+
+    #[test]
+    fn repository_default_branch_is_short_valid_and_defaults_to_main() {
+        let repository: RepositoryConfig =
+            toml::from_str("owner='team'\nname='project'\nbucket='bucket'\nprefix='project'")
+                .unwrap();
+        assert_eq!(repository.default_branch, "main");
+
+        for branch in ["", "refs/heads/main", "release..next"] {
+            let source = format!(
+                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\ndefault_branch='{branch}'"
+            );
+            let config: Config = toml::from_str(&source).unwrap();
+            assert!(config.validate().is_err(), "{branch}");
+        }
+
+        let config: Config = toml::from_str(
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\ndefault_branch='trunk'",
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

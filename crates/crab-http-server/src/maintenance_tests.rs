@@ -30,6 +30,7 @@ pub(super) async fn fixture() -> Arc<Server> {
                     name: "repo".into(),
                     bucket: "memory".into(),
                     prefix: "maintenance".into(),
+                    default_branch: "main".into(),
                     description: String::new(),
                     members: vec![],
                     protected_branches: vec![],

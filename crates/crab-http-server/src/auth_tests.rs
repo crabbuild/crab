@@ -186,6 +186,7 @@ impl Harness {
                 name: "private".into(),
                 bucket: "test".into(),
                 prefix: "test".into(),
+                default_branch: "main".into(),
                 description: "Private project".into(),
                 members: vec![
                     crate::RepositoryMember {

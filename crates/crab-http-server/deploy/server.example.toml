@@ -11,6 +11,7 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
+default_branch = "main"
 description = "Our project"
 protected_branches = [
   { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
