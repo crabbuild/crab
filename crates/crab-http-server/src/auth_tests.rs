@@ -652,3 +652,6 @@ mod git_tokens;
 
 #[path = "auth_tests/pulls.rs"]
 mod pulls;
+
+#[path = "auth_tests/releases.rs"]
+mod releases;
