@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button, IconButton, TextInput, VisuallyHidden } from "@primer/react";
 import {
   FileAddedIcon,
+  GitBranchIcon,
   PencilIcon,
   TrashIcon,
   UploadIcon,
@@ -27,6 +28,7 @@ type BaseProps = {
 };
 
 type ResponseBody = {
+  branch?: string;
   commit?: string;
   path_hex?: string;
   paths_hex?: string[];
@@ -36,6 +38,54 @@ type ResponseBody = {
 const MAX_UPLOAD_FILES = 100;
 const MAX_UPLOAD_FILE_BYTES = 900 * 1024;
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+type CommitTarget = {
+  mode: "direct" | "pull";
+  setMode: (mode: "direct" | "pull") => void;
+  newBranch: string;
+  setNewBranch: (branch: string) => void;
+  protected: boolean;
+};
+
+function useCommitTarget(repo: Repository, branch: string): CommitTarget {
+  const protectedBranch = repo.protected_branches.some(
+    (rule) => `refs/heads/${rule.branch}` === branch,
+  );
+  const [mode, setMode] = useState<"direct" | "pull">(
+    protectedBranch ? "pull" : "direct",
+  );
+  const [newBranch, setNewBranch] = useState("");
+  return {
+    mode,
+    setMode,
+    newBranch,
+    setNewBranch,
+    protected: protectedBranch,
+  };
+}
+
+function proposedBranch(target: CommitTarget) {
+  return target.mode === "pull" ? target.newBranch.trim() : undefined;
+}
+
+function commitDestination(
+  repo: Repository,
+  sourceBranch: string,
+  result: ResponseBody,
+  message: string,
+  direct: Record<string, string | undefined>,
+) {
+  if (result.branch && result.branch !== sourceBranch) {
+    return repoHref(repo, {
+      view: "pulls",
+      pull: "new",
+      base: sourceBranch,
+      head: result.branch,
+      title: message.trim(),
+    });
+  }
+  return repoHref(repo, direct);
+}
 
 function encodePath(path: string) {
   return Array.from(new TextEncoder().encode(path), (byte) =>
@@ -65,7 +115,7 @@ async function changeContent(
   repo: Repository,
   csrf: string,
   method: "POST" | "PATCH" | "DELETE",
-  body: Record<string, string>,
+  body: Record<string, string | undefined>,
 ) {
   const response = await fetch(endpoint(repo, "contents"), {
     method,
@@ -89,6 +139,8 @@ function CommitPanel({
   saving,
   error,
   cancel,
+  branch,
+  target,
   danger = false,
 }: {
   message: string;
@@ -97,6 +149,8 @@ function CommitPanel({
   saving: boolean;
   error?: string;
   cancel: () => void;
+  branch: string;
+  target: CommitTarget;
   danger?: boolean;
 }) {
   return (
@@ -111,21 +165,80 @@ function CommitPanel({
         required
         onChange={(event) => setMessage(event.target.value)}
       />
+      <fieldset className="commit-target" disabled={saving}>
+        <legend>Choose a branch for your changes</legend>
+        <label>
+          <input
+            type="radio"
+            name="commit-target"
+            checked={target.mode === "direct"}
+            disabled={target.protected}
+            onChange={() => target.setMode("direct")}
+          />
+          <span>
+            <strong>
+              Commit directly to {branch.slice("refs/heads/".length)}
+            </strong>
+            {target.protected && (
+              <small>
+                This branch requires changes through a pull request.
+              </small>
+            )}
+          </span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="commit-target"
+            checked={target.mode === "pull"}
+            onChange={() => target.setMode("pull")}
+          />
+          <span>
+            <strong>
+              Create a new branch for this commit and start a pull request
+            </strong>
+            <small>
+              You can review the diff before opening the pull request.
+            </small>
+          </span>
+        </label>
+        {target.mode === "pull" && (
+          <div className="commit-branch-name">
+            <TextInput
+              block
+              leadingVisual={GitBranchIcon}
+              aria-label="New branch name"
+              placeholder="my-change"
+              value={target.newBranch}
+              required
+              onChange={(event) => target.setNewBranch(event.target.value)}
+            />
+          </div>
+        )}
+      </fieldset>
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
       <div className="create-file-actions">
+        <Button
+          variant={danger && target.mode === "direct" ? "danger" : "primary"}
+          type="submit"
+          disabled={
+            saving || (target.mode === "pull" && !target.newBranch.trim())
+          }
+        >
+          {saving
+            ? target.mode === "pull"
+              ? "Proposing…"
+              : "Committing…"
+            : target.mode === "pull"
+              ? "Propose changes"
+              : "Commit changes"}
+        </Button>
         <Button type="button" onClick={cancel}>
           Cancel changes
-        </Button>
-        <Button
-          variant={danger ? "danger" : "primary"}
-          type="submit"
-          disabled={saving}
-        >
-          {saving ? "Committing…" : "Commit changes"}
         </Button>
       </div>
     </section>
@@ -144,6 +257,7 @@ export function CreateFile({
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const target = useCommitTarget(repo, branch);
   const directory = displayHex(directoryHex);
 
   async function submit(event: React.FormEvent) {
@@ -155,12 +269,13 @@ export function CreateFile({
       const result = await changeContent(repo, csrf, "POST", {
         branch,
         expected_head: expectedHead,
+        new_branch: proposedBranch(target),
         path_hex: pathHex,
         content,
         message: message.trim(),
       });
       window.location.assign(
-        repoHref(repo, {
+        commitDestination(repo, branch, result, message, {
           rev: branch,
           path: result.path_hex,
           kind: "Blob",
@@ -207,6 +322,8 @@ export function CreateFile({
         placeholder="Create a new file"
         saving={saving}
         error={error}
+        branch={branch}
+        target={target}
         cancel={() => navigate(repoHref(repo, { rev: branch }))}
       />
     </form>
@@ -225,6 +342,7 @@ export function UploadFiles({
   const [saving, setSaving] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string>();
+  const target = useCommitTarget(repo, branch);
 
   function selectFiles(selected: File[]) {
     const next = new Map(files.map((file) => [file.name, file]));
@@ -266,6 +384,7 @@ export function UploadFiles({
         body: JSON.stringify({
           branch,
           expected_head: expectedHead,
+          new_branch: proposedBranch(target),
           files: await Promise.all(
             files.map(async (file) => ({
               path_hex: joinPath(directoryHex, file.name),
@@ -281,7 +400,7 @@ export function UploadFiles({
           result.error?.message ?? "The files could not be committed",
         );
       window.location.assign(
-        repoHref(repo, {
+        commitDestination(repo, branch, result, message, {
           rev: branch,
           path: directoryHex || undefined,
           kind: directoryHex ? "Tree" : undefined,
@@ -356,6 +475,8 @@ export function UploadFiles({
         placeholder="Upload files"
         saving={saving}
         error={error}
+        branch={branch}
+        target={target}
         cancel={() =>
           navigate(
             repoHref(repo, {
@@ -416,6 +537,7 @@ function EditFileForm({
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const target = useCommitTarget(repo, branch);
   const path = displayHex(pathHex);
 
   async function submit(event: React.FormEvent) {
@@ -426,13 +548,14 @@ function EditFileForm({
       const result = await changeContent(repo, csrf, "PATCH", {
         branch,
         expected_head: expectedHead,
+        new_branch: proposedBranch(target),
         expected_blob: original.oid,
         path_hex: pathHex,
         content,
         message: message.trim(),
       });
       window.location.assign(
-        repoHref(repo, {
+        commitDestination(repo, branch, result, message, {
           rev: branch,
           path: result.path_hex,
           kind: "Blob",
@@ -471,6 +594,8 @@ function EditFileForm({
         placeholder={`Update ${path.split("/").at(-1) ?? "file"}`}
         saving={saving}
         error={error}
+        branch={branch}
+        target={target}
         cancel={() =>
           navigate(repoHref(repo, { rev: branch, path: pathHex, kind: "Blob" }))
         }
@@ -516,6 +641,7 @@ function DeleteFileForm({
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const target = useCommitTarget(repo, branch);
   const path = displayHex(pathHex);
 
   async function submit(event: React.FormEvent) {
@@ -523,16 +649,17 @@ function DeleteFileForm({
     setSaving(true);
     setError(undefined);
     try {
-      await changeContent(repo, csrf, "DELETE", {
+      const result = await changeContent(repo, csrf, "DELETE", {
         branch,
         expected_head: expectedHead,
+        new_branch: proposedBranch(target),
         expected_blob: expectedBlob,
         path_hex: pathHex,
         message: message.trim(),
       });
       const parent = parentHex(pathHex);
       window.location.assign(
-        repoHref(repo, {
+        commitDestination(repo, branch, result, message, {
           rev: branch,
           path: parent || undefined,
           kind: parent ? "Tree" : undefined,
@@ -568,6 +695,8 @@ function DeleteFileForm({
         placeholder={`Delete ${path.split("/").at(-1) ?? "file"}`}
         saving={saving}
         error={error}
+        branch={branch}
+        target={target}
         danger
         cancel={() =>
           navigate(repoHref(repo, { rev: branch, path: pathHex, kind: "Blob" }))
@@ -592,7 +721,7 @@ function EditorHeading({
       <div>
         <h2>{title}</h2>
         <p>
-          Commit directly to{" "}
+          Make this change from{" "}
           <strong>{branch.slice("refs/heads/".length)}</strong>
         </p>
       </div>
