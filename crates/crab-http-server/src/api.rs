@@ -303,9 +303,12 @@ async fn execute(
                 .clone(),
         ),
     };
+    let path_history = !path.is_root() && matches!(action, Action::Commit | Action::Commits);
     let kind = match action {
         Action::Refs => OperationKind::Repository,
+        Action::Commit if path_history => OperationKind::PathHistory,
         Action::Commit => OperationKind::Commit,
+        Action::Commits if path_history => OperationKind::PathHistory,
         Action::Commits => OperationKind::History,
         Action::Tree => OperationKind::Tree,
         Action::Blob | Action::Asset | Action::File => OperationKind::Content,
@@ -318,10 +321,39 @@ async fn execute(
         let snapshot = repository.snapshot(&revision, &operation).await?;
         let commit = snapshot.commit(&operation).await?;
         let mut value = match action {
-            Action::Refs | Action::Commit => commit_json(&commit),
+            Action::Refs => commit_json(&commit),
+            Action::Commit if path_history => {
+                let result = snapshot
+                    .path_history(
+                        &path,
+                        HistoryTraversal::FirstParent,
+                        &PageRequest::new(1, None)?,
+                        &operation,
+                    )
+                    .await?;
+                let latest = result.items.first().ok_or(Error::PathNotFound)?;
+                path_history_json(latest)
+            }
+            Action::Commit => commit_json(&commit),
             Action::Commits => {
-                let result = snapshot.history(HistoryTraversal::FirstParent, &page, &operation).await?;
-                json!({"items":result.items.iter().map(commit_json).collect::<Vec<_>>(),"next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+                let (items, next) = if path_history {
+                    let result = snapshot
+                        .path_history(&path, HistoryTraversal::FirstParent, &page, &operation)
+                        .await?;
+                    (
+                        result.items.iter().map(path_history_json).collect::<Vec<_>>(),
+                        result.next,
+                    )
+                } else {
+                    let result = snapshot
+                        .history(HistoryTraversal::FirstParent, &page, &operation)
+                        .await?;
+                    (
+                        result.items.iter().map(commit_json).collect::<Vec<_>>(),
+                        result.next,
+                    )
+                };
+                json!({"items":items,"next":next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
             }
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
@@ -438,6 +470,12 @@ fn entry_json(entry: &TreeEntry) -> Value {
 
 fn commit_json(commit: &Commit) -> Value {
     json!({"oid":commit.oid.to_string(),"tree":commit.tree.to_string(),"parents":commit.parents.iter().map(ToString::to_string).collect::<Vec<_>>(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(&commit.message),"message_hex":encode_hex(&commit.message)})
+}
+
+fn path_history_json(entry: &crab_remote_git::PathHistoryEntry) -> Value {
+    let mut value = commit_json(&entry.commit);
+    value["change_kind"] = json!(format!("{:?}", entry.kind));
+    value
 }
 
 fn display_path(bytes: &[u8]) -> String {

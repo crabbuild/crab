@@ -12,7 +12,9 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::Instrument as _;
 
 use crate::budget::{BudgetUsage, OperationBudget};
-use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
+use crate::objects::{
+    RawTreeEntry, find_tree_entry, materialize_tree, parse_commit, parse_tag, parse_tree_raw,
+};
 use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
@@ -693,6 +695,28 @@ impl OperationContext {
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)
             .await?;
+        let tree = self.read_raw_tree(oid).await?;
+        materialize_tree(&tree, parent)
+    }
+
+    pub(crate) async fn read_tree_entry(
+        &self,
+        oid: gix_hash::ObjectId,
+        parent: &GitPath,
+        name: &[u8],
+    ) -> Result<Option<TreeEntry>> {
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, 1)
+            .await?;
+        let tree = self.read_raw_tree(oid).await?;
+        let (entry, comparisons) = find_tree_entry(&tree, parent, name)?;
+        self.budget
+            .charge(BudgetDimension::Entries, comparisons)
+            .await?;
+        Ok(entry)
+    }
+
+    async fn read_raw_tree(&self, oid: gix_hash::ObjectId) -> Result<Arc<Vec<RawTreeEntry>>> {
         let key =
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;
@@ -709,7 +733,7 @@ impl OperationContext {
                 tree
             }
         };
-        materialize_tree(&tree, parent)
+        Ok(tree)
     }
 
     /// Read a bounded batch of verified Git objects in request order.

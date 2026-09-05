@@ -56,6 +56,7 @@ export interface Commit {
   author: string;
   author_seconds: number;
   message: string;
+  change_kind?: string;
 }
 export interface Page<T> {
   items: T[];

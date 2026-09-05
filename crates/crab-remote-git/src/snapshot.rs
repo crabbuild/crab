@@ -151,6 +151,79 @@ impl RemoteGitSnapshot {
         Ok(Page { items, next })
     }
 
+    async fn first_parent_path_history(
+        &self,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        skip: u64,
+    ) -> Result<Page<PathHistoryEntry>> {
+        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+        let commit = operation.read_commit(self.commit_oid).await?;
+        let entry = entry_at_tree(self, commit.tree, commit.oid, path, operation).await?;
+        let mut current = Some((commit, entry));
+        let mut traversed = 0u64;
+        let mut items = Vec::new();
+        while let Some((commit, entry)) = current {
+            operation.ensure_active()?;
+            let parent = match commit.parents.first() {
+                Some(oid) => {
+                    let parent = operation.read_commit(*oid).await?;
+                    let entry =
+                        entry_at_tree(self, parent.tree, parent.oid, path, operation).await?;
+                    Some((parent, entry))
+                }
+                None => None,
+            };
+            let parent_entries = parent
+                .as_ref()
+                .map(|(_, entry)| std::slice::from_ref(entry))
+                .unwrap_or_default();
+            if traversed >= skip
+                && let Some(kind) = path_change_kind(entry.as_ref(), parent_entries)
+            {
+                operation
+                    .charge(
+                        BudgetDimension::ResponseBytes,
+                        commit_response_bytes(&commit)
+                            .saturating_add(mem::size_of::<PathHistoryEntry>() as u64),
+                    )
+                    .await?;
+                items.try_reserve(1).map_err(|source| Error::Allocation {
+                    requested: mem::size_of::<PathHistoryEntry>(),
+                    source,
+                })?;
+                items.push(PathHistoryEntry { commit, kind });
+                if items.len() == page.limit() {
+                    let next = match parent {
+                        Some(_) => Some(PageCursor::path_history(
+                            self.commit_oid,
+                            HistoryTraversal::FirstParent,
+                            path,
+                            traversed.checked_add(1).ok_or(Error::LimitExceeded {
+                                limit: "history commits",
+                                actual: u64::MAX,
+                                maximum: u64::MAX,
+                            })?,
+                        )?),
+                        None => None,
+                    };
+                    return Ok(Page { items, next });
+                }
+            }
+            traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
+                limit: "history commits",
+                actual: u64::MAX,
+                maximum: u64::MAX,
+            })?;
+            if parent.is_some() {
+                operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+            }
+            current = parent;
+        }
+        Ok(Page { items, next: None })
+    }
+
     /// Return commits that changed one exact path under a parent policy.
     ///
     /// Content, mode, type, addition, and deletion changes are detected from
@@ -178,6 +251,11 @@ impl RemoteGitSnapshot {
             }
             None => 0,
         };
+        if traversal == HistoryTraversal::FirstParent {
+            return self
+                .first_parent_path_history(path, page, operation, skip)
+                .await;
+        }
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
         let mut traversed = 0u64;
@@ -627,9 +705,10 @@ impl RemoteGitSnapshot {
 
     /// Resolve one exact byte path without following symlinks.
     ///
-    /// Traversal reads at most one dependent tree per path component. The root
-    /// is returned as a synthetic tree entry. Missing final entries return
-    /// `None`; a non-tree intermediate component returns a structured error.
+    /// Traversal reads at most one dependent tree per path component and uses
+    /// canonical Git tree order for bounded exact-name lookup. The root is
+    /// returned as a synthetic tree entry. Missing final entries return `None`;
+    /// a non-tree intermediate component returns a structured error.
     pub async fn entry(
         &self,
         path: &GitPath,
@@ -658,13 +737,9 @@ impl RemoteGitSnapshot {
                 maximum: u64::MAX,
             })?;
             operation.charge(BudgetDimension::Depth, depth).await?;
-            let entries = operation.read_tree(tree_oid, &parent).await?;
-            operation
-                .charge(BudgetDimension::Entries, entries.len() as u64)
+            let found = operation
+                .read_tree_entry(tree_oid, &parent, component)
                 .await?;
-            let found = entries
-                .into_iter()
-                .find(|entry| entry.path.file_name() == Some(component));
             let Some(entry) = found else {
                 return Ok(None);
             };
@@ -1316,42 +1391,44 @@ async fn path_change(
         let parent = operation.read_commit(oid).await?;
         parents.push(entry_at_tree(snapshot, parent.tree, parent.oid, path, operation).await?);
     }
+    Ok(path_change_kind(current.as_ref(), &parents))
+}
+
+fn path_change_kind(
+    current: Option<&TreeEntry>,
+    parents: &[Option<TreeEntry>],
+) -> Option<ChangeKind> {
     if parents.is_empty() {
-        return Ok(current.map(|_| ChangeKind::Added));
+        return current.map(|_| ChangeKind::Added);
     }
-    match current {
-        None => Ok(parents
+    let Some(current) = current else {
+        return parents
             .iter()
             .any(Option::is_some)
-            .then_some(ChangeKind::Deleted)),
-        Some(current) => {
-            if parents.iter().all(Option::is_none) {
-                return Ok(Some(ChangeKind::Added));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.kind != current.kind)
-            {
-                return Ok(Some(ChangeKind::TypeChanged));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.oid != current.oid)
-            {
-                return Ok(Some(ChangeKind::Modified));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.mode != current.mode)
-            {
-                return Ok(Some(ChangeKind::ModeChanged));
-            }
-            Ok(None)
-        }
+            .then_some(ChangeKind::Deleted);
+    };
+    if parents.iter().all(Option::is_none) {
+        return Some(ChangeKind::Added);
     }
+    if parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.kind != current.kind)
+    {
+        return Some(ChangeKind::TypeChanged);
+    }
+    if parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.oid != current.oid)
+    {
+        return Some(ChangeKind::Modified);
+    }
+    parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.mode != current.mode)
+        .then_some(ChangeKind::ModeChanged)
 }
 
 fn queue_all_parents(
