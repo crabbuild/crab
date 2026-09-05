@@ -2135,6 +2135,59 @@ async fn public_api_opens_resolves_snapshots_lists_and_reads_without_a_filesyste
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recursive_tree_listing_reads_metadata_without_blob_bodies() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("operation");
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await?;
+        let revision = snapshot.commit_oid().to_string();
+        let entries = snapshot.list_tree_recursive(&operation).await?;
+        let mut actual = entries
+            .iter()
+            .map(|entry| entry.path.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let mut expected = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "ls-tree",
+                "-r",
+                "-t",
+                "--full-tree",
+                "--name-only",
+                "-z",
+                &revision,
+            ],
+            None,
+        )
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert!(entries.iter().any(|entry| {
+            entry.path == fixture.target_path
+                && entry.kind == EntryKind::Blob
+                && entry.size.is_none()
+        }));
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn visibility_rebuild_batches_remote_object_reads() {
     let options = RepositoryOptions::new(
         ObjectLimits::default(),
