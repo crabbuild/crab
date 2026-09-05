@@ -87,6 +87,7 @@ examples, and related commands.
 | [Local Dev: RustFS](local-dev-rustfs.md) | Run a local S3-compatible backend for end-to-end testing |
 | [Provider Qualification](provider-qualification.md) | Retained S3/GCS/Azure contract evidence and the explicit canonical v1 development reset |
 | [Large-repository RustFS qualification](large-repository-qualification.md) | Replay Kubernetes history and verify large-repository correctness and performance |
+| [Kubernetes 4,500-commit benchmark](../benchmarks/kubernetes-4500-rustfs.md) | Published local RustFS push, repack, resource, and concurrent-read measurements |
 | [Enterprise Auth](auth/enterprise-auth.md) | Federated identity and multi-cloud credential management |
 | [Auth: Static / Multi-Cloud](auth/enterprise-auth-static.md) | Default env-var credentials for S3, GCS, or Azure |
 | [Auth: AWS OIDC](auth/enterprise-auth-aws.md) | Corporate IdP → AWS STS temporary credentials |

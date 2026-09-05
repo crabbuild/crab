@@ -1,0 +1,215 @@
+{
+  "schema": "crab.kubernetes-replay-benchmark",
+  "version": "1.0",
+  "scope": {
+    "seed_ordinal": 0,
+    "first_replay_ordinal": 1,
+    "last_replay_ordinal": 4500,
+    "records": 4501,
+    "later_records_included": false,
+    "seed_first_parent_commits": 53908,
+    "cutoff_first_parent_commits": 58408,
+    "base_revision": "bd55d18c75f4648b934ad0b548c017c523dd705b",
+    "cutoff_revision": "b1206c60632c0588ea753f3f4bdd97a1cacc90b1"
+  },
+  "provenance": {
+    "crab_version": "1.0.1",
+    "crab_git_sha": "4b1856c905bdd60ac568d919ca3eb74ad7d20d1b",
+    "crab_binary_sha256": "e09b78493c26572f52695c045e828d457e1caee38390baa48dd00840781196e3",
+    "original_report_sha256": "b451465c4e16555126c124e5d13224c568caf0e565197b91e1667ca74752360e",
+    "continuation_report_sha256": "eaf31b65c606578228e992ba26af6c0a3cba88d6afd67fafa8e31927518ce2fe",
+    "object_store": "local RustFS at 127.0.0.1:9000",
+    "object_store_version": "not captured",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "cpu_count": 18,
+    "git_version": "2.50.1 (Apple Git-155)"
+  },
+  "seed_import": {
+    "count": 1,
+    "duration_ms": 155539,
+    "peak_process_tree_rss_bytes": 2669117440
+  },
+  "replay_1_4500": {
+    "count": 4500,
+    "sum_ms": 11361214,
+    "mean_ms": 2524.71,
+    "min_ms": 656,
+    "median_ms": 2470,
+    "p90_ms": 3847,
+    "p95_ms": 4252,
+    "p99_ms": 4524,
+    "max_ms": 10552,
+    "transactions_per_second_by_sum": 0.3961,
+    "pushes_per_minute_by_sum": 23.77
+  },
+  "pre_maintenance_1_3368": {
+    "count": 3368,
+    "sum_ms": 8526246,
+    "median_ms": 2483,
+    "p95_ms": 4279,
+    "p99_ms": 4705,
+    "max_ms": 10552
+  },
+  "post_maintenance_3369_4500": {
+    "count": 1132,
+    "sum_ms": 2834968,
+    "median_ms": 2466,
+    "p95_ms": 3148,
+    "p99_ms": 3390,
+    "max_ms": 4921
+  },
+  "latency_windows": [
+    {
+      "first": 1,
+      "last": 100,
+      "count": 100,
+      "median_ms": 671,
+      "p95_ms": 1111,
+      "p99_ms": 1556,
+      "max_ms": 1970,
+      "pushes_per_minute_by_sum": 80.44
+    },
+    {
+      "first": 101,
+      "last": 1000,
+      "count": 900,
+      "median_ms": 1327,
+      "p95_ms": 1640,
+      "p99_ms": 1818,
+      "max_ms": 2226,
+      "pushes_per_minute_by_sum": 50.03
+    },
+    {
+      "first": 1001,
+      "last": 2000,
+      "count": 1000,
+      "median_ms": 2430,
+      "p95_ms": 2934,
+      "p99_ms": 3428,
+      "max_ms": 4213,
+      "pushes_per_minute_by_sum": 25.38
+    },
+    {
+      "first": 2001,
+      "last": 3000,
+      "count": 1000,
+      "median_ms": 3386,
+      "p95_ms": 4055,
+      "p99_ms": 4822,
+      "max_ms": 10376,
+      "pushes_per_minute_by_sum": 17.43
+    },
+    {
+      "first": 3001,
+      "last": 3368,
+      "count": 368,
+      "median_ms": 4263,
+      "p95_ms": 4728,
+      "p99_ms": 5743,
+      "max_ms": 10552,
+      "pushes_per_minute_by_sum": 14.10
+    },
+    {
+      "first": 3369,
+      "last": 3468,
+      "count": 100,
+      "median_ms": 1797,
+      "p95_ms": 2232,
+      "p99_ms": 2243,
+      "max_ms": 2247,
+      "pushes_per_minute_by_sum": 31.99
+    },
+    {
+      "first": 3469,
+      "last": 3750,
+      "count": 282,
+      "median_ms": 2033,
+      "p95_ms": 2465,
+      "p99_ms": 2526,
+      "max_ms": 2924,
+      "pushes_per_minute_by_sum": 28.09
+    },
+    {
+      "first": 3751,
+      "last": 4000,
+      "count": 250,
+      "median_ms": 2457,
+      "p95_ms": 2687,
+      "p99_ms": 2915,
+      "max_ms": 3360,
+      "pushes_per_minute_by_sum": 24.94
+    },
+    {
+      "first": 4001,
+      "last": 4250,
+      "count": 250,
+      "median_ms": 2691,
+      "p95_ms": 3133,
+      "p99_ms": 3449,
+      "max_ms": 4921,
+      "pushes_per_minute_by_sum": 22.05
+    },
+    {
+      "first": 4251,
+      "last": 4500,
+      "count": 250,
+      "median_ms": 3079,
+      "p95_ms": 3369,
+      "p99_ms": 3781,
+      "max_ms": 4484,
+      "pushes_per_minute_by_sum": 19.65
+    }
+  ],
+  "maintenance": {
+    "standalone_repack": {
+      "duration_ms": 228,
+      "packs_before": 2,
+      "packs_after": 2,
+      "bytes_before": 1097185730,
+      "bytes_after": 1097185730,
+      "bytes_read": 0,
+      "bytes_written": 0,
+      "refs_preserved": true
+    },
+    "generation_owner": {
+      "passes": 85,
+      "duration_ms": 754415,
+      "bytes_read": 395865648,
+      "bytes_written": 161120618,
+      "peak_process_tree_rss_bytes": 1154465792,
+      "converged": true,
+      "final_active_packs": 2,
+      "final_geometric_candidates": 0
+    },
+    "immediate_window_change": {
+      "before_first": 3001,
+      "before_last": 3368,
+      "after_first": 3369,
+      "after_last": 3468,
+      "median_latency_reduction_percent": 57.8,
+      "p95_latency_reduction_percent": 52.8,
+      "sequential_rate_increase_percent": 126.9
+    }
+  },
+  "resources_replay_1_4500": {
+    "median_peak_process_tree_rss_bytes": 133414912,
+    "p95_peak_process_tree_rss_bytes": 235520000,
+    "max_peak_process_tree_rss_bytes": 450035712,
+    "user_cpu_ms": 1605970,
+    "system_cpu_ms": 2107180
+  },
+  "concurrent_clone_checkpoint_100": {
+    "clients": 100,
+    "successful": 100,
+    "duration_ms": 19508,
+    "median_client_ms": 16877,
+    "p95_client_ms": 19153,
+    "p99_client_ms": 19341,
+    "generated_pack_producers": 1,
+    "cache_hits": 55,
+    "cache_misses": 45,
+    "origin_requests": 2346
+  },
+  "qualification_level": "push-performance-and-intermediate-read-benchmark",
+  "terminal_4500_clone_fsck_and_byte_identity_proven": false
+}
