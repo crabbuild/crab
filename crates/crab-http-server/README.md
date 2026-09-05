@@ -898,9 +898,15 @@ from object storage, expand the path, select the active file and center it in
 the virtualized tree. The `T` shortcut focuses file search in either pane state.
 Search covers the full pinned repository tree, including paths whose parents
 have not been expanded, and retains the same compact 32-pixel row rhythm.
-If exact path history exceeds a repository read budget, the 52-pixel commit
-strip reports that local failure with retry and History controls while the tree
-and verified file contents remain usable.
+Exact path history deduplicates unchanged directory trees within each bounded
+commit batch, allowing substantially older paths in large repositories to stay
+within the repository read budget. A cold RustFS-backed Kubernetes lookup for
+`cmd/kubelet/kubelet.go` resolved the same first-parent commit as native Git in
+15.1 seconds while charging 7,742 logical objects; the previous reader exhausted
+the 10,000-object limit. The 52-pixel commit strip still reports a local failure
+with retry and History controls if a path exceeds another configured limit,
+while the tree and verified file contents remain usable. This local measurement
+is not a production latency guarantee.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
 forms were inspected against the real Kubernetes repository in light desktop and

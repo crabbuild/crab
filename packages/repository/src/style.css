@@ -2147,7 +2147,6 @@ main {
 .repo-overview .toolbar {
   grid-column: 1;
   grid-row: 1;
-  margin-bottom: 0;
 }
 .overview-layout .code-main {
   grid-column: 1;
