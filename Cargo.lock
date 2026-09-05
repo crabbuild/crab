@@ -2362,6 +2362,7 @@ dependencies = [
  "futures-util",
  "gix-features",
  "gix-hash",
+ "gix-imara-diff",
  "gix-object",
  "gix-pack",
  "object_store",

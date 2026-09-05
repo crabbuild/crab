@@ -751,14 +751,12 @@ impl RemoteGitSnapshot {
                 operation
                     .charge(BudgetDimension::BlameComparisons, comparison_cells)
                     .await?;
-                let matches = lcs_matches(
+                let matches = git_line_matches(
                     operation.runtime(),
                     parent_bytes.clone(),
-                    parent_lines.clone(),
+                    parent_line_count,
                     current_bytes.clone(),
-                    current_lines,
-                    equal_prefix,
-                    equal_suffix,
+                    current_lines.len(),
                     operation.cancellation().clone(),
                 )
                 .await?;
@@ -1507,112 +1505,91 @@ fn matching_ends(
     Ok((prefix, suffix))
 }
 
-async fn lcs_matches(
+async fn git_line_matches(
     runtime: &crate::RemoteGitRuntime,
     parent: bytes::Bytes,
-    parent_lines: Vec<Range<usize>>,
+    parent_line_count: usize,
     current: bytes::Bytes,
-    current_lines: Vec<Range<usize>>,
-    equal_prefix: usize,
-    equal_suffix: usize,
+    current_line_count: usize,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<Vec<(usize, usize)>> {
     runtime
         .spawn_blocking(move || {
             check_cpu_cancellation(&cancellation)?;
-            let parent_middle_end = parent_lines.len() - equal_suffix;
-            let current_middle_end = current_lines.len() - equal_suffix;
-            let rows = parent_middle_end
-                .saturating_sub(equal_prefix)
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded {
-                    limit: "blame comparison cells",
-                    actual: u64::MAX,
-                    maximum: u64::MAX,
-                })?;
-            let columns = current_middle_end
-                .saturating_sub(equal_prefix)
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded {
-                    limit: "blame comparison cells",
-                    actual: u64::MAX,
-                    maximum: u64::MAX,
-                })?;
-            let cells = rows.checked_mul(columns).ok_or(Error::LimitExceeded {
-                limit: "blame comparison cells",
-                actual: u64::MAX,
-                maximum: u64::MAX,
-            })?;
-            let requested =
-                cells
-                    .checked_mul(mem::size_of::<u32>())
-                    .ok_or(Error::LimitExceeded {
-                        limit: "blame comparison cells",
-                        actual: u64::MAX,
-                        maximum: u64::MAX,
-                    })?;
-            let mut matrix = Vec::new();
-            matrix
-                .try_reserve_exact(cells)
-                .map_err(|source| Error::Allocation { requested, source })?;
-            matrix.resize(cells, 0u32);
-            for row in 1..rows {
-                check_cpu_cancellation(&cancellation)?;
-                for column in 1..columns {
-                    let parent_line = &parent[parent_lines[equal_prefix + row - 1].clone()];
-                    let current_line = &current[current_lines[equal_prefix + column - 1].clone()];
-                    let index = row * columns + column;
-                    matrix[index] = if parent_line == current_line {
-                        matrix[(row - 1) * columns + column - 1].saturating_add(1)
-                    } else {
-                        matrix[(row - 1) * columns + column].max(matrix[row * columns + column - 1])
-                    };
-                }
+            let supported_lines = i32::MAX as usize - 1;
+            if parent_line_count > supported_lines || current_line_count > supported_lines {
+                return Err(Error::LimitExceeded {
+                    limit: "blame diff lines",
+                    actual: parent_line_count.max(current_line_count) as u64,
+                    maximum: supported_lines as u64,
+                });
             }
-            let capacity = matrix[rows * columns - 1] as usize;
+            let input = gix_imara_diff::InternedInput::new(parent.as_ref(), current.as_ref());
+            if input.before.len() != parent_line_count || input.after.len() != current_line_count {
+                return Err(Error::InternalInvariant {
+                    invariant: "blob line count changed while preparing blame diff",
+                });
+            }
+            // Git's default blame attribution uses Myers, including line-slider
+            // postprocessing to place ambiguous repeated-line changes.
+            let mut diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
+            diff.postprocess_lines(&input);
+            check_cpu_cancellation(&cancellation)?;
             let mut matches = Vec::new();
             matches
-                .try_reserve_exact(
-                    equal_prefix
-                        .saturating_add(capacity)
-                        .saturating_add(equal_suffix),
-                )
+                .try_reserve_exact(input.before.len().min(input.after.len()))
                 .map_err(|source| Error::Allocation {
-                    requested: equal_prefix
-                        .saturating_add(capacity)
-                        .saturating_add(equal_suffix)
+                    requested: input
+                        .before
+                        .len()
+                        .min(input.after.len())
                         .saturating_mul(mem::size_of::<(usize, usize)>()),
                     source,
                 })?;
-            matches.extend((0..equal_prefix).map(|line| (line, line)));
-            let middle_start = matches.len();
-            let (mut row, mut column) = (rows - 1, columns - 1);
-            let mut backtrace_steps = 0usize;
-            while row > 0 && column > 0 {
-                if backtrace_steps.is_multiple_of(CPU_CANCELLATION_INTERVAL) {
-                    check_cpu_cancellation(&cancellation)?;
+            let (mut parent_line, mut current_line) = (0usize, 0usize);
+            for hunk in diff.hunks() {
+                let unchanged = (hunk.before.start as usize)
+                    .checked_sub(parent_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff moved a hunk backwards",
+                    })?;
+                let current_unchanged = (hunk.after.start as usize)
+                    .checked_sub(current_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff moved a hunk backwards",
+                    })?;
+                if current_unchanged != unchanged {
+                    return Err(Error::InternalInvariant {
+                        invariant: "blob diff changed unmatched line offsets",
+                    });
                 }
-                if parent[parent_lines[equal_prefix + row - 1].clone()]
-                    == current[current_lines[equal_prefix + column - 1].clone()]
-                {
-                    matches.push((equal_prefix + row - 1, equal_prefix + column - 1));
-                    row -= 1;
-                    column -= 1;
-                } else if matrix[(row - 1) * columns + column] >= matrix[row * columns + column - 1]
-                {
-                    row -= 1;
-                } else {
-                    column -= 1;
-                }
-                backtrace_steps = backtrace_steps.saturating_add(1);
+                matches
+                    .extend((0..unchanged).map(|line| (parent_line + line, current_line + line)));
+                parent_line = hunk.before.end as usize;
+                current_line = hunk.after.end as usize;
             }
-            matches[middle_start..].reverse();
-            matches.extend((0..equal_suffix).map(|line| {
-                (
-                    parent_lines.len() - equal_suffix + line,
-                    current_lines.len() - equal_suffix + line,
-                )
-            }));
+            let unchanged =
+                input
+                    .before
+                    .len()
+                    .checked_sub(parent_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff exceeded the parent line count",
+                    })?;
+            let current_unchanged =
+                input
+                    .after
+                    .len()
+                    .checked_sub(current_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff exceeded the current line count",
+                    })?;
+            if current_unchanged != unchanged {
+                return Err(Error::InternalInvariant {
+                    invariant: "blob diff changed unmatched line tails",
+                });
+            }
+            matches.extend((0..unchanged).map(|line| (parent_line + line, current_line + line)));
             Ok(matches)
         })
         .await
@@ -2278,28 +2255,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blame_matrix_stops_when_cancelled() {
+    async fn blame_diff_stops_when_cancelled() {
         let runtime = crate::RemoteGitRuntime::default();
         let cancellation = tokio_util::sync::CancellationToken::new();
         cancellation.cancel();
-        let error = lcs_matches(
+        let error = git_line_matches(
             &runtime,
             bytes::Bytes::from_static(b"parent\n"),
-            std::iter::once(0..7).collect(),
+            1,
             bytes::Bytes::from_static(b"current\n"),
-            std::iter::once(0..8).collect(),
-            0,
-            0,
+            1,
             cancellation,
         )
         .await
-        .expect_err("cancelled blame matrix");
+        .expect_err("cancelled blame diff");
         assert!(matches!(error, Error::Cancelled));
         runtime.shutdown().await;
     }
 
     #[tokio::test]
-    async fn blame_matrix_trims_equal_prefix_and_suffix() {
+    async fn blame_diff_preserves_equal_prefix_and_suffix() {
         let runtime = crate::RemoteGitRuntime::default();
         let cancellation = tokio_util::sync::CancellationToken::new();
         let parent = bytes::Bytes::from_static(b"same\nold\ntail\n");
@@ -2316,20 +2291,29 @@ mod tests {
         .expect("matching ends");
         assert_eq!(ends, (1, 1));
         assert_eq!(
-            lcs_matches(
-                &runtime,
-                parent,
-                parent_lines,
-                current,
-                current_lines,
-                ends.0,
-                ends.1,
-                cancellation,
-            )
-            .await
-            .expect("line matches"),
+            git_line_matches(&runtime, parent, 3, current, 3, cancellation)
+                .await
+                .expect("line matches"),
             vec![(0, 0), (2, 2)]
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blame_diff_places_repeated_line_change_like_git() {
+        let runtime = crate::RemoteGitRuntime::default();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let matches = git_line_matches(
+            &runtime,
+            bytes::Bytes::from_static(b"a\na\nb\n"),
+            3,
+            bytes::Bytes::from_static(b"a\na\na\n"),
+            3,
+            cancellation,
+        )
+        .await
+        .expect("line matches");
+        assert_eq!(matches, vec![(0, 0), (1, 1)]);
         runtime.shutdown().await;
     }
 }
