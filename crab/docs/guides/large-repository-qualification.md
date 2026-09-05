@@ -9,6 +9,11 @@ commits individually, exercises full, filtered, shallow, and incremental
 reads, and verifies the resulting Git object database. Run it twice on the
 same idle host before using its latency results as a baseline.
 
+The [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md)
+is a published example of a larger, explicitly scoped run. It reports the
+successful prefix through replay ordinal 4,500 and states which terminal
+qualification checks were outside that cutoff.
+
 Add `--team-load` for the release-gate workload. It creates 100 shallow client
 clones at checkpoint 10 for a 100-replay smoke and checkpoint 100 for longer
 runs, then after replay runs 100 concurrent incremental fetches, 20
