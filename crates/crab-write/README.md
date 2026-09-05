@@ -32,6 +32,12 @@ maintenance. Its continuous loop retries immediately; a one-shot run reports the
 superseded sample and exits. The shared anchor parser also serves native push, repack and history
 recovery; malformed index hashes retain their source errors.
 
+`generation::maintain_commit_graph` derives a missing generation-bound split
+commit graph through bounded `crab-remote-git` batches after catalog readiness.
+It reuses the preceding generation's validated graph when available, uploads
+immutable graph objects first and attaches the descriptor only if the manifest's
+Git identity is still current. It does not materialize packs or create a checkout.
+
 The lifecycle returns a `Send` future suitable for an owned Tokio task. Metadata
 point lookups capture owned keys before constructing their concurrent batch, so
 borrowed iterator entries do not make publication unspawnable. This retains the
@@ -107,8 +113,8 @@ Callers must reconcile an uncertain outcome before reporting failure. Successful
 means refs are durable, not that the derived catalog is ready for reads.
 
 This crate does not yet own the complete generation service: receive-to-commit,
-catalog/visibility readiness composition, index receipts and restart repair still need a
-shared composing path before HTTP push can acknowledge a fully readable generation.
+index receipts and restart repair still need a shared composing path before HTTP
+push can acknowledge a fully readable generation.
 
 ## Verification
 

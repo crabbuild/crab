@@ -4,13 +4,14 @@ use crab_coordination::{
     CoordinationError, GIT_GENERATION_OWNER_RESOURCE, GcFenceHeartbeat, GcFenceLease,
     PushLockAcquireContext,
 };
+use crab_remote_git::{RemoteGitRuntime, RepositoryIdentity, RepositoryOptions};
 use crab_storage::{Store, StoreLayout};
 use crab_write::{Result, WriteError};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 const LEASE_TTL: Duration = Duration::from_secs(60);
-const PASS_BUDGET: Duration = Duration::from_secs(60);
+const PASS_BUDGET: Duration = Duration::from_secs(3 * 60);
 
 struct WriterFence {
     lease: GcFenceLease,
@@ -36,6 +37,9 @@ impl WriterFence {
 async fn publish(
     store: &Store,
     layout: &StoreLayout<Store>,
+    identity: &RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
@@ -63,12 +67,19 @@ async fn publish(
         };
         let mut result = async {
             let (manifest, _) = crab_metadata::manifest_store::read_manifest(store, layout).await?;
-            crab_write::generation::make_readable(
+            let Some(manifest) = crab_write::generation::make_readable(
                 store,
                 layout,
                 LEASE_TTL,
                 manifest.pusher,
                 cancel,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            crab_write::generation::maintain_commit_graph(
+                store, layout, &manifest, identity, runtime, options, cancel,
             )
             .await?;
             Ok(())
@@ -87,6 +98,9 @@ async fn publish(
 pub(crate) async fn run(
     store: Store,
     layout: StoreLayout<Store>,
+    identity: RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
     admission: Arc<Semaphore>,
     parent: CancellationToken,
 ) -> Result<()> {
@@ -97,7 +111,7 @@ pub(crate) async fn run(
             () = cancel.cancelled() => return Err(WriteError::Cancelled),
             permit = admission.acquire_owned() => permit.map_err(|_| WriteError::Cancelled)?,
         };
-        publish(&store, &layout, &cancel).await
+        publish(&store, &layout, &identity, runtime, options, &cancel).await
     };
     tokio::pin!(operation);
     tokio::select! {
