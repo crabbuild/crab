@@ -2,8 +2,11 @@
 
 use std::fmt;
 
-/// First line of every crab pointer without the trailing LF.
-pub const VERSION_LINE: &str = "version https://crab.dev/spec/v1";
+/// Canonical first line for newly serialized Crab pointers, without the trailing LF.
+pub const VERSION_LINE: &str = "version https://crab.build/spec/v1";
+
+/// First line emitted by Crab releases before the spec moved to crab.build.
+pub const LEGACY_VERSION_LINE: &str = "version https://crab.dev/spec/v1";
 
 /// Maximum total byte length of a serialized pointer.
 pub const MAX_POINTER_SIZE: usize = 256;
@@ -62,7 +65,7 @@ impl Pointer {
         let version_line = lines
             .next()
             .ok_or_else(|| PointerParseError::new("pointer is empty"))?;
-        if version_line != VERSION_LINE {
+        if !is_supported_version_line(version_line) {
             return Err(PointerParseError::new(format!(
                 "unexpected version line: {version_line:?}",
             )));
@@ -135,11 +138,13 @@ pub fn is_pointer(bytes: &[u8]) -> bool {
         return false;
     }
 
-    let version_bytes = VERSION_LINE.as_bytes();
-    if !bytes.starts_with(version_bytes) {
+    let Some(version_end) = bytes.iter().position(|byte| *byte == b'\n') else {
         return false;
-    }
-    if bytes.get(version_bytes.len()) != Some(&b'\n') {
+    };
+    let Ok(version_line) = std::str::from_utf8(&bytes[..version_end]) else {
+        return false;
+    };
+    if !is_supported_version_line(version_line) {
         return false;
     }
 
@@ -184,6 +189,12 @@ pub fn is_pointer(bytes: &[u8]) -> bool {
     }
 
     true
+}
+
+/// Return whether a version line identifies a supported Crab pointer format.
+#[must_use]
+pub fn is_supported_version_line(line: &str) -> bool {
+    line == VERSION_LINE || line == LEGACY_VERSION_LINE
 }
 
 fn parse_hex32(hex: &str) -> Result<[u8; 32]> {
@@ -369,7 +380,7 @@ size -42\n";
 
         assert_eq!(
             text,
-            "version https://crab.dev/spec/v1\n\
+            "version https://crab.build/spec/v1\n\
 file-hash 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n\
 size 1048576\n"
         );
@@ -384,7 +395,7 @@ size 1048576\n"
 
         assert_eq!(
             text,
-            "version https://crab.dev/spec/v1\n\
+            "version https://crab.build/spec/v1\n\
 file-hash 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n\
 size 1048576\n\
 shard-hint fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0\n"

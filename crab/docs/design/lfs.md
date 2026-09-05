@@ -184,7 +184,7 @@ size 12345
 ### Crab Pointer Format (existing)
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash 7c1f2a3b4d5e6f...  (blake3, 64 hex chars)
 size 10737418240
 shard-hint a1b2c3d4...  (optional)
@@ -201,7 +201,8 @@ classify(blob: &[u8]) → PointerKind
      "version https://git-lfs.github.com/spec/v1"  → parse as LFS
      "version http://git-media.io/v/2"              → parse as LFS (legacy)
      "version https://hawser.github.com/spec/v1"    → parse as LFS (legacy)
-     "version https://crab.dev/spec/v1"           → parse as Crab
+     "version https://crab.build/spec/v1"           → parse as Crab
+     "version https://crab.dev/spec/v1"             → parse as Crab (legacy)
      anything else                                  → NotAPointer
 ```
 

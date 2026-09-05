@@ -3,7 +3,7 @@
 //! A pointer is three or four LF-terminated lines totalling ≤256 bytes:
 //!
 //! ```text
-//! version https://crab.dev/spec/v1
+//! version https://crab.build/spec/v1
 //! file-hash {64-hex-blake3}
 //! size {decimal-bytes}
 //! shard-hint {64-hex-blake3}   (optional)

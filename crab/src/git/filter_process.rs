@@ -2418,7 +2418,7 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
         assert!(output_str.contains("status=success"));
         assert!(output_str.contains("version https://git-lfs.github.com/spec/v1"));
-        assert!(!output_str.contains("version https://crab.dev/spec/v1"));
+        assert!(!output_str.contains("version https://crab.build/spec/v1"));
         assert!(matches!(
             &*staging
                 .lock()
@@ -3045,8 +3045,8 @@ size 1048576\n";
         // The clean path should produce a pointer (contains version line).
         assert!(
             output
-                .windows(b"version https://crab.dev/spec/v1".len())
-                .any(|w| w == b"version https://crab.dev/spec/v1"),
+                .windows(b"version https://crab.build/spec/v1".len())
+                .any(|w| w == b"version https://crab.build/spec/v1"),
             "clean path should produce a pointer even with lazy=true"
         );
     }

@@ -57,7 +57,7 @@ const PATHS = {
     commit: "c972e8a",
     commitState: "NEW ID",
     pointer: [
-      "version https://crab.dev/spec/v1",
+      "version https://crab.build/spec/v1",
       "file-hash 4cb9…731a",
       "size 8589934592",
     ],

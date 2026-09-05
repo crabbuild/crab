@@ -739,7 +739,7 @@ for writer in evidence["writers"]:
         ["git", "-C", str(root), "show", f"HEAD:{writer['path']}"],
         text=True,
     )
-    if "version https://crab.dev/spec/v1" not in pointer or len(pointer) >= 1000:
+    if "version https://crab.build/spec/v1" not in pointer or len(pointer) >= 1000:
         raise SystemExit(f"fresh clone did not retain a compact pointer for {writer['path']}")
 PY
 
@@ -754,10 +754,10 @@ git ls-tree HEAD models/new-large.bin | awk '{print $1}' > /e2e/clone-new-large-
 git ls-tree HEAD models/sparse-extend.bin | awk '{print $1}' > /e2e/clone-sparse-extend-mode.txt
 git ls-tree HEAD moved-archive/base-move.bin | awk '{print $1}' > /e2e/clone-base-move-mode.txt
 git ls-tree HEAD models/model-link.bin | awk '{print $1}' > /e2e/clone-model-link-mode.txt
-grep -q "version https://crab.dev/spec/v1" /e2e/clone-model-pointer.txt
-grep -q "version https://crab.dev/spec/v1" /e2e/clone-new-large-pointer.txt
-grep -q "version https://crab.dev/spec/v1" /e2e/clone-sparse-extend-pointer.txt
-grep -q "version https://crab.dev/spec/v1" /e2e/clone-base-move-pointer.txt
+grep -q "version https://crab.build/spec/v1" /e2e/clone-model-pointer.txt
+grep -q "version https://crab.build/spec/v1" /e2e/clone-new-large-pointer.txt
+grep -q "version https://crab.build/spec/v1" /e2e/clone-sparse-extend-pointer.txt
+grep -q "version https://crab.build/spec/v1" /e2e/clone-base-move-pointer.txt
 grep -q "^100755$" /e2e/clone-model-mode.txt
 grep -q "^100755$" /e2e/clone-new-large-mode.txt
 grep -q "^100755$" /e2e/clone-sparse-extend-mode.txt

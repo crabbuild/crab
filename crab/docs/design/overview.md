@@ -270,7 +270,7 @@ model.safetensors (10 GB on disk)
     │     .crab/staging/index.db              (SQLite WAL-mode index)
     │
     └─ 5. Emit pointer blob to stdout:
-          version https://crab.dev/spec/v1
+          version https://crab.build/spec/v1
           file-hash 7c1f2a3b...  (64 hex chars, blake3)
           size 10737418240
           shard-hint a1b2c3d4...  (optional, for smudge fast path)
@@ -421,7 +421,7 @@ sends the pointer blob content to the filter process with a `smudge` command.
 
 ```
 Pointer blob (from Git ODB):
-  version https://crab.dev/spec/v1
+  version https://crab.build/spec/v1
   file-hash 7c1f2a3b...
   size 10737418240
     │
@@ -539,7 +539,7 @@ effectively instant regardless of repo size.
 
 **Detecting pointer files in the working tree:**
 
-A file is a pointer if it starts with `version https://crab.dev/spec/v1`.
+A file is a pointer if it starts with `version https://crab.build/spec/v1`.
 The `crab status` command (future) can report which files are pointers
 vs. hydrated.
 
@@ -1446,7 +1446,7 @@ s3://{bucket}/{repo-path}/
 ## Appendix B: Pointer Format Reference
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash {64-hex-blake3}
 size {decimal-bytes}
 shard-hint {64-hex-blake3}              (optional)

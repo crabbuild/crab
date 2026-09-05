@@ -282,7 +282,7 @@ Working Tree File (e.g. model.safetensors, 10 GB)
     │
     └── Emit pointer blob → Git ODB (~200 bytes)
         ┌─────────────────────────────────────────────────┐
-        │  version https://crab.dev/spec/v1               │
+        │  version https://crab.build/spec/v1             │
         │  file-hash 7c1f2a3b...  (blake3, 64 hex chars)  │
         │  size 10737418240                               │
         │  shard-hint a1b2c3d4...  (optional)             │

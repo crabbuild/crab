@@ -807,10 +807,10 @@ git ls-tree HEAD models/new-large.bin | awk '{print $1}' > "$RUN_ROOT/clone-new-
 git ls-tree HEAD models/sparse-extend.bin | awk '{print $1}' > "$RUN_ROOT/clone-sparse-extend-mode.txt"
 git ls-tree HEAD moved-archive/base-move.bin | awk '{print $1}' > "$RUN_ROOT/clone-base-move-mode.txt"
 git ls-tree HEAD models/model-link.bin | awk '{print $1}' > "$RUN_ROOT/clone-model-link-mode.txt"
-grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-model-pointer.txt"
-grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-new-large-pointer.txt"
-grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
-grep -q "version https://crab.dev/spec/v1" "$RUN_ROOT/clone-base-move-pointer.txt"
+grep -q "version https://crab.build/spec/v1" "$RUN_ROOT/clone-model-pointer.txt"
+grep -q "version https://crab.build/spec/v1" "$RUN_ROOT/clone-new-large-pointer.txt"
+grep -q "version https://crab.build/spec/v1" "$RUN_ROOT/clone-sparse-extend-pointer.txt"
+grep -q "version https://crab.build/spec/v1" "$RUN_ROOT/clone-base-move-pointer.txt"
 python3 "$SCRIPT_DIR/mount-concurrent-writer-probe.py" verify-pointers \
     --manifest "$RUN_ROOT/concurrent-writes.json" \
     --repo "$CLONE"

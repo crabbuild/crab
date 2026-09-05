@@ -1138,7 +1138,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(blob.contains("version https://crab.dev/spec/v1"));
+        assert!(blob.contains("version https://crab.build/spec/v1"));
         assert!(!blob.contains("allowed source content"));
 
         assert!(

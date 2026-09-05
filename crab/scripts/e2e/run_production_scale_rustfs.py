@@ -454,7 +454,7 @@ class ProductionScaleRunner:
             path = item["path"]
             result = subprocess.run(["git", "show", f":{path}"], cwd=repo, env=self.env, capture_output=True, check=False)
             blob = result.stdout
-            if result.returncode != 0 or len(blob) > 256 or not blob.startswith(b"version https://crab.dev/spec/v1\n"):
+            if result.returncode != 0 or len(blob) > 256 or not blob.startswith(b"version https://crab.build/spec/v1\n"):
                 failures.append(path)
                 continue
             if f"size {item['size']}\n".encode("utf-8") not in blob:
@@ -645,7 +645,7 @@ class ProductionScaleRunner:
             if not path.is_file() or path.stat().st_size > 256:
                 failures.append(item["path"])
                 continue
-            if not path.read_bytes().startswith(b"version https://crab.dev/spec/v1\n"):
+            if not path.read_bytes().startswith(b"version https://crab.build/spec/v1\n"):
                 failures.append(item["path"])
         self.check(name, not failures, {"files": len(manifest["files"]), "failures": failures[:10]})
 
@@ -679,7 +679,7 @@ class ProductionScaleRunner:
                 pointer_before = (
                     path.is_file()
                     and path.stat().st_size <= 256
-                    and path.read_bytes().startswith(b"version https://crab.dev/spec/v1\n")
+                    and path.read_bytes().startswith(b"version https://crab.build/spec/v1\n")
                 )
                 self.run_crab(
                     self.clone,
@@ -698,7 +698,7 @@ class ProductionScaleRunner:
                 pointer_after = (
                     path.is_file()
                     and path.stat().st_size <= 256
-                    and path.read_bytes().startswith(b"version https://crab.dev/spec/v1\n")
+                    and path.read_bytes().startswith(b"version https://crab.build/spec/v1\n")
                 )
                 if (
                     not pointer_before

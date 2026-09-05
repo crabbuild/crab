@@ -134,7 +134,7 @@ def verify_pointers(
             if models is None:
                 raise RuntimeError("models path is required")
             pointer = (models / item["path"]).read_text()
-        if "version https://crab.dev/spec/v1" not in pointer or len(pointer) >= 1000:
+        if "version https://crab.build/spec/v1" not in pointer or len(pointer) >= 1000:
             raise RuntimeError(f"invalid pointer for {item['path']}")
 
 

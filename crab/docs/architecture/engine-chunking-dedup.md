@@ -128,7 +128,7 @@ Source: `crab/src/storage/xorb/builder.rs`, `crab/src/git/push_native.rs`
 Crab pointer blobs are small (~200 bytes) text files stored in Git's ODB:
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash 7c1f2a3b4d5e6f...  (blake3, 64 hex chars)
 size 10737418240
 shard-hint a1b2c3d4...  (optional, for smudge fast path)
@@ -142,7 +142,7 @@ shard-hint a1b2c3d4...  (optional, for smudge fast path)
   lookup.
 
 Detection: A blob is a pointer if it's ≤1024 bytes and starts with
-`version https://crab.dev/spec/v1`.
+`version https://crab.build/spec/v1`.
 
 Source: `crab/src/engine/pointer.rs`
 
