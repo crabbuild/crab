@@ -30,6 +30,7 @@ pub(super) enum ReviewState {
 #[serde(rename_all = "snake_case")]
 pub(super) enum MergeMethod {
     FastForward,
+    MergeCommit,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -42,6 +43,8 @@ pub(super) struct PullMerge {
     pub base_oid: String,
     pub head_oid: String,
     pub commit_oid: String,
+    #[serde(default)]
+    pub message: String,
     pub created_at: u64,
 }
 
@@ -134,6 +137,7 @@ pub(super) struct NewPullMerge {
     pub pull_version: u64,
     pub base_oid: String,
     pub head_oid: String,
+    pub message: String,
 }
 
 pub(super) fn pull_path(number: u64) -> String {
@@ -413,6 +417,7 @@ pub(super) fn merge_matches(left: &PullMerge, input: &NewPullMerge) -> bool {
         && left.pull_version == input.pull_version
         && left.base_oid == input.base_oid
         && left.head_oid == input.head_oid
+        && left.message == input.message
 }
 
 pub(super) async fn recover_merge(
@@ -434,9 +439,10 @@ pub(super) async fn reserve_merge(
     repo: &Repository,
     pull: u64,
     input: &NewPullMerge,
+    commit_oid: gix_hash::ObjectId,
+    created_at: u64,
 ) -> Result<PullMerge> {
     let path = merge_request_path(pull, &input.request_id);
-    let timestamp = app_storage::now()?;
     let proposed = PullMerge {
         request_id: input.request_id.clone(),
         author: input.author.clone(),
@@ -444,8 +450,9 @@ pub(super) async fn reserve_merge(
         pull_version: input.pull_version,
         base_oid: input.base_oid.clone(),
         head_oid: input.head_oid.clone(),
-        commit_oid: input.head_oid.clone(),
-        created_at: timestamp,
+        commit_oid: commit_oid.to_string(),
+        message: input.message.clone(),
+        created_at,
     };
     let record = app_storage::create_or_read(repo, &path, proposed).await?;
     if !merge_matches(&record, input) {

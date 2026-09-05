@@ -605,15 +605,20 @@ React issue and pull conversation views present assignees and labels together in
 a responsive metadata rail.
 
 Repository writers can `POST /pulls/{number}/merge` with the displayed
-pull version and exact base/head IDs. The only accepted method is
-`fast_forward`: the server revalidates ancestry, pointer dependencies and Git
+pull version and exact base/head IDs. `fast_forward` moves the base only when it
+is an ancestor of the head. `merge_commit` finds the common ancestor from the
+remote commit graph, recursively combines Git trees, performs bounded text
+merges for files changed on both sides, and rejects binary, type, delete/modify,
+and overlapping text conflicts. It creates a two-parent commit with the supplied
+1–256 character message. The server revalidates pointer dependencies and Git
 visibility under the base-ref lease and both GC fences, then publishes through
 the same journal path as native Git push. A persisted merge marker blocks
 concurrent pull edits and lets the same request resume after a lost response or
 restart. A completed merge retains its pre-merge comparison even if the source
 branch is deleted. Protected base branches can be updated only through this merge
 path. The configured current-head approval requirement is checked before the
-merge reservation is created. Merge commits are not implemented.
+merge reservation is created. Individual text blobs are limited to 8 MiB during
+merge construction; larger files must be resolved on the pull branch first.
 
 ## Commit statuses and required checks
 
@@ -698,8 +703,8 @@ addition to existing Git read permissions. Preserve the entire app prefix,
 including counters and reservations, in backups; restoring only visible records
 loses numbering and retry guarantees. Restart preserves discussions but invalidates
 sessions. Markdown renders without raw HTML; external images appear as links.
-Discussion deletion/moderation, edit history, notifications and merge commits
-remain unimplemented. Production
+Discussion deletion/moderation, edit history and notifications remain
+unimplemented. Production
 backup/restore qualification is pending.
 
 The local authenticated Kubernetes/RustFS qualification created an issue and comment,
@@ -746,6 +751,22 @@ available. Pull creation, merge and idempotent merge replay took 34.1, 391.2 and
 1.0 ms; after restart, pull detail and exact changes took 25.4 and 55.8 ms of
 server work on localhost with shared caches. These are observations, not
 production latency guarantees.
+
+The merge-commit integration qualification creates diverged branches through
+native Git, merges them through the pull API, and fetches the result into an
+independent Git client. It verifies the exact first and second parents, commit
+message, and combined file tree. The same flow advances the base after another
+pull opens, makes overlapping edits to one file, and verifies that merge returns
+HTTP 409 without moving the protected base ref.
+
+The local RustFS qualification also created fresh protected base and head refs,
+opened pull request 2, and published merge commit
+`0b807e1946dbb3774439173544b2938c0630ea01`. A native protocol-v2 fetch verified
+parents `be2090b49a5aee1d819d8bdabd70f6b4e614e527` and
+`14439070de6b58d66d9cafbc3c16174671e5de31`, the exact message, and the merged
+file bytes. Pull creation, merge, idempotent replay, and native fetch took 51.2,
+541.8, 3.1, and 230 ms respectively on localhost with shared caches. These are
+functional observations rather than production latency guarantees.
 
 The same RustFS repository was then configured with protected `main`. A native
 atomic push that combined a fast-forward of `main` with creation of another
@@ -949,7 +970,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation and exact protected branches have scoped proof; administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks and recoverable fast-forward merge with canonical ref publication; merge commits and remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

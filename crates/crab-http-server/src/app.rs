@@ -32,7 +32,7 @@ pub(crate) enum Error {
     OwnReview,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
-    #[error("The pull request cannot be fast-forwarded from the selected commits")]
+    #[error("The pull request changes conflict or its branch tips changed")]
     MergeConflict,
     #[error("Git writes are busy")]
     MergeBusy,
@@ -58,6 +58,8 @@ pub(crate) enum Error {
     AssigneePermission,
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
+    #[error("Pull request merge object construction failed")]
+    MergeObject(#[source] Box<crate::git_objects::Error>),
     #[error(
         "This submission ID was already used for different content; check the existing discussion before submitting again"
     )]
@@ -84,6 +86,7 @@ impl IntoResponse for Error {
                 | Self::Clock(_)
                 | Self::Repository(_)
                 | Self::Merge(_)
+                | Self::MergeObject(_)
         ) {
             tracing::error!(error = ?self, "collaboration request failed");
         }
@@ -109,7 +112,7 @@ impl IntoResponse for Error {
             Self::MergeConflict => (
                 StatusCode::CONFLICT,
                 "merge_conflict",
-                "The base branch changed or cannot be fast-forwarded to this pull request. Reload and review the latest commits",
+                "The branch tips changed or these changes conflict. Reload and review the latest commits",
             ),
             Self::MergeBusy => (
                 StatusCode::TOO_MANY_REQUESTS,
