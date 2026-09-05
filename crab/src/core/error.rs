@@ -1035,6 +1035,16 @@ impl From<crab_cache_store::CacheStoreError> for CrabError {
     }
 }
 
+impl From<crab_read::upload_pack_wire::WireError> for CrabError {
+    fn from(error: crab_read::upload_pack_wire::WireError) -> Self {
+        match error {
+            crab_read::upload_pack_wire::WireError::Protocol(message) => Self::Protocol(message),
+            crab_read::upload_pack_wire::WireError::Io(source) => Self::Io(source),
+            crab_read::upload_pack_wire::WireError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 impl From<crab_read::ReadError> for CrabError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
@@ -1844,6 +1854,35 @@ impl From<crab_storage::error::StorageError> for CrabError {
     }
 }
 
+impl From<crab_write::WriteError> for CrabError {
+    fn from(error: crab_write::WriteError) -> Self {
+        match error {
+            crab_write::WriteError::RefChanged { path, .. } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
+            crab_write::WriteError::Storage(source) => Self::from(source),
+            crab_write::WriteError::Coordination(source) => Self::from(source),
+            crab_write::WriteError::Metadata(source) => Self::from(source),
+            crab_write::WriteError::RemoteGit(source) => Self::Io(std::io::Error::other(source)),
+            crab_write::WriteError::Git(source) => Self::from(source),
+            crab_write::WriteError::Io(source) => Self::Io(source),
+            crab_write::WriteError::CorruptObject { path, reason } => {
+                Self::CorruptObject { path, reason }
+            }
+            crab_write::WriteError::Internal(message) => Self::Internal(message),
+            crab_write::WriteError::Cancelled => Self::Cancelled,
+            error @ (crab_write::WriteError::Namespace(_)
+            | crab_write::WriteError::Worker(_)
+            | crab_write::WriteError::VisibilityUnavailable { .. }
+            | crab_write::WriteError::PackIdentity { .. }
+            | crab_write::WriteError::ManifestHash { .. }) => {
+                Self::Io(std::io::Error::other(error))
+            }
+        }
+    }
+}
+
 impl From<crab_lfs::LfsError> for CrabError {
     fn from(error: crab_lfs::LfsError) -> Self {
         match error {
@@ -1858,6 +1897,15 @@ impl From<crab_lfs::LfsError> for CrabError {
 impl From<crab_metadata::error::MetadataError> for CrabError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
+            crab_metadata::error::MetadataError::RefJournalCancelled => Self::Cancelled,
+            crab_metadata::error::MetadataError::FileLookupLimit { resource, maximum } => {
+                Self::Protocol(format!("file lookup exceeds {resource} limit ({maximum})"))
+            }
+            error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
+            | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
+                Self::Io(std::io::Error::other(error))
+            }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),
             crab_metadata::error::MetadataError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
@@ -3690,6 +3738,68 @@ pub fn check_cancelled(cancel: &tokio_util::sync::CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_journal_commit_survives_write_and_read_boundaries() {
+        for through_write in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+                transaction_id: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::Io {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "write reply lost",
+                    ),
+                }),
+                verification: None,
+            };
+            let mapped = if through_write {
+                CrabError::from(crab_write::WriteError::Metadata(source))
+            } else {
+                CrabError::from(crab_read::ReadError::Metadata(source))
+            };
+            let CrabError::Io(error) = mapped else {
+                panic!("expected typed I/O error");
+            };
+            assert!(
+                matches!(error.get_ref().and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>()),
+                Some(crab_metadata::error::MetadataError::RefJournalCommitUncertain { transaction_id, .. }) if transaction_id == &"a".repeat(64))
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_lookup_limit_is_a_protocol_rejection() {
+        let error = CrabError::from(crab_metadata::error::MetadataError::FileLookupLimit {
+            resource: "shard visits",
+            maximum: 4,
+        });
+        assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[tokio::test]
+    async fn metadata_lookup_worker_errors_retain_their_sources() {
+        let gate = tokio::sync::Semaphore::new(0);
+        gate.close();
+        let admission = crab_metadata::error::MetadataError::FileLookupAdmission {
+            source: gate.acquire().await.unwrap_err(),
+        };
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let worker = crab_metadata::error::MetadataError::FileLookupWorker {
+            source: task.await.unwrap_err(),
+        };
+        for source in [admission, worker] {
+            let CrabError::Io(error) = CrabError::from(source) else {
+                panic!("expected read I/O failure");
+            };
+            assert!(
+                error
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<crab_metadata::error::MetadataError>())
+                    .is_some()
+            );
+        }
+    }
 
     #[test]
     fn exit_code_non_fast_forward() {

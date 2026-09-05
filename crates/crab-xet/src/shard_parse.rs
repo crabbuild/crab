@@ -25,9 +25,9 @@ use tracing::warn;
 use xet_core_structures::CoreError;
 use xet_core_structures::metadata_shard::MDBShardFileHeader;
 use xet_core_structures::metadata_shard::file_structs::FileDataSequenceEntry;
-use xet_core_structures::metadata_shard::streaming_shard::{
-    process_shard_file_info_section, process_shard_xorb_info_section,
-};
+
+mod records;
+use records::{process_shard_file_info_section, process_shard_xorb_info_section};
 
 use crate::error::{Result, XetError};
 use crate::xorb::format::{MerkleHash, XorbRef};
@@ -285,8 +285,9 @@ pub fn extract_file_and_chunk_entries_from_reader<R: Read>(
 }
 
 /// Extract file recipes and chunk-index entries while enforcing per-section
-/// record limits. The parser continues to the section bookends after a limit
-/// is observed so malformed input is consumed and reported deterministically.
+/// record limits and a cap on total expanded chunk occurrences. The parser
+/// continues to the section bookends after a limit is observed so malformed
+/// input is consumed and reported deterministically.
 pub fn extract_file_and_chunk_entries_from_reader_with_limits<R: Read>(
     reader: &mut R,
     max_file_entries: usize,
@@ -363,13 +364,18 @@ pub fn extract_file_and_chunk_entries_from_reader_with_limits<R: Read>(
         });
     }
 
-    Ok((assemble_file_recipes(files, xorbs)?, chunk_entries))
+    Ok((
+        assemble_file_recipes(files, xorbs, max_chunk_entries)?,
+        chunk_entries,
+    ))
 }
 
 fn assemble_file_recipes(
     files: Vec<(MerkleHash, Vec<FileDataSequenceEntry>)>,
     xorbs: HashMap<MerkleHash, Vec<(MerkleHash, u64)>>,
+    max_occurrences: usize,
 ) -> Result<Vec<ExtractedFileRecipe>> {
+    let mut occurrences = 0usize;
     files
         .into_iter()
         .map(|(file_hash, terms)| {
@@ -419,6 +425,15 @@ fn assemble_file_recipes(
                         ),
                     });
                 }
+                occurrences = occurrences
+                    .checked_add(selected.len())
+                    .filter(|count| *count <= max_occurrences)
+                    .ok_or_else(|| XetError::CorruptObject {
+                        path: "shard file recipe".to_owned(),
+                        reason: format!(
+                            "expanded recipe exceeds {max_occurrences} chunk occurrences"
+                        ),
+                    })?;
                 chunks.extend_from_slice(selected);
             }
             Ok(ExtractedFileRecipe { file_hash, chunks })
@@ -445,7 +460,7 @@ pub fn extract_file_recipes_from_reader_with_limit<R: Read>(
     extract_file_recipes_from_reader_with_limits(reader, max_file_entries, MAX_SHARD_CHUNK_ENTRIES)
 }
 
-/// Extract file recipes while enforcing file and chunk-entry caps.
+/// Extract file recipes while bounding file records, chunk entries and total expanded occurrences.
 pub fn extract_file_recipes_from_reader_with_limits<R: Read>(
     reader: &mut R,
     max_file_entries: usize,
@@ -519,7 +534,7 @@ pub fn extract_file_recipes_from_reader_with_limits<R: Read>(
         });
     }
 
-    assemble_file_recipes(files, xorbs)
+    assemble_file_recipes(files, xorbs, max_chunk_entries)
 }
 
 /// Extract exact file recipes from raw shard bytes.
@@ -548,6 +563,18 @@ pub fn extract_file_recipes_for_hashes(
     data: &Bytes,
     file_hashes: &HashSet<MerkleHash>,
 ) -> Result<Vec<ExtractedFileRecipe>> {
+    extract_file_recipes_for_hashes_with_limit(data, file_hashes, MAX_SHARD_CHUNK_ENTRIES)
+}
+
+/// Extract selected recipes while bounding terms, chunk metadata and expanded occurrences.
+///
+/// Repeated ranges count each occurrence before the output vector grows. The
+/// requested limit is capped at the standard in-memory shard limit.
+pub fn extract_file_recipes_for_hashes_with_limit(
+    data: &Bytes,
+    file_hashes: &HashSet<MerkleHash>,
+    max_selected_entries: usize,
+) -> Result<Vec<ExtractedFileRecipe>> {
     if data.len() > MAX_SHARD_SIZE_BYTES {
         return Err(XetError::CorruptObject {
             path: "shard".to_owned(),
@@ -563,7 +590,7 @@ pub fn extract_file_recipes_for_hashes(
         &mut cursor,
         file_hashes,
         MAX_SHARD_FILE_ENTRIES,
-        MAX_SHARD_CHUNK_ENTRIES,
+        max_selected_entries.min(MAX_SHARD_CHUNK_ENTRIES),
     )
 }
 
@@ -658,7 +685,7 @@ fn extract_file_recipes_for_hashes_from_reader_with_limits<R: Read>(
         });
     }
 
-    assemble_file_recipes(files, xorbs)
+    assemble_file_recipes(files, xorbs, max_selected_entries)
 }
 
 /// Extract `(file_hash, shard_hash)` pairs from raw shard bytes via a
@@ -804,6 +831,43 @@ mod tests {
             )],
             verification: vec![],
             metadata_ext: None,
+        }
+    }
+
+    #[test]
+    fn materialized_recipes_bound_repeated_chunk_occurrences() {
+        let mut writer = ShardWriter::new();
+        writer.add_xorb(make_xorb(1, 2)).unwrap();
+        let mut file = make_file(100, 1);
+        file.metadata = FileDataSequenceHeader::new(file.metadata.file_hash, 3u32, false, false);
+        file.segments =
+            vec![FileDataSequenceEntry::new(MerkleHash::from([1u64; 4]), 2048u32, 0u32, 2u32); 3];
+        let selected = HashSet::from([file.metadata.file_hash]);
+        writer.add_file(file).unwrap();
+        let (bytes, _) = writer.finalize().unwrap();
+        let bytes = Bytes::from(bytes);
+        for limit in [4, 6] {
+            let combined = extract_file_and_chunk_entries_from_reader_with_limits(
+                &mut std::io::Cursor::new(&bytes),
+                1,
+                limit,
+            )
+            .map(|(recipes, _)| recipes);
+            let full = extract_file_recipes_from_reader_with_limits(
+                &mut std::io::Cursor::new(&bytes),
+                1,
+                limit,
+            );
+            let selected = extract_file_recipes_for_hashes_with_limit(&bytes, &selected, limit);
+            for result in [combined, full, selected] {
+                if limit == 4 {
+                    assert!(
+                        matches!(result, Err(XetError::CorruptObject { reason, .. }) if reason.contains("chunk occurrences"))
+                    );
+                } else {
+                    assert_eq!(result.unwrap()[0].chunks.len(), 6);
+                }
+            }
         }
     }
 

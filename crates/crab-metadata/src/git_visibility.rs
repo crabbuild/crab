@@ -3394,6 +3394,17 @@ mod storage {
             for oid in manifest.refs.values().chain(manifest.peeled_refs.values()) {
                 required.insert(super::decode_oid(oid)?, ());
             }
+            let mut base_refs = manifest.refs.clone();
+            for edit in pending.edits.iter().rev() {
+                match &edit.old_oid {
+                    Some(old_oid) => {
+                        base_refs.insert(edit.ref_name.clone(), old_oid.clone());
+                    }
+                    None => {
+                        base_refs.remove(&edit.ref_name);
+                    }
+                }
+            }
             let mut resolved = Vec::with_capacity(pending.edits.len());
             for pending_edit in pending.edits {
                 super::validate_ref_name(&pending_edit.ref_name)?;
@@ -3430,11 +3441,9 @@ mod storage {
                     let base_ref_name = match (&pending_edit.old_oid, &evidence.old_oid) {
                         (expected, actual) if expected == actual => None,
                         (None, Some(base_oid)) => {
-                            // New-ref evidence may be a delta from an existing
-                            // visible ref. An unbound local-only base stays on
-                            // the owner's full repair path.
-                            manifest
-                                .refs
+                            // Resolve against the prior ref map because the same
+                            // journal may also move or delete the source ref.
+                            base_refs
                                 .iter()
                                 .find(|(_, tip)| *tip == base_oid)
                                 .map(|(name, _)| name.clone())
@@ -3472,6 +3481,11 @@ mod storage {
                         return Err(super::corrupt(
                             "deleted ref pending edit cannot carry visibility evidence",
                         ));
+                    }
+                    // Deleted tips need their own lookup: no surviving ref or
+                    // update evidence necessarily names the old object.
+                    if let Some(oid) = old_oid {
+                        required.insert(oid, ());
                     }
                     resolved.push(ResolvedGitVisibilityPendingEdit {
                         ref_name: pending_edit.ref_name,
@@ -4508,8 +4522,8 @@ mod tests {
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
         let index = GitVisibilityIndex::new(
             7,
-            &"a".repeat(64),
-            &"b".repeat(64),
+            "a".repeat(64),
+            "b".repeat(64),
             BTreeMap::from([("refs/heads/main".to_owned(), vec!["1".repeat(40)])]),
         )
         .expect("valid visibility index");
@@ -4773,7 +4787,7 @@ mod tests {
 
     #[cfg(all(feature = "storage", feature = "remote-index"))]
     #[tokio::test]
-    async fn catalog_journal_handoff_applies_ordinal_delta_after_catalog_append() {
+    async fn catalog_journal_handoff_applies_updates_and_new_ref_from_prior_tip() {
         use std::sync::Arc;
 
         use crab_storage::{Store, StoreLayout};
@@ -4909,6 +4923,9 @@ mod tests {
         target
             .refs
             .insert("refs/heads/main".to_owned(), "5".repeat(40));
+        target
+            .refs
+            .insert("refs/heads/feature".to_owned(), "1".repeat(40));
         target.seal_git_validation();
         let target_pack_index_hash =
             MerkleHash::from_hex(&target_pack_index_hash).expect("target pack index hash");
@@ -5023,7 +5040,24 @@ mod tests {
         let second_evidence_hash = upload_edit(&store, &router, &second_evidence)
             .await
             .expect("upload second visibility evidence");
+        let branch_evidence = GitVisibilityEdit::from_delta_objects(
+            Some("1".repeat(40)),
+            "1".repeat(40),
+            Vec::new(),
+            Vec::new(),
+        );
+        let branch_evidence_hash = upload_edit(&store, &router, &branch_evidence)
+            .await
+            .expect("upload branch visibility evidence");
         let edits = vec![
+            RefJournalEdit {
+                ref_name: "refs/heads/feature".to_owned(),
+                old_oid: None,
+                new_oid: Some("1".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(branch_evidence_hash),
+            },
             RefJournalEdit {
                 ref_name: "refs/heads/main".to_owned(),
                 old_oid: Some("1".repeat(40)),
@@ -5077,6 +5111,93 @@ mod tests {
             lazy.index.incremental_ordinals("refs/heads/main", 4, &[0]),
             Some(vec![2, 3, 4, 5])
         );
+        assert_eq!(
+            lazy.index.ordinals_for_refs(["refs/heads/feature"]),
+            vec![0, 1]
+        );
+
+        // The removed tip is absent from both the new ref and its replacement
+        // evidence. Deletion must explicitly resolve it before checking closure.
+        let mut after_delete = target.clone();
+        after_delete.generation += 1;
+        after_delete.refs = BTreeMap::from([
+            ("refs/heads/feature".into(), "1".repeat(40)),
+            ("refs/heads/kept".into(), "1".repeat(40)),
+        ]);
+        after_delete.seal_git_validation();
+        let replacement = GitVisibilityEdit::from_replacement_objects(
+            None,
+            "1".repeat(40),
+            vec!["1".repeat(40), "2".repeat(40)],
+        );
+        let evidence = upload_edit(&store, &router, &replacement).await.unwrap();
+        let deletion = [
+            RefJournalEdit {
+                ref_name: "refs/heads/main".into(),
+                old_oid: Some("5".repeat(40)),
+                new_oid: None,
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            },
+            RefJournalEdit {
+                ref_name: "refs/heads/kept".into(),
+                old_oid: None,
+                new_oid: Some("1".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: Some(evidence),
+            },
+        ];
+        assert!(
+            prepare_catalog_journal_edits(
+                &store,
+                &router,
+                &target,
+                &deletion,
+                &after_delete.refs,
+                after_delete.generation,
+                &after_delete.pack_index_hash,
+                &after_delete.git_validation_digest,
+            )
+            .await
+            .unwrap()
+        );
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .unwrap();
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: after_delete.generation,
+                pack_index_hash: target_pack_index_hash,
+            })
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+        assert!(
+            ensure_catalog_bound(&store, &router, &after_delete)
+                .await
+                .unwrap()
+        );
+        let final_index = read_catalog_with_format(
+            &store,
+            &router,
+            after_delete.generation,
+            &after_delete.pack_index_hash,
+            &after_delete.git_validation_digest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            final_index.index.ordinals_for_refs(["refs/heads/kept"]),
+            vec![0, 1]
+        );
+        assert_eq!(
+            final_index.index.ordinals_for_refs(["refs/heads/feature"]),
+            vec![0, 1]
+        );
+        assert!(!final_index.index.contains_ref("refs/heads/main"));
     }
 
     #[cfg(feature = "storage")]

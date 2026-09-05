@@ -29,7 +29,9 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 
 - `crab-cache` — cache keys, roots, local-cache contracts, remote client contracts, probes, profiles, shard hints, and Xet chunk-cache handles.
 - `crab-cache-store` — read-through `crab-storage` adapter that composes local and optional remote caches with origin reads.
+- `crab-http-server` — repository application HTTP APIs, configured bucket catalog, embedded React assets, and browser transport policy; top-level composition over remote Git and storage.
 - `crab-cache-server` — cache-service configuration, persistence, origin access, auth, HTTP handlers, eviction, metrics, preflight, and server runtime.
+- `crab-write` — shared Git catalog publication/lifecycle and journal commit/compaction; consumers own authorization, ref leases, generation-service election and GC fencing.
 - `crab-read` — fetch admission, ref advertisement, selection, term resolution, and verified hydration across cache, metadata, storage, and Xet.
 - `crab-remote-git` — bounded filesystem-free Git object reads from immutable packs using the committed object locator and object-store ranges.
 - `crab-vfs` — FUSE/NFS mounts, overlays, snapshots, hydration, daemon/control IPC, leases, and mount lifecycle.
@@ -52,7 +54,7 @@ Dependency direction, bottom to top:
 crab-types
   -> crab-git / crab-xet / crab-storage / crab-workflow
   -> crab-metadata / crab-staging / crab-coordination / crab-lfs
-  -> crab-cache / crab-cache-store / crab-read / crab-auth / crab-auth-store
+  -> crab-cache / crab-cache-store / crab-read / crab-write / crab-auth / crab-auth-store
   -> crab-vfs / crab-cache-server / crab-auth-server
   -> product crates and binaries
 ```

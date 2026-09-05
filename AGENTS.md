@@ -24,6 +24,7 @@ CrabBuild/
 ├── crab/              Rust CLI, remote helper, and product/server composition
 ├── crates/            Shared Rust contracts, data plane, storage, and orchestration
 ├── packages/web/      Next.js marketing site and Fumadocs documentation
+├── packages/repository/ React repository application served by crab-http-server
 ├── diagram/           Architecture diagrams and rendered assets
 ├── .github/workflows/ CI, release, service, and evidence workflows
 ├── .agent/            Repository-local agent workflows
@@ -31,7 +32,7 @@ CrabBuild/
 └── .codex/            Repository-local Codex skills
 ```
 
-Cargo workspace: 20 members — 19 shared crates under `crates/`, plus `crab`.
+Cargo workspace: 22 members — 21 shared and server crates under `crates/`, plus `crab`.
 There is no desktop application, Python package, or SDK package in this workspace; desktop material under `packages/web/` is documentation and marketing content.
 
 ## Architecture

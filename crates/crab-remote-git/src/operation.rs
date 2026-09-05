@@ -12,7 +12,9 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::Instrument as _;
 
 use crate::budget::{BudgetUsage, OperationBudget};
-use crate::objects::{materialize_tree, parse_commit, parse_tag, parse_tree_raw};
+use crate::objects::{
+    RawTreeEntry, find_tree_entry, materialize_tree, parse_commit, parse_tag, parse_tree_raw,
+};
 use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
@@ -662,6 +664,36 @@ impl OperationContext {
         Ok(commit.as_ref().clone())
     }
 
+    pub(crate) async fn read_commits(&self, oids: &[gix_hash::ObjectId]) -> Result<Vec<Commit>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let objects = self.read_objects_uncharged(oids).await?;
+        let mut commits = Vec::new();
+        commits
+            .try_reserve_exact(objects.len())
+            .map_err(|source| Error::Allocation {
+                requested: objects.len().saturating_mul(std::mem::size_of::<Commit>()),
+                source,
+            })?;
+        for object in objects {
+            let source_bytes = object.data.len() as u64;
+            let commit = Arc::new(parse_commit(&object)?);
+            let key = crate::runtime::ObjectCacheKey::new(
+                &self.state.identity,
+                self.state.generation,
+                commit.oid,
+            );
+            self.state
+                .runtime
+                .insert_commit(key, Arc::clone(&commit), source_bytes)
+                .await;
+            commits.push(commit.as_ref().clone());
+        }
+        Ok(commits)
+    }
+
     pub(crate) async fn parse_tag_object(&self, object: &GitObject) -> Result<AnnotatedTag> {
         let key = crate::runtime::ObjectCacheKey::new(
             &self.state.identity,
@@ -693,6 +725,108 @@ impl OperationContext {
         self.budget
             .charge(BudgetDimension::LogicalObjects, 1)
             .await?;
+        let tree = self.read_raw_tree(oid).await?;
+        materialize_tree(&tree, parent)
+    }
+
+    pub(crate) async fn read_tree_entry(
+        &self,
+        oid: gix_hash::ObjectId,
+        parent: &GitPath,
+        name: &[u8],
+    ) -> Result<Option<TreeEntry>> {
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, 1)
+            .await?;
+        let tree = self.read_raw_tree(oid).await?;
+        let (entry, comparisons) = find_tree_entry(&tree, parent, name)?;
+        self.budget
+            .charge(BudgetDimension::Entries, comparisons)
+            .await?;
+        Ok(entry)
+    }
+
+    pub(crate) async fn read_tree_entries(
+        &self,
+        oids: &[gix_hash::ObjectId],
+        parent: &GitPath,
+        name: &[u8],
+    ) -> Result<Vec<Option<TreeEntry>>> {
+        check_cancelled(&self.cancellation)?;
+        // Old path histories often repeat directory OIDs across adjacent commits.
+        // Charge and decode each tree once while retaining request-order results.
+        let mut unique_oids = Vec::new();
+        unique_oids
+            .try_reserve_exact(oids.len())
+            .map_err(|source| Error::Allocation {
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<gix_hash::ObjectId>()),
+                source,
+            })?;
+        for oid in oids {
+            if !unique_oids.contains(oid) {
+                unique_oids.push(*oid);
+            }
+        }
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, unique_oids.len() as u64)
+            .await?;
+        let objects = self.read_objects_uncharged(&unique_oids).await?;
+        let mut unique_found = Vec::new();
+        unique_found
+            .try_reserve_exact(objects.len())
+            .map_err(|source| Error::Allocation {
+                requested: objects
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<TreeEntry>>()),
+                source,
+            })?;
+        let mut comparisons = 0u64;
+        for object in objects {
+            let source_bytes = object.data.len() as u64;
+            let tree = Arc::new(parse_tree_raw(&object)?);
+            let key = crate::runtime::ObjectCacheKey::new(
+                &self.state.identity,
+                self.state.generation,
+                object.oid,
+            );
+            self.state
+                .runtime
+                .insert_tree(key, Arc::clone(&tree), source_bytes)
+                .await;
+            let (entry, entry_comparisons) = find_tree_entry(&tree, parent, name)?;
+            comparisons = comparisons.saturating_add(entry_comparisons);
+            unique_found.push(entry);
+        }
+        self.budget
+            .charge(BudgetDimension::Entries, comparisons)
+            .await?;
+        let mut found = Vec::new();
+        found
+            .try_reserve_exact(oids.len())
+            .map_err(|source| Error::Allocation {
+                requested: oids
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<TreeEntry>>()),
+                source,
+            })?;
+        for oid in oids {
+            let position = unique_oids
+                .iter()
+                .position(|candidate| candidate == oid)
+                .ok_or(Error::InternalInvariant {
+                    invariant: "tree batch lost a requested object ID",
+                })?;
+            let entry = unique_found.get(position).ok_or(Error::InternalInvariant {
+                invariant: "tree batch result did not match requested object IDs",
+            })?;
+            found.push(entry.clone());
+        }
+        Ok(found)
+    }
+
+    async fn read_raw_tree(&self, oid: gix_hash::ObjectId) -> Result<Arc<Vec<RawTreeEntry>>> {
         let key =
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;
@@ -709,7 +843,7 @@ impl OperationContext {
                 tree
             }
         };
-        materialize_tree(&tree, parent)
+        Ok(tree)
     }
 
     /// Read a bounded batch of verified Git objects in request order.

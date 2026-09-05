@@ -17,6 +17,10 @@ const MAX_REF_HEADS: usize = 1_000_000;
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_000_000;
 const REF_JOURNAL_READ_CONCURRENCY: usize = 32;
 
+#[cfg(test)]
+#[path = "ref_journal/commit_tests.rs"]
+mod commit_tests;
+
 /// One expected-old ref edit committed by a journal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -198,14 +202,23 @@ pub async fn read_ref_head(
 ///
 /// Each head first points at invisible prepared state. The immutable commit
 /// marker makes every edit visible together; later head promotion is cleanup.
+/// A failed marker write is confirmed by bounded exact readback when possible.
+/// Otherwise `RefJournalCommitUncertain` retains its identity and both failures;
+/// missing markers cannot prove rejection because compaction removes them.
+/// Cancellation before the marker rolls back prepared heads; after attempting
+/// the marker, the operation finishes outcome recovery and returns its result.
 pub async fn commit_ref_transaction(
     store: &Store,
     router: &StoreLayout<Store>,
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
+    cancelled: impl Fn() -> bool,
 ) -> Result<RefJournalCommitResult> {
     validate_transaction(transaction)?;
     validate_expected_heads(transaction, expected_heads)?;
+    if cancelled() {
+        return Err(MetadataError::RefJournalCancelled);
+    }
     let transaction_id = transaction.id()?;
     let transaction_path = router.ref_journal_transaction_path(&transaction_id);
     store
@@ -214,6 +227,10 @@ pub async fn commit_ref_transaction(
 
     let mut prepared = Vec::with_capacity(expected_heads.len());
     for expected in expected_heads {
+        if cancelled() {
+            rollback_prepared_heads(store, router, &prepared).await;
+            return Err(MetadataError::RefJournalCancelled);
+        }
         match prepare_head(store, router, expected, &transaction_id).await {
             Ok(snapshot) => prepared.push((expected, snapshot)),
             Err(error) => {
@@ -227,12 +244,37 @@ pub async fn commit_ref_transaction(
         version: REF_JOURNAL_VERSION,
         transaction_id: transaction_id.clone(),
     };
-    store
-        .put_exact(
-            &router.ref_journal_active_path(&transaction_id),
-            Bytes::from(serialize(&marker)?),
-        )
-        .await?;
+    let marker_path = router.ref_journal_active_path(&transaction_id);
+    let marker_body = Bytes::from(serialize(&marker)?);
+    if cancelled() {
+        rollback_prepared_heads(store, router, &prepared).await;
+        return Err(MetadataError::RefJournalCancelled);
+    }
+    // After attempting the marker, cancellation cannot prove rejection. Finish
+    // outcome recovery and promotion under the same rule as a lost write reply.
+    if let Err(source) = store.put_exact(&marker_path, marker_body.clone()).await {
+        // A lost write response is not a rejected transaction. Confirm only the
+        // exact marker; never roll back prepared heads after attempting commit.
+        let verification = match store
+            .get_with_etag_bounded(&marker_path, marker_body.len() as u64)
+            .await
+        {
+            Ok((body, _)) if body == marker_body => Ok(()),
+            Ok(_) => Err(Some(StorageError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: "commit marker differs from the submitted transaction".to_owned(),
+            })),
+            Err(StorageError::NotFound { .. }) => Err(None),
+            Err(error) => Err(Some(error)),
+        };
+        if let Err(verification) = verification {
+            return Err(MetadataError::RefJournalCommitUncertain {
+                transaction_id,
+                source: Box::new(source),
+                verification: verification.map(Box::new),
+            });
+        }
+    }
 
     for (_, prepared_head) in prepared {
         if let Err(error) = promote_head(store, router, prepared_head, &transaction_id).await {
@@ -561,7 +603,8 @@ pub async fn materialize_ref_journal(
         }
         shards.extend(transaction.shards.iter().cloned());
     }
-    if !refs.is_empty() && !refs.contains_key(&head) {
+    // Journal replay preserves unborn branch HEADs just like manifest validation.
+    if !refs.is_empty() && !refs.contains_key(&head) && !head.starts_with("refs/heads/") {
         return Err(corrupt_object(
             router.ref_journal_heads_prefix().as_ref(),
             "materialized ref journal HEAD does not resolve",
@@ -1004,8 +1047,8 @@ mod tests {
             transaction_for(&store, &layout, vec![edit("refs/heads/right", 'b')]).await;
 
         let (left_result, right_result) = tokio::join!(
-            commit_ref_transaction(&store, &layout, &left, &left_heads),
-            commit_ref_transaction(&store, &layout, &right, &right_heads),
+            commit_ref_transaction(&store, &layout, &left, &left_heads, || false),
+            commit_ref_transaction(&store, &layout, &right, &right_heads, || false),
         );
 
         assert!(left_result.is_ok());
@@ -1025,12 +1068,12 @@ mod tests {
         let (second, _) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'b')]).await;
 
-        commit_ref_transaction(&store, &layout, &first, &stale_heads)
+        commit_ref_transaction(&store, &layout, &first, &stale_heads, || false)
             .await
             .unwrap();
 
         assert!(
-            commit_ref_transaction(&store, &layout, &second, &stale_heads)
+            commit_ref_transaction(&store, &layout, &second, &stale_heads, || false)
                 .await
                 .is_err()
         );
@@ -1108,7 +1151,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &layout, &next, &[observed])
+        commit_ref_transaction(&store, &layout, &next, &[observed], || false)
             .await
             .unwrap();
 
@@ -1149,7 +1192,8 @@ mod tests {
             .await
             .unwrap();
 
-        cleanup_compacted_transactions(&store, &layout, &[transaction_id.clone()]).await;
+        cleanup_compacted_transactions(&store, &layout, std::slice::from_ref(&transaction_id))
+            .await;
 
         let head = read_ref_head(&store, &layout, "refs/heads/main")
             .await
@@ -1177,10 +1221,10 @@ mod tests {
             transaction_for(&store, &layout, vec![edit("refs/heads/left", 'a')]).await;
         let (right, right_heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/right", 'b')]).await;
-        commit_ref_transaction(&store, &layout, &left, &left_heads)
+        commit_ref_transaction(&store, &layout, &left, &left_heads, || false)
             .await
             .unwrap();
-        commit_ref_transaction(&store, &layout, &right, &right_heads)
+        commit_ref_transaction(&store, &layout, &right, &right_heads, || false)
             .await
             .unwrap();
 
@@ -1218,7 +1262,7 @@ mod tests {
         let base = Manifest::default_for_repo("refs/heads/main");
         let (first, first_heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
-        commit_ref_transaction(&store, &layout, &first, &first_heads)
+        commit_ref_transaction(&store, &layout, &first, &first_heads, || false)
             .await
             .unwrap();
         let current = read_ref_head(&store, &layout, "refs/heads/main")
@@ -1244,7 +1288,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        commit_ref_transaction(&store, &layout, &second, &[current])
+        commit_ref_transaction(&store, &layout, &second, &[current], || false)
             .await
             .unwrap();
 
@@ -1264,7 +1308,7 @@ mod tests {
         let (transaction, heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
         let transaction_id = transaction.id().unwrap();
-        commit_ref_transaction(&store, &layout, &transaction, &heads)
+        commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
             .await
             .unwrap();
         let snapshot = materialize(&store, &layout, &base).await;
@@ -1295,7 +1339,7 @@ mod tests {
         let (transaction, heads) =
             transaction_for(&store, &layout, vec![edit("refs/heads/main", 'a')]).await;
         let transaction_id = transaction.id().unwrap();
-        commit_ref_transaction(&store, &layout, &transaction, &heads)
+        commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
             .await
             .unwrap();
 

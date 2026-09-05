@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_git::pack::VerifiedPackIdentity;
+use crab_git::{delta, pack::VerifiedPackIdentity};
 use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::OperationBudget;
 use crate::pack::PackStreamVerifier;
 use crate::{BudgetDimension, RemoteGitRuntime, RepositoryIdentity};
-use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result, delta};
+use crate::{CorruptionStage, Error, InflatedEntryError, RepositoryStateError, Result};
 
 /// Resource limits applied to one remote Git object read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,115 +564,41 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Locator,
             });
         }
-        let mut ready = Vec::new();
-        // The caller charges the complete logical object set before this
-        // locator queue is allocated, so its count is operation bounded.
-        ready
-            .try_reserve_exact(missing.len())
-            .map_err(|source| Error::Allocation {
-                requested: missing
-                    .len()
-                    .saturating_mul(std::mem::size_of::<(gix_hash::ObjectId, GitObjectLocator)>()),
-                source,
-            })?;
-        for (oid, lookup) in missing.iter().copied().zip(lookups) {
-            let locator = match lookup {
-                GitObjectLookup::Hit(locator) => locator,
-                GitObjectLookup::Corrupt => {
-                    return Err(Error::Corrupt {
-                        stage: CorruptionStage::Locator,
-                    });
-                }
-                GitObjectLookup::Miss => return Err(Error::ObjectNotFound { oid }),
-            };
-            check_limit(
-                "packed entry bytes",
-                locator.location.entry_len,
-                self.limits.max_packed_entry_bytes,
-            )?;
-            ready.push((oid, locator));
-        }
-        let ranges = coalesce_ranges(ready)?;
-        tracing::debug!(
-            storage_request = "range_get_coalesced",
-            range_count = ranges.len(),
-            object_count = missing.len(),
-            "coalesced remote Git object ranges"
-        );
-        let caller_cancellation = cancellation.clone();
-        // `stream::iter` is lazy: at most this byte- and object-derived number
-        // of futures owns fetched or inflated bytes at once.
-        let results = stream::iter(ranges.into_iter().map(|range| {
-            let reader = Arc::clone(self);
-            let caller_cancellation = caller_cancellation.clone();
-            async move {
-                let bytes = reader
-                    .read_coalesced_range(&range, budget, &caller_cancellation)
-                    .await?;
-                let mut group_results = Vec::with_capacity(range.entries.len());
-                for (oid, locator) in range.entries {
-                    let relative_start = locator
-                        .location
-                        .pack_offset
-                        .checked_sub(range.start)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        })?;
-                    let relative_end = relative_start
-                        .checked_add(locator.location.entry_len)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        })?;
-                    let start = usize::try_from(relative_start).map_err(|_| Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    let end = usize::try_from(relative_end).map_err(|_| Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
-                        stage: CorruptionStage::PackEntry,
-                    })?;
-                    if gix_features::hash::crc32(entry_bytes) != locator.location.crc32 {
-                        group_results.push((oid, Err(Error::PackedEntryCrcMismatch { oid })));
-                        continue;
-                    }
-                    let result = reader
-                        .read_from_prefetched_locator(
-                            session,
-                            oid,
-                            locator,
-                            Bytes::copy_from_slice(entry_bytes),
-                            reader.limits.max_object_bytes,
-                            reader.limits.max_delta_depth,
-                            budget,
-                            &caller_cancellation,
-                        )
-                        .await;
-                    if let Ok(object) = &result {
-                        let key = crate::runtime::ObjectCacheKey::new(
-                            &reader.identity,
-                            reader.generation,
-                            oid,
-                        );
-                        reader
-                            .runtime
-                            .insert_object(key, Arc::new(object.clone()))
-                            .await;
-                    }
-                    group_results.push((oid, result));
-                }
-                Ok::<_, Error>(group_results)
-            }
-        }))
-        .buffer_unordered(concurrency)
-        // Collect every started future before returning any error. Shared
-        // single-flight work is separately owned by the runtime task tracker.
-        .collect::<Vec<_>>()
-        .await;
-        for group_result in results {
-            for (oid, result) in group_result? {
-                completed.insert(oid, result?);
-            }
+        let locators = missing
+            .iter()
+            .copied()
+            .zip(lookups)
+            .map(|(oid, lookup)| match lookup {
+                GitObjectLookup::Hit(locator) => Ok(locator),
+                GitObjectLookup::Corrupt => Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
+                }),
+                GitObjectLookup::Miss => Err(Error::ObjectNotFound { oid }),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Batch delta dependencies with the selected entries. Resolving them
+        // one object at a time multiplies locator and range reads on deep history.
+        let packed = self
+            .read_packed_many_with_session_and_locators(
+                &missing,
+                &locators,
+                concurrency,
+                budget,
+                cancellation,
+            )
+            .await?;
+        let objects = self
+            .materialize_packed_entries(
+                session,
+                packed,
+                &missing,
+                concurrency,
+                budget,
+                cancellation,
+            )
+            .await?;
+        for object in objects {
+            completed.insert(object.oid, object);
         }
         order_completed_objects(requested, &completed)
     }
@@ -944,6 +870,15 @@ impl RemoteGitReader {
                 .await?;
             objects.append(&mut chunk_objects);
         }
+        // Retain verified dependencies as well as requested objects. Later
+        // batches often use an earlier delta base, just like the single reader.
+        for object in resolver.objects.values() {
+            let key =
+                crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, object.oid);
+            self.runtime
+                .insert_object(key, Arc::new(object.clone()))
+                .await;
+        }
         Ok(objects)
     }
 
@@ -959,44 +894,6 @@ impl RemoteGitReader {
     ) -> Result<GitObject> {
         let packed = self
             .read_packed_entry(requested, locator, max_object_bytes, budget, cancellation)
-            .await?;
-        self.resolve_packed_entry(
-            session,
-            requested,
-            locator,
-            packed,
-            max_object_bytes,
-            remaining_delta_depth,
-            budget,
-            cancellation,
-        )
-        .await
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "prefetched reads carry the same explicit verification and budget inputs as locator reads"
-    )]
-    async fn read_from_prefetched_locator(
-        self: &Arc<Self>,
-        session: &GitObjectLocatorSession,
-        requested: gix_hash::ObjectId,
-        locator: GitObjectLocator,
-        bytes: Bytes,
-        max_object_bytes: u64,
-        remaining_delta_depth: usize,
-        budget: &OperationBudget,
-        cancellation: &CancellationToken,
-    ) -> Result<GitObject> {
-        let packed = self
-            .decode_prefetched_entry(
-                requested,
-                locator.location.pack_offset,
-                bytes,
-                max_object_bytes,
-                budget,
-                cancellation,
-            )
             .await?;
         self.resolve_packed_entry(
             session,
@@ -1102,7 +999,7 @@ impl RemoteGitReader {
             .runtime
             .spawn_blocking(move || {
                 let parsed = delta::parse(&instructions, maximum)?;
-                delta::apply(&base_data, parsed, &token)
+                delta::apply(&base_data, parsed, || token.is_cancelled())
             })
             .await
             .map_err(|source| Error::DecodeTask { source })?
@@ -1141,50 +1038,6 @@ impl RemoteGitReader {
             });
         }
         Ok(bytes)
-    }
-
-    async fn decode_prefetched_entry(
-        &self,
-        oid: gix_hash::ObjectId,
-        pack_offset: u64,
-        bytes: Bytes,
-        max_object_bytes: u64,
-        budget: &OperationBudget,
-        cancellation: &CancellationToken,
-    ) -> Result<PackedEntry> {
-        let inflated_bytes = packed_entry_allocation_bytes(
-            oid,
-            pack_offset,
-            &bytes,
-            self.limits.max_inflated_entry_bytes,
-            max_object_bytes,
-        )?;
-        budget
-            .charge(BudgetDimension::InflatedBytes, inflated_bytes)
-            .await?;
-        let decode_permit = self.runtime.decode_permit(cancellation).await?;
-        let decode_cancellation = cancellation.clone();
-        let runtime = Arc::clone(&self.runtime);
-        let max_inflated = self.limits.max_inflated_entry_bytes;
-        let packed = runtime
-            .spawn_blocking(move || {
-                inflate_entry(
-                    oid,
-                    pack_offset,
-                    bytes,
-                    max_inflated,
-                    max_object_bytes,
-                    &decode_cancellation,
-                )
-            })
-            .await
-            .map_err(|source| Error::DecodeTask { source })??;
-        drop(decode_permit);
-        Ok(PackedEntry {
-            header: packed.header,
-            inflated: packed.inflated,
-            charged_budget: Some(budget.id()),
-        })
     }
 
     async fn locate(
@@ -1245,7 +1098,7 @@ impl RemoteGitReader {
     }
 
     async fn read_packed_entry(
-        &self,
+        self: &Arc<Self>,
         oid: gix_hash::ObjectId,
         locator: GitObjectLocator,
         max_object_bytes: u64,
@@ -1271,6 +1124,7 @@ impl RemoteGitReader {
         let work_runtime = Arc::clone(&self.runtime);
         let cache_key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
         let work_cache_key = cache_key.clone();
+        let reader = Arc::clone(self);
         let max_inflated = self.limits.max_inflated_entry_bytes;
         let pack_offset = locator.location.pack_offset;
         let entry_len = locator.location.entry_len;
@@ -1283,6 +1137,24 @@ impl RemoteGitReader {
                 max_object_bytes,
                 cancellation,
                 move |shared_cancellation| async move {
+                    // An earlier flight can populate the cache while this caller
+                    // waits for lookup/admission. Recheck before another origin read.
+                    if let Some(object) = reader
+                        .verified_cached_object(&work_cache_key, max_object_bytes)
+                        .await?
+                    {
+                        let header = match object.kind {
+                            gix_object::Kind::Commit => Header::Commit,
+                            gix_object::Kind::Tree => Header::Tree,
+                            gix_object::Kind::Blob => Header::Blob,
+                            gix_object::Kind::Tag => Header::Tag,
+                        };
+                        return Ok(PackedEntry {
+                            header,
+                            inflated: object.data.clone(),
+                            charged_budget: None,
+                        });
+                    }
                     let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
                     let bytes = tokio::select! {
                         biased;
@@ -1486,8 +1358,7 @@ impl RemoteGitReader {
             let store = self.store.clone();
             let path = path.clone();
             let work_runtime = Arc::clone(&self.runtime);
-            let source_size = self
-                .runtime
+            self.runtime
                 .load_pack_index_size_singleflight(
                     cache_key.clone(),
                     cancellation,
@@ -1503,11 +1374,7 @@ impl RemoteGitReader {
                         Ok(metadata.size)
                     },
                 )
-                .await?;
-            self.runtime
-                .insert_pack_index_source_size(cache_key.clone(), source_size)
-                .await;
-            source_size
+                .await?
         };
         check_limit(
             "pack index bytes",
@@ -2012,7 +1879,7 @@ impl PackedEntryResolver {
                 result_size,
                 max_inflated_bytes,
             )?;
-            let data = delta::apply(&base.data, parsed, cancellation)
+            let data = delta::apply(&base.data, parsed, || cancellation.is_cancelled())
                 .map_err(|error| map_delta_error(error, oid))?;
             added_bytes = added_bytes
                 .checked_add(base_bytes)
@@ -2326,7 +2193,8 @@ fn inspect_entry(
     check_cancelled(cancellation)?;
     let delta =
         delta::parse(&packed.inflated, usize::MAX).map_err(|error| map_delta_error(error, oid))?;
-    delta::validate(&delta, cancellation).map_err(|error| map_delta_error(error, oid))?;
+    delta::validate(&delta, || cancellation.is_cancelled())
+        .map_err(|error| map_delta_error(error, oid))?;
     let base_size = delta.base_size as u64;
     let result_size = delta.result_size as u64;
     match packed.header {
@@ -2659,6 +2527,142 @@ mod tests {
             .expect_err("corrupt cache entry must fail");
         assert!(matches!(error, Error::CacheCorrupt { .. }));
         assert!(runtime.cached_object(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn admitted_packed_read_rechecks_verified_cache_and_caller_limits() {
+        for scenario in ["valid", "corrupt", "object_limit", "budget_limit"] {
+            let runtime = Arc::new(
+                RemoteGitRuntime::new(
+                    crate::RuntimeOptions {
+                        max_object_flights: 1,
+                        ..Default::default()
+                    },
+                    Arc::new(crate::NoopMetrics),
+                )
+                .unwrap(),
+            );
+            let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let blocker_runtime = Arc::clone(&runtime);
+            let blocker_started = Arc::clone(&started);
+            let blocker_release = Arc::clone(&release);
+            let blocker_key = crate::runtime::ObjectCacheKey::new(
+                &identity,
+                1,
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            );
+            let blocker = tokio::spawn(async move {
+                blocker_runtime
+                    .read_packed_singleflight(
+                        blocker_key,
+                        1024,
+                        1024,
+                        &CancellationToken::new(),
+                        move |_| async move {
+                            blocker_started.notify_one();
+                            blocker_release.notified().await;
+                            Ok(PackedEntry {
+                                header: Header::Tree,
+                                inflated: Bytes::new(),
+                                charged_budget: None,
+                            })
+                        },
+                    )
+                    .await
+            });
+            started.notified().await;
+            let reader = Arc::new(
+                RemoteGitReader::from_pinned(
+                    Store::new(Arc::new(InMemory::new())),
+                    "repository",
+                    [],
+                    ReaderLimits::default(),
+                    Arc::clone(&runtime),
+                    identity.clone(),
+                    1,
+                )
+                .unwrap(),
+            );
+            let data = Bytes::from_static(b"cached base");
+            let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, &data)
+                .unwrap();
+            let key = crate::runtime::ObjectCacheKey::new(&identity, 1, oid);
+            let budget = OperationBudget::new(
+                crate::OperationLimits {
+                    max_inflated_bytes: if scenario == "budget_limit" { 1 } else { 1024 },
+                    ..Default::default()
+                },
+                Arc::clone(&runtime),
+                1,
+            );
+            let cancel = CancellationToken::new();
+            let read = reader.read_packed_entry(
+                oid,
+                GitObjectLocator {
+                    ordinal: 0,
+                    pack_id: MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+                    location: GitObjectLocation {
+                        pack_offset: 12,
+                        entry_len: 20,
+                        crc32: 0,
+                    },
+                    metadata: Default::default(),
+                },
+                if scenario == "object_limit" { 1 } else { 1024 },
+                &budget,
+                &cancel,
+            );
+            tokio::pin!(read);
+            assert!(futures_util::poll!(read.as_mut()).is_pending());
+            // The object arrives after the caller missed it and queued for admission.
+            runtime
+                .insert_object(
+                    key.clone(),
+                    Arc::new(GitObject {
+                        oid,
+                        kind: gix_object::Kind::Blob,
+                        data: if scenario == "corrupt" {
+                            Bytes::from_static(b"corrupt")
+                        } else {
+                            data.clone()
+                        },
+                    }),
+                )
+                .await;
+            release.notify_one();
+            blocker.await.unwrap().unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), read)
+                .await
+                .unwrap();
+            if scenario == "valid" {
+                let packed = result.unwrap();
+                assert_eq!((packed.header, packed.inflated), (Header::Blob, data));
+            } else {
+                let error = result.err().unwrap();
+                let mut error = &error;
+                while let Error::SharedRead { source } = error {
+                    error = source;
+                }
+                match scenario {
+                    "corrupt" => {
+                        assert!(matches!(error, Error::CacheCorrupt { .. }));
+                        assert!(runtime.cached_object(&key).await.is_none());
+                    }
+                    "object_limit" => assert!(matches!(
+                        error,
+                        Error::LimitExceeded {
+                            limit: "decoded object bytes",
+                            ..
+                        }
+                    )),
+                    "budget_limit" => assert!(matches!(error, Error::LimitExceeded { .. })),
+                    _ => unreachable!(),
+                }
+            }
+            runtime.shutdown().await;
+        }
     }
 
     #[test]

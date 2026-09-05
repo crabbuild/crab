@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use gix_hash::ObjectId;
+use std::cmp::Ordering;
 
 use crate::reader::GitObject;
 use crate::{CorruptionStage, Error, GitPath, Result};
@@ -326,6 +327,58 @@ pub(crate) fn materialize_tree(
     Ok(materialized)
 }
 
+pub(crate) fn find_tree_entry(
+    entries: &[RawTreeEntry],
+    parent: &GitPath,
+    name: &[u8],
+) -> Result<(Option<TreeEntry>, u64)> {
+    let mut comparisons = 0u64;
+    for target_is_tree in [false, true] {
+        let result = entries.binary_search_by(|entry| {
+            comparisons = comparisons.saturating_add(1);
+            tree_name_cmp(
+                &entry.name,
+                entry.kind == EntryKind::Tree,
+                name,
+                target_is_tree,
+            )
+        });
+        if let Ok(index) = result {
+            let entry = &entries[index];
+            if entry.name.as_ref() == name {
+                return Ok((
+                    Some(TreeEntry {
+                        path: parent.join(&entry.name)?,
+                        oid: entry.oid,
+                        mode: entry.mode,
+                        kind: entry.kind,
+                        size: None,
+                    }),
+                    comparisons,
+                ));
+            }
+        }
+    }
+    Ok((None, comparisons))
+}
+
+fn tree_name_cmp(left: &[u8], left_is_tree: bool, right: &[u8], right_is_tree: bool) -> Ordering {
+    let compared = left.len().min(right.len());
+    let ordering = left[..compared].cmp(&right[..compared]);
+    if ordering != Ordering::Equal {
+        return ordering;
+    }
+    let left_end = left
+        .get(compared)
+        .copied()
+        .unwrap_or(if left_is_tree { b'/' } else { 0 });
+    let right_end = right
+        .get(compared)
+        .copied()
+        .unwrap_or(if right_is_tree { b'/' } else { 0 });
+    left_end.cmp(&right_end)
+}
+
 #[cfg(test)]
 fn parse_tree(object: &GitObject, parent: &GitPath) -> Result<Vec<TreeEntry>> {
     materialize_tree(&parse_tree_raw(object)?, parent)
@@ -493,6 +546,42 @@ mod tests {
         .expect("parse tree");
         assert_eq!(entries[1].path.as_bytes(), b"\xff");
         assert_eq!(entries[1].mode, EntryMode::Executable);
+    }
+
+    #[test]
+    fn exact_tree_lookup_uses_git_directory_order() {
+        let entries = parse_tree_raw(&tree(&[
+            (b"foo.c", 0o100644),
+            (b"foo", 0o040000),
+            (b"foo0", 0o100755),
+        ]))
+        .expect("parse tree");
+        for (name, kind) in [
+            (b"foo.c".as_slice(), EntryKind::Blob),
+            (b"foo".as_slice(), EntryKind::Tree),
+            (b"foo0".as_slice(), EntryKind::Blob),
+        ] {
+            let (entry, comparisons) =
+                find_tree_entry(&entries, &GitPath::root(), name).expect("find entry");
+            assert_eq!(entry.expect("matching entry").kind, kind);
+            assert!(comparisons <= 6);
+        }
+        let (entry, comparisons) =
+            find_tree_entry(&entries, &GitPath::root(), b"missing").expect("missing entry");
+        assert!(entry.is_none());
+        assert!(comparisons <= 6);
+
+        let entries = parse_tree_raw(&tree(&[
+            (b"README.md", 0o100644),
+            (b"README.md.extra", 0o100644),
+        ]))
+        .expect("parse interposed names");
+        let (entry, _) = find_tree_entry(&entries, &GitPath::root(), b"README.md")
+            .expect("find interposed file");
+        assert_eq!(
+            entry.expect("matching interposed file").path.as_bytes(),
+            b"README.md"
+        );
     }
 
     proptest! {

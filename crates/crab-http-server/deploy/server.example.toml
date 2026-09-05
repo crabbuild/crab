@@ -1,0 +1,22 @@
+listen = "0.0.0.0:8788"
+
+[auth]
+issuer = "https://identity.example.com/realms/team"
+client_id = "crab-browser"
+public_url = "https://git.example.com"
+client_secret_file = "/run/secrets/crab-oidc-client-secret"
+
+[[repositories]]
+owner = "my-team"
+name = "my-project"
+bucket = "my-git-bucket"
+prefix = "my-project"
+default_branch = "main"
+description = "Our project"
+protected_branches = [
+  { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
+]
+members = [
+  { subject = "provider-subject-for-alice", name = "Alice", access = "admin" },
+  { subject = "provider-subject-for-bob", name = "Bob", access = "read" },
+]

@@ -10,6 +10,10 @@
 //! Individual steps are filled in by later tasks — this module provides
 //! the skeleton and step boundaries.
 
+use crab_write::catalog::{GitObjectKindMap, LocatorPackEvidence};
+use crab_write::generation::{
+    CommittedManifestAnchor, committed_manifest_anchor, uncovered_locator_object_rows,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -348,44 +352,6 @@ struct RemoteChunkRefKey {
     xorb_hash: XorbHash,
     chunk_index: u32,
     uncompressed_size: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommittedManifestAnchor {
-    pub(crate) generation: u64,
-    pub(crate) shard_index_hash: MerkleHash,
-    pub(crate) pack_index_hash: MerkleHash,
-}
-
-pub(crate) fn committed_manifest_anchor(
-    manifest: &Manifest,
-) -> Result<Option<CommittedManifestAnchor>> {
-    if manifest.shard_index_hash.is_empty() && manifest.pack_index_hash.is_empty() {
-        return Ok(None);
-    }
-    let shard_index_hash = if manifest.shard_index_hash.is_empty() {
-        MerkleHash::default()
-    } else {
-        MerkleHash::from_hex(&manifest.shard_index_hash).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed manifest has invalid shard-index hash: {error}"
-            ))
-        })?
-    };
-    let pack_index_hash = if manifest.pack_index_hash.is_empty() {
-        MerkleHash::default()
-    } else {
-        MerkleHash::from_hex(&manifest.pack_index_hash).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed manifest has invalid pack-index hash: {error}"
-            ))
-        })?
-    };
-    Ok(Some(CommittedManifestAnchor {
-        generation: manifest.generation,
-        shard_index_hash,
-        pack_index_hash,
-    }))
 }
 
 impl RemoteChunkRefKey {
@@ -1705,18 +1671,6 @@ pub(crate) struct CommittedPackIndex<'a> {
     pub(crate) kind_by_oid: Option<&'a GitObjectKindMap>,
 }
 
-#[derive(Debug)]
-struct LocatorPackEvidence {
-    pack_id: MerkleHash,
-    idx_path: PathBuf,
-    rev_path: PathBuf,
-    git_sha1: String,
-    kind_by_oid: Option<GitObjectKindMap>,
-    _temp: Option<tempfile::TempDir>,
-}
-
-type GitObjectKindMap = Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GitObjectSetProof {
     count: u64,
@@ -2810,10 +2764,7 @@ const PUSH_ADMISSION_WAIT_TTL_MULTIPLIER: u32 = 2;
 const PUSH_ADMISSION_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(100);
 const PUSH_ADMISSION_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PUSH_ADMISSION_THROTTLE_COOLDOWN: Duration = Duration::from_secs(1);
-const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
-const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = PUSH_ADMISSION_SLOTS;
 const GIT_LOCATOR_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
-const LOCATOR_EVIDENCE_CONCURRENCY: usize = 16;
 const GIT_VISIBILITY_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 const GIT_LOCATOR_MIN_CANDIDATES: usize = 256;
 
@@ -5586,187 +5537,6 @@ async fn acquire_push_admission_lock(
     }
 }
 
-async fn acquire_ref_journal_compaction_lock(
-    store: &Store,
-    router: &StoreLayout,
-    transaction_id: &str,
-    ttl: Duration,
-    cancel: &CancellationToken,
-) -> Result<Option<PushLock>> {
-    let deadline =
-        Instant::now() + ttl.saturating_mul(REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER);
-    let mut attempt = 0;
-    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-    loop {
-        if !crate::metadata::manifest::ref_journal_transaction_is_active(
-            store,
-            router,
-            transaction_id,
-        )
-        .await?
-        {
-            return Ok(None);
-        }
-        check_cancelled(cancel)?;
-        match acquire_context
-            .acquire_internal(
-                router.repo_prefix(),
-                crab_coordination::GIT_MANIFEST_RESOURCE,
-                ttl,
-            )
-            .await
-            .map_err(CrabError::from)
-        {
-            Ok(lock) => return Ok(Some(lock)),
-            Err(error @ CrabError::PushLockHeld { .. }) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(error);
-                }
-                let delay = push_lock_wait_delay(attempt, deadline.saturating_duration_since(now));
-                attempt = attempt.saturating_add(1);
-                debug!(
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    %transaction_id,
-                    "committed ref transaction is waiting for compaction handoff"
-                );
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    () = cancel.cancelled() => return Err(CrabError::Cancelled),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-async fn try_acquire_ref_journal_compaction_lock(
-    store: &Store,
-    router: &StoreLayout,
-    transaction_id: &str,
-    ttl: Duration,
-) -> Result<Option<PushLock>> {
-    if !crate::metadata::manifest::ref_journal_transaction_is_active(store, router, transaction_id)
-        .await?
-    {
-        return Ok(None);
-    }
-
-    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-    match acquire_context
-        .try_acquire_internal(
-            router.repo_prefix(),
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            ttl,
-        )
-        .await
-        .map_err(CrabError::from)
-    {
-        Ok(lock) => Ok(Some(lock)),
-        Err(CrabError::PushLockHeld { .. }) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-async fn compact_ref_journal_until_idle(
-    store: &Store,
-    router: &StoreLayout,
-    pusher: Option<String>,
-) -> Result<Option<crate::metadata::manifest::RefJournalCompaction>> {
-    let mut latest = None;
-    let mut passes = 0;
-    while passes < MAX_REF_JOURNAL_COMPACTION_PASSES {
-        let compacted = crate::metadata::manifest::compact_ref_journal(
-            store,
-            router,
-            now_iso8601(),
-            pusher.clone(),
-            uuid::Uuid::now_v7().to_string(),
-        )
-        .await?;
-        let Some(compaction) = compacted else {
-            return Ok(latest);
-        };
-        passes += 1;
-        debug!(
-            pass = passes,
-            generation = compaction.manifest.generation,
-            "ref journal compactor drained one visible transaction wave"
-        );
-        for (ref_name, holder) in &compaction.edited_ref_lock_holders {
-            match PushLock::release_ref_if_holder(
-                store.inner(),
-                router.repo_prefix(),
-                ref_name,
-                holder,
-            )
-            .await
-            .map_err(CrabError::from)
-            {
-                Ok(true) => debug!(
-                    %ref_name,
-                    %holder,
-                    "released ref lock after journal compaction"
-                ),
-                Ok(false) => debug!(
-                    %ref_name,
-                    %holder,
-                    "ref lock was already handed off after journal compaction"
-                ),
-                Err(error) => warn!(
-                    %ref_name,
-                    %holder,
-                    %error,
-                    "ref lock cleanup after journal compaction failed"
-                ),
-            }
-        }
-        latest = Some(compaction);
-    }
-    // Bound ownership so a continuous push stream cannot monopolize the
-    // derived lock. Any transaction left active waits and becomes the next
-    // owner through the handoff protocol.
-    debug!(
-        passes,
-        "ref journal compactor reached its bounded drain limit"
-    );
-    Ok(latest)
-}
-
-async fn compact_ref_journal_with_lock(
-    store: &Store,
-    router: &StoreLayout,
-    mut lock: PushLock,
-    pusher: Option<String>,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    let operation = while_renewing_internal_lock_with_cancellation(
-        &mut lock,
-        cancel,
-        compact_ref_journal_until_idle(store, router, pusher),
-    )
-    .await;
-    let release = lock.release().await.map_err(CrabError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "ref journal compaction lock release also failed after owner error"
-            );
-            Err(error)
-        }
-    }
-}
-
-/// Compact committed ref-journal transactions under the generation owner.
-///
-/// A push only publishes the immutable transaction and its visibility
-/// evidence. The owner folds that bounded journal into the manifest after the
-/// ref lock is released, so repository-sized metadata work cannot delay the
-/// push acknowledgement.
 pub(crate) async fn compact_ref_journal_for_owner(
     store: &Store,
     router: &StoreLayout,
@@ -5774,25 +5544,22 @@ pub(crate) async fn compact_ref_journal_for_owner(
     pusher: Option<String>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    let active =
-        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
-    let Some(transaction_id) = active.first() else {
-        return Ok(false);
-    };
-    let Some(lock) =
-        acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
-            .await?
-    else {
-        return Ok(false);
-    };
-    compact_ref_journal_with_lock(store, router, lock, pusher, cancel).await
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::journal::compact_for_owner(
+        store.as_storage(),
+        &storage_router,
+        lock_ttl,
+        pusher,
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
-/// Make one bounded, non-blocking reader repair attempt for an active ref journal.
-///
-/// Upload-pack readers may arrive as a large fanout while a push is handing
-/// off its ref journal. Only one reader may compact; other readers retry their
-/// normal admission path without waiting on or probing the manifest lease.
 pub(crate) async fn compact_ref_journal_for_reader(
     store: &Store,
     router: &StoreLayout,
@@ -5800,47 +5567,20 @@ pub(crate) async fn compact_ref_journal_for_reader(
     pusher: Option<String>,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    let active =
-        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
-    let Some(transaction_id) = active.first() else {
-        return Ok(false);
-    };
-    let Some(lock) =
-        try_acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl).await?
-    else {
-        debug!(
-            %transaction_id,
-            "reader skipped ref journal compaction because another actor owns the manifest lease"
-        );
-        return Ok(false);
-    };
-    let deadline = Instant::now() + (lock_ttl / 2).max(Duration::from_secs(1));
-    let mut lock = lock;
-    let operation = while_renewing_internal_lock_with_cancellation(&mut lock, cancel, async {
-        let mut compacted = false;
-        while Instant::now() < deadline {
-            check_cancelled(cancel)?;
-            let pass = compact_ref_journal_until_idle(store, router, pusher.clone()).await?;
-            if pass.is_none() {
-                break;
-            }
-            compacted = true;
-        }
-        Ok::<_, CrabError>(compacted)
-    })
-    .await;
-    let release = lock.release().await.map_err(CrabError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "reader ref journal lock release also failed after compaction error"
-            );
-            Err(error)
-        }
-    }
+    let storage_router = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::journal::compact_for_reader(
+        store.as_storage(),
+        &storage_router,
+        lock_ttl,
+        pusher,
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
@@ -5851,74 +5591,6 @@ pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
         }
         if let Err(e) = lock.release().await {
             warn!(error = %e, "failed to release push lock");
-        }
-    }
-}
-
-pub(crate) async fn while_renewing_internal_lock<T>(
-    lock: &mut PushLock,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    while_renewing_internal_lock_impl(lock, None, operation).await
-}
-
-pub(crate) async fn while_renewing_internal_lock_with_cancellation<T>(
-    lock: &mut PushLock,
-    failure_cancel: &CancellationToken,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    while_renewing_internal_lock_impl(lock, Some(failure_cancel), operation).await
-}
-
-async fn while_renewing_internal_lock_impl<T>(
-    lock: &mut PushLock,
-    failure_cancel: Option<&CancellationToken>,
-    operation: impl Future<Output = Result<T>>,
-) -> Result<T> {
-    let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
-    let mut ticker = tokio::time::interval(renewal_interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await;
-    tokio::pin!(operation);
-    let mut renewal_error = None;
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut operation => {
-                return match result {
-                    Err(error) => Err(error),
-                    Ok(value) => match renewal_error {
-                        Some(error) => Err(CrabError::from(error)),
-                        None => Ok(value),
-                    },
-                };
-            }
-            _ = ticker.tick(), if renewal_error.is_none() => {
-                // A backend CAS may consume its full retry deadline. Keep polling completed
-                // maintenance so a successful operation can release a still-valid lease.
-                let renewal = lock.renew();
-                tokio::pin!(renewal);
-                tokio::select! {
-                    biased;
-                    result = &mut renewal => {
-                        if let Err(error) = result {
-                            if let Some(failure_cancel) = failure_cancel {
-                                failure_cancel.cancel();
-                            }
-                            renewal_error = Some(error);
-                        }
-                    }
-                    result = &mut operation => {
-                        return match result {
-                            Err(error) => Err(error),
-                            Ok(value) => match renewal_error {
-                                Some(error) => Err(CrabError::from(error)),
-                                None => Ok(value),
-                            },
-                        };
-                    }
-                }
-            }
         }
     }
 }
@@ -5981,348 +5653,6 @@ async fn while_admitted_until_commit<T>(
             }
         }
     }
-}
-
-fn validate_locator_pack_evidence(
-    pack: &PackManifestEntry,
-    idx_path: &Path,
-    rev_path: &Path,
-    expected_git_sha1: &str,
-    error_path: &str,
-) -> Result<()> {
-    let locations = crab_git::pack_locator::PackLocationIter::open(idx_path, rev_path, pack.size)
-        .map_err(crab_git::pack::PackError::from)?;
-    if locations.object_count() != pack.object_count {
-        return Err(CrabError::CorruptObject {
-            path: error_path.to_owned(),
-            reason: format!(
-                "manifest records {} objects but verified index contains {}",
-                pack.object_count,
-                locations.object_count()
-            ),
-        });
-    }
-    if locations.pack_checksum().to_string() != expected_git_sha1 {
-        return Err(CrabError::CorruptObject {
-            path: error_path.to_owned(),
-            reason: "pack index checksum disagrees with verified pack trailer".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-async fn download_locator_pack_evidence(
-    store: &Store,
-    router: &StoreLayout,
-    pack: &PackManifestEntry,
-    populate_kind_metadata: bool,
-    cancel: &CancellationToken,
-) -> Result<LocatorPackEvidence> {
-    check_cancelled(cancel)?;
-    if pack.size < 20 {
-        return Err(CrabError::CorruptObject {
-            path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
-            reason: "canonical Git pack is too short for its trailer".to_owned(),
-        });
-    }
-    let trailer = store
-        .range_get(&router.pack_path(&pack.pack_id), pack.size - 20..pack.size)
-        .await?;
-    let expected_git_sha1 =
-        gix_hash::ObjectId::from(<[u8; 20]>::try_from(trailer.as_ref()).map_err(|_| {
-            CrabError::CorruptObject {
-                path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
-                reason: "canonical Git pack trailer is not 20 bytes".to_owned(),
-            }
-        })?)
-        .to_string();
-    let temp = tempfile::tempdir().map_err(CrabError::Io)?;
-    let idx_path = temp.path().join("pack.idx");
-    let rev_path = temp.path().join("pack.rev");
-    let index_maximum =
-        crab_git::pack_locator::max_pack_index_size(pack.object_count).ok_or_else(|| {
-            CrabError::CorruptObject {
-                path: router.pack_index_path(&pack.pack_id).as_ref().to_owned(),
-                reason: "Git pack index size overflows its bound".to_owned(),
-            }
-        })?;
-    let reverse_maximum = crab_git::pack_locator::pack_reverse_index_size(pack.object_count)
-        .ok_or_else(|| CrabError::CorruptObject {
-            path: router
-                .pack_reverse_index_path(&pack.pack_id)
-                .as_ref()
-                .to_owned(),
-            reason: "Git reverse index size overflows its bound".to_owned(),
-        })?;
-    store
-        .download_to_path_bounded(
-            &router.pack_index_path(&pack.pack_id),
-            &idx_path,
-            index_maximum,
-        )
-        .await?;
-    check_cancelled(cancel)?;
-    store
-        .download_to_path_bounded(
-            &router.pack_reverse_index_path(&pack.pack_id),
-            &rev_path,
-            reverse_maximum,
-        )
-        .await?;
-    check_cancelled(cancel)?;
-    validate_locator_pack_evidence(
-        pack,
-        &idx_path,
-        &rev_path,
-        &expected_git_sha1,
-        router.pack_index_path(&pack.pack_id).as_ref(),
-    )?;
-    let kind_by_oid = if let Some(kinds) =
-        load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?
-    {
-        Some(kinds)
-    } else if populate_kind_metadata {
-        crab_git::initialize_bare_git_dir(temp.path()).map_err(CrabError::from)?;
-        let source = temp.path().join("source.pack");
-        let downloaded = store
-            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
-            .await?;
-        check_cancelled(cancel)?;
-        if downloaded != pack.size {
-            return Err(CrabError::CorruptObject {
-                path: source.display().to_string(),
-                reason: format!(
-                    "committed pack has size {downloaded}, expected {}",
-                    pack.size
-                ),
-            });
-        }
-        let git_dir = temp.path().to_owned();
-        let pack_dir = git_dir.join("objects/pack");
-        let canonical_name = pack.pack_id.clone();
-        let index_path = idx_path.clone();
-        let reverse_index_path = rev_path.clone();
-        let object_count = pack.object_count;
-        let pack_size = pack.size;
-        let (kinds, kind_metadata) = tokio::task::spawn_blocking(move || -> Result<_> {
-            std::fs::create_dir_all(&pack_dir)?;
-            crab_git::pack::install_pack_file_from_path(
-                &pack_dir,
-                &source,
-                &canonical_name,
-                0,
-                false,
-            )?;
-            let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                &index_path,
-                &reverse_index_path,
-                pack_size,
-            )
-            .map_err(crab_git::pack::PackError::from)?;
-            let object_ids = locations
-                .by_ref()
-                .map(|location| {
-                    location
-                        .map(|location| location.oid)
-                        .map_err(crab_git::pack::PackError::from)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(CrabError::from)?;
-            if object_ids.len() != object_count as usize {
-                return Err(CrabError::CorruptObject {
-                    path: index_path.display().to_string(),
-                    reason: format!(
-                        "pack index contains {} objects, expected {object_count}",
-                        object_ids.len()
-                    ),
-                });
-            }
-            let kinds = crab_git::object_kinds_from_git_dir(&git_dir, &object_ids)
-                .map_err(CrabError::from)?;
-            if kinds.len() != object_ids.len() {
-                return Err(CrabError::Internal(
-                    "Git object-kind catalog returned an incomplete pack result".to_owned(),
-                ));
-            }
-            let ordered_kinds = object_ids
-                .iter()
-                .map(|oid| {
-                    kinds.get(oid).copied().ok_or_else(|| {
-                        CrabError::Internal(
-                            "Git object-kind catalog omitted a pack object".to_owned(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
-                locations.pack_checksum(),
-                &ordered_kinds,
-            )
-            .map_err(crab_git::pack::PackError::from)
-            .map_err(CrabError::from)?;
-            let kinds = kinds
-                .into_iter()
-                .map(|(oid, kind)| {
-                    let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
-                        CrabError::Internal(
-                            "Git object-kind catalog returned a non-SHA1 object".to_owned(),
-                        )
-                    })?;
-                    Ok((oid, metadata_kind(kind)))
-                })
-                .collect::<Result<HashMap<_, _>>>()?;
-            Ok((kinds, kind_metadata))
-        })
-        .await
-        .map_err(|error| {
-            CrabError::Internal(format!(
-                "Git object-kind catalog worker failed during owner maintenance: {error}"
-            ))
-        })??;
-        store
-            .put(
-                &router.pack_kind_metadata_path(&pack.pack_id),
-                Bytes::from(kind_metadata),
-            )
-            .await?;
-        Some(Arc::new(kinds))
-    } else {
-        None
-    };
-    check_cancelled(cancel)?;
-    let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-        CrabError::Internal(format!(
-            "committed pack id is invalid for locator publication: {error}"
-        ))
-    })?;
-    Ok(LocatorPackEvidence {
-        pack_id,
-        idx_path,
-        rev_path,
-        git_sha1: expected_git_sha1,
-        kind_by_oid,
-        _temp: Some(temp),
-    })
-}
-
-async fn load_pack_kind_metadata(
-    store: &Store,
-    router: &StoreLayout,
-    pack: &PackManifestEntry,
-    idx_path: &Path,
-    rev_path: &Path,
-) -> Result<Option<GitObjectKindMap>> {
-    let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let maximum =
-        crab_git::pack_locator::pack_kind_metadata_size(pack.object_count).ok_or_else(|| {
-            CrabError::CorruptObject {
-                path: path.as_ref().to_owned(),
-                reason: "Git kind metadata size overflows its bound".to_owned(),
-            }
-        })?;
-    let bytes = match store.get_with_etag_bounded(&path, maximum).await {
-        Ok((bytes, _)) => bytes,
-        Err(CrabError::NotFound { .. }) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let idx_path = idx_path.to_owned();
-    let rev_path = rev_path.to_owned();
-    let pack_size = pack.size;
-    let object_count =
-        usize::try_from(pack.object_count).map_err(|_| CrabError::CorruptObject {
-            path: "pack kind metadata".to_owned(),
-            reason: "kind metadata object count does not fit in memory".to_owned(),
-        })?;
-    let map = tokio::task::spawn_blocking(move || -> Result<GitObjectKindMap> {
-        let locations =
-            crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack_size)
-                .map_err(crab_git::pack::PackError::from)?;
-        let entries = crab_git::pack_locator::decode_pack_kind_metadata_iter(&bytes, locations)
-            .map_err(crab_git::pack::PackError::from)?;
-        let mut kinds = HashMap::with_capacity(entries.len());
-        for entry in entries {
-            let (oid, kind) = entry.map_err(crab_git::pack::PackError::from)?;
-            let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
-                CrabError::Internal("Git kind metadata contains a non-SHA1 object".to_owned())
-            })?;
-            if kinds.insert(oid, metadata_kind(kind)).is_some() {
-                return Err(CrabError::CorruptObject {
-                    path: "pack kind metadata".to_owned(),
-                    reason: "kind metadata contains a duplicate object".to_owned(),
-                });
-            }
-        }
-        if kinds.len() != object_count {
-            return Err(CrabError::CorruptObject {
-                path: "pack kind metadata".to_owned(),
-                reason: format!(
-                    "kind metadata contains {} objects, expected {}",
-                    kinds.len(),
-                    object_count
-                ),
-            });
-        }
-        Ok(Arc::new(kinds))
-    })
-    .await
-    .map_err(|error| {
-        CrabError::Internal(format!("Git object-kind metadata worker failed: {error}"))
-    })??;
-    Ok(Some(map))
-}
-
-async fn collect_locator_pack_evidence(
-    store: &Store,
-    router: &StoreLayout,
-    local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
-    packs: &[PackManifestEntry],
-    skip_packs: &HashSet<MerkleHash>,
-    populate_kind_metadata: bool,
-    cancel: &CancellationToken,
-) -> Result<Vec<LocatorPackEvidence>> {
-    let mut evidence = Vec::new();
-    let mut remote_packs = Vec::new();
-    for pack in packs {
-        check_cancelled(cancel)?;
-        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed pack id is invalid for locator publication: {error}"
-            ))
-        })?;
-        if skip_packs.contains(&pack_id) {
-            continue;
-        }
-        if let Some(local) = local_evidence.remove(&pack_id) {
-            validate_locator_pack_evidence(
-                pack,
-                &local.idx_path,
-                &local.rev_path,
-                &local.git_sha1,
-                &local.idx_path.display().to_string(),
-            )?;
-            evidence.push(local);
-        } else {
-            remote_packs.push(pack.clone());
-        }
-    }
-    let remote_pack_count = remote_packs.len();
-    let started = Instant::now();
-    let remote_evidence =
-        futures_util::stream::iter(remote_packs.into_iter().map(|pack| async move {
-            check_cancelled(cancel)?;
-            download_locator_pack_evidence(store, router, &pack, populate_kind_metadata, cancel)
-                .await
-        }))
-        .buffer_unordered(LOCATOR_EVIDENCE_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    tracing::debug!(
-        locator_remote_pack_count = remote_pack_count,
-        locator_evidence_download_ms = started.elapsed().as_millis() as u64,
-        "downloaded Git locator pack evidence"
-    );
-    evidence.extend(remote_evidence);
-    Ok(evidence)
 }
 
 async fn acquire_current_git_locator_lock(
@@ -6406,173 +5736,6 @@ async fn try_acquire_current_git_locator_lock(
     }
 }
 
-async fn write_locator_pack_evidence(
-    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
-    bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
-    evidence: &[LocatorPackEvidence],
-) -> Result<()> {
-    for pack_evidence in evidence {
-        let binding = *bindings.get(&pack_evidence.pack_id).ok_or_else(|| {
-            CrabError::Internal("locator evidence has no current manifest pack binding".to_owned())
-        })?;
-        let mut locations = crab_git::pack_locator::PackLocationIter::open(
-            &pack_evidence.idx_path,
-            &pack_evidence.rev_path,
-            binding.record.pack_size,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
-        if locations.pack_checksum().to_string() != pack_evidence.git_sha1 {
-            return Err(CrabError::CorruptObject {
-                path: pack_evidence.idx_path.display().to_string(),
-                reason: "pack index checksum changed during locator publication".to_owned(),
-            });
-        }
-        let mut entries = Vec::with_capacity(25_000);
-        for location in &mut locations {
-            let location = location.map_err(crab_git::pack::PackError::from)?;
-            let oid = location.oid.as_bytes().try_into().map_err(|_| {
-                CrabError::Internal("generated pack index contained non-SHA1 object".to_owned())
-            })?;
-            entries.push(crab_metadata::git_object_locator::GitObjectLocatorEntry {
-                oid,
-                location: crab_metadata::git_object_locator::GitObjectLocation {
-                    pack_offset: location.pack_offset,
-                    entry_len: location.entry_len,
-                    crc32: location.crc32,
-                },
-                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
-                    kind: pack_evidence
-                        .kind_by_oid
-                        .as_ref()
-                        .and_then(|kinds| kinds.get(&oid).copied()),
-                    ..Default::default()
-                },
-            });
-            if entries.len() == 25_000 {
-                writer.write_locations(binding, &entries).await?;
-                entries.clear();
-            }
-        }
-        if !entries.is_empty() {
-            writer.write_locations(binding, &entries).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn publish_pack_locator_inventory(
-    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
-    store: &Store,
-    router: &StoreLayout,
-    local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
-    anchor: CommittedManifestAnchor,
-    current_packs: &[PackManifestEntry],
-    populate_kind_metadata: bool,
-    allow_catalog_rebuild: bool,
-    cancel: &CancellationToken,
-) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
-    let mut pack_records = Vec::with_capacity(current_packs.len());
-    for pack in current_packs {
-        let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
-            CrabError::Internal(format!(
-                "committed pack id is invalid for locator publication: {error}"
-            ))
-        })?;
-        pack_records.push(crab_metadata::git_object_locator::GitPackLocatorRecord {
-            pack_id,
-            committed_generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-            object_count: pack.object_count,
-            pack_size: pack.size,
-        });
-    }
-    let bindings = writer.bind_packs(&pack_records).await?;
-    let retained_slots = bindings
-        .iter()
-        .map(|binding| binding.pack_slot)
-        .collect::<HashSet<_>>();
-    // Publish current-pack rows before sweeping stale slots. A repack can move
-    // every OID to a new slot without changing the object universe; sweeping
-    // first would mistake that valid rewrite for an object-set change and
-    // trigger a full dense-ordinal catalog rebuild.
-    let covered = bindings
-        .iter()
-        .filter(|binding| writer.binding_has_covered_objects(**binding))
-        .map(|binding| binding.record.pack_id)
-        .collect::<HashSet<_>>();
-    // Pack bytes are immutable. Sweeping an obsolete slot removes only rows
-    // owned by that slot; covered retained packs remain valid and do not need
-    // another full index scan.
-    let mut evidence = collect_locator_pack_evidence(
-        store,
-        router,
-        local_evidence,
-        current_packs,
-        &covered,
-        populate_kind_metadata,
-        cancel,
-    )
-    .await?;
-    let bindings = bindings
-        .into_iter()
-        .map(|binding| (binding.record.pack_id, binding))
-        .collect::<HashMap<_, _>>();
-    write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
-
-    let sweep = writer.sweep_unreferenced(&retained_slots).await?;
-    if sweep.object_rows_deleted != 0 {
-        if !allow_catalog_rebuild {
-            // A normal push may leave stale rows after a repack, but rebuilding
-            // the dense catalog is owner work and must not extend the ack path.
-            debug!(
-                object_rows_deleted = sweep.object_rows_deleted,
-                "deferred stale Git locator catalog rebuild to generation owner"
-            );
-            return Ok((false, sweep));
-        }
-        // Only deleting an object proves that the dense ordinal universe
-        // changed. Rebuild then replay every current pack, including packs
-        // that were covered before the sweep.
-        writer.replace_object_catalog(&retained_slots).await?;
-        let already_loaded = evidence
-            .iter()
-            .map(|item| item.pack_id)
-            .collect::<HashSet<_>>();
-        let mut replay = collect_locator_pack_evidence(
-            store,
-            router,
-            local_evidence,
-            current_packs,
-            &already_loaded,
-            populate_kind_metadata,
-            cancel,
-        )
-        .await?;
-        evidence.append(&mut replay);
-        write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
-        writer.complete_object_catalog_rebuild().await?;
-    }
-    debug!(
-        object_rows_deleted = sweep.object_rows_deleted,
-        pack_rows_deleted = sweep.pack_rows_deleted,
-        catalog_rebuilt = sweep.object_rows_deleted != 0,
-        "swept stale Git locator rows"
-    );
-    let (after, _) = read_manifest(store, router).await?;
-    if after.generation != anchor.generation
-        || after.pack_index_hash != anchor.pack_index_hash.hex()
-    {
-        return Ok((false, sweep));
-    }
-    writer
-        .set_coverage(crab_metadata::git_object_locator::GitLocatorCoverage {
-            generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-        })
-        .await?;
-    Ok((true, sweep))
-}
-
 async fn planned_locator_object_rows(
     store: &Store,
     router: &StoreLayout,
@@ -6603,87 +5766,6 @@ async fn planned_locator_object_rows(
         &bindings,
         current_packs,
     ))
-}
-
-pub(crate) fn uncovered_locator_object_rows(
-    coverage: Option<crab_metadata::git_object_locator::GitLocatorCoverage>,
-    bindings: &[crab_metadata::git_object_locator::GitPackLocatorBinding],
-    packs: &[PackManifestEntry],
-) -> u64 {
-    let Some(coverage) = coverage else {
-        return packs
-            .iter()
-            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
-    };
-    let covered = bindings
-        .iter()
-        .map(|binding| {
-            (
-                binding.record.pack_id,
-                (
-                    binding.record.committed_generation,
-                    binding.record.object_count,
-                    binding.record.pack_size,
-                ),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    packs
-        .iter()
-        .filter(|pack| {
-            let Ok(pack_id) = MerkleHash::from_hex(&pack.pack_id) else {
-                return true;
-            };
-            !covered
-                .get(&pack_id)
-                .is_some_and(|(committed_generation, object_count, pack_size)| {
-                    *object_count == pack.object_count
-                        && *pack_size == pack.size
-                        && *committed_generation <= coverage.generation
-                })
-        })
-        .fold(0_u64, |total, pack| total.saturating_add(pack.object_count))
-}
-
-pub(crate) async fn publish_pack_locator_inventory_for_owner(
-    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
-    store: &Store,
-    router: &StoreLayout,
-    anchor: CommittedManifestAnchor,
-    current_packs: &[PackManifestEntry],
-    cancel: &CancellationToken,
-) -> Result<(bool, crab_metadata::git_object_locator::LocatorSweepStats)> {
-    if writer.coverage()
-        == Some(crab_metadata::git_object_locator::GitLocatorCoverage {
-            generation: anchor.generation,
-            pack_index_hash: anchor.pack_index_hash,
-        })
-    {
-        return Ok((
-            false,
-            crab_metadata::git_object_locator::LocatorSweepStats::default(),
-        ));
-    }
-    let mut local_evidence = HashMap::new();
-    let (updated, sweep) = publish_pack_locator_inventory(
-        writer,
-        store,
-        router,
-        &mut local_evidence,
-        anchor,
-        current_packs,
-        // Rebound packs retain the logical metadata already proven for each
-        // OID. New OIDs without local push evidence use the documented
-        // canonical filtered-read fallback instead of a repository-sized scan.
-        false,
-        true,
-        cancel,
-    )
-    .await?;
-    if updated {
-        writer.publish_checkpoint().await?;
-    }
-    Ok((updated, sweep))
 }
 
 pub(crate) async fn publish_committed_pack_locators(
@@ -6730,13 +5812,6 @@ async fn publish_committed_pack_locators_with_mode(
     let mut local_evidence = HashMap::with_capacity(packs.len());
     for published in packs {
         let pack = published.pack;
-        validate_locator_pack_evidence(
-            pack,
-            published.idx_path,
-            published.rev_path,
-            published.git_sha1,
-            &published.idx_path.display().to_string(),
-        )?;
         let pack_id = MerkleHash::from_hex(&pack.pack_id).map_err(|error| {
             CrabError::Internal(format!(
                 "committed pack id is invalid for locator publication: {error}"
@@ -6745,14 +5820,13 @@ async fn publish_committed_pack_locators_with_mode(
         if local_evidence
             .insert(
                 pack_id,
-                LocatorPackEvidence {
-                    pack_id,
-                    idx_path: published.idx_path.to_owned(),
-                    rev_path: published.rev_path.to_owned(),
-                    git_sha1: published.git_sha1.to_owned(),
-                    kind_by_oid: published.kind_by_oid.cloned(),
-                    _temp: None,
-                },
+                LocatorPackEvidence::from_local(
+                    pack,
+                    published.idx_path,
+                    published.rev_path,
+                    published.git_sha1,
+                    published.kind_by_oid.cloned(),
+                )?,
             )
             .is_some()
         {
@@ -6771,7 +5845,7 @@ async fn publish_committed_pack_locators_with_mode(
         return Ok(crab_metadata::git_object_locator::LocatorWriteStats::default());
     };
     let publication_started = Instant::now();
-    let write_result = Box::pin(while_renewing_internal_lock(&mut lock, async {
+    let write_result = Box::pin(crab_coordination::while_renewing(&mut lock, None, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != anchor.generation
             || current.pack_index_hash != anchor.pack_index_hash.hex()
@@ -6813,18 +5887,23 @@ async fn publish_committed_pack_locators_with_mode(
             )
             .await?
         };
-        let operation = publish_pack_locator_inventory(
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(), router.repo_prefix().to_owned());
+        let operation = crab_write::catalog::publish_inventory(
             &mut writer,
-            store,
-            router,
+            store.as_storage(),
+            &storage_router,
             &mut local_evidence,
-            anchor,
+            crab_metadata::git_object_locator::GitLocatorCoverage {
+                generation: anchor.generation,
+                pack_index_hash: anchor.pack_index_hash,
+            },
             current_packs,
-            false,
             wait_for_lock,
             cancel,
         )
-        .await;
+        .await
+        .map_err(CrabError::from);
         let close_result = writer.close().await.map_err(CrabError::from);
         match (operation, close_result) {
             (Ok(_), Ok(stats)) => Ok(stats),
@@ -7085,7 +6164,7 @@ async fn repair_git_visibility_if_current_with_options(
     let Some(mut lock) = lock else {
         return Ok(None);
     };
-    let repair = Box::pin(while_renewing_internal_lock(&mut lock, async {
+    let repair = Box::pin(crab_coordination::while_renewing(&mut lock, None, async {
         let (current, _) = read_manifest(store, router).await?;
         if current.generation != required_generation
             || current.pack_index_hash != manifest.pack_index_hash
@@ -8185,13 +7264,18 @@ impl PushPipeline {
             // covers every spec by construction in `evaluate_decisions`.
         }
 
-        // Retarget HEAD if the previous value no longer resolves —
-        // otherwise `git clone` emits "remote HEAD refers to
-        // nonexistent ref" and leaves the working tree bare.
+        // Choose a live branch when available. A tag-only push must preserve
+        // the unborn branch rather than making a tag the clone checkout target.
         if !new_manifest.refs.is_empty() && !new_manifest.refs.contains_key(&new_manifest.head) {
             let preferred_head = local_head
-                .filter(|h| new_manifest.refs.contains_key(h))
-                .or_else(|| new_manifest.refs.keys().next().cloned());
+                .filter(|h| h.starts_with("refs/heads/") && new_manifest.refs.contains_key(h))
+                .or_else(|| {
+                    new_manifest
+                        .refs
+                        .keys()
+                        .find(|name| name.starts_with("refs/heads/"))
+                        .cloned()
+                });
             if let Some(head) = preferred_head {
                 debug!(
                     old_head = %new_manifest.head,
@@ -9063,6 +8147,8 @@ impl PushPipeline {
         if !eligible {
             return Ok(false);
         }
+        crab_git::refname::validate_ref_namespace(manifest.refs.keys().map(String::as_str))
+            .map_err(crab_write::WriteError::from)?;
 
         let git_dir = self.common_git_dir()?;
         let store = self
@@ -9077,10 +8163,45 @@ impl PushPipeline {
             upload_segmented_bulk(store, &self.router, bulk),
             publish_git_visibility_index_from_git_dir(&git_dir, manifest, store, &self.router),
         )?;
-        let new_etag =
-            write_manifest_cas(store, &self.router, manifest, &current.manifest_etag).await?;
-
-        *self.manifest_etag.lock().await = Some(new_etag);
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let namespace_layout = &layout;
+        let published = crab_write::with_ref_namespace(
+            storage,
+            &layout,
+            self.config.lock_ttl,
+            &self.cancel,
+            |cancel| async move {
+                check_cancelled(&cancel)?;
+                let fresh = crab_metadata::manifest_store::read_repository_snapshot(
+                    storage,
+                    namespace_layout,
+                )
+                .await?;
+                // Immutable uploads can overlap another first import or journal create.
+                // Recheck under the same namespace gate used by journal publication.
+                if fresh.manifest_etag != current.manifest_etag
+                    || !fresh.journal.refs.is_empty()
+                    || !fresh.journal.transactions.is_empty()
+                    || !fresh.journal.visible_heads.is_empty()
+                {
+                    return Ok::<_, CrabError>(false);
+                }
+                check_cancelled(&cancel)?;
+                let new_etag =
+                    write_manifest_cas(store, &self.router, manifest, &fresh.manifest_etag).await?;
+                *self.manifest_etag.lock().await = Some(new_etag);
+                Ok(true)
+            },
+        )
+        .await?;
+        if !published {
+            return Ok(false);
+        }
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
@@ -9282,18 +8403,6 @@ impl PushPipeline {
                 );
             }
         }
-        let mut expected_heads = Vec::with_capacity(edits.len());
-        let mut parents = BTreeMap::new();
-        for edit in &edits {
-            let head = crate::metadata::manifest::read_ref_journal_head(
-                store,
-                &self.router,
-                &edit.ref_name,
-            )
-            .await?;
-            parents.insert(edit.ref_name.clone(), head.visible_transaction.clone());
-            expected_heads.push(head);
-        }
         let packs = self
             .uploaded_packs
             .lock()
@@ -9312,14 +8421,21 @@ impl PushPipeline {
             .as_ref()
             .is_none_or(|value| value.head != manifest.head)
             .then(|| manifest.head.clone());
-        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
-            parents, edits, head, packs, shards,
-        )?;
-        let committed = crate::metadata::manifest::commit_ref_journal_transaction(
-            store,
-            &self.router,
-            &transaction,
-            &expected_heads,
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let committed = crab_write::journal::commit_edits(
+            storage,
+            &layout,
+            &current_snapshot,
+            edits,
+            head,
+            packs,
+            shards,
+            &self.cancel,
         )
         .await?;
         info!(
@@ -19461,34 +18577,17 @@ mod tests {
             .await
             .expect("publish second graph generation");
 
-        let anchor = CommittedManifestAnchor {
-            generation: current_manifest.generation,
-            shard_index_hash: MerkleHash::default(),
-            pack_index_hash: MerkleHash::from_hex(&pack_index_hash)
-                .expect("parse graph fixture pack index hash"),
-        };
-        let mut writer =
-            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                Arc::clone(store.inner()),
-                router.repo_prefix(),
-                object_count,
-            )
-            .await
-            .expect("open graph fixture locator writer");
-        publish_pack_locator_inventory_for_owner(
-            &mut writer,
-            &store,
-            &router,
-            anchor,
+        crab_write::generation::maintain_catalog(
+            store.as_storage(),
+            &base_storage_router,
+            &current_manifest,
             &[pack],
+            Duration::from_secs(60),
             &CancellationToken::new(),
         )
         .await
-        .expect("publish graph fixture locator");
-        writer
-            .close()
-            .await
-            .expect("close graph fixture locator writer");
+        .expect("publish graph fixture catalog")
+        .expect("current fixture generation");
 
         let rebuild = rebuild_split_commit_graph_from_remote_packs_if_current(
             &store,
@@ -25141,6 +24240,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_manifest_rechecks_journal_creates_before_publication() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("initial-namespace-race");
+        initialize_test_repository(&store, &router).await;
+        let cancel = CancellationToken::new();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store.clone()),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router.clone(),
+            None,
+            cancel.clone(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let sha_map = pipeline.resolve_src_ref_map().unwrap();
+        let decisions = pipeline
+            .evaluate_decisions_with_sha_map(&sha_map)
+            .await
+            .unwrap();
+        pipeline.prepare_git_pack().await.unwrap();
+        pipeline.upload_packs().await.unwrap();
+        let (candidate, bulk) = pipeline
+            .apply_decisions_with_sha_map(&decisions, false, &sha_map)
+            .await
+            .unwrap();
+        let storage = store.as_storage();
+        let layout =
+            crab_storage::StoreLayout::new(storage.clone(), router.repo_prefix().to_owned());
+        let captured = crab_metadata::manifest_store::read_repository_snapshot(storage, &layout)
+            .await
+            .unwrap();
+        let mut leases = Vec::new();
+        for name in ["refs/heads/main", "refs/heads/main/child"] {
+            leases.push(
+                PushLock::acquire_ref(
+                    store.inner(),
+                    router.repo_prefix(),
+                    name,
+                    Duration::from_secs(60),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        crab_write::journal::commit_edits(
+            storage,
+            &layout,
+            &captured,
+            vec![crab_metadata::ref_journal::RefJournalEdit {
+                ref_name: "refs/heads/main/child".to_owned(),
+                old_oid: None,
+                new_oid: Some(sha_map["refs/heads/main"].clone()),
+                peeled_oid: None,
+                lock_holder: Some(leases[1].holder().to_owned()),
+                visibility_evidence_hash: None,
+            }],
+            Some("refs/heads/main/child".to_owned()),
+            vec![],
+            vec![],
+            &cancel,
+        )
+        .await
+        .unwrap();
+        // The manifest ETag still matches; only the fresh journal reveals the
+        // competing create. Initial publication must hand off to normal commit.
+        let published = pipeline
+            .try_publish_initial_manifest(&candidate, &bulk, &captured, &mut None)
+            .await
+            .unwrap();
+        for lease in leases {
+            lease.release().await.unwrap();
+        }
+        assert!(!published);
+        let current = crab_metadata::manifest_store::read_repository_snapshot(storage, &layout)
+            .await
+            .unwrap();
+        assert!(current.manifest.refs.is_empty());
+        assert_eq!(
+            current
+                .journal
+                .refs
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["refs/heads/main/child"]
+        );
+    }
+
+    #[tokio::test]
     async fn push_batch_single_ref_succeeds() {
         let _guard = GitDirGuard::new();
         let config = PushConfig::default();
@@ -26142,9 +25334,9 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async {
+            crab_coordination::while_renewing(&mut lock, Some(&cancel), async {
                 cancel.cancelled().await;
-                Ok(())
+                Ok::<_, CrabError>(())
             }),
         )
         .await
@@ -26185,13 +25377,13 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_millis(1_500),
-            while_renewing_internal_lock_with_cancellation(&mut lock, &cancel, async move {
+            crab_coordination::while_renewing(&mut lock, Some(&cancel), async move {
                 operation_started
                     .acquire()
                     .await
                     .expect("observe stalled renewal")
                     .forget();
-                Ok(())
+                Ok::<_, CrabError>(())
             }),
         )
         .await
@@ -26534,33 +25726,24 @@ mod tests {
             .await
             .expect("upload owner kind metadata");
 
-        let anchor = CommittedManifestAnchor {
-            generation: manifest.generation,
-            shard_index_hash: MerkleHash::default(),
-            pack_index_hash: MerkleHash::from_hex(&pack_index_hash).expect("owner pack hash"),
-        };
-        let mut writer =
-            crab_metadata::git_object_locator::GitObjectLocatorWriter::open_for_publication(
-                Arc::clone(store.inner()),
-                router.repo_prefix(),
-                pack.object_count,
-            )
-            .await
-            .expect("open owner locator writer");
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
         assert!(
-            publish_pack_locator_inventory_for_owner(
-                &mut writer,
-                &store,
-                &router,
-                anchor,
+            crab_write::generation::maintain_catalog(
+                store.as_storage(),
+                &storage_router,
+                &manifest,
                 &[pack],
+                Duration::from_secs(60),
                 &CancellationToken::new(),
             )
             .await
-            .expect("publish owner locator")
-            .0
+            .expect("publish owner catalog")
+            .expect("current generation")
+            .advanced
         );
-        writer.close().await.expect("close owner locator writer");
 
         let session = crab_metadata::git_object_locator::GitObjectLocatorSession::open(
             Arc::clone(store.inner()),
@@ -36098,6 +35281,33 @@ mod tests {
             matches!(error, CrabError::CorruptObject { ref reason, .. } if reason.contains("crab init"))
         );
         assert!(pipeline.base_manifest.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_manifest_preserves_unborn_head_alongside_tags() {
+        use crate::metadata::manifest::{Manifest, create_manifest};
+        use object_store::memory::InMemory;
+        let store = crate::storage::store::Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let mut base = Manifest::default_for_repo("refs/heads/unborn");
+        base.refs.insert("refs/tags/v1".into(), "a".repeat(40));
+        base.seal_git_validation();
+        create_manifest(&store, &router, &base).await.unwrap();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store),
+            None,
+            None,
+            "org/repo".to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.read_base_manifest().await.unwrap();
+        let (manifest, _) = pipeline.build_manifest().await.unwrap();
+        assert_eq!(manifest.head, "refs/heads/unborn");
     }
 
     #[tokio::test]

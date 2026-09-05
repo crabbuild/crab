@@ -127,6 +127,15 @@ impl From<crab_git::pack::PackError> for AuthServerError {
 impl From<crab_metadata::error::MetadataError> for AuthServerError {
     fn from(error: crab_metadata::error::MetadataError) -> Self {
         match error {
+            error @ crab_metadata::error::MetadataError::RefJournalCancelled => {
+                Self::Io(io::Error::other(error))
+            }
+            error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
+            | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::FileLookupLimit { .. }
+            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
+                Self::Io(io::Error::other(error))
+            }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),
             crab_metadata::error::MetadataError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
@@ -185,6 +194,12 @@ impl From<crab_lfs::LfsError> for AuthServerError {
 impl From<crab_read::ReadError> for AuthServerError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
+            crab_read::ReadError::Metadata(
+                source @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
+                | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+                | crab_metadata::error::MetadataError::FileLookupLimit { .. }
+                | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }),
+            ) => Self::from(source),
             crab_read::ReadError::Io(source) => Self::Io(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::NotFound { path } => Self::NotFound { path },
@@ -253,5 +268,60 @@ impl From<crab_types::pointer::PointerParseError> for AuthServerError {
 impl From<io::Error> for AuthServerError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncertain_journal_commit_survives_direct_and_read_boundaries() {
+        for through_read in [false, true] {
+            let source = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+                transaction_id: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::Io {
+                    source: io::Error::new(io::ErrorKind::ConnectionReset, "write reply lost"),
+                }),
+                verification: None,
+            };
+            let mapped = if through_read {
+                AuthServerError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                AuthServerError::from(source)
+            };
+            let AuthServerError::Io(error) = mapped else {
+                panic!("expected typed I/O error");
+            };
+            assert!(
+                matches!(error.get_ref().and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>()),
+                Some(crab_metadata::error::MetadataError::RefJournalCommitUncertain { transaction_id, .. }) if transaction_id == &"a".repeat(64))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_lookup_errors_survive_direct_and_read_wrapping() {
+        for through_read in [false, true] {
+            let gate = tokio::sync::Semaphore::new(0);
+            gate.close();
+            let source = crab_metadata::error::MetadataError::FileLookupAdmission {
+                source: gate.acquire().await.unwrap_err(),
+            };
+            let error = if through_read {
+                AuthServerError::from(crab_read::ReadError::Metadata(source))
+            } else {
+                AuthServerError::from(source)
+            };
+            let AuthServerError::Io(error) = error else {
+                panic!("expected read I/O failure");
+            };
+            assert!(
+                error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>())
+                    .is_some()
+            );
+        }
     }
 }

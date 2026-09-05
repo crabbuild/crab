@@ -31,7 +31,7 @@ silently disagreeing about keys, generations, hashes, or serialization.
 .crab/chunk_index_db/             bucket-global chunk receipts and placements
 ```
 
-`Manifest` is version 2 and contains the complete ref map, HEAD, generation,
+`Manifest` is version 1 and contains the complete ref map, HEAD, generation,
 and content hashes for larger metadata objects. `seal_git_validation` binds
 the semantically validated Git state to a BLAKE3 digest; readers call
 `validate_manifest_payload` before trusting refs or index pointers.
@@ -49,6 +49,36 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 
 Keep each SlateDB session's lifecycle explicit: every opened reader or writer
 must be closed on success and error paths.
+
+When validating dependencies against an already captured repository state, use
+`FileIndexLookupSession::for_snapshot(&layout, &snapshot, limits)` with a snapshot returned
+by `read_repository_snapshot` for that layout. It scans only that snapshot's shard
+inventory, including its captured journal overlay. Later manifests, journals and
+file-index rows do not change its answers. This mode opens no SlateDB reader and
+writes no checkpoints, so cancelling a lookup leaves no reader to close.
+The ordinary `open`/`open_for_storage` methods continue to capture current state
+and use acceleration where storage permissions allow it.
+
+`FileIndexLookupLimits` bounds batch size, cached distinct files, cumulative shard
+visits, each fetched shard body and expanded recipe entries. The inventory must
+fit the visit budget before the session is created. A complete scan reserves its
+visits before dispatch; failures and cancellation consume that reservation, and
+cannot create cached absences. Cached results need no further shard visits.
+At most four shard scans overlap across all sessions in a process. Capacity is
+acquired before origin reads and moves into the blocking hash/recipe parser.
+Dropping or timing out the caller leaves that capacity held until the worker
+exits, so detached jobs cannot evade the bound. Hashing/parsing does not block
+async workers. Excluding transport retries, total shard-body
+bytes are bounded by `max_shard_visits * max_shard_bytes`; each visit also permits
+one HEAD and at most a 12-byte trailer plus a 4 KiB bloom prefilter read.
+
+A selected shard is only a dependency candidate. Verify the file's content at
+origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
+publication base before accepting a write. The composing request must still own
+an overall deadline and admission for the other receive stages. A timed-out
+lookup may finish its current bounded parser in the background, retaining its
+permit until completion. Pointer content proofs have their own four-operation
+process bound and include admission queue time in their deadline.
 
 ## Usage
 
@@ -92,3 +122,14 @@ assert_eq!(indexes.chunk_index_path, ".crab/chunk_index_db/");
   this crate owns the metadata it consumes.
 - [`crab-coordination`](../crab-coordination/README.md) decides when a new
   manifest generation is authoritative.
+
+## Unborn default branches
+
+A manifest or replayed ref journal may retain a symbolic `refs/heads/...` HEAD
+that has no commit while tags or other branches exist. The validation digest still
+binds HEAD and every ref; an unresolved non-branch HEAD remains invalid for a
+nonempty repository. Read-side name and object validation remains mandatory.
+
+This extends the readable states of the existing serialized schema. Deploy the
+updated readers and publication services together: v1.0.1 and v1.1.0 reject this
+state. Existing manifests with resolved HEADs require no migration.

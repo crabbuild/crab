@@ -63,7 +63,7 @@ jobs:
           rust=false
           web=false
           docs=false
-          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|\.github/workflows/)' <<< "${files}"; then
+          if grep -Eq '^(Cargo\.toml|Cargo\.lock|crab/|crates/|packages/repository/|\.github/workflows/)' <<< "${files}"; then
             rust=true
           fi
           while IFS= read -r file; do
@@ -93,6 +93,11 @@ jobs:
     name: Rust quality and tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Full workspace debug symbols exhaust hosted-runner disk during linking.
+      # Keep file/line backtraces without changing assertions or optimization.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     needs: [changes, actionlint]
     if: needs.changes.outputs.rust == 'true'
     steps:
@@ -109,6 +114,23 @@ jobs:
         with:
           workspaces: ". -> target"
           cache-on-failure: true
+
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+
+      - name: Build and verify embedded repository frontend
+        run: |
+          npm ci --prefix packages/repository
+          npm run format:check --prefix packages/repository
+          npm test --prefix packages/repository
+          npm run build --prefix packages/repository
+
+      - name: Check HTTP server
+        run: cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -151,6 +173,34 @@ jobs:
           else
             echo "No managed OpenAPI baseline exists on ${base_ref}; accepting the initial contract."
           fi
+
+  repository-ui:
+    name: Repository browser interactions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes, actionlint]
+    if: needs.changes.outputs.rust == 'true'
+    defaults:
+      run:
+        working-directory: packages/repository
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm run test:browser
+      - name: Retain failed browser traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-browser-failures
+          path: packages/repository/node_modules/.cache/browser-tests
+          include-hidden-files: true
 
   web:
     name: Web quality and tests

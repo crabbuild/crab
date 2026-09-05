@@ -10,6 +10,7 @@ members = [
     "crates/crab-coordination",
     "crates/crab-diff",
     "crates/crab-git",
+    "crates/crab-http-server",
     "crates/crab-lfs",
     "crates/crab-metadata",
     "crates/crab-read",
@@ -19,6 +20,7 @@ members = [
     "crates/crab-types",
     "crates/crab-vfs",
     "crates/crab-workflow",
+    "crates/crab-write",
     "crates/crab-xet",
     "crab",
 ]
@@ -36,6 +38,7 @@ crab-cache-store = { path = "crates/crab-cache-store", default-features = false 
 crab-coordination = { path = "crates/crab-coordination", default-features = false }
 crab-diff = { path = "crates/crab-diff", default-features = false }
 crab-git = { path = "crates/crab-git", default-features = false }
+crab-http-server = { path = "crates/crab-http-server", default-features = false }
 crab-lfs = { path = "crates/crab-lfs", default-features = false }
 crab-metadata = { path = "crates/crab-metadata", default-features = false }
 crab-read = { path = "crates/crab-read", default-features = false }
@@ -44,6 +47,7 @@ crab-staging = { path = "crates/crab-staging", default-features = false }
 crab-storage = { path = "crates/crab-storage", default-features = false }
 crab-types = { path = "crates/crab-types", default-features = false }
 crab-vfs = { path = "crates/crab-vfs", default-features = false }
+crab-write = { path = "crates/crab-write", default-features = false }
 crab-workflow = { path = "crates/crab-workflow", default-features = false }
 crab-xet = { path = "crates/crab-xet", default-features = false }
 
@@ -65,7 +69,9 @@ gix-fsck = "0.21.0"
 gix-glob = "0.26.0"
 gix-hash = "0.25.0"
 gix-ignore = "0.21.0"
+gix-imara-diff = "0.2.3"
 gix-index = "0.51.0"
+gix-merge = { version = "0.16.0", default-features = false, features = ["sha1"] }
 gix-lock = "23.0.0"
 gix-negotiate = "0.31.0"
 gix-object = "0.60.0"

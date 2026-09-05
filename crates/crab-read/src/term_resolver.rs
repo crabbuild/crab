@@ -1060,7 +1060,7 @@ mod tests {
 
         let origin = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(origin.clone(), "org/repo".to_owned());
-        let store = CachingStore::new(origin, &CacheConfig::default()).unwrap();
+        let store = CachingStore::new(origin, CacheConfig::default()).unwrap();
         let path = router.xorb_path(&xorb.hash);
         store.origin().put(&path, xorb.bytes.clone()).await.unwrap();
 

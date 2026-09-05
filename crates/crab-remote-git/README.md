@@ -39,8 +39,9 @@ The supported entry points are:
 - `RemoteGitRepository::{generate_pack,generate_pack_cached,generate_pack_request_cached}`:
   verified response packs, with immutable reuse after selection or before an
   exact request is planned;
-- `RemoteGitSnapshot::{entry,list_directory,blob_metadata,read_blob}`: browser
-  navigation and Git-representation content;
+- `RemoteGitSnapshot::{entry,list_directory,list_tree_recursive,blob_metadata,read_blob}`:
+  browser navigation, bounded metadata-only tree traversal, and Git-representation
+  content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
   semantics without a checkout;
 - `RemoteGitSnapshot::{archive,archive_stream}`: bounded traversal, with the
@@ -65,14 +66,22 @@ manifest, inventory, negative, blame-result, and pack-index caches are byte
 bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
+Shared base/index reads recheck their caches after admission: a caller that
+missed before a previous producer finished must reuse its verified result.
+Index-size producers publish their cache entry before retiring the shared task.
+Object checksum/size checks and operation budgets still apply to late cache hits;
+parsed indexes are reused only within the caller's source-byte limit.
 Batch scheduling is lazy and its concurrency is the minimum of origin,
 blocking-decode, object-flight, logical-object, storage-request, fetched-byte,
-and inflated-byte limits. Archive traversal produces one entry at a time; its
-pending tree work is bounded by the verified tree-object limit.
-Services may keep a bounded cache of cloned immutable repository handles and
-use `is_current` after a short freshness interval. A changed manifest always
-requires a new complete open handshake; cached state is never refreshed in
-place.
+and inflated-byte limits. Batched object reads fetch selected entries and their
+delta dependencies together, then retain verified bases in the bounded object
+cache so later history waves do not repeat the same locator and range reads.
+Archive traversal produces one entry at a time; its pending tree work is bounded
+by the verified tree-object limit.
+Services may keep a bounded cache of cloned immutable repository handles.
+`is_current` detects manifest changes only; observing uncompacted journal commits
+requires reopening after the freshness interval. A changed manifest always
+requires a new complete open handshake; cached state is never refreshed in place.
 
 Response packs can be persisted beneath the repository's immutable
 `generated-packs/v1` namespace. Selection-bound keys cover physical repository
@@ -107,11 +116,13 @@ the source installation bounded by skipping an OID enumeration that the
 selection planner does not consume; exact response-set validation remains in
 place.
 
-Directory listing reads only the selected tree. Child sizes are absent unless
-the caller requests bounded page-only metadata. Directory cursors resume after
-an exact entry in the pinned tree, preserving Git order when files and
-directories share a name prefix. Comparison prunes equal tree IDs. History, diff, blame, archive, storage, inflation, and response work have
-independent aggregate limits.
+Directory listing reads only the selected tree. Recursive listing batches tree
+reads and returns metadata without reading blob bodies. Child sizes are absent
+unless the caller requests bounded page-only metadata. Directory cursors resume
+after an exact entry in the pinned tree, preserving Git order when files and
+directories share a name prefix. Comparison prunes equal tree IDs. History,
+diff, blame, archive, storage, inflation, and response work have independent
+aggregate limits.
 
 History remains authoritative over verified raw commit objects. When the
 manifest names an immutable split commit graph, open bounds the complete graph
@@ -120,7 +131,9 @@ stable ordinals, parent closure, corrected generations, and the exact manifest
 generation/pack/digest tuple. A snapshot uses it only while each positional
 parent list exactly matches the corresponding raw commit; missing or corrupt
 acceleration falls back to raw parent order and can never hide a reachable
-commit.
+commit. First-parent path cursors carry the next verified raw parent, so later
+pages do not replay newer commits. A matching complete graph groups bounded raw
+commit and tree reads for range coalescing without becoming the history authority.
 
 Each operation emits one structured span with only its bounded operation kind,
 process-local correlation ID, outcome, and safe error category. Raw OIDs,
@@ -140,10 +153,11 @@ and blob. Services should reserve separate admission for these expensive
 operations and should not infer archive or blame latency from root-listing
 latency.
 
-Resolving a full commit ID proves reachability by walking verified raw commits
-breadth-first from the pinned refs. Nearby merge parents are checked before
-older ancestry on either branch. Deep or unreachable revisions can still exceed
-the operation's history/object budgets; resolving a named ref avoids that walk.
+Resolving a full commit ID uses the validated complete split graph to prove
+reachability without object-store reads. When that acceleration is unavailable,
+the reader walks verified raw commits breadth-first from the pinned refs, checking
+nearby merge parents before older ancestry on either branch. That fallback remains
+bounded by the operation's history and object budgets.
 
 ## Live qualification example
 
@@ -274,3 +288,9 @@ Git blobs, Crab pointers, and Git LFS pointers but never materializes pointer
 targets. Logical Crab content belongs to `crab-read`; verified LFS content
 belongs to `crab-lfs`. Service composition decides whether those representations
 are enabled.
+
+An unborn default branch does not imply an empty repository: `RepositoryRefs.head`
+is `None` and `unborn_head` carries the symbolic branch name even when tags or other
+branches exist. Explicit ref reads still resolve normally; a missing HEAD does not
+silently resolve to another ref. Call `RepositoryRefs::is_empty()` to test whether
+there are any refs.

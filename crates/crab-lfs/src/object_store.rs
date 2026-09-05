@@ -9,6 +9,8 @@ use std::ops::Range;
 use std::path::Path as StdPath;
 use std::pin::Pin;
 
+mod origin;
+
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
@@ -37,7 +39,7 @@ pub enum LfsError {
     #[error("LFS object missing: oid {oid}")]
     ObjectMissing { oid: String },
 
-    /// Local file I/O failed while streaming an object.
+    /// File I/O or a blocking content-verification worker failed.
     #[error("LFS object I/O error: {source}")]
     Io {
         #[from]
@@ -488,6 +490,24 @@ impl LfsObjectStore {
         }
     }
 
+    /// Verify exact bytes from this store without consulting or writing receipts.
+    ///
+    /// The caller must supply an origin-only store, bound `expected_size`, and
+    /// wrap this operation in its request deadline. No primary fallback is used.
+    /// Dropping the future stops reads; detached hash work retains admission.
+    pub async fn verify_origin(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
+        let path = self.object_path(oid);
+        match origin::inspect(&self.store, &path, oid, Some(expected_size)).await? {
+            ExistingObject::Valid(_) => Ok(()),
+            ExistingObject::Missing => Err(LfsError::ObjectMissing {
+                oid: hex_encode(oid),
+            }),
+            ExistingObject::Corrupt(_) => Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            }),
+        }
+    }
+
     /// Streams an LFS object to a local file while verifying its size and
     /// SHA-256 digest.
     ///
@@ -798,43 +818,7 @@ impl LfsObjectStore {
             return Ok(ExistingObject::Valid(meta));
         }
 
-        let (meta, range, mut stream) = match store.get_stream(path, None).await {
-            Ok(result) => result,
-            Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),
-            Err(error) => return Err(error.into()),
-        };
-        let etag = ETag {
-            e_tag: meta.e_tag.clone(),
-            version: meta.version.clone(),
-        };
-        let mut hasher = Sha256::new();
-        let mut actual_size = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            hasher.update(&chunk);
-            actual_size = actual_size.checked_add(chunk.len() as u64).ok_or_else(|| {
-                StorageError::CorruptObject {
-                    path: path.to_string(),
-                    reason: "object size overflow while verifying LFS content".to_owned(),
-                }
-            })?;
-        }
-        let expected_size = range.end.saturating_sub(range.start);
-        if range.start != 0 || expected_size != meta.size || actual_size != expected_size {
-            return Err(StorageError::CorruptObject {
-                path: path.to_string(),
-                reason: format!(
-                    "incomplete LFS object body: expected {} bytes, read {actual_size}",
-                    meta.size
-                ),
-            }
-            .into());
-        }
-        if hasher.finalize().as_slice() == oid {
-            Ok(ExistingObject::Valid(meta))
-        } else {
-            Ok(ExistingObject::Corrupt(etag))
-        }
+        origin::inspect(store, path, oid, None).await
     }
 }
 

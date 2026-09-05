@@ -151,6 +151,293 @@ impl RemoteGitSnapshot {
         Ok(Page { items, next })
     }
 
+    /// Return commits reachable from this snapshot and not from the base snapshot.
+    ///
+    /// Every parent is considered, so merge-side commits remain visible while
+    /// commits already contained by the base are excluded. Continuations bind
+    /// both immutable commits and may rewalk their bounded history after cache loss.
+    pub async fn ahead_history(
+        &self,
+        base: &Self,
+        page: &PageRequest,
+        operation: &OperationContext,
+    ) -> Result<Page<Commit>> {
+        self.ensure_operation(operation)?;
+        base.ensure_operation(operation)?;
+        if !Arc::ptr_eq(&self.repository, &base.repository) {
+            return Err(Error::InternalInvariant {
+                invariant: "history snapshots belong to different repository generations",
+            });
+        }
+        let skip = match page.after() {
+            Some(cursor) => {
+                let decoded = cursor.decode_ahead_history()?;
+                if decoded.start != self.commit_oid || decoded.base != base.commit_oid {
+                    return Err(Error::InvalidCursor {
+                        reason: CursorError::ContextMismatch,
+                    });
+                }
+                decoded.skip
+            }
+            None => 0,
+        };
+        if self.commit_oid == base.commit_oid {
+            return Ok(Page {
+                items: vec![],
+                next: None,
+            });
+        }
+
+        let base_ancestors =
+            commit_ancestors(base.commit_oid, operation, self.commit_graph.as_deref()).await?;
+        let mut pending = vec![self.commit_oid];
+        let mut visited = HashSet::new();
+        let mut traversed = 0u64;
+        let mut items = Vec::new();
+        while let Some(oid) = pending.pop() {
+            operation.ensure_active()?;
+            if visited.contains(&oid) || base_ancestors.contains(&oid) {
+                continue;
+            }
+            if traversed >= skip && items.len() == page.limit() {
+                pending.push(oid);
+                break;
+            }
+            visited.insert(oid);
+            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+            let commit = operation.read_commit(oid).await?;
+            queue_all_parents(&mut pending, &commit, self.commit_graph.as_deref())?;
+            if traversed >= skip {
+                operation
+                    .charge(
+                        BudgetDimension::ResponseBytes,
+                        commit_response_bytes(&commit),
+                    )
+                    .await?;
+                items.try_reserve(1).map_err(|source| Error::Allocation {
+                    requested: mem::size_of::<Commit>(),
+                    source,
+                })?;
+                items.push(commit);
+            }
+            traversed = traversed.checked_add(1).ok_or(Error::LimitExceeded {
+                limit: "history commits",
+                actual: u64::MAX,
+                maximum: u64::MAX,
+            })?;
+        }
+        while pending
+            .last()
+            .is_some_and(|oid| visited.contains(oid) || base_ancestors.contains(oid))
+        {
+            pending.pop();
+        }
+        let next = if pending.is_empty() {
+            None
+        } else {
+            let next_skip = skip
+                .checked_add(items.len() as u64)
+                .ok_or(Error::LimitExceeded {
+                    limit: "history commits",
+                    actual: u64::MAX,
+                    maximum: u64::MAX,
+                })?;
+            Some(PageCursor::ahead_history(
+                self.commit_oid,
+                base.commit_oid,
+                next_skip,
+            ))
+        };
+        Ok(Page { items, next })
+    }
+
+    async fn first_parent_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+    ) -> Result<Page<PathHistoryEntry>> {
+        if let Some(commit_graph) = self.commit_graph.as_deref() {
+            return self
+                .commit_graph_path_history(start, path, page, operation, commit_graph)
+                .await;
+        }
+        self.raw_first_parent_path_history(start, path, page, operation, Vec::new())
+            .await
+    }
+
+    async fn commit_graph_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        commit_graph: &CommitGraphIndex,
+    ) -> Result<Page<PathHistoryEntry>> {
+        // Keep speculative reads below the aggregate object budget when the
+        // requested page ends inside a batch.
+        const PREFETCH: usize = 16;
+
+        let mut items = Vec::new();
+        let mut carry: Option<(Commit, Option<TreeEntry>)> = None;
+        let mut next_oid = start;
+        loop {
+            let Some(oids) = commit_graph.first_parent_chain(next_oid, PREFETCH) else {
+                let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
+                return self
+                    .raw_first_parent_path_history(fallback, path, page, operation, items)
+                    .await;
+            };
+            if oids.is_empty() {
+                return Err(Error::InternalInvariant {
+                    invariant: "commit graph returned an empty first-parent batch",
+                });
+            }
+            let commits = path_history_commits(&oids, operation).await?;
+            // The graph only supplies the batch shape. Raw commit objects must
+            // confirm every positional parent before the batch can affect history.
+            if commits
+                .iter()
+                .any(|commit| !commit_graph.parents_match(commit.oid, &commit.parents))
+            {
+                let fallback = carry.as_ref().map_or(next_oid, |(commit, _)| commit.oid);
+                return self
+                    .raw_first_parent_path_history(fallback, path, page, operation, items)
+                    .await;
+            }
+            let entries = entries_at_trees(&commits, path, operation).await?;
+            let batch = commits.into_iter().zip(entries);
+            let mut batch = batch.into_iter();
+            let mut current = match carry.take() {
+                Some(carry) => carry,
+                None => batch.next().ok_or(Error::InternalInvariant {
+                    invariant: "first-parent prefetch produced no commits",
+                })?,
+            };
+            for parent in batch {
+                let resume = parent.0.oid;
+                if append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    std::slice::from_ref(&parent.1),
+                    page,
+                    operation,
+                )
+                .await?
+                {
+                    return self.first_parent_path_page(path, items, Some(resume));
+                }
+                current = parent;
+            }
+            let Some(parent) = current.0.parents.first().copied() else {
+                let _ = append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    &[],
+                    page,
+                    operation,
+                )
+                .await?;
+                return Ok(Page { items, next: None });
+            };
+            carry = Some(current);
+            next_oid = parent;
+        }
+    }
+
+    async fn raw_first_parent_path_history(
+        &self,
+        start: ObjectId,
+        path: &GitPath,
+        page: &PageRequest,
+        operation: &OperationContext,
+        mut items: Vec<PathHistoryEntry>,
+    ) -> Result<Page<PathHistoryEntry>> {
+        const PREFETCH: usize = 16;
+
+        let mut carry: Option<(Commit, Option<TreeEntry>)> = None;
+        let mut next_oid = start;
+        loop {
+            let mut commits = Vec::new();
+            commits
+                .try_reserve_exact(PREFETCH)
+                .map_err(|source| Error::Allocation {
+                    requested: PREFETCH.saturating_mul(mem::size_of::<Commit>()),
+                    source,
+                })?;
+            let mut oid = Some(next_oid);
+            while commits.len() < PREFETCH
+                && let Some(current_oid) = oid
+            {
+                operation.ensure_active()?;
+                let commit = path_history_commit(current_oid, operation).await?;
+                oid = commit.parents.first().copied();
+                commits.push(commit);
+            }
+            let entries = entries_at_trees(&commits, path, operation).await?;
+            let mut batch = commits.into_iter().zip(entries);
+            let mut current = match carry.take() {
+                Some(carry) => carry,
+                None => batch.next().ok_or(Error::InternalInvariant {
+                    invariant: "first-parent prefetch produced no commits",
+                })?,
+            };
+            for parent in batch {
+                let resume = parent.0.oid;
+                if append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    std::slice::from_ref(&parent.1),
+                    page,
+                    operation,
+                )
+                .await?
+                {
+                    return self.first_parent_path_page(path, items, Some(resume));
+                }
+                current = parent;
+            }
+            let Some(parent) = current.0.parents.first().copied() else {
+                let _ = append_path_history_change(
+                    &mut items,
+                    current.0,
+                    current.1.as_ref(),
+                    &[],
+                    page,
+                    operation,
+                )
+                .await?;
+                return Ok(Page { items, next: None });
+            };
+            carry = Some(current);
+            next_oid = parent;
+        }
+    }
+
+    fn first_parent_path_page(
+        &self,
+        path: &GitPath,
+        items: Vec<PathHistoryEntry>,
+        resume: Option<ObjectId>,
+    ) -> Result<Page<PathHistoryEntry>> {
+        let next = resume
+            .map(|resume| {
+                PageCursor::path_history(
+                    self.commit_oid,
+                    HistoryTraversal::FirstParent,
+                    path,
+                    0,
+                    resume,
+                )
+            })
+            .transpose()?;
+        Ok(Page { items, next })
+    }
+
     /// Return commits that changed one exact path under a parent policy.
     ///
     /// Content, mode, type, addition, and deletion changes are detected from
@@ -163,7 +450,7 @@ impl RemoteGitSnapshot {
         operation: &OperationContext,
     ) -> Result<Page<PathHistoryEntry>> {
         self.ensure_operation(operation)?;
-        let skip = match page.after() {
+        let (skip, first_parent_start) = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_path_history()?;
                 if decoded.start != self.commit_oid
@@ -174,10 +461,15 @@ impl RemoteGitSnapshot {
                         reason: CursorError::ContextMismatch,
                     });
                 }
-                decoded.skip
+                (decoded.skip, decoded.resume)
             }
-            None => 0,
+            None => (0, self.commit_oid),
         };
+        if traversal == HistoryTraversal::FirstParent {
+            return self
+                .first_parent_path_history(first_parent_start, path, page, operation)
+                .await;
+        }
         let mut pending = vec![self.commit_oid];
         let mut visited = HashSet::new();
         let mut traversed = 0u64;
@@ -234,7 +526,9 @@ impl RemoteGitSnapshot {
             }
         }
         let next = next_skip
-            .map(|skip| PageCursor::path_history(self.commit_oid, traversal, path, skip))
+            .map(|skip| {
+                PageCursor::path_history(self.commit_oid, traversal, path, skip, self.commit_oid)
+            })
             .transpose()?;
         Ok(Page { items, next })
     }
@@ -402,96 +696,103 @@ impl RemoteGitSnapshot {
         let mut visited = HashSet::new();
         visited.insert(current_commit.oid);
 
-        while let Some(parent_oid) = current_commit.parents.first().copied() {
-            operation.ensure_active()?;
-            if !visited.insert(parent_oid) {
-                return Err(Error::Corrupt {
-                    stage: CorruptionStage::Commit,
-                });
+        'history: while let Some(parent_oid) = current_commit.parents.first().copied() {
+            let parent_commits =
+                blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation).await?;
+            for parent_commit in &parent_commits {
+                if !visited.insert(parent_commit.oid) {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Commit,
+                    });
+                }
             }
-            operation.charge(BudgetDimension::HistoryCommits, 1).await?;
-            let parent_commit = operation.read_commit(parent_oid).await?;
-            let Some(parent_blob) = read_optional_blame_blob(
-                self,
-                parent_commit.tree,
-                parent_commit.oid,
-                path,
-                operation,
-            )
-            .await?
-            else {
-                break;
-            };
-            if parent_blob.metadata.oid == current_oid {
+            let parent_entries = entries_at_trees(&parent_commits, path, operation).await?;
+            for (parent_commit, parent_entry) in parent_commits.into_iter().zip(parent_entries) {
+                let Some(parent_entry) = parent_entry.filter(|entry| entry.kind == EntryKind::Blob)
+                else {
+                    break 'history;
+                };
+                if parent_entry.oid == current_oid {
+                    let mut attributed = false;
+                    for final_line in tracked.iter().flatten() {
+                        origins[*final_line] = parent_commit.oid;
+                        attributed = true;
+                    }
+                    if attributed {
+                        commits.insert(parent_commit.oid, parent_commit.clone());
+                    }
+                    if !origins.contains(&current_commit.oid) {
+                        commits.remove(&current_commit.oid);
+                    }
+                    current_commit = parent_commit;
+                    continue;
+                }
+                let Some(parent_blob) =
+                    optional_blame_blob_for_entry(parent_entry, operation).await?
+                else {
+                    break 'history;
+                };
                 let mut attributed = false;
-                for final_line in tracked.iter().flatten() {
-                    origins[*final_line] = parent_commit.oid;
-                    attributed = true;
+                let parent_bytes = parent_blob.bytes;
+                let parent_line_count = line_count(&parent_bytes, operation.cancellation())?;
+                let parent_lines =
+                    line_ranges(&parent_bytes, parent_line_count, operation.cancellation())?;
+                let (equal_prefix, equal_suffix) = matching_ends(
+                    &parent_bytes,
+                    &parent_lines,
+                    &current_bytes,
+                    &current_lines,
+                    operation.cancellation(),
+                )?;
+                let comparison_cells = comparison_cells(
+                    parent_line_count - equal_prefix - equal_suffix,
+                    current_lines.len() - equal_prefix - equal_suffix,
+                )?;
+                operation
+                    .charge(BudgetDimension::BlameComparisons, comparison_cells)
+                    .await?;
+                let matches = git_line_matches(
+                    operation.runtime(),
+                    parent_bytes.clone(),
+                    parent_line_count,
+                    current_bytes.clone(),
+                    current_lines.len(),
+                    operation.cancellation().clone(),
+                )
+                .await?;
+                let mut parent_tracked = Vec::new();
+                parent_tracked
+                    .try_reserve_exact(parent_lines.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: parent_lines
+                            .len()
+                            .saturating_mul(mem::size_of::<Option<usize>>()),
+                        source,
+                    })?;
+                parent_tracked.resize(parent_lines.len(), None);
+                for (parent_line, current_line) in matches {
+                    if let Some(final_line) = tracked[current_line] {
+                        origins[final_line] = parent_commit.oid;
+                        parent_tracked[parent_line] = Some(final_line);
+                        attributed = true;
+                    }
                 }
                 if attributed {
                     commits.insert(parent_commit.oid, parent_commit.clone());
                 }
-                current_commit = parent_commit;
-                continue;
-            }
-            let parent_bytes = parent_blob.bytes;
-            let parent_line_count = line_count(&parent_bytes, operation.cancellation())?;
-            let parent_lines =
-                line_ranges(&parent_bytes, parent_line_count, operation.cancellation())?;
-            let (equal_prefix, equal_suffix) = matching_ends(
-                &parent_bytes,
-                &parent_lines,
-                &current_bytes,
-                &current_lines,
-                operation.cancellation(),
-            )?;
-            let comparison_cells = comparison_cells(
-                parent_line_count - equal_prefix - equal_suffix,
-                current_lines.len() - equal_prefix - equal_suffix,
-            )?;
-            operation
-                .charge(BudgetDimension::BlameComparisons, comparison_cells)
-                .await?;
-            let matches = lcs_matches(
-                operation.runtime(),
-                parent_bytes.clone(),
-                parent_lines.clone(),
-                current_bytes.clone(),
-                current_lines,
-                equal_prefix,
-                equal_suffix,
-                operation.cancellation().clone(),
-            )
-            .await?;
-            let mut parent_tracked = Vec::new();
-            parent_tracked
-                .try_reserve_exact(parent_lines.len())
-                .map_err(|source| Error::Allocation {
-                    requested: parent_lines
-                        .len()
-                        .saturating_mul(mem::size_of::<Option<usize>>()),
-                    source,
-                })?;
-            parent_tracked.resize(parent_lines.len(), None);
-            let mut attributed = false;
-            for (parent_line, current_line) in matches {
-                if let Some(final_line) = tracked[current_line] {
-                    origins[final_line] = parent_commit.oid;
-                    parent_tracked[parent_line] = Some(final_line);
-                    attributed = true;
+                // Keep metadata only for commits that still own a final line.
+                if !origins.contains(&current_commit.oid) {
+                    commits.remove(&current_commit.oid);
                 }
+                if parent_tracked.iter().all(Option::is_none) {
+                    break 'history;
+                }
+                current_commit = parent_commit;
+                current_oid = parent_blob.metadata.oid;
+                current_bytes = parent_bytes;
+                current_lines = parent_lines;
+                tracked = parent_tracked;
             }
-            if attributed {
-                commits.insert(parent_commit.oid, parent_commit.clone());
-            }
-            if parent_tracked.iter().all(Option::is_none) {
-                break;
-            }
-            current_commit = parent_commit;
-            current_oid = parent_blob.metadata.oid;
-            current_bytes = parent_bytes;
-            current_lines = parent_lines;
-            tracked = parent_tracked;
         }
 
         let ranges = blame_ranges(path, &origins, &commits, operation.cancellation())?;
@@ -582,6 +883,70 @@ impl RemoteGitSnapshot {
         Ok(entries)
     }
 
+    /// Traverse all snapshot entries without reading blob bodies.
+    ///
+    /// Results use deterministic raw path order. Tree reads are batched while the
+    /// operation's object, entry, response-byte, depth, time, and cancellation
+    /// limits bound the traversal.
+    pub async fn list_tree_recursive(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<Vec<TreeEntry>> {
+        const TREE_READ_BATCH: usize = 64;
+
+        self.ensure_operation(operation)?;
+        let mut pending = vec![(self.root_tree_oid, GitPath::root(), 0u64)];
+        let mut entries = Vec::new();
+        while !pending.is_empty() {
+            operation.ensure_active()?;
+            let start = pending.len().saturating_sub(TREE_READ_BATCH);
+            let batch = pending.split_off(start);
+            let trees = futures_util::future::try_join_all(
+                batch
+                    .iter()
+                    .map(|(oid, parent, _)| operation.read_tree(*oid, parent)),
+            )
+            .await?;
+            for ((_, _, depth), tree) in batch.into_iter().zip(trees) {
+                entries
+                    .try_reserve(tree.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: tree.len().saturating_mul(mem::size_of::<TreeEntry>()),
+                        source,
+                    })?;
+                pending
+                    .try_reserve(tree.len())
+                    .map_err(|source| Error::Allocation {
+                        requested: tree.len().saturating_mul(mem::size_of::<(
+                            ObjectId,
+                            GitPath,
+                            u64,
+                        )>()),
+                        source,
+                    })?;
+                for entry in tree {
+                    let entry_depth = next_depth(depth)?;
+                    operation
+                        .charge(BudgetDimension::Depth, entry_depth)
+                        .await?;
+                    operation.charge(BudgetDimension::Entries, 1).await?;
+                    operation
+                        .charge(
+                            BudgetDimension::ResponseBytes,
+                            entry.path.as_bytes().len() as u64,
+                        )
+                        .await?;
+                    if entry.kind == EntryKind::Tree {
+                        pending.push((entry.oid, entry.path.clone(), entry_depth));
+                    }
+                    entries.push(entry);
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(entries)
+    }
+
     /// Stream bounded archive entries while owning and finalizing the operation.
     ///
     /// The stream reads no descendants until polled. Dropping it triggers the
@@ -627,9 +992,10 @@ impl RemoteGitSnapshot {
 
     /// Resolve one exact byte path without following symlinks.
     ///
-    /// Traversal reads at most one dependent tree per path component. The root
-    /// is returned as a synthetic tree entry. Missing final entries return
-    /// `None`; a non-tree intermediate component returns a structured error.
+    /// Traversal reads at most one dependent tree per path component and uses
+    /// canonical Git tree order for bounded exact-name lookup. The root is
+    /// returned as a synthetic tree entry. Missing final entries return `None`;
+    /// a non-tree intermediate component returns a structured error.
     pub async fn entry(
         &self,
         path: &GitPath,
@@ -658,13 +1024,9 @@ impl RemoteGitSnapshot {
                 maximum: u64::MAX,
             })?;
             operation.charge(BudgetDimension::Depth, depth).await?;
-            let entries = operation.read_tree(tree_oid, &parent).await?;
-            operation
-                .charge(BudgetDimension::Entries, entries.len() as u64)
+            let found = operation
+                .read_tree_entry(tree_oid, &parent, component)
                 .await?;
-            let found = entries
-                .into_iter()
-                .find(|entry| entry.path.file_name() == Some(component));
             let Some(entry) = found else {
                 return Ok(None);
             };
@@ -1028,19 +1390,10 @@ async fn read_blame_blob(
     blame_blob_for_entry(entry, operation).await
 }
 
-async fn read_optional_blame_blob(
-    source: &RemoteGitSnapshot,
-    tree: ObjectId,
-    commit: ObjectId,
-    path: &GitPath,
+async fn optional_blame_blob_for_entry(
+    entry: TreeEntry,
     operation: &OperationContext,
 ) -> Result<Option<Blob>> {
-    let Some(entry) = entry_at_tree(source, tree, commit, path, operation).await? else {
-        return Ok(None);
-    };
-    if entry.kind != EntryKind::Blob {
-        return Ok(None);
-    }
     let blob = parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
     Ok(blame_unsupported_reason(&blob).is_none().then_some(blob))
 }
@@ -1152,112 +1505,91 @@ fn matching_ends(
     Ok((prefix, suffix))
 }
 
-async fn lcs_matches(
+async fn git_line_matches(
     runtime: &crate::RemoteGitRuntime,
     parent: bytes::Bytes,
-    parent_lines: Vec<Range<usize>>,
+    parent_line_count: usize,
     current: bytes::Bytes,
-    current_lines: Vec<Range<usize>>,
-    equal_prefix: usize,
-    equal_suffix: usize,
+    current_line_count: usize,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<Vec<(usize, usize)>> {
     runtime
         .spawn_blocking(move || {
             check_cpu_cancellation(&cancellation)?;
-            let parent_middle_end = parent_lines.len() - equal_suffix;
-            let current_middle_end = current_lines.len() - equal_suffix;
-            let rows = parent_middle_end
-                .saturating_sub(equal_prefix)
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded {
-                    limit: "blame comparison cells",
-                    actual: u64::MAX,
-                    maximum: u64::MAX,
-                })?;
-            let columns = current_middle_end
-                .saturating_sub(equal_prefix)
-                .checked_add(1)
-                .ok_or(Error::LimitExceeded {
-                    limit: "blame comparison cells",
-                    actual: u64::MAX,
-                    maximum: u64::MAX,
-                })?;
-            let cells = rows.checked_mul(columns).ok_or(Error::LimitExceeded {
-                limit: "blame comparison cells",
-                actual: u64::MAX,
-                maximum: u64::MAX,
-            })?;
-            let requested =
-                cells
-                    .checked_mul(mem::size_of::<u32>())
-                    .ok_or(Error::LimitExceeded {
-                        limit: "blame comparison cells",
-                        actual: u64::MAX,
-                        maximum: u64::MAX,
-                    })?;
-            let mut matrix = Vec::new();
-            matrix
-                .try_reserve_exact(cells)
-                .map_err(|source| Error::Allocation { requested, source })?;
-            matrix.resize(cells, 0u32);
-            for row in 1..rows {
-                check_cpu_cancellation(&cancellation)?;
-                for column in 1..columns {
-                    let parent_line = &parent[parent_lines[equal_prefix + row - 1].clone()];
-                    let current_line = &current[current_lines[equal_prefix + column - 1].clone()];
-                    let index = row * columns + column;
-                    matrix[index] = if parent_line == current_line {
-                        matrix[(row - 1) * columns + column - 1].saturating_add(1)
-                    } else {
-                        matrix[(row - 1) * columns + column].max(matrix[row * columns + column - 1])
-                    };
-                }
+            let supported_lines = i32::MAX as usize - 1;
+            if parent_line_count > supported_lines || current_line_count > supported_lines {
+                return Err(Error::LimitExceeded {
+                    limit: "blame diff lines",
+                    actual: parent_line_count.max(current_line_count) as u64,
+                    maximum: supported_lines as u64,
+                });
             }
-            let capacity = matrix[rows * columns - 1] as usize;
+            let input = gix_imara_diff::InternedInput::new(parent.as_ref(), current.as_ref());
+            if input.before.len() != parent_line_count || input.after.len() != current_line_count {
+                return Err(Error::InternalInvariant {
+                    invariant: "blob line count changed while preparing blame diff",
+                });
+            }
+            // Git's default blame attribution uses Myers, including line-slider
+            // postprocessing to place ambiguous repeated-line changes.
+            let mut diff = gix_imara_diff::Diff::compute(gix_imara_diff::Algorithm::Myers, &input);
+            diff.postprocess_lines(&input);
+            check_cpu_cancellation(&cancellation)?;
             let mut matches = Vec::new();
             matches
-                .try_reserve_exact(
-                    equal_prefix
-                        .saturating_add(capacity)
-                        .saturating_add(equal_suffix),
-                )
+                .try_reserve_exact(input.before.len().min(input.after.len()))
                 .map_err(|source| Error::Allocation {
-                    requested: equal_prefix
-                        .saturating_add(capacity)
-                        .saturating_add(equal_suffix)
+                    requested: input
+                        .before
+                        .len()
+                        .min(input.after.len())
                         .saturating_mul(mem::size_of::<(usize, usize)>()),
                     source,
                 })?;
-            matches.extend((0..equal_prefix).map(|line| (line, line)));
-            let middle_start = matches.len();
-            let (mut row, mut column) = (rows - 1, columns - 1);
-            let mut backtrace_steps = 0usize;
-            while row > 0 && column > 0 {
-                if backtrace_steps.is_multiple_of(CPU_CANCELLATION_INTERVAL) {
-                    check_cpu_cancellation(&cancellation)?;
+            let (mut parent_line, mut current_line) = (0usize, 0usize);
+            for hunk in diff.hunks() {
+                let unchanged = (hunk.before.start as usize)
+                    .checked_sub(parent_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff moved a hunk backwards",
+                    })?;
+                let current_unchanged = (hunk.after.start as usize)
+                    .checked_sub(current_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff moved a hunk backwards",
+                    })?;
+                if current_unchanged != unchanged {
+                    return Err(Error::InternalInvariant {
+                        invariant: "blob diff changed unmatched line offsets",
+                    });
                 }
-                if parent[parent_lines[equal_prefix + row - 1].clone()]
-                    == current[current_lines[equal_prefix + column - 1].clone()]
-                {
-                    matches.push((equal_prefix + row - 1, equal_prefix + column - 1));
-                    row -= 1;
-                    column -= 1;
-                } else if matrix[(row - 1) * columns + column] >= matrix[row * columns + column - 1]
-                {
-                    row -= 1;
-                } else {
-                    column -= 1;
-                }
-                backtrace_steps = backtrace_steps.saturating_add(1);
+                matches
+                    .extend((0..unchanged).map(|line| (parent_line + line, current_line + line)));
+                parent_line = hunk.before.end as usize;
+                current_line = hunk.after.end as usize;
             }
-            matches[middle_start..].reverse();
-            matches.extend((0..equal_suffix).map(|line| {
-                (
-                    parent_lines.len() - equal_suffix + line,
-                    current_lines.len() - equal_suffix + line,
-                )
-            }));
+            let unchanged =
+                input
+                    .before
+                    .len()
+                    .checked_sub(parent_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff exceeded the parent line count",
+                    })?;
+            let current_unchanged =
+                input
+                    .after
+                    .len()
+                    .checked_sub(current_line)
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "blob diff exceeded the current line count",
+                    })?;
+            if current_unchanged != unchanged {
+                return Err(Error::InternalInvariant {
+                    invariant: "blob diff changed unmatched line tails",
+                });
+            }
+            matches.extend((0..unchanged).map(|line| (parent_line + line, current_line + line)));
             Ok(matches)
         })
         .await
@@ -1316,42 +1648,215 @@ async fn path_change(
         let parent = operation.read_commit(oid).await?;
         parents.push(entry_at_tree(snapshot, parent.tree, parent.oid, path, operation).await?);
     }
-    if parents.is_empty() {
-        return Ok(current.map(|_| ChangeKind::Added));
-    }
-    match current {
-        None => Ok(parents
+    Ok(path_change_kind(current.as_ref(), &parents))
+}
+
+async fn path_history_commit(oid: ObjectId, operation: &OperationContext) -> Result<Commit> {
+    operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+    operation.read_commit(oid).await
+}
+
+async fn path_history_commits(
+    oids: &[ObjectId],
+    operation: &OperationContext,
+) -> Result<Vec<Commit>> {
+    operation
+        .charge(BudgetDimension::HistoryCommits, oids.len() as u64)
+        .await?;
+    operation.read_commits(oids).await
+}
+
+async fn blame_parent_commits(
+    start: ObjectId,
+    commit_graph: Option<&CommitGraphIndex>,
+    operation: &OperationContext,
+) -> Result<Vec<Commit>> {
+    const GRAPH_PREFETCH: usize = 1_024;
+    const RAW_PREFETCH: usize = 16;
+
+    if let Some(commit_graph) = commit_graph
+        && let Some(oids) = commit_graph.first_parent_chain(start, GRAPH_PREFETCH)
+        && !oids.is_empty()
+    {
+        let commits = path_history_commits(&oids, operation).await?;
+        let valid = commits
             .iter()
-            .any(Option::is_some)
-            .then_some(ChangeKind::Deleted)),
-        Some(current) => {
-            if parents.iter().all(Option::is_none) {
-                return Ok(Some(ChangeKind::Added));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.kind != current.kind)
-            {
-                return Ok(Some(ChangeKind::TypeChanged));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.oid != current.oid)
-            {
-                return Ok(Some(ChangeKind::Modified));
-            }
-            if parents
-                .iter()
-                .flatten()
-                .any(|parent| parent.mode != current.mode)
-            {
-                return Ok(Some(ChangeKind::ModeChanged));
-            }
-            Ok(None)
+            .all(|commit| commit_graph.parents_match(commit.oid, &commit.parents))
+            && commits
+                .windows(2)
+                .all(|pair| pair[0].parents.first() == Some(&pair[1].oid));
+        if valid {
+            return Ok(commits);
         }
     }
+
+    let mut commits = Vec::new();
+    commits
+        .try_reserve_exact(RAW_PREFETCH)
+        .map_err(|source| Error::Allocation {
+            requested: RAW_PREFETCH.saturating_mul(mem::size_of::<Commit>()),
+            source,
+        })?;
+    let mut oid = Some(start);
+    while commits.len() < RAW_PREFETCH
+        && let Some(current_oid) = oid
+    {
+        operation.ensure_active()?;
+        let commit = path_history_commit(current_oid, operation).await?;
+        oid = commit.parents.first().copied();
+        commits.push(commit);
+    }
+    Ok(commits)
+}
+
+async fn entries_at_trees(
+    commits: &[Commit],
+    path: &GitPath,
+    operation: &OperationContext,
+) -> Result<Vec<Option<TreeEntry>>> {
+    if path.is_root() {
+        return Ok(commits
+            .iter()
+            .map(|commit| {
+                Some(TreeEntry {
+                    path: GitPath::root(),
+                    oid: commit.tree,
+                    mode: EntryMode::Tree,
+                    kind: EntryKind::Tree,
+                    size: None,
+                })
+            })
+            .collect());
+    }
+
+    let mut trees = commits
+        .iter()
+        .map(|commit| Some(commit.tree))
+        .collect::<Vec<_>>();
+    let mut result = vec![None; commits.len()];
+    let mut parent = GitPath::root();
+    let mut components = path.components().peekable();
+    let mut depth = 0u64;
+    while let Some(component) = components.next() {
+        operation.ensure_active()?;
+        depth = depth.checked_add(1).ok_or(Error::LimitExceeded {
+            limit: "traversal depth",
+            actual: u64::MAX,
+            maximum: u64::MAX,
+        })?;
+        let active = trees
+            .iter()
+            .enumerate()
+            .filter_map(|(index, oid)| oid.map(|oid| (index, oid)))
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            return Ok(result);
+        }
+        operation.charge(BudgetDimension::Depth, depth).await?;
+        let oids = active.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let entries = operation
+            .read_tree_entries(&oids, &parent, component)
+            .await?;
+        if components.peek().is_none() {
+            for ((index, _), entry) in active.into_iter().zip(entries) {
+                result[index] = entry;
+            }
+            return Ok(result);
+        }
+        for ((index, _), entry) in active.into_iter().zip(entries) {
+            trees[index] = match entry {
+                Some(entry) if entry.kind == EntryKind::Tree => Some(entry.oid),
+                Some(entry) => return Err(Error::PathComponentNotTree { actual: entry.kind }),
+                None => None,
+            };
+        }
+        parent = parent.join(component)?;
+    }
+    Err(Error::InternalInvariant {
+        invariant: "non-root path traversal had no components",
+    })
+}
+
+async fn append_path_history_change(
+    items: &mut Vec<PathHistoryEntry>,
+    commit: Commit,
+    entry: Option<&TreeEntry>,
+    parent_entries: &[Option<TreeEntry>],
+    page: &PageRequest,
+    operation: &OperationContext,
+) -> Result<bool> {
+    let Some(kind) = path_change_kind(entry, parent_entries) else {
+        return Ok(false);
+    };
+    operation
+        .charge(
+            BudgetDimension::ResponseBytes,
+            commit_response_bytes(&commit)
+                .saturating_add(mem::size_of::<PathHistoryEntry>() as u64),
+        )
+        .await?;
+    items.try_reserve(1).map_err(|source| Error::Allocation {
+        requested: mem::size_of::<PathHistoryEntry>(),
+        source,
+    })?;
+    items.push(PathHistoryEntry { commit, kind });
+    Ok(items.len() == page.limit())
+}
+
+fn path_change_kind(
+    current: Option<&TreeEntry>,
+    parents: &[Option<TreeEntry>],
+) -> Option<ChangeKind> {
+    if parents.is_empty() {
+        return current.map(|_| ChangeKind::Added);
+    }
+    let Some(current) = current else {
+        return parents
+            .iter()
+            .any(Option::is_some)
+            .then_some(ChangeKind::Deleted);
+    };
+    if parents.iter().all(Option::is_none) {
+        return Some(ChangeKind::Added);
+    }
+    if parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.kind != current.kind)
+    {
+        return Some(ChangeKind::TypeChanged);
+    }
+    if parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.oid != current.oid)
+    {
+        return Some(ChangeKind::Modified);
+    }
+    parents
+        .iter()
+        .flatten()
+        .any(|parent| parent.mode != current.mode)
+        .then_some(ChangeKind::ModeChanged)
+}
+
+async fn commit_ancestors(
+    root: ObjectId,
+    operation: &OperationContext,
+    commit_graph: Option<&CommitGraphIndex>,
+) -> Result<HashSet<ObjectId>> {
+    let mut pending = vec![root];
+    let mut ancestors = HashSet::new();
+    while let Some(oid) = pending.pop() {
+        operation.ensure_active()?;
+        if !ancestors.insert(oid) {
+            continue;
+        }
+        operation.charge(BudgetDimension::HistoryCommits, 1).await?;
+        let commit = operation.read_commit(oid).await?;
+        queue_all_parents(&mut pending, &commit, commit_graph)?;
+    }
+    Ok(ancestors)
 }
 
 fn queue_all_parents(
@@ -1750,28 +2255,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blame_matrix_stops_when_cancelled() {
+    async fn blame_diff_stops_when_cancelled() {
         let runtime = crate::RemoteGitRuntime::default();
         let cancellation = tokio_util::sync::CancellationToken::new();
         cancellation.cancel();
-        let error = lcs_matches(
+        let error = git_line_matches(
             &runtime,
             bytes::Bytes::from_static(b"parent\n"),
-            std::iter::once(0..7).collect(),
+            1,
             bytes::Bytes::from_static(b"current\n"),
-            std::iter::once(0..8).collect(),
-            0,
-            0,
+            1,
             cancellation,
         )
         .await
-        .expect_err("cancelled blame matrix");
+        .expect_err("cancelled blame diff");
         assert!(matches!(error, Error::Cancelled));
         runtime.shutdown().await;
     }
 
     #[tokio::test]
-    async fn blame_matrix_trims_equal_prefix_and_suffix() {
+    async fn blame_diff_preserves_equal_prefix_and_suffix() {
         let runtime = crate::RemoteGitRuntime::default();
         let cancellation = tokio_util::sync::CancellationToken::new();
         let parent = bytes::Bytes::from_static(b"same\nold\ntail\n");
@@ -1788,20 +2291,29 @@ mod tests {
         .expect("matching ends");
         assert_eq!(ends, (1, 1));
         assert_eq!(
-            lcs_matches(
-                &runtime,
-                parent,
-                parent_lines,
-                current,
-                current_lines,
-                ends.0,
-                ends.1,
-                cancellation,
-            )
-            .await
-            .expect("line matches"),
+            git_line_matches(&runtime, parent, 3, current, 3, cancellation)
+                .await
+                .expect("line matches"),
             vec![(0, 0), (2, 2)]
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blame_diff_places_repeated_line_change_like_git() {
+        let runtime = crate::RemoteGitRuntime::default();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let matches = git_line_matches(
+            &runtime,
+            bytes::Bytes::from_static(b"a\na\nb\n"),
+            3,
+            bytes::Bytes::from_static(b"a\na\na\n"),
+            3,
+            cancellation,
+        )
+        .await
+        .expect("line matches");
+        assert_eq!(matches, vec![(0, 0), (1, 1)]);
         runtime.shutdown().await;
     }
 }
