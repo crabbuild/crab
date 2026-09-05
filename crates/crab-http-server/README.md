@@ -95,6 +95,10 @@ SVG, other local formats and external images remain links so repository content
 cannot become same-origin active content or make signed-in browsers contact third-party hosts.
 Markdown file views switch between highlighted source, rendered preview and blame;
 the preview uses the same repository-relative link and safe image rules as README rendering.
+Pull requests use the standard Conversation, Commits, Checks and Files changed
+navigation. The Commits tab walks every parent and shows only commits reachable
+from the exact head but not from the exact base; each entry links to its immutable
+repository snapshot and signed cursors paginate the bounded traversal.
 Opening a file shows the tree sidebar; Browse files toggles it. Directories appear
 before files, with both groups naturally sorted by ascending filename in the tree
 and directory table. A directory click selects and expands it while its children
@@ -131,8 +135,9 @@ attachment. Parameters:
   directories and report when the requested result limit truncates matches.
 - `limit` (1–200) and signed `cursor`: directory/history pagination and the
   maximum number of search results.
-- `base`: optional comparison base; defaults to the first parent. A root commit
-  compares against an empty tree.
+- `base`: optional comparison base for changes, diffs and commit history. Changes
+  and diffs default to the first parent, while commit history with a base returns
+  the all-parent `rev − base` set. A root commit compares against an empty tree.
 
 Browser file commits use `POST`, `PATCH`, and `DELETE` on
 `/api/repos/{owner}/{name}/contents`. Every request names an existing
@@ -281,7 +286,8 @@ prefix. `required_approvals` accepts 0–20 and defaults to zero when omitted.
 Once a repository has a branch, native Git cannot create, update or delete a
 protected name; an atomic push containing one is rejected in full. The first
 branch can still initialize an empty or tag-only repository. A fast-forward
-pull request merge is the supported publication path for a protected branch.
+or two-parent pull request merge is the supported publication path for a
+protected branch.
 
 Sign-in verifies browser-bound state, PKCE, nonce, signature, issuer, audience,
 authorized party, expiry, issuance time and an access-token hash when supplied.
@@ -759,6 +765,16 @@ message, and combined file tree. The same flow advances the base after another
 pull opens, makes overlapping edits to one file, and verifies that merge returns
 HTTP 409 without moving the protected base ref.
 
+The pull-request Commits tab has remote-reader coverage for a merge-shaped graph:
+the head and side commit are returned while the base and every ancestor reachable
+from it are excluded. Pagination resumes in deterministic order and rejects a
+cursor reused with another base. The native HTTP integration also verifies the
+public `commits?rev=<head>&base=<base>` response for a pushed two-commit history.
+The rebuilt release server loaded the persisted RustFS merge qualification and
+returned its exact head-only commit in 121.4 ms round trip; selecting that row
+opened the immutable commit snapshot. The dark view had no horizontal overflow
+at the browser's 610-pixel width.
+
 The local RustFS qualification also created fresh protected base and head refs,
 opened pull request 2, and published merge commit
 `0b807e1946dbb3774439173544b2938c0630ea01`. A native protocol-v2 fetch verified
@@ -970,7 +986,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation and exact protected branches have scoped proof; administration pending |
-| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
+| Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |

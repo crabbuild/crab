@@ -263,6 +263,17 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     assert_eq!(older_history["items"][0]["oid"], first);
     assert_eq!(older_history["items"][0]["change_kind"], "Added");
     assert!(older_history["next"].is_null());
+    let pull_commits = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&base={first}&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(pull_commits.status(), StatusCode::OK);
+    let pull_commits: serde_json::Value =
+        serde_json::from_slice(&pull_commits.bytes().await.unwrap()).unwrap();
+    assert_eq!(pull_commits["items"][0]["oid"], second);
+    assert_eq!(pull_commits["items"].as_array().unwrap().len(), 1);
+    assert!(pull_commits["next"].is_null());
     let reader = tempfile::tempdir().unwrap();
     success(reader.path(), &["init", "--bare", "."]).await;
     success(

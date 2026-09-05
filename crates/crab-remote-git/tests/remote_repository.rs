@@ -3577,6 +3577,77 @@ async fn history_pages_are_deterministic_and_bound_to_start_and_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::History, &cancellation)
+        .await
+        .expect("operation");
+    let result = async {
+        let head = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await?;
+        let head_oid = head.commit_oid();
+        let base = fixture
+            .repository
+            .snapshot(&Revision::Commit(fixture.root_commit), &operation)
+            .await?;
+        let first = head
+            .ahead_history(&base, &PageRequest::new(1, None)?, &operation)
+            .await?;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|commit| commit.oid)
+                .collect::<Vec<_>>(),
+            vec![head_oid]
+        );
+        let cursor = first.next.expect("ahead-history continuation");
+        let second = head
+            .ahead_history(
+                &base,
+                &PageRequest::new(1, Some(cursor.clone()))?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|commit| commit.oid)
+                .collect::<Vec<_>>(),
+            vec![fixture.side_commit]
+        );
+        assert!(second.next.is_none());
+
+        let other_base = fixture
+            .repository
+            .snapshot(&Revision::Commit(fixture.semantic_base_commit), &operation)
+            .await?;
+        assert!(matches!(
+            head.ahead_history(&other_base, &PageRequest::new(1, Some(cursor))?, &operation,)
+                .await,
+            Err(Error::InvalidCursor {
+                reason: CursorError::ContextMismatch
+            })
+        ));
+        let equal = head
+            .ahead_history(&head, &PageRequest::new(10, None)?, &operation)
+            .await?;
+        assert!(equal.items.is_empty());
+        assert!(equal.next.is_none());
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incomplete_commit_graph_cannot_hide_raw_history() {
     let fixture = publish_with_summary(DeltaKind::Ref, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
