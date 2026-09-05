@@ -65,6 +65,8 @@ export function RepositoryToolbar({
   refs,
   revision,
   view,
+  path,
+  kind,
   onRefresh,
   onBrowse,
 }: {
@@ -72,6 +74,8 @@ export function RepositoryToolbar({
   refs: Refs;
   revision: string;
   view: string;
+  path?: string;
+  kind?: string;
   onRefresh: () => void;
   onBrowse?: () => void;
 }) {
@@ -80,7 +84,9 @@ export function RepositoryToolbar({
       <RepositoryRefControls
         refs={refs}
         revision={revision}
-        onSelect={(name) => navigate(repoHref(repo, { rev: name, view }))}
+        onSelect={(name) =>
+          navigate(repoHref(repo, { rev: name, view, path, kind }))
+        }
       />
       <div className="repository-actions">
         {onBrowse && (

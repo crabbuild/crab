@@ -8,6 +8,7 @@ import {
   FileIcon,
 } from "@primer/octicons-react";
 import {
+  displayHex,
   endpoint,
   repoHref,
   useRequest,
@@ -297,13 +298,24 @@ export function Directory({
   );
 }
 
-export function History({ repo, rev }: { repo: Repository; rev: string }) {
+export function History({
+  repo,
+  rev,
+  path,
+  kind,
+}: {
+  repo: Repository;
+  rev: string;
+  path: string;
+  kind: string;
+}) {
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const state = useRequest<Page<Commit>>(
     endpoint(repo, "commits", {
       rev,
+      path_hex: path || undefined,
       cursor: cursors[cursors.length - 1],
-      limit: "30",
+      limit: path ? "1" : "30",
     }),
   );
   return (
@@ -312,7 +324,16 @@ export function History({ repo, rev }: { repo: Repository; rev: string }) {
         <>
           <div className="section-heading">
             <h2>Commits</h2>
-            <span className="muted">First-parent history</span>
+            {path ? (
+              <span className="muted">
+                History for{" "}
+                <Link href={repoHref(repo, { rev, path, kind })}>
+                  {displayHex(path)}
+                </Link>
+              </span>
+            ) : (
+              <span className="muted">First-parent history</span>
+            )}
           </div>
           <section className="panel commit-list">
             {page.items.map((commit) => (
@@ -320,7 +341,10 @@ export function History({ repo, rev }: { repo: Repository; rev: string }) {
                 <div>
                   <Link
                     className="commit-subject"
-                    href={repoHref(repo, { view: "commit", rev: commit.oid })}
+                    href={repoHref(repo, {
+                      view: "commit",
+                      rev: commit.oid,
+                    })}
                   >
                     {commit.message.split("\n")[0]}
                   </Link>

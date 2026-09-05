@@ -227,6 +227,41 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(visible["refs"][0]["oid"], second);
     assert_eq!(visible["head"]["name"], format!("refs/heads/{branch}"));
+    let readme_path = "524541444d452e6d64";
+    let latest = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commit?rev={second}&path_hex={readme_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(latest.status(), StatusCode::OK);
+    let latest: serde_json::Value = serde_json::from_slice(&latest.bytes().await.unwrap()).unwrap();
+    assert_eq!(latest["oid"], second);
+    assert_eq!(latest["message"], "second commit\n");
+    assert_eq!(latest["change_kind"], "Modified");
+    let path_history = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&path_hex={readme_path}&limit=1"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(path_history.status(), StatusCode::OK);
+    let path_history: serde_json::Value =
+        serde_json::from_slice(&path_history.bytes().await.unwrap()).unwrap();
+    assert_eq!(path_history["items"][0]["oid"], second);
+    assert_eq!(path_history["items"][0]["change_kind"], "Modified");
+    assert_eq!(path_history["items"].as_array().unwrap().len(), 1);
+    assert!(path_history["next"].is_string());
+    let cursor = path_history["next"].as_str().unwrap();
+    let older_history = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/commits?rev={second}&path_hex={readme_path}&limit=1&cursor={cursor}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(older_history.status(), StatusCode::OK);
+    let older_history: serde_json::Value =
+        serde_json::from_slice(&older_history.bytes().await.unwrap()).unwrap();
+    assert_eq!(older_history["items"][0]["oid"], first);
+    assert_eq!(older_history["items"][0]["change_kind"], "Added");
+    assert!(older_history["next"].is_null());
     let reader = tempfile::tempdir().unwrap();
     success(reader.path(), &["init", "--bare", "."]).await;
     success(

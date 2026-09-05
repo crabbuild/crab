@@ -465,9 +465,17 @@ function RepositoryPage({
                           refs={data}
                           revision={revisionLabel(data, revName ?? rev)}
                           view={view}
+                          path={path || undefined}
+                          kind={path ? kind : undefined}
                           onRefresh={refs.retry}
                         />
-                        <History key={rev} repo={repo} rev={rev} />
+                        <History
+                          key={`${rev}:${path}`}
+                          repo={repo}
+                          rev={rev}
+                          path={path}
+                          kind={kind}
+                        />
                       </>
                     ) : view === "commit" ? (
                       <>
@@ -560,7 +568,12 @@ function RepositoryPage({
                             <FileBreadcrumb repo={repo} rev={rev} path={path} />
                           )}
                           {kind !== "Tree" && (
-                            <LatestCommit repo={repo} rev={rev} />
+                            <LatestCommit
+                              repo={repo}
+                              rev={rev}
+                              path={path}
+                              kind={kind}
+                            />
                           )}
                           {kind === "Tree" ? (
                             <Directory
@@ -569,7 +582,14 @@ function RepositoryPage({
                               rev={rev}
                               path={path}
                               onEntry={selectEntry}
-                              header={<LatestCommit repo={repo} rev={rev} />}
+                              header={
+                                <LatestCommit
+                                  repo={repo}
+                                  rev={rev}
+                                  path={path}
+                                  kind="Tree"
+                                />
+                              }
                             />
                           ) : kind === "Submodule" ? (
                             <div className="notice">
@@ -643,8 +663,20 @@ function RepositoryPage({
   );
 }
 
-function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
-  const state = useRequest<Commit>(endpoint(repo, "commit", { rev }));
+function LatestCommit({
+  repo,
+  rev,
+  path,
+  kind,
+}: {
+  repo: Repository;
+  rev: string;
+  path?: string;
+  kind?: string;
+}) {
+  const state = useRequest<Commit>(
+    endpoint(repo, "commit", { rev, path_hex: path || undefined }),
+  );
   if (state.loading || (!state.data && !state.error))
     return (
       <div className="latest-commit" role="status">
@@ -662,11 +694,14 @@ function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
           <strong>{commit.author}</strong>
           <Link
             className="truncate"
-            href={repoHref(repo, { view: "commit", rev })}
+            href={repoHref(repo, { view: "commit", rev: commit.oid })}
           >
             {commit.message.split("\n")[0]}
           </Link>
-          <Link className="oid" href={repoHref(repo, { view: "commit", rev })}>
+          <Link
+            className="oid"
+            href={repoHref(repo, { view: "commit", rev: commit.oid })}
+          >
             {short(commit.oid)}
           </Link>
           <span className="muted commit-date">
@@ -674,7 +709,12 @@ function LatestCommit({ repo, rev }: { repo: Repository; rev: string }) {
           </span>
           <Link
             className="commit-history-link"
-            href={repoHref(repo, { view: "commits", rev })}
+            href={repoHref(repo, {
+              view: "commits",
+              rev,
+              path: path || undefined,
+              kind: path ? kind : undefined,
+            })}
           >
             <HistoryIcon /> History
           </Link>

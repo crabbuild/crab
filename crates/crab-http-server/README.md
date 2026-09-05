@@ -84,7 +84,7 @@ configured bucket.
 
 The browser provides repository selection and a searchable branch/tag picker
 with default-branch identification and keyboard navigation, raw-byte path navigation, lazy
-Pierre Trees, paginated directories and first-parent history, highlighted files,
+Pierre Trees, paginated directories and repository/path-scoped first-parent history, highlighted files,
 exact Git blob downloads, commit changes, Pierre split/unified diffs and first-parent blame.
 The root view groups the selected commit and file table beside repository details.
 Markdown README files render beneath directory listings with GitHub-style typography;
@@ -94,7 +94,9 @@ SVG, other local formats and external images remain links so repository content
 cannot become same-origin active content or make signed-in browsers contact third-party hosts.
 Opening a file shows the tree sidebar; Browse files toggles it. Directories appear
 first within each page, and the Code menu provides the Git URL. Request timing
-is expandable. Light and dark themes support desktop and narrow screens.
+is expandable. File and directory History follows the exact first-parent path
+with repository-bound signed pagination. Light and dark themes support desktop
+and narrow screens.
 Crab/LFS pointer downloads contain the pointer Git blob; artifact hydration is
 not yet part of the HTTP application. Tree search covers loaded directories.
 
@@ -107,7 +109,9 @@ serves them inline; `blob` remains an exact octet-stream attachment. Parameters:
 - `rev`: ref or full commit OID; defaults to HEAD. Responses identify their commit
   and generation. Browser links pin the selected OID.
 - `path` or `path_hex`: exactly one optional raw Git path. No filesystem
-  normalization; hex supports names that are not UTF-8.
+  normalization; hex supports names that are not UTF-8. `commit` returns the
+  latest commit that changed a supplied path, and `commits` paginates that path's
+  first-parent history.
 - `limit` (1–200) and signed `cursor`: directory/history pagination.
 - `base`: optional comparison base; defaults to the first parent. A root commit
   compares against an empty tree.

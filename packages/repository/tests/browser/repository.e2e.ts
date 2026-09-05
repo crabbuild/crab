@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 const oid = "a".repeat(40);
+const pathOid = "b".repeat(40);
+const pathParent = "c".repeat(40);
+const addedPathOid = "d".repeat(40);
 const readme =
   "# Team project\n\nBrowse the [source entry](src/index.ts) without cloning.\n\n" +
   "![Architecture](docs/architecture.png) ![Vector](docs/vector.svg) " +
@@ -42,13 +45,45 @@ test.beforeEach(async ({ page }) => {
     if (url.pathname.endsWith("/commit"))
       return route.fulfill({
         json: {
-          oid,
+          oid: url.searchParams.has("path_hex") ? pathOid : oid,
           tree: "b".repeat(40),
           parents: [],
           author: "Alice",
           author_seconds: 1_700_000_000,
-          message: "Make the repository easier to browse",
+          message: url.searchParams.has("path_hex")
+            ? "Update this path"
+            : "Make the repository easier to browse",
         },
+      });
+    if (url.pathname.endsWith("/commits"))
+      return route.fulfill({
+        json: (() => {
+          const pathHistory = url.searchParams.has("path_hex");
+          const added = url.searchParams.get("cursor") === "older-path";
+          return {
+            items: [
+              {
+                oid: pathHistory ? (added ? addedPathOid : pathOid) : oid,
+                tree: "b".repeat(40),
+                parents: pathHistory && !added ? [pathParent] : [],
+                author: "Alice",
+                author_seconds: 1_700_000_000,
+                message: pathHistory
+                  ? added
+                    ? "Add this path"
+                    : "Update this path"
+                  : "Make the repository easier to browse",
+                change_kind: pathHistory
+                  ? added
+                    ? "Added"
+                    : "Modified"
+                  : undefined,
+              },
+            ],
+            next: pathHistory && !added ? "older-path" : null,
+            commit: oid,
+          };
+        })(),
       });
     if (url.pathname.endsWith("/tree"))
       return route.fulfill({
@@ -179,6 +214,9 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toHaveText("project/README.md");
   await expect(page.locator(".file-panel")).toBeVisible();
+  await expect(page.locator(".latest-commit")).toContainText(
+    "Update this path",
+  );
   await expect(page.locator(".tree-sidebar")).toHaveCSS("width", "356px");
   await expect(page.getByPlaceholder("Go to file")).toBeVisible();
   await page
@@ -206,6 +244,24 @@ test("overview groups files with their commit and opens the tree when navigating
         ),
     )
     .toEqual(["README.md"]);
+  await page.getByRole("link", { name: "History", exact: true }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`view=commits.*path=${pathHex("README.md")}.*kind=Blob`),
+  );
+  await expect(page.getByRole("heading", { name: "Commits" })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "README.md", exact: true }),
+  ).toHaveAttribute(
+    "href",
+    `/team/project?rev=${oid}&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await expect(page.locator(".commit-list")).toContainText("Update this path");
+  await expect(page.getByRole("button", { name: "Newer" })).toBeDisabled();
+  await page.getByRole("button", { name: "Older" }).click();
+  await expect(page.locator(".commit-list")).toContainText("Add this path");
+  await expect(page.getByRole("button", { name: "Older" })).toBeDisabled();
+  await page.getByRole("button", { name: "Newer" }).click();
+  await expect(page.locator(".commit-list")).toContainText("Update this path");
 });
 
 test("deep links expand the active path and select its file", async ({
