@@ -19,6 +19,7 @@ mod lfs;
 mod maintenance;
 mod pulls;
 mod receive;
+mod repository_settings;
 mod server;
 mod statuses;
 
@@ -52,6 +53,11 @@ pub enum Error {
     Initialization(#[source] crab_write::WriteError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("repository settings could not be loaded")]
+    Settings {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("server logging initialization failed")]
     Logging {
         #[source]

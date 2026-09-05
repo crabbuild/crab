@@ -180,6 +180,11 @@ impl Harness {
         .await
         .unwrap();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let protected_branches = vec![crate::BranchProtection {
+            branch: "main".into(),
+            required_approvals: 1,
+            required_checks: vec!["ci/test".into()],
+        }];
         let repository = Repository {
             config: RepositoryConfig {
                 owner: "team".into(),
@@ -200,15 +205,12 @@ impl Harness {
                         access: crate::RepositoryAccess::Read,
                     },
                 ],
-                protected_branches: vec![crate::BranchProtection {
-                    branch: "main".into(),
-                    required_approvals: 1,
-                    required_checks: vec!["ci/test".into()],
-                }],
+                protected_branches: protected_branches.clone(),
             },
             store: store.clone(),
             layout: StoreLayout::new(store, "test".into()),
             identity: RepositoryIdentity::new("test", "test", 1).unwrap(),
+            protections: RwLock::new(BranchProtections::configured(&protected_branches)),
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };

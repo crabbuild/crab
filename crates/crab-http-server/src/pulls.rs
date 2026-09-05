@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    RepositoryConfig,
+    BranchProtection,
     app::{self, Error, Result},
     app_storage,
     assignees::{self, Assignee},
@@ -68,7 +68,9 @@ async fn pull_view(
         |merge| merge.head_oid.as_str(),
     );
     let branches_available = pull.merge.is_some() || current.is_some();
-    let (statuses, check_runs) = match repo.config.protection(&pull.base_ref) {
+    let protections = repo.branch_protections().await;
+    let protection = protections.protection(&pull.base_ref);
+    let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (
             statuses::latest(repo, head_oid).await?,
             checks::latest(repo, head_oid).await?,
@@ -77,7 +79,7 @@ async fn pull_view(
     };
     let labels = labels::catalog(repo).await?;
     let assignees = assignees::available(repo, actor);
-    let requirements = merge_requirements(pull, &repo.config, head_oid, &statuses, &check_runs);
+    let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
     Ok(json!({
         "number": pull.number,
         "title": pull.title,
@@ -168,12 +170,12 @@ struct RequiredCheck {
 
 fn merge_requirements(
     pull: &PullRequest,
-    config: &RepositoryConfig,
+    rule: Option<&BranchProtection>,
     head_oid: &str,
     statuses: &[CommitStatus],
     check_runs: &[CheckRun],
 ) -> MergeRequirements {
-    let Some(rule) = config.protection(&pull.base_ref) else {
+    let Some(rule) = rule else {
         return MergeRequirements {
             protected: false,
             required_approvals: 0,

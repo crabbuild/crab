@@ -33,6 +33,12 @@ test.beforeEach(async ({ page }) => {
   let currentReadme = readme;
   let currentReadmeOid = oid;
   let uploadedFiles: string[] = [];
+  let protectionVersion = 0;
+  let protectionRules: Array<{
+    branch: string;
+    required_approvals: number;
+    required_checks: string[];
+  }> = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session")
@@ -49,6 +55,7 @@ test.beforeEach(async ({ page }) => {
               description: "A repository for our team.",
               access: "write",
               can_admin: true,
+              protection_version: protectionVersion,
               protected_branches: page.url().includes("scenario=protected")
                 ? [
                     {
@@ -57,11 +64,34 @@ test.beforeEach(async ({ page }) => {
                       required_checks: [],
                     },
                   ]
-                : [],
+                : protectionRules,
             },
           ],
         },
       });
+    if (url.pathname.endsWith("/settings/branch-protections")) {
+      expect(route.request().method()).toBe("PUT");
+      const body = route.request().postDataJSON() as {
+        expected_version: number;
+        rules: typeof protectionRules;
+      };
+      if (body.expected_version !== protectionVersion)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "settings_changed",
+              message:
+                "Branch protection settings changed; reload before saving",
+            },
+          },
+        });
+      protectionVersion += 1;
+      protectionRules = body.rules;
+      return route.fulfill({
+        json: { version: protectionVersion, rules: protectionRules },
+      });
+    }
     if (url.pathname.endsWith("/uploads")) {
       const body = route.request().postDataJSON() as {
         branch: string;
@@ -1068,6 +1098,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
               name: "project",
               description: "A repository for our team.",
               access: "write",
+              protection_version: 0,
               protected_branches: [
                 {
                   branch: "main",
@@ -1268,6 +1299,84 @@ test("repository settings changes the default branch with explicit confirmation"
   await expect(page.locator(".default-branch-current")).toContainText(
     "feature/docs",
   );
+  await selectTheme(page, "dark");
+  await page.setViewportSize({ width: 390, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+});
+
+test("repository settings create, edit, and delete branch protection rules", async ({
+  page,
+}) => {
+  const updates: unknown[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "PUT" &&
+      new URL(request.url()).pathname.endsWith("/settings/branch-protections")
+    )
+      updates.push(request.postDataJSON());
+  });
+
+  await page.goto("/team/project?view=settings&section=branches");
+  await expect(
+    page.getByRole("link", { name: "Branches", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(
+    page.getByRole("heading", { name: "Branch protection rules" }),
+  ).toBeVisible();
+  await expect(page.getByText("No branch protection rules")).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Add branch protection rule" })
+    .click();
+  await page.getByLabel("Branch name").fill("main");
+  await page.getByLabel("Required approving reviews").selectOption("2");
+  await page.getByLabel("Required status checks").fill("ci/test\nsecurity");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  const rule = page.locator(".protection-list > li");
+  await expect(rule).toContainText("main");
+  await expect(rule).toContainText("2 approving reviews required");
+  await expect(rule.locator(".protection-checks")).toContainText("ci/test");
+  await expect(rule.locator(".protection-checks")).toContainText("security");
+  expect(updates[0]).toEqual({
+    expected_version: 0,
+    rules: [
+      {
+        branch: "main",
+        required_approvals: 2,
+        required_checks: ["ci/test", "security"],
+      },
+    ],
+  });
+
+  await page.getByRole("button", { name: "Edit main" }).click();
+  await page.getByLabel("Required approving reviews").selectOption("1");
+  await page.getByLabel("Required status checks").fill("build");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(rule).toContainText("1 approving review required");
+  await expect(rule.locator(".protection-checks")).toHaveText("build");
+  expect(updates[1]).toEqual({
+    expected_version: 1,
+    rules: [
+      {
+        branch: "main",
+        required_approvals: 1,
+        required_checks: ["build"],
+      },
+    ],
+  });
+
+  await page.getByRole("button", { name: "Delete main" }).click();
+  const confirmation = page.getByRole("region", {
+    name: "Delete main protection",
+  });
+  await expect(confirmation).toContainText("Remove protection from main?");
+  await confirmation.getByRole("button", { name: "Remove rule" }).click();
+  await expect(page.getByText("No branch protection rules")).toBeVisible();
+  expect(updates[2]).toEqual({ expected_version: 2, rules: [] });
+
   await selectTheme(page, "dark");
   await page.setViewportSize({ width: 390, height: 800 });
   expect(

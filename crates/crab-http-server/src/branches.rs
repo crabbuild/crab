@@ -5,16 +5,17 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{patch, post},
+    routing::{patch, post, put},
 };
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    app,
+    BranchProtection, app,
     auth::Principal,
     receive::{self, ReceiveError},
+    repository_settings::{self, BranchProtections},
     server::Server,
 };
 
@@ -30,7 +31,11 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/settings/default-branch",
             patch(set_default),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(2048))
+        .route(
+            "/api/repos/{owner}/{name}/settings/branch-protections",
+            put(set_branch_protections),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(256 * 1024))
 }
 
 #[derive(Deserialize)]
@@ -73,6 +78,13 @@ struct DefaultBranchOutput {
     commit: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BranchProtectionsInput {
+    expected_version: u64,
+    rules: Vec<BranchProtection>,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("{0}")]
@@ -113,6 +125,14 @@ impl IntoResponse for Error {
             Self::App(app::Error::Invalid(message)) => {
                 (StatusCode::BAD_REQUEST, "invalid_request", *message)
             }
+            Self::App(
+                app::Error::Conflict
+                | app::Error::Storage(crab_storage::StorageError::StateConflict { .. }),
+            ) => (
+                StatusCode::CONFLICT,
+                "settings_changed",
+                "Branch protection settings changed; reload before saving",
+            ),
             Self::Body(_) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request",
@@ -340,6 +360,22 @@ async fn set_default(
         branch,
         commit: expected.to_string(),
     }))
+}
+
+async fn set_branch_protections(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<BranchProtectionsInput>, JsonRejection>,
+) -> Result<Json<BranchProtections>, Error> {
+    let Json(input) = input?;
+    let repository = app::repository(&server, &principal, &(owner, name))?;
+    if !principal.can_admin(&repository.config) {
+        return Err(Error::AdminPermission);
+    }
+    Ok(Json(
+        repository_settings::replace(repository, input.expected_version, input.rules).await?,
+    ))
 }
 
 pub(crate) fn branch_ref(name: &str) -> Result<String, &'static str> {
