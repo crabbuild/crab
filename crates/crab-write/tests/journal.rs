@@ -47,9 +47,12 @@ async fn pending(store: &Store, layout: &StoreLayout<Store>) -> PushLock {
     lease
 }
 
-fn storage(prefix: &str) -> (Store, StoreLayout<Store>) {
+async fn storage(prefix: &str) -> (Store, StoreLayout<Store>) {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), prefix.to_owned());
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+        .await
+        .unwrap();
     (store, layout)
 }
 
@@ -66,7 +69,7 @@ fn edit(name: &str, old: Option<char>, new: Option<char>) -> ref_journal::RefJou
 
 #[tokio::test]
 async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
-    let (store, layout) = storage("namespace-race");
+    let (store, layout) = storage("namespace-race").await;
     manifest_store::create_manifest(&store, &layout, &Manifest::default_for_repo(REF))
         .await
         .unwrap();
@@ -119,7 +122,7 @@ async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
 
 #[tokio::test]
 async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits() {
-    let (store, layout) = storage("namespace-admission");
+    let (store, layout) = storage("namespace-admission").await;
     let main = pending(&store, &layout).await;
     let gate = PushLock::acquire_internal(
         store.inner(),
@@ -193,7 +196,7 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
 
 #[tokio::test]
 async fn atomic_namespace_replacement_removes_the_parent_before_creating_children() {
-    let (store, layout) = storage("namespace-replacement");
+    let (store, layout) = storage("namespace-replacement").await;
     let main = pending(&store, &layout).await;
     let child = format!("{REF}/child");
     let lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), &child, TTL)
@@ -227,7 +230,7 @@ async fn atomic_namespace_replacement_removes_the_parent_before_creating_childre
 
 #[tokio::test]
 async fn late_namespace_lease_loss_preserves_the_committed_result_and_new_holder() {
-    let (store, layout) = storage("namespace-outcome");
+    let (store, layout) = storage("namespace-outcome").await;
     let main = pending(&store, &layout).await;
     let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
         .await
@@ -299,7 +302,7 @@ async fn late_namespace_lease_loss_preserves_the_committed_result_and_new_holder
 
 #[tokio::test]
 async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction() {
-    let (store, layout) = storage("commit-edits");
+    let (store, layout) = storage("commit-edits").await;
     let tag = "refs/tags/release";
     let dev = "refs/heads/dev";
     manifest_store::create_manifest(&store, &layout, &Manifest::default_for_repo(REF))
@@ -387,7 +390,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
 
 #[tokio::test]
 async fn invalid_or_stale_batch_leaves_no_journal_artifacts() {
-    let (store, layout) = storage("rejected-edits");
+    let (store, layout) = storage("rejected-edits").await;
     let lease = pending(&store, &layout).await;
     let sibling = "refs/heads/dev";
     let sibling_lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), sibling, TTL)
@@ -438,7 +441,7 @@ async fn invalid_or_stale_batch_leaves_no_journal_artifacts() {
 #[tokio::test]
 async fn compaction_releases_only_the_committed_holder() {
     for replaced in [false, true] {
-        let (store, layout) = storage("holder-handoff");
+        let (store, layout) = storage("holder-handoff").await;
         let original = pending(&store, &layout).await;
         let lease = if replaced {
             original.release().await.unwrap();
@@ -485,7 +488,7 @@ async fn compaction_releases_only_the_committed_holder() {
 
 #[tokio::test]
 async fn contended_reader_skips_and_cancelled_owner_preserves_pending_transaction() {
-    let (store, layout) = storage("contention");
+    let (store, layout) = storage("contention").await;
     let lease = pending(&store, &layout).await;
     let blocker = PushLock::acquire_internal(
         store.inner(),
@@ -538,7 +541,7 @@ async fn contended_reader_skips_and_cancelled_owner_preserves_pending_transactio
 
 #[tokio::test]
 async fn failed_compaction_releases_manifest_lease_and_can_retry() {
-    let (store, layout) = storage("repair");
+    let (store, layout) = storage("repair").await;
     let lease = pending(&store, &layout).await;
     let (original, _) = store.get_with_etag(&layout.manifest_path()).await.unwrap();
     // Deliberately bypass the state-write guard to model damaged origin bytes.

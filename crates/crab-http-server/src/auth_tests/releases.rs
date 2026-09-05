@@ -71,14 +71,6 @@ async fn delete_release(
 async fn browser_release_publishes_and_recovers_native_git_tags() {
     let h = Harness::new(false).await;
     let repo = &h.server.repositories[&("team".into(), "private".into())];
-    crab_metadata::manifest_store::create_manifest(
-        &repo.store,
-        &repo.layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
-
     let alice = h.login().await;
     let session = h.json("/api/session", &alice).await;
     let csrf = session["csrf"].as_str().unwrap();

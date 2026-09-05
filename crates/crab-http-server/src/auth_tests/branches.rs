@@ -104,14 +104,6 @@ async fn set_archive(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (Sta
 async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     let h = Harness::new(false).await;
     let repo = &h.server.repositories[&("team".into(), "private".into())];
-    crab_metadata::manifest_store::create_manifest(
-        &repo.store,
-        &repo.layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
-
     let alice = h.login().await;
     let session = h.json("/api/session", &alice).await;
     let csrf = session["csrf"].as_str().unwrap();

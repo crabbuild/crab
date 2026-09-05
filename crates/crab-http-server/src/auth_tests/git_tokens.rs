@@ -21,14 +21,6 @@ async fn principal(h: &Harness, token: &str) -> auth::Principal {
 #[tokio::test]
 async fn token_permissions_intersect_repository_membership_and_requested_scope() {
     let h = Harness::new(false).await;
-    let repo = &h.server.repositories[&("team".into(), "private".into())];
-    crab_metadata::manifest_store::create_manifest(
-        &repo.store,
-        &repo.layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
     for (identity, access, permitted) in [
         ("valid", "read", true),
         ("valid", "write", true),

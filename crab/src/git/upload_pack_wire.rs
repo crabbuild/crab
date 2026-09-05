@@ -23,8 +23,8 @@ use crab_read::{
     plan_upload_pack_catalog, upload_pack_repository_options,
 };
 use crab_remote_git::{
-    Error as RemoteGitError, GitCatalogVisibilityIndex, ObjectLimits, OperationLimits,
-    RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions, RepositoryRefs,
+    Error as RemoteGitError, GitCatalogVisibilityIndex, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity, RepositoryRefs,
 };
 use gix_hash::ObjectId;
 use rand::Rng as _;

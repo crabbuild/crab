@@ -39,6 +39,78 @@ pub async fn commit_edits(
     shards: Vec<String>,
     cancel: &CancellationToken,
 ) -> Result<RefJournalCommitResult> {
+    commit_edits_inner(
+        store,
+        router,
+        snapshot,
+        edits,
+        head,
+        packs,
+        shards,
+        CommitContext {
+            plan_id: None,
+            cancel,
+        },
+    )
+    .await
+}
+
+/// Mirror-plan attribution and cancellation for one journal commit.
+pub struct MirrorPlanContext<'a> {
+    plan_id: &'a str,
+    cancel: &'a CancellationToken,
+}
+
+impl<'a> MirrorPlanContext<'a> {
+    #[must_use]
+    pub fn new(plan_id: &'a str, cancel: &'a CancellationToken) -> Self {
+        Self { plan_id, cancel }
+    }
+}
+
+/// Commit a validated batch and bind its terminal outcome to a mirror plan.
+pub async fn commit_edits_for_plan(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    snapshot: &RepositorySnapshot,
+    edits: Vec<RefJournalEdit>,
+    head: Option<String>,
+    packs: Vec<PackManifestEntry>,
+    shards: Vec<String>,
+    context: MirrorPlanContext<'_>,
+) -> Result<RefJournalCommitResult> {
+    commit_edits_inner(
+        store,
+        router,
+        snapshot,
+        edits,
+        head,
+        packs,
+        shards,
+        CommitContext {
+            plan_id: Some(context.plan_id),
+            cancel: context.cancel,
+        },
+    )
+    .await
+}
+
+struct CommitContext<'a> {
+    plan_id: Option<&'a str>,
+    cancel: &'a CancellationToken,
+}
+
+async fn commit_edits_inner(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    snapshot: &RepositorySnapshot,
+    edits: Vec<RefJournalEdit>,
+    head: Option<String>,
+    packs: Vec<PackManifestEntry>,
+    shards: Vec<String>,
+    context: CommitContext<'_>,
+) -> Result<RefJournalCommitResult> {
+    let CommitContext { plan_id, cancel } = context;
     check_cancelled(cancel)?;
     let parents = edits
         .iter()
@@ -53,7 +125,7 @@ pub async fn commit_edits(
         .iter()
         .any(|edit| edit.old_oid.is_none() != edit.new_oid.is_none());
     if !changes_namespace {
-        return commit_transaction(store, router, transaction, cancel).await;
+        return commit_transaction(store, router, transaction, plan_id, cancel).await;
     }
     check_namespace(snapshot, &transaction)?;
     crate::with_ref_namespace(
@@ -67,7 +139,7 @@ pub async fn commit_edits(
                 crab_metadata::manifest_store::read_repository_snapshot(store, router).await?;
             check_old_values(router, &fresh, &transaction)?;
             check_namespace(&fresh, &transaction)?;
-            commit_transaction(store, router, transaction, &scoped).await
+            commit_transaction(store, router, transaction, plan_id, &scoped).await
         },
     )
     .await
@@ -120,6 +192,7 @@ async fn commit_transaction(
     store: &Store,
     router: &StoreLayout<Store>,
     mut transaction: RefJournalTransaction,
+    plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<RefJournalCommitResult> {
     let mut expected_heads = Vec::with_capacity(transaction.edits.len());
@@ -131,12 +204,29 @@ async fn commit_transaction(
             .insert(edit.ref_name.clone(), observed.visible_transaction.clone());
         expected_heads.push(observed);
     }
-    Ok(
-        ref_journal::commit_ref_transaction(store, router, &transaction, &expected_heads, || {
-            cancel.is_cancelled()
-        })
-        .await?,
-    )
+    Ok(match plan_id {
+        Some(plan_id) => {
+            ref_journal::commit_ref_transaction_for_plan(
+                store,
+                router,
+                &transaction,
+                &expected_heads,
+                plan_id,
+                || cancel.is_cancelled(),
+            )
+            .await?
+        }
+        None => {
+            ref_journal::commit_ref_transaction(
+                store,
+                router,
+                &transaction,
+                &expected_heads,
+                || cancel.is_cancelled(),
+            )
+            .await?
+        }
+    })
 }
 
 fn check_cancelled(cancel: &CancellationToken) -> Result<()> {

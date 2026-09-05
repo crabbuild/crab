@@ -4,7 +4,7 @@ use crab_coordination::{
     CoordinationError, GIT_GENERATION_OWNER_RESOURCE, GIT_MANIFEST_RESOURCE, GcFenceLease,
     PushLock, internal_lock_path,
 };
-use crab_metadata::{manifest_store, manifests::Manifest, ref_journal::RefJournalEdit};
+use crab_metadata::{manifest_store, ref_journal::RefJournalEdit};
 use crab_write::WriteError;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -14,13 +14,9 @@ const TTL: Duration = Duration::from_secs(60);
 pub(super) async fn fixture() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
-    manifest_store::create_manifest(
-        &store,
-        &layout,
-        &Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
+    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+        .await
+        .unwrap();
     Arc::new(Server {
         repositories: BTreeMap::from([(
             ("team".into(), "repo".into()),

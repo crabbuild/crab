@@ -247,6 +247,7 @@ impl FileIndexLookupSession {
             storage: router.store().clone(),
             router,
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            limits: FileIndexLookupLimits::CURRENT_STATE,
         })
     }
 
@@ -483,7 +484,7 @@ impl FileIndexLookupSession {
             // Reserve the whole scan before dispatch. Failed/cancelled scans
             // consume their reservation and cannot create cached absences.
             cache.shard_visits += anchor.shards.len();
-            let batches = stream::iter(anchor.shards.iter().copied().map(|shard_hash| {
+            let mut batches = stream::iter(anchor.shards.iter().copied().map(|shard_hash| {
                 let storage = self.storage.clone();
                 let router = self.router.clone();
                 let unresolved = unresolved.clone();

@@ -105,13 +105,9 @@ async fn native_http_push_rustfs() {
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
     let layout = StoreLayout::new(store.clone(), prefix.clone());
-    crab_metadata::manifest_store::create_manifest(
-        &store,
-        &layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
+    crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+        .await
+        .unwrap();
     let mut server = maintenance_tests::fixture().await;
     let repo = Arc::get_mut(&mut server)
         .unwrap()

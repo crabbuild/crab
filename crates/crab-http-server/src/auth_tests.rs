@@ -215,6 +215,13 @@ impl Harness {
             pinned: Mutex::new(None),
             maintenance: Mutex::new(None),
         };
+        crab_write::initialize::initialize_repository(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
         let server = Arc::new(Server {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]),
             runtime: Arc::new(RemoteGitRuntime::default()),
@@ -482,13 +489,9 @@ async fn non_members_cannot_trigger_repository_publication() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
     }
     let repo = &h.server.repositories[&("team".into(), "private".into())];
-    crab_metadata::manifest_store::create_manifest(
-        &repo.store,
-        &repo.layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
+    crab_write::initialize::initialize_repository(&repo.store, &repo.layout, "refs/heads/main")
+        .await
+        .unwrap();
     let lease = super::maintenance_tests::commit_without_proof(repo).await;
     let before = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
         .await
