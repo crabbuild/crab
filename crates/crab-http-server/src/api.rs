@@ -195,6 +195,9 @@ pub(crate) async fn read(
             (Some(value), _) => GitPath::new(value.as_bytes().to_vec())?,
             _ => GitPath::root(),
         };
+        if params.base.is_some() && !path.is_root() && matches!(action, Action::Commits) {
+            return Err(ApiError::Input("base cannot be combined with path history"));
+        }
         let cursor = params
             .cursor
             .as_deref()
@@ -362,6 +365,15 @@ async fn execute(
                         .await?;
                     (
                         result.items.iter().map(path_history_json).collect::<Vec<_>>(),
+                        result.next,
+                    )
+                } else if let Some(base) = params.base.as_deref() {
+                    let base = repository
+                        .snapshot(&Revision::parse(base)?, &operation)
+                        .await?;
+                    let result = snapshot.ahead_history(&base, &page, &operation).await?;
+                    (
+                        result.items.iter().map(commit_json).collect::<Vec<_>>(),
                         result.next,
                     )
                 } else {
