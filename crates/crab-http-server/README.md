@@ -93,8 +93,10 @@ with PNG, JPEG, GIF or WebP names load through a signature-checked inline endpoi
 SVG, other local formats and external images remain links so repository content
 cannot become same-origin active content or make signed-in browsers contact third-party hosts.
 Opening a file shows the tree sidebar; Browse files toggles it. Directories appear
-first within each page, and the Code menu provides the Git URL. Request timing
-is expandable. File and directory History follows the exact first-parent path;
+first within each page. A directory click selects and expands it while its children
+load, and content loading keeps the tree's selection and expansion in place. The
+Code menu provides the Git URL. Request timing is expandable. File and directory
+History follows the exact first-parent path;
 repository-bound signed cursors resume at the next verified parent without
 replaying newer commits. Writers browsing a branch can create, edit, and delete
 regular files through reviewable commit forms. Historical commits and tags remain

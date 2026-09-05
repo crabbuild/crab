@@ -459,6 +459,45 @@ test("deep links expand the active path and select its file", async ({
   expect(state.folderIconWidth).toBe("16px");
 });
 
+test("one directory click selects, expands, and loads its children", async ({
+  page,
+}) => {
+  const treeRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/tree"))
+      treeRequests.push(request.url());
+  });
+  await page.goto(
+    `/team/project?rev=${oid}&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  const tree = page.locator('[aria-label="Repository files"]');
+  const directory = tree.getByRole("treeitem", {
+    name: "src",
+    exact: true,
+  });
+  await expect(directory).toHaveAttribute("aria-expanded", "false");
+  await page.waitForLoadState("networkidle");
+  treeRequests.length = 0;
+
+  await directory.click();
+
+  await expect(page).toHaveURL(new RegExp(`path=${pathHex("src")}.*kind=Tree`));
+  await expect(directory).toHaveAttribute("aria-selected", "true");
+  await expect(directory).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    tree.getByRole("treeitem", { name: "index.ts", exact: true }),
+  ).toBeVisible();
+  expect(
+    treeRequests.filter((url) => !new URL(url).searchParams.get("path_hex")),
+  ).toHaveLength(0);
+
+  await directory.click();
+  await expect(directory).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    tree.getByRole("treeitem", { name: "index.ts", exact: true }),
+  ).toHaveCount(0);
+});
+
 test("file-tree create button commits a file and keeps GitHub control spacing", async ({
   context,
   page,

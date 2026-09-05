@@ -653,43 +653,52 @@ function RepositoryPage({
                               kind={kind}
                             />
                           )}
-                          {kind === "Tree" ? (
-                            <Directory
-                              key={`${rev}:${path}`}
-                              repo={repo}
-                              rev={rev}
-                              path={path}
-                              onEntry={selectEntry}
-                              header={
-                                <LatestCommit
-                                  repo={repo}
-                                  rev={rev}
-                                  path={path}
-                                  kind="Tree"
-                                />
-                              }
-                            />
-                          ) : kind === "Submodule" ? (
-                            <div className="notice">
-                              This entry points to a commit in a submodule.
-                            </div>
-                          ) : (
-                            <FileView
-                              key={`${rev}:${path}`}
-                              repo={repo}
-                              rev={rev}
-                              path={path}
-                              name={displayHex(path)}
-                              theme={theme}
-                              write={
-                                canChangeFile
-                                  ? {
-                                      branch: branch.name,
-                                    }
-                                  : undefined
-                              }
-                            />
-                          )}
+                          <Suspense
+                            fallback={
+                              <div className="notice" role="status">
+                                <Spinner size="small" /> Loading repository
+                                content…
+                              </div>
+                            }
+                          >
+                            {kind === "Tree" ? (
+                              <Directory
+                                key={`${rev}:${path}`}
+                                repo={repo}
+                                rev={rev}
+                                path={path}
+                                onEntry={selectEntry}
+                                header={
+                                  <LatestCommit
+                                    repo={repo}
+                                    rev={rev}
+                                    path={path}
+                                    kind="Tree"
+                                  />
+                                }
+                              />
+                            ) : kind === "Submodule" ? (
+                              <div className="notice">
+                                This entry points to a commit in a submodule.
+                              </div>
+                            ) : (
+                              <FileView
+                                key={`${rev}:${path}`}
+                                repo={repo}
+                                rev={rev}
+                                path={path}
+                                name={displayHex(path)}
+                                theme={theme}
+                                write={
+                                  canChangeFile
+                                    ? {
+                                        branch: branch.name,
+                                      }
+                                    : undefined
+                                }
+                              />
+                            )}
+                          </Suspense>
                         </div>
                         {overview && (
                           <aside

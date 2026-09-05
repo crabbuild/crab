@@ -39,6 +39,9 @@ export function RepositoryTree({
   const entries = useRef(new Map<string, Entry>());
   const select = useRef(onSelect);
   const syncingSelection = useRef(false);
+  const loadDirectory = useRef(
+    (_path: string, _pathHex: string): Promise<void> => Promise.resolve(),
+  );
   select.current = onSelect;
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -188,9 +191,7 @@ export function RepositoryTree({
     const controller = new AbortController();
     const loads = new Map<string, Promise<void>>();
     entries.current.clear();
-    model.resetPaths([], {
-      initialExpandedPaths: ancestors.map(({ path }) => `${path}/`),
-    });
+    model.resetPaths([]);
     setError("");
     setPending(0);
     async function load(path: string, pathHex: string) {
@@ -247,18 +248,31 @@ export function RepositoryTree({
         if (entry) void load(entry.path, entry.path_hex);
       }
     });
+    loadDirectory.current = load;
+    void load("", "");
+    return () => {
+      controller.abort();
+      unsubscribe();
+      if (loadDirectory.current === load)
+        loadDirectory.current = () => Promise.resolve();
+    };
+  }, [repo.owner, repo.name, rev, model, attempt]);
+  useEffect(() => {
+    let frame: number | undefined;
+    let cancelled = false;
     void (async () => {
-      await load("", "");
+      await loadDirectory.current("", "");
       for (const ancestor of ancestors) {
+        if (cancelled) return;
         const item = model.getItem(`${ancestor.path}/`);
         if (item && "expand" in item) item.expand();
-        await load(ancestor.path, ancestor.pathHex);
+        await loadDirectory.current(ancestor.path, ancestor.pathHex);
       }
-      if (controller.signal.aborted || !activePath) return;
-      requestAnimationFrame(() => {
-        if (controller.signal.aborted) return;
-        const item = model.getItem(activePath);
-        if (!item) return;
+      if (cancelled || !activePath) return;
+      const item = model.getItem(activePath);
+      if (!item) return;
+      frame = requestAnimationFrame(() => {
+        if (cancelled) return;
         syncingSelection.current = true;
         item.select();
         syncingSelection.current = false;
@@ -266,8 +280,8 @@ export function RepositoryTree({
       });
     })();
     return () => {
-      controller.abort();
-      unsubscribe();
+      cancelled = true;
+      if (frame !== undefined) cancelAnimationFrame(frame);
     };
   }, [repo.owner, repo.name, rev, model, attempt, activePath, ancestors]);
   return (
