@@ -100,10 +100,8 @@ main {
   gap: 8px;
   margin-left: auto;
 }
-.theme-control select {
-  border: 0;
-  background: transparent;
-  color: var(--fgColor-default);
+.theme-control button {
+  white-space: nowrap;
 }
 .repo-header {
   background: var(--page-header-bgColor);
@@ -2085,10 +2083,6 @@ main {
   color: var(--header-fgColor-default);
   opacity: 0.65;
 }
-.theme-control option {
-  background: var(--bgColor-default);
-  color: var(--fgColor-default);
-}
 .repo-overview {
   max-width: 1280px;
   display: grid;
@@ -2286,6 +2280,17 @@ main {
   background: var(--borderColor-muted);
   border: 0;
 }
+.file-markdown-preview {
+  min-height: 240px;
+  padding: 32px 40px;
+  font-size: 16px;
+  line-height: 1.5;
+}
+.file-markdown-preview img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
 .file-table thead {
   color: var(--fgColor-muted);
   font-size: 12px;
@@ -2433,6 +2438,10 @@ main {
 }
 .ref-controls.compact > button {
   flex: 0 0 32px;
+  height: 32px;
+}
+.ref-controls.compact .add-file-menu {
+  width: 32px;
   height: 32px;
 }
 .ref-controls.compact .revision-picker-anchor {
@@ -2646,6 +2655,66 @@ main {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 16px;
+}
+.upload-dropzone {
+  display: flex;
+  min-height: 220px;
+  padding: 32px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  border: 2px dashed var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  color: var(--fgColor-muted);
+  background: var(--bgColor-muted);
+  cursor: pointer;
+  text-align: center;
+}
+.upload-dropzone strong {
+  color: var(--fgColor-default);
+  font-size: 16px;
+}
+.upload-dropzone > span {
+  color: var(--fgColor-accent);
+  font-weight: 600;
+}
+.upload-dropzone:hover,
+.upload-dropzone.dragging,
+.upload-dropzone:focus-within {
+  border-color: var(--borderColor-accent-emphasis);
+  background: var(--bgColor-accent-muted);
+}
+.upload-dropzone:focus-within {
+  outline: 2px solid var(--focus-outlineColor);
+  outline-offset: 2px;
+}
+.upload-file-list {
+  margin: 16px 0 0;
+  padding: 0;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  list-style: none;
+}
+.upload-file-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 6px 8px 6px 16px;
+}
+.upload-file-list li + li {
+  border-top: 1px solid var(--borderColor-muted);
+}
+.upload-file-list li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.upload-file-list small {
+  color: var(--fgColor-muted);
 }
 .delete-file-summary {
   display: flex;
@@ -2865,5 +2934,8 @@ main {
   }
   .create-file-actions {
     flex-wrap: wrap;
+  }
+  .file-markdown-preview {
+    padding: 24px 16px;
   }
 }

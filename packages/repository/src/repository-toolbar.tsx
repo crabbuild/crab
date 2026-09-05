@@ -1,10 +1,12 @@
-import { Button, IconButton } from "@primer/react";
+import { ActionList, ActionMenu, Button, IconButton } from "@primer/react";
 import {
+  FileAddedIcon,
   GitBranchIcon,
   PlusIcon,
   SearchIcon,
   SidebarExpandIcon,
   TagIcon,
+  UploadIcon,
 } from "@primer/octicons-react";
 import { navigate, repoHref, type Refs, type Repository } from "./api";
 import { CloneMenu } from "./git-access";
@@ -17,6 +19,7 @@ export function RepositoryRefControls({
   compact = false,
   onSearch,
   onCreateFile,
+  onUploadFiles,
   onCreateBranch,
 }: {
   refs: Refs;
@@ -25,6 +28,7 @@ export function RepositoryRefControls({
   compact?: boolean;
   onSearch?: () => void;
   onCreateFile?: () => void;
+  onUploadFiles?: () => void;
   onCreateBranch?: (name: string) => Promise<void>;
 }) {
   const branches = refs.refs.filter((ref) =>
@@ -41,13 +45,33 @@ export function RepositoryRefControls({
         onSelect={onSelect}
         onCreateBranch={onCreateBranch}
       />
-      {compact && onCreateFile && (
-        <IconButton
-          icon={PlusIcon}
-          aria-label="Create new file"
-          size="small"
-          onClick={onCreateFile}
-        />
+      {compact && onCreateFile && onUploadFiles && (
+        <ActionMenu>
+          <ActionMenu.Anchor>
+            <IconButton
+              className="add-file-menu"
+              icon={PlusIcon}
+              aria-label="Add file"
+              size="small"
+            />
+          </ActionMenu.Anchor>
+          <ActionMenu.Overlay width="small">
+            <ActionList>
+              <ActionList.Item onSelect={onCreateFile}>
+                <ActionList.LeadingVisual>
+                  <FileAddedIcon />
+                </ActionList.LeadingVisual>
+                Create new file
+              </ActionList.Item>
+              <ActionList.Item onSelect={onUploadFiles}>
+                <ActionList.LeadingVisual>
+                  <UploadIcon />
+                </ActionList.LeadingVisual>
+                Upload files
+              </ActionList.Item>
+            </ActionList>
+          </ActionMenu.Overlay>
+        </ActionMenu>
       )}
       {compact && onSearch ? (
         <IconButton

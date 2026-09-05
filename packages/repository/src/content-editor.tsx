@@ -1,6 +1,12 @@
 import { useState } from "react";
-import { Button, TextInput } from "@primer/react";
-import { FileAddedIcon, PencilIcon, TrashIcon } from "@primer/octicons-react";
+import { Button, IconButton, TextInput, VisuallyHidden } from "@primer/react";
+import {
+  FileAddedIcon,
+  PencilIcon,
+  TrashIcon,
+  UploadIcon,
+  XIcon,
+} from "@primer/octicons-react";
 import {
   displayHex,
   endpoint,
@@ -23,8 +29,13 @@ type BaseProps = {
 type ResponseBody = {
   commit?: string;
   path_hex?: string;
+  paths_hex?: string[];
   error?: { message?: string };
 };
+
+const MAX_UPLOAD_FILES = 100;
+const MAX_UPLOAD_FILE_BYTES = 900 * 1024;
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 function encodePath(path: string) {
   return Array.from(new TextEncoder().encode(path), (byte) =>
@@ -35,6 +46,19 @@ function encodePath(path: string) {
 function joinPath(directoryHex: string, name: string) {
   const nameHex = encodePath(name);
   return directoryHex ? `${directoryHex}2f${nameHex}` : nameHex;
+}
+
+function encodeBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return btoa(binary);
+}
+
+function fileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
 }
 
 async function changeContent(
@@ -184,6 +208,163 @@ export function CreateFile({
         saving={saving}
         error={error}
         cancel={() => navigate(repoHref(repo, { rev: branch }))}
+      />
+    </form>
+  );
+}
+
+export function UploadFiles({
+  repo,
+  branch,
+  expectedHead,
+  directoryHex,
+  csrf,
+}: BaseProps & { directoryHex: string }) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState<string>();
+
+  function selectFiles(selected: File[]) {
+    const next = new Map(files.map((file) => [file.name, file]));
+    for (const file of selected) next.set(file.name, file);
+    const values = [...next.values()];
+    const total = values.reduce((sum, file) => sum + file.size, 0);
+    if (values.length > MAX_UPLOAD_FILES) {
+      setError("Select no more than 100 files");
+      return;
+    }
+    if (values.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
+      setError("Each file must be 900 KiB or smaller");
+      return;
+    }
+    if (total > MAX_UPLOAD_BYTES) {
+      setError("Selected files must total 4 MiB or smaller");
+      return;
+    }
+    setError(undefined);
+    setFiles(values);
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!files.length) {
+      setError("Choose at least one file");
+      return;
+    }
+    setSaving(true);
+    setError(undefined);
+    try {
+      const response = await fetch(endpoint(repo, "uploads"), {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+        },
+        body: JSON.stringify({
+          branch,
+          expected_head: expectedHead,
+          files: await Promise.all(
+            files.map(async (file) => ({
+              path_hex: joinPath(directoryHex, file.name),
+              content_base64: encodeBase64(await file.arrayBuffer()),
+            })),
+          ),
+          message: message.trim(),
+        }),
+      });
+      const result = (await response.json()) as ResponseBody;
+      if (!response.ok || !result.commit || !result.paths_hex?.length)
+        throw new Error(
+          result.error?.message ?? "The files could not be committed",
+        );
+      window.location.assign(
+        repoHref(repo, {
+          rev: branch,
+          path: directoryHex || undefined,
+          kind: directoryHex ? "Tree" : undefined,
+        }),
+      );
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "The files could not be committed",
+      );
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="create-file upload-files" onSubmit={submit}>
+      <EditorHeading
+        icon={<UploadIcon size={24} />}
+        title="Upload files"
+        branch={branch}
+      />
+      <label
+        className={`upload-dropzone${dragging ? " dragging" : ""}`}
+        onDragEnter={() => setDragging(true)}
+        onDragOver={(event) => event.preventDefault()}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragging(false);
+          selectFiles([...event.dataTransfer.files]);
+        }}
+      >
+        <UploadIcon size={32} />
+        <strong>Drag files here to add them to your repository</strong>
+        <span>or choose your files</span>
+        <VisuallyHidden>
+          <input
+            type="file"
+            multiple
+            aria-label="Choose files to upload"
+            onChange={(event) => selectFiles([...(event.target.files ?? [])])}
+          />
+        </VisuallyHidden>
+        <small>Up to 100 files, 900 KiB each and 4 MiB total</small>
+      </label>
+      {files.length > 0 && (
+        <ul className="upload-file-list" aria-label="Files to upload">
+          {files.map((file) => (
+            <li key={file.name}>
+              <FileAddedIcon />
+              <span>{file.name}</span>
+              <small>{fileSize(file.size)}</small>
+              <IconButton
+                icon={XIcon}
+                aria-label={`Remove ${file.name}`}
+                size="small"
+                variant="invisible"
+                onClick={() =>
+                  setFiles((current) =>
+                    current.filter((candidate) => candidate !== file),
+                  )
+                }
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      <CommitPanel
+        message={message}
+        setMessage={setMessage}
+        placeholder="Upload files"
+        saving={saving}
+        error={error}
+        cancel={() =>
+          navigate(
+            repoHref(repo, {
+              rev: branch,
+              path: directoryHex || undefined,
+              kind: directoryHex ? "Tree" : undefined,
+            }),
+          )
+        }
       />
     </form>
   );

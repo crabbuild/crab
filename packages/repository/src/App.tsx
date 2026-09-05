@@ -1,13 +1,22 @@
 import { Suspense, lazy, useEffect, useLayoutEffect, useState } from "react";
-import { BaseStyles, Button, Label, Spinner } from "@primer/react";
+import {
+  ActionList,
+  ActionMenu,
+  BaseStyles,
+  Button,
+  Label,
+  Spinner,
+} from "@primer/react";
 import { ThemeProvider } from "@primer/react/next";
 import {
   AlertIcon,
   CodeIcon,
+  DeviceDesktopIcon,
   GitBranchIcon,
   GitPullRequestIcon,
   HistoryIcon,
   IssueOpenedIcon,
+  MoonIcon,
   RepoIcon,
   SidebarCollapseIcon,
   SunIcon,
@@ -30,7 +39,12 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
-import { CreateFile, DeleteFile, EditFile } from "./content-editor";
+import {
+  CreateFile,
+  DeleteFile,
+  EditFile,
+  UploadFiles,
+} from "./content-editor";
 import { IssuesWorkspace } from "./issues-navigation";
 import {
   RepositoryRefControls,
@@ -169,21 +183,7 @@ export function App() {
               </Button>
             </div>
           )}
-          <div className="theme-control">
-            <SunIcon />
-            <label className="sr-only" htmlFor="theme">
-              Appearance
-            </label>
-            <select
-              id="theme"
-              value={theme}
-              onChange={(event) => setTheme(event.target.value as Theme)}
-            >
-              <option value="auto">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </div>
+          <ThemeControl theme={theme} setTheme={setTheme} resolved={resolved} />
         </header>
         <main id="main" tabIndex={-1}>
           {sessionError && (
@@ -293,6 +293,51 @@ export function App() {
         </footer>
       </BaseStyles>
     </ThemeProvider>
+  );
+}
+
+function ThemeControl({
+  theme,
+  setTheme,
+  resolved,
+}: {
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
+  resolved: "light" | "dark";
+}) {
+  const choices = [
+    { value: "auto", label: "System", icon: DeviceDesktopIcon },
+    { value: "light", label: "Light", icon: SunIcon },
+    { value: "dark", label: "Dark", icon: MoonIcon },
+  ] as const;
+  return (
+    <div className="theme-control">
+      <ActionMenu>
+        <ActionMenu.Button
+          aria-label="Appearance"
+          leadingVisual={resolved === "dark" ? MoonIcon : SunIcon}
+          size="small"
+        >
+          {choices.find((choice) => choice.value === theme)?.label}
+        </ActionMenu.Button>
+        <ActionMenu.Overlay align="end" width="small">
+          <ActionList selectionVariant="single">
+            {choices.map((choice) => (
+              <ActionList.Item
+                key={choice.value}
+                selected={theme === choice.value}
+                onSelect={() => setTheme(choice.value)}
+              >
+                <ActionList.LeadingVisual>
+                  <choice.icon />
+                </ActionList.LeadingVisual>
+                {choice.label}
+              </ActionList.Item>
+            ))}
+          </ActionList>
+        </ActionMenu.Overlay>
+      </ActionMenu>
+    </div>
   );
 }
 
@@ -419,12 +464,12 @@ function RepositoryPage({
         <nav aria-label="Repository">
           <Link
             className={
-              ["code", "create", "edit", "delete"].includes(view)
+              ["code", "create", "upload", "edit", "delete"].includes(view)
                 ? "active"
                 : ""
             }
             aria-current={
-              ["code", "create", "edit", "delete"].includes(view)
+              ["code", "create", "upload", "edit", "delete"].includes(view)
                 ? "page"
                 : undefined
             }
@@ -527,7 +572,23 @@ function RepositoryPage({
                       </div>
                     }
                   >
-                    {view === "create" ? (
+                    {view === "upload" ? (
+                      repo.access === "write" && branch ? (
+                        <UploadFiles
+                          repo={repo}
+                          branch={branch.name}
+                          expectedHead={branch.oid}
+                          directoryHex={
+                            kind === "Tree" ? path : parentHex(path)
+                          }
+                          csrf={csrf}
+                        />
+                      ) : (
+                        <div className="notice error" role="alert">
+                          Write access to a branch is required to upload files.
+                        </div>
+                      )
+                    ) : view === "create" ? (
                       repo.access === "write" && branch ? (
                         <CreateFile
                           repo={repo}
@@ -648,6 +709,22 @@ function RepositoryPage({
                                           repoHref(repo, {
                                             rev: branch.name,
                                             view: "create",
+                                            path:
+                                              kind === "Tree"
+                                                ? path
+                                                : parentHex(path),
+                                            kind: "Tree",
+                                          }),
+                                        )
+                                    : undefined
+                                }
+                                onUploadFiles={
+                                  repo.access === "write" && branch
+                                    ? () =>
+                                        navigate(
+                                          repoHref(repo, {
+                                            rev: branch.name,
+                                            view: "upload",
                                             path:
                                               kind === "Tree"
                                                 ? path

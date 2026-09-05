@@ -10,6 +10,7 @@ import {
 import {
   endpoint,
   navigate,
+  parentHex,
   repoHref,
   useRequest,
   type Blame,
@@ -20,6 +21,7 @@ import {
   type Repository,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
+import { RepositoryMarkdown } from "./repository-markdown";
 
 type Props = {
   repo: Repository;
@@ -40,10 +42,10 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );
-  const [showBlame, setShowBlame] = useState(false);
+  const [view, setView] = useState<"code" | "preview" | "blame">("code");
   const [copied, setCopied] = useState(false);
   const blame = useRequest<Blame>(
-    showBlame ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
+    view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
   );
   const file = useMemo(
     () => ({
@@ -65,12 +67,23 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
             <div className="file-view-controls">
               <SegmentedControl
                 aria-label="File view"
-                onChange={(index) => setShowBlame(index === 1)}
+                onChange={(index) => {
+                  const views =
+                    /\.(?:md|markdown)$/i.test(name) && content.text !== null
+                      ? (["code", "preview", "blame"] as const)
+                      : (["code", "blame"] as const);
+                  setView(views[index] ?? "code");
+                }}
               >
-                <SegmentedControl.Button selected={!showBlame}>
+                <SegmentedControl.Button selected={view === "code"}>
                   Code
                 </SegmentedControl.Button>
-                <SegmentedControl.Button selected={showBlame}>
+                {/\.(?:md|markdown)$/i.test(name) && content.text !== null && (
+                  <SegmentedControl.Button selected={view === "preview"}>
+                    Preview
+                  </SegmentedControl.Button>
+                )}
+                <SegmentedControl.Button selected={view === "blame"}>
                   Blame
                 </SegmentedControl.Button>
               </SegmentedControl>
@@ -154,7 +167,7 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
               contain the exact stored Git blob.
             </div>
           )}
-          {showBlame && (
+          {view === "blame" && (
             <Result state={blame}>
               {(result) => (
                 <div className="blame-list">
@@ -184,6 +197,15 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
               <strong>Binary file</strong>
               <p>Download this file to view its contents.</p>
             </div>
+          ) : view === "preview" ? (
+            <RepositoryMarkdown
+              repo={repo}
+              rev={rev}
+              directory={parentHex(path)}
+              className="file-markdown-preview"
+            >
+              {content.text}
+            </RepositoryMarkdown>
           ) : (
             <File file={file} options={options} />
           )}

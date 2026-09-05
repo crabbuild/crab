@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const oid = "a".repeat(40);
 const pathOid = "b".repeat(40);
@@ -13,6 +13,16 @@ const pathHex = (path: string) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
 
+async function selectTheme(page: Page, theme: "light" | "dark") {
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await page
+    .getByRole("menuitemradio", {
+      name: theme === "light" ? "Light" : "Dark",
+      exact: true,
+    })
+    .click();
+}
+
 test.beforeEach(async ({ page }) => {
   let created = false;
   let createdBranch: string | null = null;
@@ -20,6 +30,7 @@ test.beforeEach(async ({ page }) => {
   let currentHead = oid;
   let currentReadme = readme;
   let currentReadmeOid = oid;
+  let uploadedFiles: string[] = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session")
@@ -40,6 +51,40 @@ test.beforeEach(async ({ page }) => {
           ],
         },
       });
+    if (url.pathname.endsWith("/uploads")) {
+      const body = route.request().postDataJSON() as {
+        branch: string;
+        expected_head: string;
+        files: { path_hex: string; content_base64: string }[];
+        message: string;
+      };
+      expect(route.request().method()).toBe("POST");
+      expect(body).toEqual({
+        branch: "refs/heads/main",
+        expected_head: oid,
+        files: [
+          {
+            path_hex: pathHex("notes.txt"),
+            content_base64: "YWxwaGEK",
+          },
+          {
+            path_hex: pathHex("raw.bin"),
+            content_base64: "AP8KgA==",
+          },
+        ],
+        message: "Upload repository files",
+      });
+      uploadedFiles = ["notes.txt", "raw.bin"];
+      currentHead = "2".repeat(40);
+      return route.fulfill({
+        status: 201,
+        json: {
+          branch: "refs/heads/main",
+          commit: currentHead,
+          paths_hex: body.files.map((file) => file.path_hex),
+        },
+      });
+    }
     if (url.pathname.endsWith("/contents")) {
       const body = route.request().postDataJSON() as {
         branch: string;
@@ -213,9 +258,15 @@ test.beforeEach(async ({ page }) => {
             : url.searchParams.get("path_hex")
               ? []
               : [
+                  ["zeta.txt", "Blob"],
                   ...(!deleted ? [["README.md", "Blob"]] : []),
+                  ["Beta", "Tree"],
+                  ["file10.txt", "Blob"],
                   ["src", "Tree"],
+                  ["alpha", "Tree"],
+                  ["file2.txt", "Blob"],
                   ...(created ? [["NEW.md", "Blob"]] : []),
+                  ...uploadedFiles.map((path) => [path, "Blob"]),
                 ]
           ).map(([path, kind]) => ({
             path,
@@ -301,7 +352,22 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(
     panel.getByText("Make the repository easier to browse"),
   ).toBeVisible();
-  await expect(panel.locator("tbody tr").first()).toContainText("src");
+  await expect
+    .poll(() =>
+      panel
+        .locator("tbody tr td:first-child a")
+        .allTextContents()
+        .then((names) => names.map((name) => name.trim())),
+    )
+    .toEqual([
+      "alpha",
+      "Beta",
+      "src",
+      "file2.txt",
+      "file10.txt",
+      "README.md",
+      "zeta.txt",
+    ]);
   await expect(
     panel.getByRole("button", { name: "Next", exact: true }),
   ).toHaveCount(0);
@@ -339,6 +405,7 @@ test("overview groups files with their commit and opens the tree when navigating
     "32px",
   );
   await panel.getByRole("link", { name: "README.md", exact: true }).click();
+  await expect(page).toHaveURL(/rev=refs%2Fheads%2Fmain/);
   await expect(page.locator(".tree-sidebar")).toBeVisible();
   await expect(page.locator(".breadcrumb")).toContainText("project/README.md");
   await page.getByRole("button", { name: "Copy path", exact: true }).click();
@@ -392,6 +459,33 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(page.getByRole("button", { name: "Older" })).toBeDisabled();
   await page.getByRole("button", { name: "Newer" }).click();
   await expect(page.locator(".commit-list")).toContainText("Update this path");
+});
+
+test("Markdown files switch between source and a repository-aware preview", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const preview = page.locator(".file-markdown-preview");
+  await expect(
+    preview.getByRole("heading", { name: "Team project" }),
+  ).toBeVisible();
+  await expect(
+    preview.getByRole("link", { name: "source entry" }),
+  ).toHaveAttribute(
+    "href",
+    `/team/project?rev=${oid}&path=${pathHex("src/index.ts")}&kind=Blob`,
+  );
+  await expect(
+    preview.getByRole("img", { name: "Architecture" }),
+  ).toHaveAttribute(
+    "src",
+    `/api/repos/team/project/asset?rev=${oid}&path_hex=${pathHex("docs/architecture.png")}`,
+  );
+  await page.getByRole("button", { name: "Code", exact: true }).click();
+  await expect(preview).toHaveCount(0);
 });
 
 test("Go to file finds a deep repository path before its directory is expanded", async ({
@@ -526,20 +620,21 @@ test("one directory click selects, expands, and loads its children", async ({
   ).toHaveCount(0);
 });
 
-test("file-tree create button commits a file and keeps GitHub control spacing", async ({
+test("file-tree add menu commits a file and keeps GitHub control spacing", async ({
   context,
   page,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto(`/team/project?path=${pathHex("README.md")}&kind=Blob`);
-  const create = page.getByRole("button", {
-    name: "Create new file",
+  const add = page.getByRole("button", {
+    name: "Add file",
     exact: true,
   });
-  await expect(create).toBeVisible();
-  await expect(create).toHaveCSS("width", "32px");
-  await expect(create).toHaveCSS("height", "32px");
-  await create.click();
+  await expect(add).toBeVisible();
+  await expect(add).toHaveCSS("width", "32px");
+  await expect(add).toHaveCSS("height", "32px");
+  await add.click();
+  await page.getByRole("menuitem", { name: "Create new file" }).click();
   await expect(
     page.getByRole("heading", { name: "Create new file" }),
   ).toBeVisible();
@@ -560,6 +655,44 @@ test("file-tree create button commits a file and keeps GitHub control spacing", 
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe("Hello, team!");
+});
+
+test("file-tree add menu uploads text and binary files in one commit", async ({
+  page,
+}) => {
+  await page.goto(`/team/project?path=${pathHex("README.md")}&kind=Blob`);
+  await page.getByRole("button", { name: "Add file" }).click();
+  await page.getByRole("menuitem", { name: "Upload files" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Upload files" }),
+  ).toBeVisible();
+  await page.getByLabel("Choose files to upload").evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["alpha\n"], "notes.txt", { type: "text/plain" }),
+    );
+    transfer.items.add(
+      new File([new Uint8Array([0, 255, 10, 128])], "raw.bin", {
+        type: "application/octet-stream",
+      }),
+    );
+    const input = element as HTMLInputElement;
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const files = page.getByRole("list", { name: "Files to upload" });
+  await expect(files).toContainText("notes.txt");
+  await expect(files).toContainText("raw.bin");
+  await page.setViewportSize({ width: 360, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(360);
+  await page.getByLabel("Commit message").fill("Upload repository files");
+  await page.getByRole("button", { name: "Commit changes" }).click();
+  await expect(page).toHaveURL(/rev=refs%2Fheads%2Fmain/);
+  await expect(
+    page.getByRole("region", { name: "Folders and files" }),
+  ).toContainText("raw.bin");
 });
 
 test("branch file actions edit and delete through reviewable commit pages", async ({
@@ -624,7 +757,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     [390, "light"],
   ] as const) {
     await page.setViewportSize({ width, height: 800 });
-    await page.getByLabel("Appearance", { exact: true }).selectOption(theme);
+    await selectTheme(page, theme);
     await page.locator(".clone-menu summary").click();
     await expect(
       page.getByLabel("Repository URL", { exact: true }),
@@ -649,9 +782,9 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await page.locator(".clone-menu summary").click();
   }
   await page.reload();
-  await expect(page.getByLabel("Appearance", { exact: true })).toHaveValue(
-    "light",
-  );
+  await expect(
+    page.getByRole("button", { name: "Appearance", exact: true }),
+  ).toContainText("Light");
 });
 
 test("issues follow the GitHub list hierarchy in both themes and on mobile", async ({
@@ -682,7 +815,7 @@ test("issues follow the GitHub list hierarchy in both themes and on mobile", asy
     [390, "light"],
   ] as const) {
     await page.setViewportSize({ width, height: 900 });
-    await page.getByLabel("Appearance", { exact: true }).selectOption(theme);
+    await selectTheme(page, theme);
     const geometry = await page.evaluate(() => ({
       viewport: innerWidth,
       page: document.documentElement.scrollWidth,
@@ -807,8 +940,8 @@ test("revision picker filters branches and tags and restores keyboard focus", as
   expect(geometry.page).toBeLessThanOrEqual(geometry.width);
   await page.keyboard.press("Escape");
   await expect(anchor).toBeFocused();
-  for (const scheme of ["light", "dark"]) {
-    await page.getByLabel("Appearance", { exact: true }).selectOption(scheme);
+  for (const scheme of ["light", "dark"] as const) {
+    await selectTheme(page, scheme);
     await expect(page.locator("html")).toHaveCSS("color-scheme", scheme);
   }
 });

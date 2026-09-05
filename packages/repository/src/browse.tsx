@@ -1,6 +1,4 @@
 import { useState, type ReactNode } from "react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Button } from "@primer/react";
 import {
   BookIcon,
@@ -19,6 +17,8 @@ import {
   type Repository,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
+import { compareFileItems } from "./entry-sort";
+import { RepositoryMarkdown } from "./repository-markdown";
 
 const readmeNames = ["readme.md", "readme.markdown", "readme"];
 
@@ -31,50 +31,6 @@ function readmeEntry(entries: Entry[]) {
     );
     if (entry) return entry;
   }
-}
-
-function encodePathComponent(value: string) {
-  return Array.from(new TextEncoder().encode(value), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
-function inlineRaster(value?: string) {
-  return /\.(?:png|jpe?g|gif|webp)$/i.test(value?.split(/[?#]/, 1)[0] ?? "");
-}
-
-function repositoryTarget(directory: string, value?: string) {
-  if (
-    !value ||
-    value.startsWith("#") ||
-    value.startsWith("/") ||
-    /^[a-z][a-z\d+.-]*:/i.test(value)
-  )
-    return null;
-  const [pathAndQuery, fragment] = value.split("#", 2);
-  const encodedPath = pathAndQuery.split("?", 1)[0];
-  let decodedPath: string;
-  try {
-    decodedPath = decodeURIComponent(encodedPath);
-  } catch {
-    return null;
-  }
-  const components = directory ? directory.split("2f") : [];
-  for (const component of decodedPath.split("/")) {
-    if (!component || component === ".") continue;
-    if (component === "..") {
-      if (!components.length) return null;
-      components.pop();
-    } else {
-      components.push(encodePathComponent(component));
-    }
-  }
-  if (!components.length) return null;
-  return {
-    path: components.join("2f"),
-    kind: decodedPath.endsWith("/") ? "Tree" : "Blob",
-    fragment: fragment ? `#${fragment}` : "",
-  };
 }
 
 function ReadmePreview({
@@ -104,7 +60,10 @@ function ReadmePreview({
             path: entry.path_hex,
             kind: entry.kind,
           })}
-          onClick={() => onEntry(entry)}
+          onClick={(event) => {
+            event.preventDefault();
+            onEntry(entry);
+          }}
         >
           {name}
         </Link>
@@ -114,62 +73,14 @@ function ReadmePreview({
           content.text === null ? (
             <div className="notice">This README is not a text file.</div>
           ) : (
-            <div className="discussion-markdown repository-readme-body">
-              <Markdown
-                skipHtml
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  a: ({ href, children }) => {
-                    const target = repositoryTarget(directory, href);
-                    return target ? (
-                      <Link
-                        href={`${repoHref(repo, {
-                          rev,
-                          path: target.path,
-                          kind: target.kind,
-                        })}${target.fragment}`}
-                      >
-                        {children}
-                      </Link>
-                    ) : (
-                      <a href={href} rel="noreferrer">
-                        {children}
-                      </a>
-                    );
-                  },
-                  img: ({ src, alt }) => {
-                    const target = repositoryTarget(directory, src);
-                    if (!target)
-                      return (
-                        <a
-                          href={typeof src === "string" ? src : undefined}
-                          rel="noreferrer"
-                        >
-                          {alt || "View image"}
-                        </a>
-                      );
-                    const blob = endpoint(repo, "blob", {
-                      rev,
-                      path_hex: target.path,
-                    });
-                    return inlineRaster(src) ? (
-                      <img
-                        src={endpoint(repo, "asset", {
-                          rev,
-                          path_hex: target.path,
-                        })}
-                        alt={alt ?? ""}
-                        loading="lazy"
-                      />
-                    ) : (
-                      <a href={blob}>{alt || "View image"}</a>
-                    );
-                  },
-                }}
-              >
-                {content.text}
-              </Markdown>
-            </div>
+            <RepositoryMarkdown
+              repo={repo}
+              rev={rev}
+              directory={directory}
+              className="repository-readme-body"
+            >
+              {content.text}
+            </RepositoryMarkdown>
           )
         }
       </Result>
@@ -219,15 +130,13 @@ export function Directory({
                   </thead>
                   <tbody>
                     {[...page.items]
-                      .sort(
-                        (left, right) =>
-                          Number(right.kind === "Tree") -
-                            Number(left.kind === "Tree") ||
-                          (left.path < right.path
-                            ? -1
-                            : left.path > right.path
-                              ? 1
-                              : 0),
+                      .sort((left, right) =>
+                        compareFileItems(
+                          left.path.split("/").at(-1) ?? left.path,
+                          left.kind === "Tree",
+                          right.path.split("/").at(-1) ?? right.path,
+                          right.kind === "Tree",
+                        ),
                       )
                       .map((entry) => (
                         <tr key={entry.path_hex}>
@@ -238,7 +147,10 @@ export function Directory({
                                 path: entry.path_hex,
                                 kind: entry.kind,
                               })}
-                              onClick={() => onEntry(entry)}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                onEntry(entry);
+                              }}
                             >
                               {entry.kind === "Tree" ? (
                                 <FileDirectoryFillIcon className="folder-icon" />
