@@ -44,7 +44,7 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / "crab-add-commit-push-smoke"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REMOTE_PREFIX = "e2e-add-commit-push"
-POINTER_VERSION = "version https://crab.dev/spec/v1"
+POINTER_VERSION = "version https://crab.build/spec/v1"
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 SECRET_FLAGS = {"--access-key", "--secret-key", "--session-token"}
 

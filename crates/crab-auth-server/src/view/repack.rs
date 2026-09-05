@@ -346,7 +346,7 @@ mod tests {
         let input = temp.path().join("in.fast-export");
         let output = temp.path().join("out.fast-export");
         let pointer = format!(
-            "version https://crab.dev/spec/v1\nfile-hash {}\nsize 13\n",
+            "version https://crab.build/spec/v1\nfile-hash {}\nsize 13\n",
             "1".repeat(64)
         );
         let stream = format!(
@@ -364,7 +364,7 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
 
         assert_eq!(rewritten, 1);
-        assert!(text.contains("https://crab.dev/spec/v1"));
+        assert!(text.contains("https://crab.build/spec/v1"));
         assert!(text.contains(&format!(
             "blob\nmark :1\ndata {}\n{}",
             pointer.len(),

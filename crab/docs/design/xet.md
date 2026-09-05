@@ -754,7 +754,7 @@ User runs: git add big_model.safetensors
    d. Stage last chunk.
    e. Record (file_hash, [(chunk_hash, offset, size)...]) in staging metadata.
    f. Emit pointer blob:
-        version https://crab.dev/spec/v1
+        version https://crab.build/spec/v1
         file-hash {blake3}
         size {bytes}
 
@@ -873,7 +873,7 @@ The Git-level history of a file tracks its *versions* (each with a distinct file
 ### 9.1 The Format
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash {64-char hex blake3}
 size {decimal bytes}
 ```
@@ -924,7 +924,7 @@ impl Pointer {
         let version = version_line
             .strip_prefix("version ")
             .ok_or(PointerError::NotAPointer)?;
-        if version != "https://crab.dev/spec/v1" {
+        if version != "https://crab.build/spec/v1" {
             return Err(PointerError::UnsupportedVersion(version.to_owned()));
         }
 
@@ -949,7 +949,7 @@ impl Pointer {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         format!(
-            "version https://crab.dev/spec/v1\nfile-hash {}\nsize {}\n",
+            "version https://crab.build/spec/v1\nfile-hash {}\nsize {}\n",
             self.file_hash.to_hex(),
             self.size,
         ).into_bytes()
@@ -2063,7 +2063,7 @@ A tracked empty file:
 - Pointer:
   
   ```
-  version https://crab.dev/spec/v1
+  version https://crab.build/spec/v1
   file-hash af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
   size 0
   ```

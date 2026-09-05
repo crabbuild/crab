@@ -1005,7 +1005,7 @@ When provided or computed, the SHA-256 is stored in the shard's
 crab uses a different pointer format:
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash 7c1f2a3b...
 size 10737418240
 shard-hint a1b2c3d4...

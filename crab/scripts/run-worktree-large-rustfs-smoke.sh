@@ -221,7 +221,7 @@ import sys
 root = pathlib.Path(sys.argv[1]) / "models"
 for index in range(int(sys.argv[2])):
     data = (root / f"model-{index:02}.bin").read_bytes()
-    if len(data) > 256 or not data.startswith(b"version https://crab.dev/spec/v1\n"):
+    if len(data) > 256 or not data.startswith(b"version https://crab.build/spec/v1\n"):
         raise SystemExit(f"expected pointer file: model-{index:02}.bin")
 PY
 run_crab "$CLONE" "$RUN_ROOT/cache/clone" hydrate --all --json \

@@ -24,7 +24,7 @@ fn crab_owned_contract_inventory_is_canonical_v1() {
     assert_eq!(FILE_PUSH_PLAN_VERSION, 1);
     assert_eq!(LOCKFILE_SCHEMA_VERSION, 1);
     assert_eq!(ARTIFACT_SCHEMA_VERSION, 1);
-    assert_eq!(VERSION_LINE, "version https://crab.dev/spec/v1");
+    assert_eq!(VERSION_LINE, "version https://crab.build/spec/v1");
 }
 
 #[test]

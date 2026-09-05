@@ -428,7 +428,7 @@ When Git’s clean filter processes a large file, crab emits a pointer blob into
 Pointer format:
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash {blake3-of-full-content}
 size {bytes}
 ```
@@ -436,7 +436,7 @@ size {bytes}
 Example:
 
 ```
-version https://crab.dev/spec/v1
+version https://crab.build/spec/v1
 file-hash 7c1f2a3b4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8
 size 10737418240
 ```
@@ -1071,7 +1071,7 @@ async fn clean(path: PathBuf, mut stream: impl AsyncRead + Unpin) -> Result<Vec<
     staging::record_file(&file_hash, &chunks_recorded).await?;
 
     let pointer = format!(
-        "version https://crab.dev/spec/v1\nfile-hash {}\nsize {}\n",
+        "version https://crab.build/spec/v1\nfile-hash {}\nsize {}\n",
         file_hash.to_hex(), total_size
     );
     Ok(pointer.into_bytes())
@@ -1989,7 +1989,7 @@ This rewrites history (changes commit SHAs) but preserves content. Users coordin
 
 Every crab-managed object has a format version:
 
-- Pointers: `version https://crab.dev/spec/v1` — bumped on breaking changes.
+- Pointers: `version https://crab.build/spec/v1` — bumped on breaking changes.
 - `config` object: `version: 1`.
 - Xorb/shard formats: inherited from xet-core’s versioning (currently `1`).
 

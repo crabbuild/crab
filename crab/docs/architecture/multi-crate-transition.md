@@ -2123,9 +2123,9 @@ The first slice establishes the direction:
 - `crab-types` now owns pointer wire parsing/serialization, shared
   `ErrorCategory`, `StorageProviderKind`, `BucketIdentity`, `StorageScope`, RFC
   3339 millisecond timestamp formatting, and `StageHash`. It preserves the
-  current `https://crab.dev/spec/v1` pointer header as a persisted wire-format
-  contract; changing that header to `crab.build` would be a separate data
-  migration, not part of the crate split. The provider kind and normalized
+  current `https://crab.build/spec/v1` pointer header and accepts the shipped
+  `https://crab.dev/spec/v1` header as a legacy persisted wire-format contract.
+  The provider kind and normalized
   bucket identity are shared by URL parsing, storage identity, auth credential
   resolution, import same-bucket checks, and provider-specific storage
   construction. `StorageProviderKind::parse_cloud_alias` owns the shared

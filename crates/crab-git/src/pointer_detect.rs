@@ -4,7 +4,7 @@
 //! by inspecting the version line prefix. Uses a fast path that checks the
 //! first 256 bytes before attempting a full parse.
 
-use crab_types::pointer::Pointer;
+use crab_types::pointer::{Pointer, is_supported_version_line};
 
 use crate::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 
@@ -12,7 +12,6 @@ use crate::lfs_pointer::{LfsPointer, MAX_LFS_POINTER_SIZE};
 const LFS_VERSION_PREFIX: &str = "version https://git-lfs.github.com/spec/v1";
 const LEGACY_GIT_MEDIA_PREFIX: &str = "version http://git-media.io/v/2";
 const LEGACY_HAWSER_PREFIX: &str = "version https://hawser.github.com/spec/v1";
-const CRAB_VERSION_PREFIX: &str = "version https://crab.dev/spec/v1";
 
 /// Result of classifying a blob's pointer format.
 #[derive(Debug)]
@@ -49,7 +48,7 @@ pub fn classify(bytes: &[u8]) -> PointerKind {
             Ok(pointer) => PointerKind::Lfs(pointer),
             Err(_) => PointerKind::NotAPointer,
         }
-    } else if first_line == CRAB_VERSION_PREFIX.as_bytes() {
+    } else if std::str::from_utf8(first_line).is_ok_and(is_supported_version_line) {
         match Pointer::parse(bytes) {
             Ok(pointer) => PointerKind::Crab(pointer),
             Err(_) => PointerKind::NotAPointer,
@@ -113,7 +112,7 @@ mod tests {
     fn classify_crab_pointer() {
         let hash = sample_oid();
         let raw = format!(
-            "version https://crab.dev/spec/v1\nfile-hash {}\nsize 512\n",
+            "version https://crab.build/spec/v1\nfile-hash {}\nsize 512\n",
             hex_encode(&hash),
         );
         match classify(raw.as_bytes()) {
@@ -123,6 +122,16 @@ mod tests {
             }
             other => panic!("expected Crab, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_legacy_crab_pointer() {
+        let raw = format!(
+            "version https://crab.dev/spec/v1\nfile-hash {}\nsize 512\n",
+            sample_oid_hex(),
+        );
+
+        assert!(matches!(classify(raw.as_bytes()), PointerKind::Crab(_)));
     }
 
     #[test]

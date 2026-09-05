@@ -19,6 +19,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     { url: `${SITE_URL}/pricing` },
     { url: `${SITE_URL}/privacy` },
     { url: `${SITE_URL}/remote-services` },
+    { url: `${SITE_URL}/spec/v1` },
     { url: `${SITE_URL}/terms-of-service` },
     { url: `${SITE_URL}/use-cases` },
   ]

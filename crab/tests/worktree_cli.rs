@@ -1033,7 +1033,7 @@ fn crab_add_from_linked_worktree_uses_current_index_and_shared_staging() {
         String::from_utf8_lossy(&linked_blob.stderr)
     );
     let pointer_text = String::from_utf8_lossy(&linked_blob.stdout);
-    assert!(pointer_text.contains("version https://crab.dev/spec/v1"));
+    assert!(pointer_text.contains("version https://crab.build/spec/v1"));
 
     let main_lookup =
         run_git(&repo, ["ls-files", "--error-unmatch", "model.bin"]).expect("main index lookup");
