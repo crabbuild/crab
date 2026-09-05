@@ -1045,12 +1045,15 @@ while the tree and verified file contents remain usable. This local measurement
 is not a production latency guarantee.
 After the generation owner rebuilt the same repository's graph directly from
 its six remote packs, a cold blame of that 39-line file traversed nearly
-59,000 first-parent commits and returned 18 ranges covering all 39 lines in
-44.45 seconds. Every line owner matched native `git blame --first-parent`.
-Batched delta materialization and 1,024-commit graph waves charged 125,525
-logical objects and 108,831 storage requests; the immutable warm result completed
-its read in 51 ms with two storage requests. The unindexed reader reached only
-24,429 logical objects in 103 seconds before cancellation.
+59,000 first-parent commits and returned 18 ranges covering all 39 lines.
+Every line owner matched native `git blame --first-parent`. Two fresh release
+server runtimes using 2,048-commit graph waves completed in 32.12 and 32.70
+seconds, charging 125,471 logical objects and 103,768 storage requests. The
+faster run fetched 164,389,032 bytes and inflated 154,100,268 bytes. An
+8,192-commit experiment reduced requests but fetched 412,666,490 bytes and was
+slower, so it was rejected. The immutable warm result completed its read in
+51 ms with two storage requests. The unindexed reader reached only 24,429
+logical objects in 103 seconds before cancellation.
 Historical file routes also pin full commit IDs. Exact revision validation now
 uses the same complete graph instead of replaying remote ancestry before blame;
 the Kubernetes `5e83b9c` file from the browser returned all 18 ranges in 36.1
