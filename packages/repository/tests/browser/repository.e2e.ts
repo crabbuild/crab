@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectNoAccessibilityViolations } from "./accessibility";
 
 const oid = "a".repeat(40);
 const pathOid = "b".repeat(40);
@@ -369,6 +370,25 @@ test.beforeEach(async ({ page }) => {
       json: { error: { message: "Fixture route unavailable" } },
     });
   });
+});
+
+test("repository views pass automated WCAG A and AA checks", async ({
+  page,
+}) => {
+  for (const theme of ["light", "dark"] as const) {
+    await page.goto("/team/project");
+    await selectTheme(page, theme);
+    for (const location of [
+      "/team/project",
+      `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+      "/team/project?view=issues",
+      "/team/project?view=branches",
+    ]) {
+      await page.goto(location);
+      await page.waitForLoadState("networkidle");
+      await expectNoAccessibilityViolations(page);
+    }
+  }
 });
 
 test("overview groups files with their commit and opens the tree when navigating", async ({

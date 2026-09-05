@@ -1,4 +1,8 @@
 import { expect, test } from "@playwright/test";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 test("Git tokens require a repository and keep secrets tied to that selection", async ({
   page,
@@ -57,6 +61,8 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   });
   await page.goto("/");
   await page.getByText("Git access", { exact: true }).click();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
   await page.getByText("Credential manager setup", { exact: true }).click();
   await expect(page.locator(".credential-setup code")).toHaveText(
     "git config --global 'credential.http://127.0.0.1:5175.useHttpPath' true",
@@ -78,6 +84,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   const token = page.getByLabel("Read token for team/first", { exact: false });
   await expect(token).toHaveValue("fixture-token");
   await expect(token).toHaveAttribute("type", "password");
+  await expectNoAccessibilityViolations(page);
   requestedAccess = "write";
   await page.getByLabel("Access", { exact: true }).selectOption("write");
   await expect(token).toHaveCount(0);

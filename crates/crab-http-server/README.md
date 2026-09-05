@@ -1015,7 +1015,10 @@ Markdown tab navigation, posting from preview, retained drafts after failure,
 preserving focus moved elsewhere during a delayed response, repeated edit
 conflicts, and retrying a failed read of newer content. Header checks
 exercise light/dark themes at 320–1,280 px, including control hit targets and
-Git access panel bounds. They use
+Git access panel bounds. Automated axe checks enforce WCAG 2.0, 2.1 and 2.2
+Level A and AA rules across the repository overview, Markdown files, refs,
+issues, pull requests, labels, Git access and Pierre diff views in both themes.
+They use
 in-memory HTTP fixtures to isolate browser behavior; they do not prove storage
 persistence or replace authenticated RustFS qualification. CI runs them in a
 separate browser job and retains traces/screenshots on failure.
@@ -1028,7 +1031,8 @@ revealed overlapping account/theme controls; the header now wraps account
 actions onto a separate mobile row, with its Git access panel below the header.
 The saved title, comment and reopened state also survived a server restart and
 fresh sign-in. These checks use a local test issuer, not a production identity
-provider, and do not constitute a complete accessibility audit.
+provider. Manual assistive-technology and complete keyboard audits remain
+release work.
 
 When an issue or comment save conflicts, an inline panel loads the saved title
 and raw Markdown while retaining the editable draft. Save remains disabled
@@ -1052,8 +1056,8 @@ qualification exercised sign-in, a repository/file read, logout, and recovery fr
 an invalid callback against a local signed-token test issuer.
 
 Known Vite/esbuild advisories were addressed by updating to Vite 7.3.6 and
-esbuild 0.28.2 within Vite's supported dependency range. The final online npm
-audit endpoint timed out; a fresh successful audit remains part of release proof.
+esbuild 0.28.2 within Vite's supported dependency range. A fresh online npm
+audit reported zero vulnerabilities.
 
 ## Completion requirements
 
@@ -1062,13 +1066,13 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
 | Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state, exact compare links and guarded branch deletion now complement the existing picker and live repository reads |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
-| GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
+| GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; automated WCAG A/AA scans cover major views in both themes; remaining workflows and manual assistive-technology checks need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server binary safely initializes configured empty prefixes with a selected default branch; browser administration and import remain pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
-| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |
+| Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | In progress: unit, type, production-build and 26-flow browser suites include automated WCAG 2.0/2.1/2.2 A/AA scans; manual accessibility, broad production and release proof remain pending |
 
 Keep this matrix truthful as implementation advances. No placeholder navigation,
 mock collaboration data, or green narrow test is evidence of product completion.
