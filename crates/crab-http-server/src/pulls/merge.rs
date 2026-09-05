@@ -61,6 +61,7 @@ fn current_ref(repository: &crab_remote_git::RemoteGitRepository, name: &str) ->
 
 fn map_receive(error: ReceiveError) -> Error {
     match &error {
+        ReceiveError::Archived => Error::Archived,
         ReceiveError::Busy
         | ReceiveError::Coordination(
             crab_coordination::CoordinationError::PushLockHeld { .. }

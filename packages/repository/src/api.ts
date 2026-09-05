@@ -13,6 +13,8 @@ export interface Repository {
   description: string;
   access: "read" | "write";
   can_admin: boolean;
+  archive_version: number;
+  archived: boolean;
   protection_version: number;
   protected_branches: Array<{
     branch: string;

@@ -7,6 +7,8 @@ const repo = {
   description: "",
   access: "read" as const,
   can_admin: false,
+  archive_version: 0,
+  archived: false,
   protection_version: 0,
   protected_branches: [],
 };

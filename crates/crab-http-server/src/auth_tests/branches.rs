@@ -3,6 +3,7 @@ use super::*;
 const ROOT: &str = "/api/repos/team/private/branches";
 const DEFAULT_BRANCH: &str = "/api/repos/team/private/settings/default-branch";
 const PROTECTIONS: &str = "/api/repos/team/private/settings/branch-protections";
+const ARCHIVE_SETTINGS: &str = "/api/repos/team/private/settings/archive";
 
 async fn create_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (StatusCode, Value) {
     let response = h
@@ -69,6 +70,23 @@ async fn set_branch_protections(
     let response = h
         .http
         .put(format!("{}{PROTECTIONS}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
+async fn set_archive(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .put(format!("{}{ARCHIVE_SETTINGS}", h.origin))
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
@@ -241,6 +259,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
             version: 2,
             rules: repo.config.protected_branches.clone(),
         }),
+        lifecycle: RwLock::new(RepositoryLifecycle::active()),
         pinned: Mutex::new(None),
         maintenance: Mutex::new(None),
     };
@@ -449,6 +468,108 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     .await;
     assert_eq!(stale.0, StatusCode::CONFLICT);
     assert_eq!(stale.1["error"]["code"], "branch_changed");
+
+    crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/archive"])
+        .await;
+    std::fs::write(source.path().join("ARCHIVED.md"), "read only\n").unwrap();
+    crate::server::receive_tests::success(source.path(), &["add", "ARCHIVED.md"]).await;
+    crate::server::receive_tests::success(source.path(), &["commit", "-m", "archive boundary"])
+        .await;
+    let archive_commit =
+        crate::server::receive_tests::success(source.path(), &["rev-parse", "HEAD"]).await;
+    let archived = set_archive(
+        &h,
+        &alice,
+        csrf,
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await;
+    assert_eq!(archived.0, StatusCode::OK, "{}", archived.1);
+    assert_eq!(archived.1, json!({"version":1,"archived":true}));
+    let catalog = h.json("/api/repos", &alice).await;
+    assert_eq!(catalog["repositories"][0]["archive_version"], 1);
+    assert_eq!(catalog["repositories"][0]["archived"], true);
+    assert_eq!(
+        crate::repository_settings::load_lifecycle(repo)
+            .await
+            .unwrap(),
+        crate::repository_settings::RepositoryLifecycle {
+            version: 1,
+            archived: true,
+        }
+    );
+    let blocked = create_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"feature/blocked","source_oid":commit}),
+    )
+    .await;
+    assert_eq!(blocked.0, StatusCode::FORBIDDEN);
+    assert_eq!(blocked.1["error"]["code"], "repository_archived");
+    let collaboration = h
+        .http
+        .post(format!("{}/api/repos/team/private/issues", h.origin))
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(collaboration.status(), StatusCode::FORBIDDEN);
+    let collaboration =
+        serde_json::from_slice::<Value>(&collaboration.bytes().await.unwrap()).unwrap();
+    assert_eq!(collaboration["error"]["code"], "repository_archived");
+    let rejected = crate::server::receive_tests::git(
+        source.path(),
+        &["push", git_url.as_str(), "HEAD:feature/archive"],
+    )
+    .await;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("HTTP 403"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        !h.json("/api/repos/team/private/refs", &alice).await["refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let stale_archive = set_archive(
+        &h,
+        &alice,
+        csrf,
+        json!({"expected_version":0,"archived":false,"repository":"team/private"}),
+    )
+    .await;
+    assert_eq!(stale_archive.0, StatusCode::CONFLICT);
+    assert_eq!(stale_archive.1["error"]["code"], "settings_changed");
+    let unarchived = set_archive(
+        &h,
+        &alice,
+        csrf,
+        json!({"expected_version":1,"archived":false,"repository":"team/private"}),
+    )
+    .await;
+    assert_eq!(unarchived.0, StatusCode::OK, "{}", unarchived.1);
+    assert_eq!(unarchived.1, json!({"version":2,"archived":false}));
+    crate::server::receive_tests::success(
+        source.path(),
+        &["push", git_url.as_str(), "HEAD:feature/archive"],
+    )
+    .await;
+    assert_eq!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/heads/feature/archive"]
+        )
+        .await,
+        format!("{archive_commit}\trefs/heads/feature/archive")
+    );
     h.close().await;
 }
 
@@ -468,6 +589,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
         assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
         assert_eq!(invalid.1["error"]["code"], "invalid_request");
     }
+    let invalid_archive = set_archive(
+        &h,
+        &alice,
+        csrf,
+        json!({"expected_version":0,"archived":true,"repository":"private"}),
+    )
+    .await;
+    assert_eq!(invalid_archive.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_archive.1["error"]["code"], "invalid_request");
     for body in [
         json!({"expected_version":0,"rules":[{"branch":"refs/heads/main","required_approvals":0,"required_checks":[]}]}),
         json!({"expected_version":0,"rules":[{"branch":"main","required_approvals":21,"required_checks":[]}]}),
@@ -548,6 +678,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(denied_protection.0, StatusCode::FORBIDDEN);
     assert_eq!(denied_protection.1["error"]["code"], "forbidden");
+    let denied_archive = set_archive(
+        &h,
+        &bob,
+        bob_session["csrf"].as_str().unwrap(),
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await;
+    assert_eq!(denied_archive.0, StatusCode::FORBIDDEN);
+    assert_eq!(denied_archive.1["error"]["code"], "forbidden");
 
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
@@ -588,5 +727,14 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(hidden_protection.0, StatusCode::NOT_FOUND);
     assert_eq!(hidden_protection.1["error"]["code"], "repository_not_found");
+    let hidden_archive = set_archive(
+        &h,
+        &outsider,
+        outsider_session["csrf"].as_str().unwrap(),
+        json!({"expected_version":0,"archived":true,"repository":"team/private"}),
+    )
+    .await;
+    assert_eq!(hidden_archive.0, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_archive.1["error"]["code"], "repository_not_found");
     h.close().await;
 }

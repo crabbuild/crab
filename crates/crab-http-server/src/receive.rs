@@ -34,6 +34,8 @@ pub(crate) enum ReceiveError {
     Forbidden,
     #[error("protected branch requires a pull request")]
     Protected,
+    #[error("repository is archived and read-only")]
+    Archived,
     #[error("Git transfers are busy")]
     Busy,
     #[error("receive cancelled or deadline exceeded")]
@@ -66,8 +68,8 @@ pub(crate) enum ReceiveError {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("receive storage failed")]
     Storage(#[from] crab_storage::StorageError),
-    #[error("branch protection policy failed")]
-    Policy(#[source] Box<crate::app::Error>),
+    #[error("repository settings failed")]
+    Settings(#[source] Box<crate::app::Error>),
     #[error("receive coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("receive publication failed")]
@@ -227,6 +229,10 @@ impl IntoResponse for ReceiveError {
             Self::Protected => (
                 StatusCode::FORBIDDEN,
                 "Protected branch requires a pull request",
+            ),
+            Self::Archived => (
+                StatusCode::FORBIDDEN,
+                "Repository is archived and read-only",
             ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
