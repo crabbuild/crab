@@ -1,0 +1,488 @@
+use std::sync::Arc;
+
+use axum::{
+    Extension, Json, Router,
+    extract::{Path, State, rejection::JsonRejection},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use gix_hash::ObjectId;
+use gix_object::{Kind, WriteTo, bstr::BString, tree};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::{
+    app,
+    auth::{Identity, Principal},
+    receive::{self, ReceiveError},
+    server::Server,
+};
+
+const MAX_PATH_BYTES: usize = 1024;
+const MAX_CONTENT_BYTES: usize = 900 * 1024;
+const MAX_MESSAGE_CHARS: usize = 256;
+
+pub(crate) fn routes() -> Router<Arc<Server>> {
+    Router::new().route(
+        "/api/repos/{owner}/{name}/contents",
+        post(create).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateInput {
+    branch: String,
+    expected_head: String,
+    path_hex: String,
+    content: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct CreateOutput {
+    branch: String,
+    commit: String,
+    path_hex: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("{0}")]
+    Input(&'static str),
+    #[error("Write access is required to create files")]
+    Permission,
+    #[error("The branch changed; reload before committing")]
+    Conflict,
+    #[error("A file or directory already exists at this path")]
+    Exists,
+    #[error("A path component is not a directory")]
+    NotDirectory,
+    #[error("Repository read failed")]
+    Remote(#[from] crab_remote_git::Error),
+    #[error("Git object decoding failed")]
+    Decode(#[from] gix_object::decode::Error),
+    #[error("Git object encoding failed")]
+    Io(#[from] std::io::Error),
+    #[error("Git object hashing failed")]
+    Hash(#[from] gix_hash::hasher::Error),
+    #[error("Repository publication failed")]
+    Receive(#[source] Box<ReceiveError>),
+    #[error("Repository request failed")]
+    App(#[from] app::Error),
+    #[error("Repository service failed")]
+    Service(#[from] crate::Error),
+    #[error("Clock failed")]
+    Clock(#[from] std::time::SystemTimeError),
+    #[error("Invalid request body")]
+    Body(#[from] JsonRejection),
+}
+
+impl From<ReceiveError> for Error {
+    fn from(error: ReceiveError) -> Self {
+        Self::Receive(Box::new(error))
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match &self {
+            Self::Input(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
+            Self::App(app::Error::NotFound) => (
+                StatusCode::NOT_FOUND,
+                "repository_not_found",
+                "Repository not found",
+            ),
+            Self::App(app::Error::Invalid(message)) => {
+                (StatusCode::BAD_REQUEST, "invalid_request", *message)
+            }
+            Self::Permission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to create files",
+            ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Forbidden) => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to create files",
+            ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Protected) => (
+                StatusCode::FORBIDDEN,
+                "protected_branch",
+                "Protected branch requires a pull request",
+            ),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                "conflict",
+                "The branch changed; reload before committing",
+            ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Request(_)) => (
+                StatusCode::CONFLICT,
+                "conflict",
+                "The branch changed; reload before committing",
+            ),
+            Self::Receive(error)
+                if matches!(
+                    error.as_ref(),
+                    ReceiveError::Graph(
+                        crab_git::receive_plan::ReceivePlanError::Stale { .. }
+                            | crab_git::receive_plan::ReceivePlanError::NonFastForward { .. },
+                    ) | ReceiveError::Write(crab_write::WriteError::RefChanged { .. })
+                ) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "conflict",
+                    "The branch changed; reload before committing",
+                )
+            }
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Graph(_)) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_path",
+                "The file path cannot be committed",
+            ),
+            Self::Exists => (
+                StatusCode::CONFLICT,
+                "path_exists",
+                "A file or directory already exists at this path",
+            ),
+            Self::NotDirectory => (
+                StatusCode::CONFLICT,
+                "not_directory",
+                "A path component is not a directory",
+            ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Busy) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "busy",
+                "Git writes are busy; retry shortly",
+            ),
+            _ => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "publication_failed",
+                "The file could not be committed. Reload the repository before retrying",
+            ),
+        };
+        if status.is_server_error() {
+            tracing::error!(error = ?self, "browser file publication failed");
+        }
+        (
+            status,
+            Json(json!({"error":{"code":code,"message":message}})),
+        )
+            .into_response()
+    }
+}
+
+struct BuiltCommit {
+    oid: ObjectId,
+    objects: Vec<(Kind, Vec<u8>)>,
+}
+
+enum BuildOutcome {
+    Created(BuiltCommit),
+    Exists,
+    NotDirectory,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BuildError {
+    #[error("repository read failed")]
+    Remote(#[from] crab_remote_git::Error),
+    #[error("Git object decoding failed")]
+    Decode(#[from] gix_object::decode::Error),
+    #[error("Git object encoding failed")]
+    Io(#[from] std::io::Error),
+    #[error("Git object hashing failed")]
+    Hash(#[from] gix_hash::hasher::Error),
+}
+
+async fn create(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<CreateInput>, JsonRejection>,
+) -> Result<impl IntoResponse, Error> {
+    let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::Permission);
+    }
+    let Json(input) = input?;
+    let path = validate_input(&input)?;
+    let expected = parse_oid(&input.expected_head)?;
+    let actor = app::actor(&principal)?;
+    let cancellation = server.cancellation.child_token();
+    let repository = repo
+        .open_current(&server, server.options, &cancellation)
+        .await?;
+    let current = repository
+        .refs()
+        .entries
+        .iter()
+        .find(|reference| reference.name == input.branch)
+        .map(|reference| reference.target)
+        .ok_or(Error::Conflict)?;
+    if current != expected {
+        return Err(Error::Conflict);
+    }
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::Repository, &cancellation)
+        .await?;
+    let built = build_commit(
+        &repository,
+        &operation,
+        expected,
+        &path,
+        &input,
+        &actor,
+        seconds,
+    )
+    .await;
+    let built = match built {
+        Ok(built) => {
+            operation.finish(Ok(())).await?;
+            built
+        }
+        Err(BuildError::Remote(error)) => {
+            return match operation.finish::<()>(Err(error)).await {
+                Err(error) => Err(Error::Remote(error)),
+                Ok(()) => Err(Error::Remote(crab_remote_git::Error::InternalInvariant {
+                    invariant: "failed repository edit unexpectedly succeeded",
+                })),
+            };
+        }
+        Err(BuildError::Decode(error)) => {
+            operation.finish(Ok(())).await?;
+            return Err(Error::Decode(error));
+        }
+        Err(BuildError::Io(error)) => {
+            operation.finish(Ok(())).await?;
+            return Err(Error::Io(error));
+        }
+        Err(BuildError::Hash(error)) => {
+            operation.finish(Ok(())).await?;
+            return Err(Error::Hash(error));
+        }
+    };
+    let built = match built {
+        BuildOutcome::Created(built) => built,
+        BuildOutcome::Exists => return Err(Error::Exists),
+        BuildOutcome::NotDirectory => return Err(Error::NotDirectory),
+    };
+    receive::publish_objects(
+        Arc::clone(&server),
+        principal,
+        (owner, name),
+        crab_git::receive_plan::RefUpdate {
+            name: input.branch.clone(),
+            old: Some(expected),
+            new: Some(built.oid),
+        },
+        built.objects,
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateOutput {
+            branch: input.branch,
+            commit: built.oid.to_string(),
+            path_hex: input.path_hex.to_ascii_lowercase(),
+        }),
+    ))
+}
+
+fn validate_input(input: &CreateInput) -> Result<crab_remote_git::GitPath, Error> {
+    if !input.branch.starts_with("refs/heads/")
+        || crab_git::validate_push_refname(&input.branch).is_err()
+    {
+        return Err(Error::Input("Select an existing branch"));
+    }
+    if input.path_hex.is_empty()
+        || !input.path_hex.len().is_multiple_of(2)
+        || input.path_hex.len() > MAX_PATH_BYTES * 2
+    {
+        return Err(Error::Input("Enter a valid repository path"));
+    }
+    let bytes = (0..input.path_hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&input.path_hex[index..index + 2], 16))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| Error::Input("Enter a valid repository path"))?;
+    let path = crab_remote_git::GitPath::new(bytes)?;
+    if path.is_root()
+        || path.components().any(|part| {
+            matches!(part, b"." | b"..") || part.eq_ignore_ascii_case(b".git") || part.len() > 255
+        })
+    {
+        return Err(Error::Input("Enter a valid repository path"));
+    }
+    if input.content.len() > MAX_CONTENT_BYTES {
+        return Err(Error::Input("File content must be 900 KiB or smaller"));
+    }
+    let message = input.message.trim();
+    if message.is_empty()
+        || message.chars().count() > MAX_MESSAGE_CHARS
+        || message
+            .chars()
+            .any(|character| character.is_control() && character != '\n')
+    {
+        return Err(Error::Input("Commit message must contain 1–256 characters"));
+    }
+    parse_oid(&input.expected_head)?;
+    Ok(path)
+}
+
+fn parse_oid(value: &str) -> Result<ObjectId, Error> {
+    ObjectId::from_hex(value.as_bytes())
+        .ok()
+        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
+        .ok_or(Error::Input("Expected head must be a full SHA-1 commit ID"))
+}
+
+async fn build_commit(
+    repository: &crab_remote_git::RemoteGitRepository,
+    operation: &crab_remote_git::OperationContext,
+    parent: ObjectId,
+    path: &crab_remote_git::GitPath,
+    input: &CreateInput,
+    actor: &Identity,
+    seconds: u64,
+) -> Result<BuildOutcome, BuildError> {
+    let snapshot = repository
+        .snapshot(&crab_remote_git::Revision::Commit(parent), operation)
+        .await?;
+    match snapshot.entry(path, operation).await {
+        Ok(Some(_)) => return Ok(BuildOutcome::Exists),
+        Ok(None) => {}
+        Err(crab_remote_git::Error::PathComponentNotTree { .. }) => {
+            return Ok(BuildOutcome::NotDirectory);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let mut levels = Vec::new();
+    let components = path.components().collect::<Vec<_>>();
+    let (file_name, directories) =
+        components
+            .split_last()
+            .ok_or(crab_remote_git::Error::InternalInvariant {
+                invariant: "validated file path had no component",
+            })?;
+    let mut current_tree = Some(snapshot.root_tree_oid());
+    for component in directories {
+        let entries = match current_tree {
+            Some(oid) => read_tree(operation, oid).await?,
+            None => Vec::new(),
+        };
+        current_tree = match entries
+            .iter()
+            .find(|entry| entry.filename.as_slice() == *component)
+        {
+            Some(entry) if entry.mode.is_tree() => Some(entry.oid),
+            Some(_) => return Ok(BuildOutcome::NotDirectory),
+            None => None,
+        };
+        levels.push((entries, (*component).to_vec()));
+    }
+    let mut entries = match current_tree {
+        Some(oid) => read_tree(operation, oid).await?,
+        None => Vec::new(),
+    };
+    if entries
+        .iter()
+        .any(|entry| entry.filename.as_slice() == *file_name)
+    {
+        return Ok(BuildOutcome::Exists);
+    }
+    let mut objects = Vec::new();
+    let blob = input.content.as_bytes().to_vec();
+    let blob_oid = object_id(Kind::Blob, &blob)?;
+    objects.push((Kind::Blob, blob));
+    entries.push(tree::Entry {
+        mode: tree::EntryKind::Blob.into(),
+        filename: BString::from((*file_name).to_vec()),
+        oid: blob_oid,
+    });
+    let mut tree_oid = encode_tree(entries, &mut objects)?;
+    for (mut entries, component) in levels.into_iter().rev() {
+        match entries
+            .iter_mut()
+            .find(|entry| entry.filename.as_slice() == component)
+        {
+            Some(entry) => entry.oid = tree_oid,
+            None => entries.push(tree::Entry {
+                mode: tree::EntryKind::Tree.into(),
+                filename: BString::from(component),
+                oid: tree_oid,
+            }),
+        }
+        tree_oid = encode_tree(entries, &mut objects)?;
+    }
+    let commit = commit_bytes(tree_oid, parent, actor, input.message.trim(), seconds);
+    let oid = object_id(Kind::Commit, &commit)?;
+    objects.push((Kind::Commit, commit));
+    Ok(BuildOutcome::Created(BuiltCommit { oid, objects }))
+}
+
+async fn read_tree(
+    operation: &crab_remote_git::OperationContext,
+    oid: ObjectId,
+) -> Result<Vec<tree::Entry>, BuildError> {
+    let object = operation.read_object(oid).await?;
+    if object.kind != Kind::Tree {
+        return Err(crab_remote_git::Error::InternalInvariant {
+            invariant: "commit tree path resolved to a non-tree object",
+        }
+        .into());
+    }
+    gix_object::TreeRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+        .map(gix_object::TreeRef::into_owned)
+        .map(|tree| tree.entries)
+        .map_err(BuildError::from)
+}
+
+fn encode_tree(
+    mut entries: Vec<tree::Entry>,
+    objects: &mut Vec<(Kind, Vec<u8>)>,
+) -> Result<ObjectId, BuildError> {
+    entries.sort();
+    let tree = gix_object::Tree { entries };
+    let mut bytes = Vec::new();
+    tree.write_to(&mut bytes)?;
+    let oid = object_id(Kind::Tree, &bytes)?;
+    objects.push((Kind::Tree, bytes));
+    Ok(oid)
+}
+
+fn object_id(kind: Kind, bytes: &[u8]) -> Result<ObjectId, gix_hash::hasher::Error> {
+    gix_object::compute_hash(gix_hash::Kind::Sha1, kind, bytes)
+}
+
+fn commit_bytes(
+    tree: ObjectId,
+    parent: ObjectId,
+    actor: &Identity,
+    message: &str,
+    seconds: u64,
+) -> Vec<u8> {
+    let name: String = actor
+        .name
+        .chars()
+        .filter(|character| !matches!(character, '<' | '>' | '\n' | '\r' | '\0'))
+        .take(160)
+        .collect();
+    let name = if name.trim().is_empty() {
+        "Crab user"
+    } else {
+        name.trim()
+    };
+    let email_key = blake3::hash(format!("{}\0{}", actor.issuer, actor.subject).as_bytes());
+    format!(
+        "tree {tree}\nparent {parent}\nauthor {name} <{}@users.crab.invalid> {seconds} +0000\ncommitter {name} <{}@users.crab.invalid> {seconds} +0000\n\n{message}\n",
+        email_key.to_hex(),
+        email_key.to_hex(),
+    )
+    .into_bytes()
+}

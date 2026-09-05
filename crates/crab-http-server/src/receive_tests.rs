@@ -279,6 +279,61 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     );
     reader.close().unwrap();
 
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": second,
+                "path_hex": "646f63732f62726f777365722e747874",
+                "content": "created without a checkout\n",
+                "message": "Create browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let third = created["commit"].as_str().unwrap();
+    assert_eq!(created["branch"], format!("refs/heads/{branch}"));
+    let stale = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": second,
+                "path_hex": "7374616c652e747874",
+                "content": "stale\n",
+                "message": "Stale commit"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let reader = tempfile::tempdir().unwrap();
+    success(reader.path(), &["init", "--bare", "."]).await;
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:docs/browser.txt"]).await,
+        "created without a checkout"
+    );
+    reader.close().unwrap();
+
     let repo = &server.repositories[&("team".into(), "repo".into())];
     let remote = repo
         .open_current(&server, server.options, &server.cancellation)
@@ -292,7 +347,7 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         .collect();
     assert_eq!(
         refs,
-        BTreeMap::from([(format!("refs/heads/{branch}"), second.clone())])
+        BTreeMap::from([(format!("refs/heads/{branch}"), third.to_owned())])
     );
     let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
     let mut expected = Vec::new();

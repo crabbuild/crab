@@ -139,6 +139,35 @@ pub(crate) async fn update_existing_ref(
     .map(drop)
 }
 
+pub(super) async fn publish_pack(
+    server: &Server,
+    principal: &Principal,
+    key: &(String, String),
+    directory: tempfile::TempDir,
+    pack: BufReader<std::fs::File>,
+    update: crab_git::receive_plan::RefUpdate,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let request = receive_wire::ReceiveRequest {
+        updates: vec![update],
+        report_status: false,
+    };
+    run_request(
+        server,
+        principal,
+        key,
+        directory,
+        request,
+        ReceiveInput {
+            pack: Some(pack),
+            publication: Publication::NativePush,
+        },
+        cancel,
+    )
+    .await
+    .map(drop)
+}
+
 async fn run_request(
     server: &Server,
     principal: &Principal,

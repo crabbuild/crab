@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     Config, RepositoryConfig, Result, api, assets, assignees,
     auth::{self, Authentication, Principal},
-    checks, git, issues, labels, lfs, maintenance, pulls, receive, statuses,
+    checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, statuses,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -254,6 +254,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
     Router::new()
         .merge(assignees::routes(Arc::clone(&server)))
         .merge(checks::routes(Arc::clone(&server)))
+        .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))
         .merge(labels::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))

@@ -1,6 +1,7 @@
 import { Button, IconButton } from "@primer/react";
 import {
   GitBranchIcon,
+  PlusIcon,
   SearchIcon,
   SidebarExpandIcon,
   TagIcon,
@@ -15,12 +16,14 @@ export function RepositoryRefControls({
   onSelect,
   compact = false,
   onSearch,
+  onCreate,
 }: {
   refs: Refs;
   revision: string;
   onSelect: (name: string) => void;
   compact?: boolean;
   onSearch?: () => void;
+  onCreate?: () => void;
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
@@ -31,6 +34,14 @@ export function RepositoryRefControls({
   return (
     <div className={`ref-controls${compact ? " compact" : ""}`}>
       <RevisionPicker refs={refs} revision={revision} onSelect={onSelect} />
+      {compact && onCreate && (
+        <IconButton
+          icon={PlusIcon}
+          aria-label="Create new file"
+          size="small"
+          onClick={onCreate}
+        />
+      )}
       {compact && onSearch ? (
         <IconButton
           icon={SearchIcon}
