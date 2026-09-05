@@ -15,6 +15,10 @@ const pathHex = (path: string) =>
 
 test.beforeEach(async ({ page }) => {
   let created = false;
+  let deleted = false;
+  let currentHead = oid;
+  let currentReadme = readme;
+  let currentReadmeOid = oid;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session")
@@ -39,24 +43,50 @@ test.beforeEach(async ({ page }) => {
       const body = route.request().postDataJSON() as {
         branch: string;
         expected_head: string;
+        expected_blob?: string;
         path_hex: string;
-        content: string;
+        content?: string;
         message: string;
       };
-      expect(route.request().method()).toBe("POST");
-      expect(body).toEqual({
-        branch: "refs/heads/main",
-        expected_head: oid,
-        path_hex: pathHex("NEW.md"),
-        content: "Created from Crab\n",
-        message: "Create NEW.md",
-      });
-      created = true;
+      const method = route.request().method();
+      if (method === "POST") {
+        expect(body).toEqual({
+          branch: "refs/heads/main",
+          expected_head: oid,
+          path_hex: pathHex("NEW.md"),
+          content: "Created from Crab\n",
+          message: "Create NEW.md",
+        });
+        created = true;
+      } else if (method === "PATCH") {
+        expect(body).toEqual({
+          branch: "refs/heads/main",
+          expected_head: oid,
+          expected_blob: oid,
+          path_hex: pathHex("README.md"),
+          content: "# Edited in Crab\n",
+          message: "Update README",
+        });
+        currentHead = "e".repeat(40);
+        currentReadmeOid = "f".repeat(40);
+        currentReadme = body.content ?? "";
+      } else {
+        expect(method).toBe("DELETE");
+        expect(body).toEqual({
+          branch: "refs/heads/main",
+          expected_head: "e".repeat(40),
+          expected_blob: "f".repeat(40),
+          path_hex: pathHex("README.md"),
+          message: "Delete README",
+        });
+        currentHead = "1".repeat(40);
+        deleted = true;
+      }
       return route.fulfill({
-        status: 201,
+        status: method === "POST" ? 201 : 200,
         json: {
           branch: "refs/heads/main",
-          commit: "e".repeat(40),
+          commit: currentHead,
           path_hex: body.path_hex,
         },
       });
@@ -64,8 +94,8 @@ test.beforeEach(async ({ page }) => {
     if (url.pathname.endsWith("/refs"))
       return route.fulfill({
         json: {
-          head: { name: "refs/heads/main", oid },
-          refs: [{ name: "refs/heads/main", oid }],
+          head: { name: "refs/heads/main", oid: currentHead },
+          refs: [{ name: "refs/heads/main", oid: currentHead }],
           generation: 1,
         },
       });
@@ -120,7 +150,7 @@ test.beforeEach(async ({ page }) => {
             : url.searchParams.get("path_hex")
               ? []
               : [
-                  ["README.md", "Blob"],
+                  ...(!deleted ? [["README.md", "Blob"]] : []),
                   ["src", "Tree"],
                   ...(created ? [["NEW.md", "Blob"]] : []),
                 ]
@@ -138,11 +168,14 @@ test.beforeEach(async ({ page }) => {
     if (url.pathname.endsWith("/file")) {
       const text =
         url.searchParams.get("path_hex") === pathHex("README.md")
-          ? readme
+          ? currentReadme
           : "Hello, team!";
       return route.fulfill({
         json: {
-          oid,
+          oid:
+            url.searchParams.get("path_hex") === pathHex("README.md")
+              ? currentReadmeOid
+              : oid,
           size: text.length,
           mode: "100644",
           classification: "OrdinaryGit",
@@ -393,6 +426,57 @@ test("file-tree create button commits a file and keeps GitHub control spacing", 
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe("Hello, team!");
+});
+
+test("branch file actions edit and delete through reviewable commit pages", async ({
+  context,
+  page,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  const edit = page.getByRole("button", {
+    name: "Edit this file",
+    exact: true,
+  });
+  const remove = page.getByRole("button", {
+    name: "Delete this file",
+    exact: true,
+  });
+  await expect(edit).toBeVisible();
+  await expect(remove).toBeVisible();
+  await expect(edit).toHaveCSS("width", "34px");
+  await expect(remove).toHaveCSS("height", "32px");
+
+  await edit.click();
+  await expect(
+    page.getByRole("heading", { name: "Editing README.md" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("File content")).toBeFocused();
+  await page.getByLabel("File content").fill("# Edited in Crab\n");
+  await page.getByLabel("Commit message").fill("Update README");
+  await page.getByRole("button", { name: "Commit changes" }).click();
+  await page.getByRole("button", { name: "Copy file contents" }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("# Edited in Crab\n");
+
+  await page
+    .getByRole("button", { name: "Delete this file", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Delete README.md" }),
+  ).toBeVisible();
+  await expect(page.locator(".delete-file-summary")).toContainText(
+    "remain available in the repository history",
+  );
+  await page.getByLabel("Commit message").fill("Delete README");
+  await page.getByRole("button", { name: "Commit changes" }).click();
+  await expect(page).toHaveURL("/team/project?rev=refs%2Fheads%2Fmain");
+  await expect(
+    page.getByRole("region", { name: "Folders and files" }),
+  ).not.toContainText("README.md");
 });
 
 test("mobile Code menu stays within the viewport and theme selection persists", async ({

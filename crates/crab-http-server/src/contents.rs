@@ -26,7 +26,10 @@ const MAX_MESSAGE_CHARS: usize = 256;
 pub(crate) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
         "/api/repos/{owner}/{name}/contents",
-        post(create).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
+        post(create)
+            .patch(update)
+            .delete(remove)
+            .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
     )
 }
 
@@ -40,8 +43,92 @@ struct CreateInput {
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateInput {
+    branch: String,
+    expected_head: String,
+    expected_blob: String,
+    path_hex: String,
+    content: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteInput {
+    branch: String,
+    expected_head: String,
+    expected_blob: String,
+    path_hex: String,
+    message: String,
+}
+
+enum ChangeInput {
+    Create(CreateInput),
+    Update(UpdateInput),
+    Delete(DeleteInput),
+}
+
+impl ChangeInput {
+    fn branch(&self) -> &str {
+        match self {
+            Self::Create(input) => &input.branch,
+            Self::Update(input) => &input.branch,
+            Self::Delete(input) => &input.branch,
+        }
+    }
+
+    fn expected_head(&self) -> &str {
+        match self {
+            Self::Create(input) => &input.expected_head,
+            Self::Update(input) => &input.expected_head,
+            Self::Delete(input) => &input.expected_head,
+        }
+    }
+
+    fn expected_blob(&self) -> Option<&str> {
+        match self {
+            Self::Create(_) => None,
+            Self::Update(input) => Some(&input.expected_blob),
+            Self::Delete(input) => Some(&input.expected_blob),
+        }
+    }
+
+    fn path_hex(&self) -> &str {
+        match self {
+            Self::Create(input) => &input.path_hex,
+            Self::Update(input) => &input.path_hex,
+            Self::Delete(input) => &input.path_hex,
+        }
+    }
+
+    fn content(&self) -> Option<&str> {
+        match self {
+            Self::Create(input) => Some(&input.content),
+            Self::Update(input) => Some(&input.content),
+            Self::Delete(_) => None,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Create(input) => &input.message,
+            Self::Update(input) => &input.message,
+            Self::Delete(input) => &input.message,
+        }
+    }
+
+    const fn status(&self) -> StatusCode {
+        match self {
+            Self::Create(_) => StatusCode::CREATED,
+            Self::Update(_) | Self::Delete(_) => StatusCode::OK,
+        }
+    }
+}
+
 #[derive(Serialize)]
-struct CreateOutput {
+struct ChangeOutput {
     branch: String,
     commit: String,
     path_hex: String,
@@ -51,12 +138,20 @@ struct CreateOutput {
 enum Error {
     #[error("{0}")]
     Input(&'static str),
-    #[error("Write access is required to create files")]
+    #[error("Write access is required to change files")]
     Permission,
     #[error("The branch changed; reload before committing")]
     Conflict,
     #[error("A file or directory already exists at this path")]
     Exists,
+    #[error("The file no longer exists")]
+    Missing,
+    #[error("The file changed; reload before committing")]
+    FileChanged,
+    #[error("Only regular files can be changed in the browser")]
+    Unsupported,
+    #[error("The file content is unchanged")]
+    Unchanged,
     #[error("A path component is not a directory")]
     NotDirectory,
     #[error("Repository read failed")]
@@ -100,12 +195,12 @@ impl IntoResponse for Error {
             Self::Permission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to create files",
+                "Write access is required to change files",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Forbidden) => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to create files",
+                "Write access is required to change files",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Protected) => (
                 StatusCode::FORBIDDEN,
@@ -147,6 +242,26 @@ impl IntoResponse for Error {
                 "path_exists",
                 "A file or directory already exists at this path",
             ),
+            Self::Missing => (
+                StatusCode::NOT_FOUND,
+                "path_not_found",
+                "The file no longer exists",
+            ),
+            Self::FileChanged => (
+                StatusCode::CONFLICT,
+                "file_changed",
+                "The file changed; reload before committing",
+            ),
+            Self::Unsupported => (
+                StatusCode::BAD_REQUEST,
+                "unsupported_file",
+                "Only regular files can be changed in the browser",
+            ),
+            Self::Unchanged => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unchanged",
+                "The file content is unchanged",
+            ),
             Self::NotDirectory => (
                 StatusCode::CONFLICT,
                 "not_directory",
@@ -180,8 +295,12 @@ struct BuiltCommit {
 }
 
 enum BuildOutcome {
-    Created(BuiltCommit),
+    Committed(BuiltCommit),
     Exists,
+    Missing,
+    FileChanged,
+    Unsupported,
+    Unchanged,
     NotDirectory,
 }
 
@@ -203,13 +322,46 @@ async fn create(
     Path((owner, name)): Path<(String, String)>,
     input: std::result::Result<Json<CreateInput>, JsonRejection>,
 ) -> Result<impl IntoResponse, Error> {
+    let Json(input) = input?;
+    change(server, principal, owner, name, ChangeInput::Create(input)).await
+}
+
+async fn update(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<UpdateInput>, JsonRejection>,
+) -> Result<impl IntoResponse, Error> {
+    let Json(input) = input?;
+    change(server, principal, owner, name, ChangeInput::Update(input)).await
+}
+
+async fn remove(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<DeleteInput>, JsonRejection>,
+) -> Result<impl IntoResponse, Error> {
+    let Json(input) = input?;
+    change(server, principal, owner, name, ChangeInput::Delete(input)).await
+}
+
+async fn change(
+    server: Arc<Server>,
+    principal: Principal,
+    owner: String,
+    name: String,
+    input: ChangeInput,
+) -> Result<impl IntoResponse, Error> {
     let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     if !principal.can_write(&repo.config) {
         return Err(Error::Permission);
     }
-    let Json(input) = input?;
     let path = validate_input(&input)?;
-    let expected = parse_oid(&input.expected_head)?;
+    let expected = parse_oid(
+        input.expected_head(),
+        "Expected head must be a full SHA-1 commit ID",
+    )?;
     let actor = app::actor(&principal)?;
     let cancellation = server.cancellation.child_token();
     let repository = repo
@@ -219,7 +371,7 @@ async fn create(
         .refs()
         .entries
         .iter()
-        .find(|reference| reference.name == input.branch)
+        .find(|reference| reference.name == input.branch())
         .map(|reference| reference.target)
         .ok_or(Error::Conflict)?;
     if current != expected {
@@ -268,16 +420,21 @@ async fn create(
         }
     };
     let built = match built {
-        BuildOutcome::Created(built) => built,
+        BuildOutcome::Committed(built) => built,
         BuildOutcome::Exists => return Err(Error::Exists),
+        BuildOutcome::Missing => return Err(Error::Missing),
+        BuildOutcome::FileChanged => return Err(Error::FileChanged),
+        BuildOutcome::Unsupported => return Err(Error::Unsupported),
+        BuildOutcome::Unchanged => return Err(Error::Unchanged),
         BuildOutcome::NotDirectory => return Err(Error::NotDirectory),
     };
+    let status = input.status();
     receive::publish_objects(
         Arc::clone(&server),
         principal,
         (owner, name),
         crab_git::receive_plan::RefUpdate {
-            name: input.branch.clone(),
+            name: input.branch().to_owned(),
             old: Some(expected),
             new: Some(built.oid),
         },
@@ -285,30 +442,30 @@ async fn create(
     )
     .await?;
     Ok((
-        StatusCode::CREATED,
-        Json(CreateOutput {
-            branch: input.branch,
+        status,
+        Json(ChangeOutput {
+            branch: input.branch().to_owned(),
             commit: built.oid.to_string(),
-            path_hex: input.path_hex.to_ascii_lowercase(),
+            path_hex: input.path_hex().to_ascii_lowercase(),
         }),
     ))
 }
 
-fn validate_input(input: &CreateInput) -> Result<crab_remote_git::GitPath, Error> {
-    if !input.branch.starts_with("refs/heads/")
-        || crab_git::validate_push_refname(&input.branch).is_err()
+fn validate_input(input: &ChangeInput) -> Result<crab_remote_git::GitPath, Error> {
+    if !input.branch().starts_with("refs/heads/")
+        || crab_git::validate_push_refname(input.branch()).is_err()
     {
         return Err(Error::Input("Select an existing branch"));
     }
-    if input.path_hex.is_empty()
-        || !input.path_hex.len().is_multiple_of(2)
-        || input.path_hex.len() > MAX_PATH_BYTES * 2
+    if input.path_hex().is_empty()
+        || !input.path_hex().len().is_multiple_of(2)
+        || input.path_hex().len() > MAX_PATH_BYTES * 2
     {
         return Err(Error::Input("Enter a valid repository path"));
     }
-    let bytes = (0..input.path_hex.len())
+    let bytes = (0..input.path_hex().len())
         .step_by(2)
-        .map(|index| u8::from_str_radix(&input.path_hex[index..index + 2], 16))
+        .map(|index| u8::from_str_radix(&input.path_hex()[index..index + 2], 16))
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|_| Error::Input("Enter a valid repository path"))?;
     let path = crab_remote_git::GitPath::new(bytes)?;
@@ -319,10 +476,13 @@ fn validate_input(input: &CreateInput) -> Result<crab_remote_git::GitPath, Error
     {
         return Err(Error::Input("Enter a valid repository path"));
     }
-    if input.content.len() > MAX_CONTENT_BYTES {
+    if input
+        .content()
+        .is_some_and(|content| content.len() > MAX_CONTENT_BYTES)
+    {
         return Err(Error::Input("File content must be 900 KiB or smaller"));
     }
-    let message = input.message.trim();
+    let message = input.message().trim();
     if message.is_empty()
         || message.chars().count() > MAX_MESSAGE_CHARS
         || message
@@ -331,15 +491,24 @@ fn validate_input(input: &CreateInput) -> Result<crab_remote_git::GitPath, Error
     {
         return Err(Error::Input("Commit message must contain 1–256 characters"));
     }
-    parse_oid(&input.expected_head)?;
+    parse_oid(
+        input.expected_head(),
+        "Expected head must be a full SHA-1 commit ID",
+    )?;
+    if let Some(expected_blob) = input.expected_blob() {
+        parse_oid(
+            expected_blob,
+            "Expected blob must be a full SHA-1 object ID",
+        )?;
+    }
     Ok(path)
 }
 
-fn parse_oid(value: &str) -> Result<ObjectId, Error> {
+fn parse_oid(value: &str, message: &'static str) -> Result<ObjectId, Error> {
     ObjectId::from_hex(value.as_bytes())
         .ok()
         .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
-        .ok_or(Error::Input("Expected head must be a full SHA-1 commit ID"))
+        .ok_or(Error::Input(message))
 }
 
 async fn build_commit(
@@ -347,20 +516,40 @@ async fn build_commit(
     operation: &crab_remote_git::OperationContext,
     parent: ObjectId,
     path: &crab_remote_git::GitPath,
-    input: &CreateInput,
+    input: &ChangeInput,
     actor: &Identity,
     seconds: u64,
 ) -> Result<BuildOutcome, BuildError> {
     let snapshot = repository
         .snapshot(&crab_remote_git::Revision::Commit(parent), operation)
         .await?;
-    match snapshot.entry(path, operation).await {
-        Ok(Some(_)) => return Ok(BuildOutcome::Exists),
-        Ok(None) => {}
+    let existing = match snapshot.entry(path, operation).await {
+        Ok(entry) => entry,
         Err(crab_remote_git::Error::PathComponentNotTree { .. }) => {
             return Ok(BuildOutcome::NotDirectory);
         }
         Err(error) => return Err(error.into()),
+    };
+    match (input, &existing) {
+        (ChangeInput::Create(_), Some(_)) => return Ok(BuildOutcome::Exists),
+        (ChangeInput::Create(_), None) => {}
+        (ChangeInput::Update(_) | ChangeInput::Delete(_), None) => {
+            return Ok(BuildOutcome::Missing);
+        }
+        (ChangeInput::Update(_) | ChangeInput::Delete(_), Some(entry))
+            if entry.kind != crab_remote_git::EntryKind::Blob =>
+        {
+            return Ok(BuildOutcome::Unsupported);
+        }
+        (ChangeInput::Update(_) | ChangeInput::Delete(_), Some(entry)) => {
+            let expected = ObjectId::from_hex(input.expected_blob().unwrap_or_default().as_bytes())
+                .map_err(|_| crab_remote_git::Error::InternalInvariant {
+                    invariant: "validated browser mutation had an invalid expected blob",
+                })?;
+            if entry.oid != expected {
+                return Ok(BuildOutcome::FileChanged);
+            }
+        }
     }
     let mut levels = Vec::new();
     let components = path.components().collect::<Vec<_>>();
@@ -390,40 +579,85 @@ async fn build_commit(
         Some(oid) => read_tree(operation, oid).await?,
         None => Vec::new(),
     };
-    if entries
-        .iter()
-        .any(|entry| entry.filename.as_slice() == *file_name)
-    {
-        return Ok(BuildOutcome::Exists);
-    }
     let mut objects = Vec::new();
-    let blob = input.content.as_bytes().to_vec();
-    let blob_oid = object_id(Kind::Blob, &blob)?;
-    objects.push((Kind::Blob, blob));
-    entries.push(tree::Entry {
-        mode: tree::EntryKind::Blob.into(),
-        filename: BString::from((*file_name).to_vec()),
-        oid: blob_oid,
-    });
-    let mut tree_oid = encode_tree(entries, &mut objects)?;
-    for (mut entries, component) in levels.into_iter().rev() {
-        match entries
-            .iter_mut()
-            .find(|entry| entry.filename.as_slice() == component)
-        {
-            Some(entry) => entry.oid = tree_oid,
-            None => entries.push(tree::Entry {
+    let position = entries
+        .iter()
+        .position(|entry| entry.filename.as_slice() == *file_name);
+    match input {
+        ChangeInput::Create(input) => {
+            if position.is_some() {
+                return Ok(BuildOutcome::Exists);
+            }
+            let blob = input.content.as_bytes().to_vec();
+            let oid = object_id(Kind::Blob, &blob)?;
+            objects.push((Kind::Blob, blob));
+            entries.push(tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from((*file_name).to_vec()),
+                oid,
+            });
+        }
+        ChangeInput::Update(input) => {
+            let position = position.ok_or(crab_remote_git::Error::InternalInvariant {
+                invariant: "resolved browser edit disappeared from its parent tree",
+            })?;
+            let blob = input.content.as_bytes().to_vec();
+            let oid = object_id(Kind::Blob, &blob)?;
+            if entries[position].oid == oid {
+                return Ok(BuildOutcome::Unchanged);
+            }
+            objects.push((Kind::Blob, blob));
+            entries[position].oid = oid;
+        }
+        ChangeInput::Delete(_) => {
+            let position = position.ok_or(crab_remote_git::Error::InternalInvariant {
+                invariant: "resolved browser deletion disappeared from its parent tree",
+            })?;
+            entries.remove(position);
+        }
+    }
+    let deleting = matches!(input, ChangeInput::Delete(_));
+    let mut tree_oid = if deleting && entries.is_empty() && !levels.is_empty() {
+        None
+    } else {
+        Some(encode_tree(entries, &mut objects)?)
+    };
+    let level_count = levels.len();
+    for (index, (mut entries, component)) in levels.into_iter().rev().enumerate() {
+        let position = entries
+            .iter()
+            .position(|entry| entry.filename.as_slice() == component);
+        match (position, tree_oid) {
+            (Some(position), Some(oid)) => entries[position].oid = oid,
+            (Some(position), None) => {
+                entries.remove(position);
+            }
+            (None, Some(oid)) => entries.push(tree::Entry {
                 mode: tree::EntryKind::Tree.into(),
                 filename: BString::from(component),
-                oid: tree_oid,
+                oid,
             }),
+            (None, None) => {
+                return Err(crab_remote_git::Error::InternalInvariant {
+                    invariant: "deleted browser path had a missing parent tree entry",
+                }
+                .into());
+            }
         }
-        tree_oid = encode_tree(entries, &mut objects)?;
+        let is_root = index + 1 == level_count;
+        tree_oid = if deleting && entries.is_empty() && !is_root {
+            None
+        } else {
+            Some(encode_tree(entries, &mut objects)?)
+        };
     }
-    let commit = commit_bytes(tree_oid, parent, actor, input.message.trim(), seconds);
+    let tree_oid = tree_oid.ok_or(crab_remote_git::Error::InternalInvariant {
+        invariant: "browser mutation did not produce a root tree",
+    })?;
+    let commit = commit_bytes(tree_oid, parent, actor, input.message().trim(), seconds);
     let oid = object_id(Kind::Commit, &commit)?;
     objects.push((Kind::Commit, commit));
-    Ok(BuildOutcome::Created(BuiltCommit { oid, objects }))
+    Ok(BuildOutcome::Committed(BuiltCommit { oid, objects }))
 }
 
 async fn read_tree(

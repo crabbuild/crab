@@ -300,7 +300,7 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     assert_eq!(response.status(), StatusCode::CREATED);
     let created: serde_json::Value =
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-    let third = created["commit"].as_str().unwrap();
+    let third = created["commit"].as_str().unwrap().to_owned();
     assert_eq!(created["branch"], format!("refs/heads/{branch}"));
     let stale = reqwest::Client::new()
         .post(format!(
@@ -321,6 +321,47 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         .await
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let browser_path = "646f63732f62726f777365722e747874";
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={third}&path_hex={browser_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let created_blob = file["oid"].as_str().unwrap();
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": third,
+                "expected_blob": created_blob,
+                "path_hex": browser_path,
+                "content": "edited without a checkout\n",
+                "message": "Edit browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let fourth = edited["commit"].as_str().unwrap().to_owned();
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={fourth}&path_hex={browser_path}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(file["text"], "edited without a checkout\n");
+    let edited_blob = file["oid"].as_str().unwrap();
     let reader = tempfile::tempdir().unwrap();
     success(reader.path(), &["init", "--bare", "."]).await;
     success(
@@ -330,8 +371,63 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     .await;
     assert_eq!(
         success(reader.path(), &["show", "FETCH_HEAD:docs/browser.txt"]).await,
-        "created without a checkout"
+        "edited without a checkout"
     );
+    let stale_file = reqwest::Client::new()
+        .delete(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fourth,
+                "expected_blob": created_blob,
+                "path_hex": browser_path,
+                "message": "Delete stale browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_file.status(), StatusCode::CONFLICT);
+    let response = reqwest::Client::new()
+        .delete(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fourth,
+                "expected_blob": edited_blob,
+                "path_hex": browser_path,
+                "message": "Delete browser file"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let fifth = deleted["commit"].as_str().unwrap().to_owned();
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    for path in ["FETCH_HEAD:docs/browser.txt", "FETCH_HEAD:docs"] {
+        assert!(
+            !git(reader.path(), &["cat-file", "-e", path])
+                .await
+                .status
+                .success(),
+            "deleted browser path remained visible"
+        );
+    }
     reader.close().unwrap();
 
     let repo = &server.repositories[&("team".into(), "repo".into())];
@@ -347,7 +443,7 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         .collect();
     assert_eq!(
         refs,
-        BTreeMap::from([(format!("refs/heads/{branch}"), third.to_owned())])
+        BTreeMap::from([(format!("refs/heads/{branch}"), fifth)])
     );
     let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
     let mut expected = Vec::new();

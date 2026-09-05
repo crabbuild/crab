@@ -2504,6 +2504,12 @@ main {
   flex: 1;
   max-width: 420px;
 }
+.create-file-path.readonly-path {
+  align-items: baseline;
+}
+.create-file-path.readonly-path strong {
+  overflow-wrap: anywhere;
+}
 .create-file-editor {
   border: 1px solid var(--borderColor-default);
   border-top: 0;
@@ -2552,6 +2558,25 @@ main {
   gap: 8px;
   margin-top: 16px;
 }
+.delete-file-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 80px;
+  padding: 16px;
+  border: 1px solid var(--borderColor-danger-emphasis);
+  border-radius: var(--borderRadius-medium);
+  color: var(--fgColor-default);
+  background: var(--bgColor-danger-muted);
+}
+.delete-file-summary > svg {
+  flex: 0 0 auto;
+  color: var(--fgColor-danger);
+}
+.delete-file-summary p {
+  margin: 4px 0 0;
+  color: var(--fgColor-muted);
+}
 .file-panel {
   margin-top: 16px;
 }
@@ -2578,15 +2603,22 @@ main {
   text-decoration: none;
   font-size: 14px;
 }
-.file-actions > a:first-child {
+.file-actions > :first-child {
   border-radius: var(--borderRadius-medium) 0 0 var(--borderRadius-medium);
 }
 .file-actions > :not(:first-child) {
   margin-left: -1px;
+  border-radius: 0;
 }
-.file-actions > a:last-child {
+.file-actions > button {
+  width: 34px;
+  height: 32px;
+}
+.file-actions > a.file-icon-button {
   width: 34px;
   padding: 0;
+}
+.file-actions > :last-child {
   border-radius: 0 var(--borderRadius-medium) var(--borderRadius-medium) 0;
 }
 .file-actions > a:hover {

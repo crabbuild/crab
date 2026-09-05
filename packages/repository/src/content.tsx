@@ -1,9 +1,15 @@
 import { useMemo, useState } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
-import { CopyIcon, DownloadIcon } from "@primer/octicons-react";
+import {
+  CopyIcon,
+  DownloadIcon,
+  PencilIcon,
+  TrashIcon,
+} from "@primer/octicons-react";
 import {
   endpoint,
+  navigate,
   repoHref,
   useRequest,
   type Blame,
@@ -21,6 +27,7 @@ type Props = {
   path: string;
   name: string;
   theme: "light" | "dark";
+  write?: { branch: string };
 };
 const themes = { light: "github-light", dark: "github-dark" } as const;
 
@@ -29,7 +36,7 @@ function formatSize(bytes: number) {
   return `${(bytes / 1024).toFixed(2)} KB`;
 }
 
-export function FileView({ repo, rev, path, name, theme }: Props) {
+export function FileView({ repo, rev, path, name, theme, write }: Props) {
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );
@@ -102,6 +109,43 @@ export function FileView({ repo, rev, path, name, theme }: Props) {
               >
                 <DownloadIcon />
               </a>
+              {write &&
+                content.text !== null &&
+                content.classification === "OrdinaryGit" && (
+                  <IconButton
+                    icon={PencilIcon}
+                    aria-label="Edit this file"
+                    size="small"
+                    onClick={() =>
+                      navigate(
+                        repoHref(repo, {
+                          rev: write.branch,
+                          view: "edit",
+                          path,
+                          kind: "Blob",
+                        }),
+                      )
+                    }
+                  />
+                )}
+              {write && (
+                <IconButton
+                  icon={TrashIcon}
+                  aria-label="Delete this file"
+                  size="small"
+                  variant="danger"
+                  onClick={() =>
+                    navigate(
+                      repoHref(repo, {
+                        rev: write.branch,
+                        view: "delete",
+                        path,
+                        kind: "Blob",
+                      }),
+                    )
+                  }
+                />
+              )}
             </div>
           </div>
           {content.classification !== "OrdinaryGit" && (

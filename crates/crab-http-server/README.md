@@ -96,9 +96,12 @@ Opening a file shows the tree sidebar; Browse files toggles it. Directories appe
 first within each page, and the Code menu provides the Git URL. Request timing
 is expandable. File and directory History follows the exact first-parent path;
 repository-bound signed cursors resume at the next verified parent without
-replaying newer commits. Light and dark themes support desktop and narrow screens.
-Crab/LFS pointer downloads contain the pointer Git blob; artifact hydration is
-not yet part of the HTTP application. Tree search covers loaded directories.
+replaying newer commits. Writers browsing a branch can create, edit, and delete
+regular files through reviewable commit forms. Historical commits and tags remain
+read-only; binary, symlink, and pointer-backed content cannot be edited in the
+browser. Light and dark themes support desktop and narrow screens. Crab/LFS pointer
+downloads contain the pointer Git blob; artifact hydration is not yet part of
+the HTTP application. Tree search covers loaded directories.
 
 `GET /api/repos` returns the configured catalog. Repository reads use
 `GET /api/repos/{owner}/{name}/{action}`, where `action` is `refs`, `commit`,
@@ -107,7 +110,8 @@ accepts only raster blobs whose signatures identify PNG, JPEG, GIF or WebP and
 serves them inline; `blob` remains an exact octet-stream attachment. Parameters:
 
 - `rev`: ref or full commit OID; defaults to HEAD. Responses identify their commit
-  and generation. Browser links pin the selected OID.
+  and generation. Browser links preserve a selected branch and pin historical
+  views to their selected object ID.
 - `path` or `path_hex`: exactly one optional raw Git path. No filesystem
   normalization; hex supports names that are not UTF-8. `commit` returns the
   latest commit that changed a supplied path, and `commits` paginates that path's
@@ -115,6 +119,18 @@ serves them inline; `blob` remains an exact octet-stream attachment. Parameters:
 - `limit` (1–200) and signed `cursor`: directory/history pagination.
 - `base`: optional comparison base; defaults to the first parent. A root commit
   compares against an empty tree.
+
+Browser file commits use `POST`, `PATCH`, and `DELETE` on
+`/api/repos/{owner}/{name}/contents`. Every request names an existing
+`refs/heads/*` branch, its exact `expected_head`, a raw `path_hex`, and a bounded
+commit message. Create and edit include UTF-8 `content`; edit and delete also
+include the exact `expected_blob`. The server rejects stale branch or blob state,
+existing/missing path races, unsupported entry kinds, unchanged edits, invalid
+paths, files larger than 900 KiB, and protected-branch writes. It creates Git
+objects in process and sends the resulting pack through the same quarantine,
+graph validation, ref lock, visibility, and journal publication path used by
+native smart-HTTP pushes. Empty trees created by deletion are pruned. No server
+checkout or local Git object database is created.
 
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
@@ -761,8 +777,8 @@ three exact blobs including a PNG, six changed files' diff inputs, and one line
 of first-parent blame against native Git. The latest mixed first/repeated local
 run measured median tree reads of 11 ms, diffs of 34 ms, and one blame request
 of 1.5 seconds. Caches were not flushed; these measurements are not a production
-latency guarantee. Forty-four Rust server tests, eight frontend navigation,
-model and Markdown tests, and sixteen Chromium tests passed. Identity integration
+latency guarantee. Forty-six Rust server tests, eight frontend navigation,
+model and Markdown tests, and eighteen Chromium tests passed. Identity integration
 tests exercise real HTTP redirects and signed Ed25519 tokens, including key
 rotation, replay, invalid claims, outsider access and logout CSRF rejection, plus
 confidential-client secret-file authentication, Git token scope and revocation.
@@ -780,6 +796,13 @@ and file icons, compact branch/search controls, segmented path breadcrumbs and
 the matching collapsed navigation row. Direct links now load every ancestor
 from object storage, expand the path, select the active file and center it in
 the virtualized tree. The `T` shortcut focuses file search in either pane state.
+The branch file toolbar now follows the supplied GitHub reference with contiguous
+32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
+forms were inspected against the real Kubernetes repository in light desktop and
+dark 390-pixel layouts without horizontal overflow. A fresh isolated RustFS
+qualification created and edited a nested file, rejected stale branch and blob
+state, deleted the file, pruned its empty directory, and verified every visible
+state through an independent protocol-v2 fetch.
 
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue

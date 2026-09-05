@@ -427,6 +427,55 @@ async fn non_members_cannot_trigger_repository_publication() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for (method, body) in [
+        (
+            reqwest::Method::POST,
+            json!({
+                "branch": "refs/heads/main",
+                "expected_head": "1111111111111111111111111111111111111111",
+                "path_hex": "524541444d452e6d64",
+                "content": "created",
+                "message": "Create README"
+            }),
+        ),
+        (
+            reqwest::Method::PATCH,
+            json!({
+                "branch": "refs/heads/main",
+                "expected_head": "1111111111111111111111111111111111111111",
+                "expected_blob": "2222222222222222222222222222222222222222",
+                "path_hex": "524541444d452e6d64",
+                "content": "updated",
+                "message": "Update README"
+            }),
+        ),
+        (
+            reqwest::Method::DELETE,
+            json!({
+                "branch": "refs/heads/main",
+                "expected_head": "1111111111111111111111111111111111111111",
+                "expected_blob": "2222222222222222222222222222222222222222",
+                "path_hex": "524541444d452e6d64",
+                "message": "Delete README"
+            }),
+        ),
+    ] {
+        let response = h
+            .http
+            .request(
+                method.clone(),
+                format!("{}/api/repos/team/private/contents", h.origin),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
+    }
     let repo = &h.server.repositories[&("team".into(), "private".into())];
     crab_metadata::manifest_store::create_manifest(
         &repo.store,
