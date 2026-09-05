@@ -73,8 +73,11 @@ Object checksum/size checks and operation budgets still apply to late cache hits
 parsed indexes are reused only within the caller's source-byte limit.
 Batch scheduling is lazy and its concurrency is the minimum of origin,
 blocking-decode, object-flight, logical-object, storage-request, fetched-byte,
-and inflated-byte limits. Archive traversal produces one entry at a time; its
-pending tree work is bounded by the verified tree-object limit.
+and inflated-byte limits. Batched object reads fetch selected entries and their
+delta dependencies together, then retain verified bases in the bounded object
+cache so later history waves do not repeat the same locator and range reads.
+Archive traversal produces one entry at a time; its pending tree work is bounded
+by the verified tree-object limit.
 Services may keep a bounded cache of cloned immutable repository handles.
 `is_current` detects manifest changes only; observing uncompacted journal commits
 requires reopening after the freshness interval. A changed manifest always

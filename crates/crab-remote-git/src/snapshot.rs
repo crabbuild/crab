@@ -1694,7 +1694,7 @@ async fn blame_parent_commits(
     commit_graph: Option<&CommitGraphIndex>,
     operation: &OperationContext,
 ) -> Result<Vec<Commit>> {
-    const GRAPH_PREFETCH: usize = 512;
+    const GRAPH_PREFETCH: usize = 1_024;
     const RAW_PREFETCH: usize = 16;
 
     if let Some(commit_graph) = commit_graph

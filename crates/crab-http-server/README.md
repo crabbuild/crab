@@ -920,16 +920,17 @@ Exact path history deduplicates unchanged directory trees within each bounded
 commit batch, allowing substantially older paths in large repositories to stay
 within the repository read budget. A cold RustFS-backed Kubernetes lookup for
 `cmd/kubelet/kubelet.go` resolved the same first-parent commit as native Git in
-15.1 seconds while charging 7,742 logical objects; the previous reader exhausted
+11.1 seconds while charging 7,742 logical objects; the previous reader exhausted
 the 10,000-object limit. The 52-pixel commit strip still reports a local failure
 with retry and History controls if a path exceeds another configured limit,
 while the tree and verified file contents remain usable. This local measurement
 is not a production latency guarantee.
 After the generation owner rebuilt the same repository's graph directly from
 its six remote packs, a cold blame of that 39-line file traversed nearly
-59,000 first-parent commits and rendered 18 ranges in 45.8 seconds. It charged
-125,637 logical objects and 121,305 storage requests; the immutable warm result
-returned in 41 ms with eight storage requests. The unindexed reader reached only
+59,000 first-parent commits and returned all 39 line attributions in 46.3 seconds.
+Batched delta materialization and 1,024-commit graph waves charged 125,529
+logical objects and 102,461 storage requests; the immutable warm result returned
+in 36 ms with eight storage requests. The unindexed reader reached only
 24,429 logical objects in 103 seconds before cancellation.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
