@@ -4039,6 +4039,7 @@ async fn blame_unchanged_blob_does_not_spend_comparison_budget() {
     let options = RepositoryOptions::new(
         ObjectLimits::default(),
         OperationLimits {
+            max_logical_objects: 7,
             max_blame_comparison_cells: 1,
             ..OperationLimits::default()
         },

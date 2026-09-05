@@ -191,13 +191,18 @@ cache invalidation path before the browser removes it from the refs page.
 
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
-always opens a fresh snapshot. Reads remain bounded to 30 seconds and 8 MiB per
+always opens a fresh snapshot. Reads remain bounded to two minutes and 8 MiB per
 operation/JSON response; 16 requests may run
 concurrently. `Server-Timing` reports repository open, read, and total handling
 milliseconds. It excludes HTTP transmission; the browser also measures the
 complete fetch/JSON round trip. Cached reads are not cold-storage measurements.
 Ctrl-C cancels requests, drains publication jobs and shuts down the shared runtime.
 On Unix, `SIGTERM` follows the same drain path for containers and service managers.
+
+Deep blame reads use the generation-bound split commit graph. Run
+`crab metadb owner --once` from a configured repository after importing or
+publishing a generation whose commit graph is missing; the command rebuilds the
+derived graph directly from remote packs without a checkout.
 
 `GET /healthz` reports process liveness. `GET /readyz` opens every configured
 repository within one shared ten-second deadline and returns 503 with
@@ -907,6 +912,12 @@ the 10,000-object limit. The 52-pixel commit strip still reports a local failure
 with retry and History controls if a path exceeds another configured limit,
 while the tree and verified file contents remain usable. This local measurement
 is not a production latency guarantee.
+After `crab metadb owner --once` rebuilt the same repository's graph directly
+from its six remote packs, a cold blame of that 39-line file traversed nearly
+59,000 first-parent commits and rendered 18 ranges in 45.8 seconds. It charged
+125,637 logical objects and 121,305 storage requests; the immutable warm result
+returned in 41 ms with eight storage requests. The unindexed reader reached only
+24,429 logical objects in 103 seconds before cancellation.
 The branch file toolbar now follows the supplied GitHub reference with contiguous
 32-pixel raw/copy/download/edit/delete controls. Its create, edit, and delete
 forms were inspected against the real Kubernetes repository in light desktop and
