@@ -125,30 +125,14 @@ pub(crate) async fn initialize_remote_repository_store(
     router: &StoreLayout,
     head: &str,
 ) -> Result<()> {
-    match store.head(&router.layout_descriptor_path()).await {
-        Ok(_) => {
-            crate::core::remote_layout::open(store, router).await?;
-        }
-        Err(CrabError::NotFound { .. }) => {
-            let repo_prefix =
-                object_store::path::Path::from(router.repo_prefix().trim_end_matches('/'));
-            let empty = store
-                .as_storage()
-                .list_prefix_bounded(&repo_prefix, 0)
-                .await
-                .map_err(CrabError::from)?
-                .is_some();
-            if !empty {
-                return Err(CrabError::CorruptObject {
-                    path: router.layout_descriptor_path().to_string(),
-                    reason: "canonical v1 layout descriptor is missing but repository objects already exist; reset this isolated development repository instead of converting it in place".to_owned(),
-                });
-            }
-            crate::core::remote_layout::initialize(store, router).await?;
-        }
-        Err(error) => return Err(error),
-    }
-    ensure_initial_manifest(store, router, head).await
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    crab_write::initialize::initialize_repository(store.as_storage(), &layout, head)
+        .await
+        .map_err(Into::into)
 }
 
 /// Options-driven init implementation.
@@ -816,24 +800,6 @@ pub async fn create_initial_manifest(
     );
 
     Ok(())
-}
-
-async fn ensure_initial_manifest(
-    store: &crate::storage::store::Store,
-    router: &crate::storage::StoreLayout,
-    head: &str,
-) -> Result<()> {
-    // New repositories are the hot path: create-first avoids a discovery GET.
-    // A conflict proves another initializer won, so adopt its manifest.
-    match create_initial_manifest(store, router, head).await {
-        Ok(()) => Ok(()),
-        Err(CrabError::CasConflict { .. }) => {
-            crate::metadata::manifest::read_manifest(store, router)
-                .await
-                .map(|_| ())
-        }
-        Err(error) => Err(error),
-    }
 }
 
 /// Resolve the path to the crab binary for use in git config values.
@@ -1889,10 +1855,10 @@ storage_provider = "azure"
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/my-repo".to_string());
 
-        ensure_initial_manifest(&store, &router, "refs/heads/main")
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
             .expect("first remote initialization should succeed");
-        ensure_initial_manifest(&store, &router, "refs/heads/main")
+        initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
             .expect("repeated remote initialization should adopt the manifest");
 

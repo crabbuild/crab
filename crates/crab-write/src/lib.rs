@@ -1,6 +1,7 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
 pub mod catalog;
 pub mod generation;
+pub mod initialize;
 pub mod journal;
 mod namespace;
 pub use namespace::with_ref_namespace;

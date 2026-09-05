@@ -6,8 +6,8 @@ operator's own object storage. A read-only browser is not the completion bar.
 
 ## Run the current development build
 
-Requires Node 22.12+ for building the React app, Rust, and an existing Crab
-repository. Runtime needs the resulting Rust binary, object-storage credentials,
+Requires Node 22.12+ for building the React app, Rust, and an existing object
+storage bucket. Runtime needs the resulting Rust binary, object-storage credentials,
 and writable temporary space for catalog sidecars and incoming pack preparation. Use the standard
 `TMPDIR` on a suitable volume when the system temporary directory is small or
 read-only. The server does not clone repositories, execute Git, or write a local
@@ -32,6 +32,7 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
+default_branch = "main"
 description = "Our project"
 ```
 
@@ -39,6 +40,22 @@ Configure credentials using Crab's existing S3 environment provider. For local
 RustFS, set `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP=true`, and
 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false`, plus credentials in a private environment
 file. Never put credentials in server configuration or frontend assets.
+
+Initialize every configured repository prefix once with the same binary and
+credentials, then start the server:
+
+```sh
+"$HOME/Workspace/crabbuild-target/crab-main/release/crab-http-server" \
+  --config /path/to/server.toml --initialize
+"$HOME/Workspace/crabbuild-target/crab-main/release/crab-http-server" \
+  --config /path/to/server.toml
+```
+
+Initialization creates the canonical layout descriptor and generation-zero
+manifest with the configured `default_branch`, which defaults to `main`. It is
+safe to repeat and adopts an already initialized repository. If a prefix contains
+objects but no canonical layout descriptor, it fails without converting or
+overwriting that data. The bucket itself must already exist.
 
 Without authentication, the server accepts only loopback listeners. This mode
 trusts the local operator and exposes every configured repository. Team deployments
@@ -73,6 +90,10 @@ docker run --rm --name crab-http-server \
   --mount type=bind,src=/secure/oidc-client-secret,dst=/run/secrets/crab-oidc-client-secret,readonly \
   crab-http-server:local
 ```
+
+Before the first service start, run the same container command once with
+`--config /etc/crab/server.toml --initialize`; keep the configuration and
+credential mounts identical.
 
 The binary's `--healthcheck` mode calls the configured listener's `/readyz`, so
 healthy means every configured repository can be opened from object storage.
@@ -277,6 +298,7 @@ owner = "my-team"
 name = "my-project"
 bucket = "my-git-bucket"
 prefix = "my-project"
+default_branch = "main"
 protected_branches = [
   { branch = "main", required_approvals = 1, required_checks = ["ci/test"] },
 ]
@@ -489,8 +511,9 @@ its observed latency; they are not production or Internet benchmarks.
 
 `POST /git/{owner}/{name}.git/git-receive-pack` accepts exact native Git commits,
 branch/tag creation, fast-forward updates and deletions in one atomic batch.
-Non-fast-forward updates are rejected, including forced refspecs. Existing Crab
-repositories must be initialized before serving them. The local loopback operator
+Non-fast-forward updates are rejected, including forced refspecs. Repository
+prefixes are initialized with the binary's explicit `--initialize` mode before
+the first server start. The local loopback operator
 can push; authenticated team pushes require a repository-scoped write token.
 Read tokens are never upgraded implicitly.
 
@@ -1043,7 +1066,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
 | Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
-| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
+| Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | In progress: the server binary safely initializes configured empty prefixes with a selected default branch; browser administration and import remain pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |
 | Quality gates | API and UI regression suites, accessibility, realistic Kubernetes qualification, security boundaries, CI/package smoke and measured latency | Pending |
 
