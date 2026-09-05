@@ -110,7 +110,10 @@ searchable refs pages; the branch page separates the default branch, identifies
 exact protected branches, copies branch names, links immutable commit tips and
 opens a comparison against the default branch. Writers can delete an unprotected,
 non-default branch after an inline confirmation. The refs pages use the same
-GitHub-derived responsive hierarchy in light and dark themes. The browser also
+GitHub-derived responsive hierarchy in light and dark themes. Appearance
+selection persists across navigation, and buttons switch tokens atomically so
+an animated foreground cannot briefly lose contrast against its new background.
+The browser also
 gives repository administrators a Settings page for changing the default branch
 through the same explicit selection, update and warning-confirmation flow as
 [GitHub](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/changing-the-default-branch).

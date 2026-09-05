@@ -110,7 +110,20 @@ export function App() {
   }, [theme]);
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
   useLayoutEffect(() => {
-    document.documentElement.style.colorScheme = resolved;
+    const root = document.documentElement;
+    root.style.colorScheme = resolved;
+    root.dataset.themeChanging = "";
+    let settledFrame: number | undefined;
+    const paintedFrame = requestAnimationFrame(() => {
+      settledFrame = requestAnimationFrame(() => {
+        delete root.dataset.themeChanging;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(paintedFrame);
+      if (settledFrame !== undefined) cancelAnimationFrame(settledFrame);
+      delete root.dataset.themeChanging;
+    };
   }, [resolved]);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);

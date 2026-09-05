@@ -1,6 +1,9 @@
 * {
   box-sizing: border-box;
 }
+html[data-theme-changing] button {
+  transition: none;
+}
 [data-color-mode="dark"] button[data-variant="primary"]:hover,
 [data-color-mode="dark"] button[data-variant="primary"]:active {
   background-color: var(--bgColor-success-emphasis);
