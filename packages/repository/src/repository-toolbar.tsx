@@ -11,8 +11,10 @@ import {
 import { navigate, repoHref, type Refs, type Repository } from "./api";
 import { CloneMenu } from "./git-access";
 import { RevisionPicker } from "./revision-picker";
+import { Link } from "./ui";
 
 export function RepositoryRefControls({
+  repo,
   refs,
   revision,
   onSelect,
@@ -22,6 +24,7 @@ export function RepositoryRefControls({
   onUploadFiles,
   onCreateBranch,
 }: {
+  repo: Repository;
   refs: Refs;
   revision: string;
   onSelect: (name: string) => void;
@@ -82,13 +85,19 @@ export function RepositoryRefControls({
         />
       ) : (
         <div className="ref-summary">
-          <span className="ref-count muted">
+          <Link
+            className="ref-count muted"
+            href={repoHref(repo, { view: "branches" })}
+          >
             <GitBranchIcon /> {branches}{" "}
             {branches === 1 ? "branch" : "branches"}
-          </span>
-          <span className="ref-count muted">
+          </Link>
+          <Link
+            className="ref-count muted"
+            href={repoHref(repo, { view: "tags" })}
+          >
             <TagIcon /> {tags} {tags === 1 ? "tag" : "tags"}
-          </span>
+          </Link>
         </div>
       )}
     </div>
@@ -126,6 +135,7 @@ export function RepositoryToolbar({
   return (
     <div className="toolbar">
       <RepositoryRefControls
+        repo={repo}
         refs={refs}
         revision={revision}
         onSelect={(name) =>

@@ -77,6 +77,9 @@ const LabelsPage = lazy(() =>
     default: module.LabelsPage,
   })),
 );
+const RefsPage = lazy(() =>
+  import("./refs").then((module) => ({ default: module.RefsPage })),
+);
 type Theme = "light" | "dark" | "auto";
 
 export function App() {
@@ -464,12 +467,28 @@ function RepositoryPage({
         <nav aria-label="Repository">
           <Link
             className={
-              ["code", "create", "upload", "edit", "delete"].includes(view)
+              [
+                "code",
+                "create",
+                "upload",
+                "edit",
+                "delete",
+                "branches",
+                "tags",
+              ].includes(view)
                 ? "active"
                 : ""
             }
             aria-current={
-              ["code", "create", "upload", "edit", "delete"].includes(view)
+              [
+                "code",
+                "create",
+                "upload",
+                "edit",
+                "delete",
+                "branches",
+                "tags",
+              ].includes(view)
                 ? "page"
                 : undefined
             }
@@ -558,7 +577,22 @@ function RepositoryPage({
         ) : (
           <Result state={visibleRefState} showTiming={false}>
             {(data) =>
-              !data.refs.length ? (
+              view === "branches" || view === "tags" ? (
+                <Suspense
+                  fallback={
+                    <div className="notice" role="status">
+                      <Spinner size="small" /> Loading repository refs…
+                    </div>
+                  }
+                >
+                  <RefsPage
+                    key={view}
+                    repo={repo}
+                    refs={data}
+                    type={view === "branches" ? "branches" : "tags"}
+                  />
+                </Suspense>
+              ) : !data.refs.length ? (
                 <div className="notice">
                   <h2>This repository is empty</h2>
                   <p>Push an initial commit with Crab to start browsing.</p>
@@ -691,6 +725,7 @@ function RepositoryPage({
                             </div>
                             <div className="tree-sidebar-controls">
                               <RepositoryRefControls
+                                repo={repo}
                                 refs={data}
                                 revision={revisionLabel(data, revName ?? rev)}
                                 onSelect={(name) =>
