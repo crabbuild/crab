@@ -2897,6 +2897,53 @@ async fn distinct_delta_objects_share_one_cold_base_fetch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn batched_objects_materialize_selected_delta_bases_from_one_range() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let setup = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .expect("setup operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &setup)
+        .await
+        .expect("snapshot");
+    let mut oids = Vec::new();
+    for (path, _) in &fixture.blob_paths {
+        oids.push(
+            snapshot
+                .entry(path, &setup)
+                .await
+                .expect("blob entry")
+                .expect("blob exists")
+                .oid,
+        );
+    }
+    setup.finish(Ok(())).await.expect("finish setup");
+
+    fixture.backend.reset_pack_gets();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .expect("batch operation");
+    let objects = operation.read_objects(&oids).await.expect("batch objects");
+    for (object, (_, expected)) in objects.iter().zip(&fixture.blob_paths) {
+        assert_eq!(object.kind, gix_object::Kind::Blob);
+        assert_eq!(object.data.as_ref(), expected);
+    }
+    operation.finish(Ok(())).await.expect("finish batch");
+    assert_eq!(
+        fixture.backend.pack_gets(),
+        1,
+        "selected delta bases must reuse their coalesced batch range"
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn slow_distinct_reads_never_exceed_origin_admission_bound() {
     let runtime_options = RuntimeOptions {
         max_origin_concurrency: 2,
