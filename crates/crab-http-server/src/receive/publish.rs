@@ -368,7 +368,10 @@ async fn publish(
         ));
     }
     let has_branch = refs.keys().any(|name| name.starts_with("refs/heads/"));
-    let protections = entry.branch_protections().await;
+    let protections = entry
+        .branch_protections()
+        .await
+        .map_err(|error| ReceiveError::Policy(Box::new(error)))?;
     let protected = input.publication == Publication::NativePush
         && request.updates.iter().any(|update| {
             protections.protection(&update.name).is_some() && (update.old.is_some() || has_branch)

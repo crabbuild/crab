@@ -183,7 +183,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         "feature/policy"
     );
     let persisted = crate::repository_settings::load(repo).await.unwrap();
-    assert_eq!(persisted, repo.branch_protections().await);
+    assert_eq!(persisted, repo.branch_protections().await.unwrap());
 
     crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/policy"])
         .await;
@@ -231,6 +231,48 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         .await,
         format!("{policy_commit}\trefs/heads/feature/policy")
     );
+
+    let external = Repository {
+        config: repo.config.clone(),
+        store: repo.store.clone(),
+        layout: repo.layout.clone(),
+        identity: repo.identity.clone(),
+        protections: RwLock::new(BranchProtections {
+            version: 2,
+            rules: repo.config.protected_branches.clone(),
+        }),
+        pinned: Mutex::new(None),
+        maintenance: Mutex::new(None),
+    };
+    let mut external_rules = repo.config.protected_branches.clone();
+    external_rules.push(crate::BranchProtection {
+        branch: "feature/policy".into(),
+        required_approvals: 1,
+        required_checks: vec![],
+    });
+    let external_policy = crate::repository_settings::replace(&external, 2, external_rules)
+        .await
+        .unwrap();
+    assert_eq!(external_policy.version, 3);
+    assert_eq!(repo.protections.read().await.version, 2);
+
+    std::fs::write(source.path().join("POLICY.md"), "changed elsewhere\n").unwrap();
+    crate::server::receive_tests::success(source.path(), &["add", "POLICY.md"]).await;
+    crate::server::receive_tests::success(source.path(), &["commit", "-m", "external policy"])
+        .await;
+    let rejected = crate::server::receive_tests::git(
+        source.path(),
+        &["push", git_url.as_str(), "HEAD:feature/policy"],
+    )
+    .await;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("protected branch requires a pull request")
+    );
+    assert_eq!(repo.protections.read().await.version, 3);
+    let catalog = h.json("/api/repos", &alice).await;
+    assert_eq!(catalog["repositories"][0]["protection_version"], 3);
     crate::server::receive_tests::success(source.path(), &["checkout", "main"]).await;
 
     let changed_default = set_default_branch(

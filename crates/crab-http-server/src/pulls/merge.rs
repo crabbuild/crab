@@ -333,7 +333,7 @@ async fn execute(
     }
     // These reads order merge admission before later status or check-run updates.
     // Once the reservation exists, retries recover that admitted publication.
-    let protections = repo.branch_protections().await;
+    let protections = repo.branch_protections().await?;
     let protection = protections.protection(&pull.base_ref);
     let (statuses, check_runs) = match protection {
         Some(rule) if !rule.required_checks.is_empty() => (

@@ -359,6 +359,10 @@ create, edit, and remove these exact rules under **Settings → Branches**; writ
 use the displayed version so one administrator cannot silently overwrite
 another administrator's update. The hierarchy and action names follow
 [GitHub's classic branch protection flow](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule).
+Catalog reads, native pushes, pull-request views and merge admission reload the
+versioned object, so separately running servers observe completed updates
+without a restart. An operation already admitted can finish under the version
+it read.
 Once a repository has a branch, native Git cannot create, update or delete a
 protected name; an atomic push containing one is rejected in full. The first
 branch can still initialize an empty or tag-only repository. A fast-forward

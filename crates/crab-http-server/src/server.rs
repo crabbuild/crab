@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Config, RepositoryConfig, Result, api, archive, assets, assignees,
+    Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
     branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive,
     repository_settings::{self, BranchProtections},
@@ -39,8 +39,8 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
-    pub(crate) async fn branch_protections(&self) -> BranchProtections {
-        self.protections.read().await.clone()
+    pub(crate) async fn branch_protections(&self) -> app::Result<BranchProtections> {
+        repository_settings::refresh(self).await
     }
 
     pub(crate) async fn invalidate(&self) {
@@ -373,14 +373,14 @@ fn readiness_unavailable() -> Response {
 async fn catalog(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
-) -> Json<serde_json::Value> {
+) -> app::Result<Json<serde_json::Value>> {
     let mut repositories = Vec::new();
     for repository in server
         .repositories
         .values()
         .filter(|repository| principal.can_read(&repository.config))
     {
-        let protections = repository.branch_protections().await;
+        let protections = repository.branch_protections().await?;
         repositories.push(json!({
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
@@ -390,7 +390,7 @@ async fn catalog(
             "protected_branches": protections.rules,
         }));
     }
-    Json(json!({"repositories":repositories}))
+    Ok(Json(json!({"repositories":repositories})))
 }
 
 async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next: Next) -> Response {

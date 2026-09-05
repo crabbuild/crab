@@ -66,6 +66,8 @@ pub(crate) enum ReceiveError {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("receive storage failed")]
     Storage(#[from] crab_storage::StorageError),
+    #[error("branch protection policy failed")]
+    Policy(#[source] Box<crate::app::Error>),
     #[error("receive coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("receive publication failed")]

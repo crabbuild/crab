@@ -44,6 +44,17 @@ pub(crate) async fn load(repo: &Repository) -> Result<BranchProtections> {
     Ok(settings)
 }
 
+pub(crate) async fn refresh(repo: &Repository) -> Result<BranchProtections> {
+    let current = load(repo).await?;
+    let mut effective = repo.protections.write().await;
+    // A load started before a successful local replacement can finish afterward.
+    // Keep that delayed snapshot from rolling policy back to an older version.
+    if current.version >= effective.version && *effective != current {
+        *effective = current.clone();
+    }
+    Ok(effective.clone())
+}
+
 pub(crate) async fn replace(
     repo: &Repository,
     expected_version: u64,
