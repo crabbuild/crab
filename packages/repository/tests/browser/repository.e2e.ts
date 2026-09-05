@@ -14,6 +14,7 @@ const pathHex = (path: string) =>
   ).join("");
 
 test.beforeEach(async ({ page }) => {
+  let created = false;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/session")
@@ -34,6 +35,32 @@ test.beforeEach(async ({ page }) => {
           ],
         },
       });
+    if (url.pathname.endsWith("/contents")) {
+      const body = route.request().postDataJSON() as {
+        branch: string;
+        expected_head: string;
+        path_hex: string;
+        content: string;
+        message: string;
+      };
+      expect(route.request().method()).toBe("POST");
+      expect(body).toEqual({
+        branch: "refs/heads/main",
+        expected_head: oid,
+        path_hex: pathHex("NEW.md"),
+        content: "Created from Crab\n",
+        message: "Create NEW.md",
+      });
+      created = true;
+      return route.fulfill({
+        status: 201,
+        json: {
+          branch: "refs/heads/main",
+          commit: "e".repeat(40),
+          path_hex: body.path_hex,
+        },
+      });
+    }
     if (url.pathname.endsWith("/refs"))
       return route.fulfill({
         json: {
@@ -95,6 +122,7 @@ test.beforeEach(async ({ page }) => {
               : [
                   ["README.md", "Blob"],
                   ["src", "Tree"],
+                  ...(created ? [["NEW.md", "Blob"]] : []),
                 ]
           ).map(([path, kind]) => ({
             path,
@@ -107,19 +135,21 @@ test.beforeEach(async ({ page }) => {
           commit: oid,
         },
       });
-    if (url.pathname.endsWith("/file"))
+    if (url.pathname.endsWith("/file")) {
+      const text =
+        url.searchParams.get("path_hex") === pathHex("README.md")
+          ? readme
+          : "Hello, team!";
       return route.fulfill({
         json: {
           oid,
-          size: readme.length,
+          size: text.length,
           mode: "100644",
           classification: "OrdinaryGit",
-          text:
-            url.searchParams.get("path_hex") === pathHex("README.md")
-              ? readme
-              : "Hello, team!",
+          text,
         },
       });
+    }
     if (url.pathname.endsWith("/issues"))
       return route.fulfill({
         json: {
@@ -327,6 +357,42 @@ test("deep links expand the active path and select its file", async ({
   expect(state.activeRailWidth).toBe("3px");
   expect(state.expanded).toContain("src");
   expect(state.folderIconWidth).toBe("16px");
+});
+
+test("file-tree create button commits a file and keeps GitHub control spacing", async ({
+  context,
+  page,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(`/team/project?path=${pathHex("README.md")}&kind=Blob`);
+  const create = page.getByRole("button", {
+    name: "Create new file",
+    exact: true,
+  });
+  await expect(create).toBeVisible();
+  await expect(create).toHaveCSS("width", "32px");
+  await expect(create).toHaveCSS("height", "32px");
+  await create.click();
+  await expect(
+    page.getByRole("heading", { name: "Create new file" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("File name")).toBeFocused();
+  await page.setViewportSize({ width: 360, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(360);
+  await page.getByLabel("File name").fill("NEW.md");
+  await page.getByLabel("File content").fill("Created from Crab\n");
+  await page.getByLabel("Commit message").fill("Create NEW.md");
+  await page.getByRole("button", { name: "Commit changes" }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`rev=refs%2Fheads%2Fmain.*path=${pathHex("NEW.md")}`),
+  );
+  await expect(page.locator(".breadcrumb")).toContainText("project/NEW.md");
+  await page.getByRole("button", { name: "Copy file contents" }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("Hello, team!");
 });
 
 test("mobile Code menu stays within the viewport and theme selection persists", async ({

@@ -2386,6 +2386,10 @@ main {
   display: flex;
   gap: 8px;
 }
+.ref-controls.compact > button {
+  flex: 0 0 32px;
+  height: 32px;
+}
 .ref-controls.compact .revision-picker-anchor {
   flex: 1;
   width: auto;
@@ -2463,6 +2467,90 @@ main {
 }
 .repo-file-workspace .latest-commit {
   min-height: 52px;
+}
+.create-file {
+  max-width: 1180px;
+  margin: 24px auto 48px;
+  padding: 0 24px;
+}
+.create-file-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.create-file-heading h2,
+.create-file-heading p {
+  margin: 0;
+}
+.create-file-heading p {
+  color: var(--fgColor-muted);
+  font-size: 14px;
+}
+.create-file-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 52px;
+  padding: 8px 16px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium) var(--borderRadius-medium) 0 0;
+  background: var(--bgColor-muted);
+}
+.create-file-path > span {
+  white-space: nowrap;
+}
+.create-file-path > span + span {
+  flex: 1;
+  max-width: 420px;
+}
+.create-file-editor {
+  border: 1px solid var(--borderColor-default);
+  border-top: 0;
+  border-radius: 0 0 var(--borderRadius-medium) var(--borderRadius-medium);
+  overflow: hidden;
+}
+.create-file-editor-tab {
+  width: max-content;
+  margin: 8px 8px 0;
+  padding: 8px 16px;
+  border: 1px solid var(--borderColor-default);
+  border-bottom-color: var(--bgColor-default);
+  border-radius: 6px 6px 0 0;
+  font-weight: 600;
+}
+.create-file-editor textarea {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+  padding: 16px;
+  border: 0;
+  border-top: 1px solid var(--borderColor-default);
+  outline-offset: -2px;
+  resize: vertical;
+  background: var(--bgColor-default);
+  color: var(--fgColor-default);
+  font: 14px/1.5 var(--fontStack-monospace);
+}
+.create-file-commit {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.create-file-commit h3 {
+  margin: 0 0 16px;
+}
+.create-file-commit label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.create-file-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 .file-panel {
   margin-top: 16px;
@@ -2633,5 +2721,24 @@ main {
   }
   .file-metadata {
     white-space: normal;
+  }
+  .create-file {
+    margin: 16px 0 32px;
+    padding: 0 16px;
+  }
+  .create-file-path {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .create-file-path > span + span {
+    width: 100%;
+    max-width: none;
+  }
+  .create-file-editor textarea {
+    min-height: 320px;
+  }
+  .create-file-actions {
+    flex-wrap: wrap;
   }
 }
