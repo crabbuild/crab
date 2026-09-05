@@ -354,6 +354,48 @@ pub(crate) async fn fast_forward(
     old: gix_hash::ObjectId,
     new: gix_hash::ObjectId,
 ) -> Result<()> {
+    publish_ref(
+        server,
+        principal,
+        key,
+        crab_git::receive_plan::RefUpdate {
+            name,
+            old: Some(old),
+            new: Some(new),
+        },
+        publish::Publication::PullRequest,
+    )
+    .await
+}
+
+pub(crate) async fn create_branch(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    name: String,
+    new: gix_hash::ObjectId,
+) -> Result<()> {
+    publish_ref(
+        server,
+        principal,
+        key,
+        crab_git::receive_plan::RefUpdate {
+            name,
+            old: None,
+            new: Some(new),
+        },
+        publish::Publication::NativePush,
+    )
+    .await
+}
+
+async fn publish_ref(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    update: crab_git::receive_plan::RefUpdate,
+    publication: publish::Publication,
+) -> Result<()> {
     let permit = Arc::clone(&server.git_admission)
         .try_acquire_owned()
         .map_err(|_| ReceiveError::Busy)?;
@@ -363,15 +405,12 @@ pub(crate) async fn fast_forward(
     let (send, result) = tokio::sync::oneshot::channel();
     server.receives.spawn(async move {
         let _permit = permit;
-        let work = publish::update_existing_ref(
+        let work = publish::publish_existing_objects(
             &worker_server,
             &principal,
             &key,
-            crab_git::receive_plan::RefUpdate {
-                name,
-                old: Some(old),
-                new: Some(new),
-            },
+            update,
+            publication,
             &worker_cancel,
         );
         tokio::pin!(work);
@@ -383,10 +422,10 @@ pub(crate) async fn fast_forward(
             }
         };
         if let Err(Err(error)) = send.send(completed) {
-            tracing::error!(error = ?error, "disconnected pull request merge failed");
+            tracing::error!(error = ?error, "disconnected ref publication failed");
         }
     });
     result
         .await
-        .map_err(|_| ReceiveError::Request("Merge worker stopped"))?
+        .map_err(|_| ReceiveError::Request("Ref publication worker stopped"))?
 }
