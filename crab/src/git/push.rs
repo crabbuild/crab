@@ -8533,26 +8533,36 @@ impl PushPipeline {
             .as_ref()
             .is_none_or(|value| value.head != manifest.head)
             .then(|| manifest.head.clone());
-        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
-            parents, edits, head, packs, shards,
-        )?;
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
         let committed = match self.config.mirror_plan_id.as_deref() {
             Some(plan_id) => {
-                crate::metadata::manifest::commit_ref_journal_transaction_for_plan(
-                    store,
-                    &self.router,
-                    &transaction,
-                    &expected_heads,
-                    plan_id,
+                crab_write::journal::commit_edits_for_plan(
+                    storage,
+                    &layout,
+                    &current_snapshot,
+                    edits,
+                    head,
+                    packs,
+                    shards,
+                    crab_write::journal::MirrorPlanContext::new(plan_id, &self.cancel),
                 )
                 .await?
             }
             None => {
-                crate::metadata::manifest::commit_ref_journal_transaction(
-                    store,
-                    &self.router,
-                    &transaction,
-                    &expected_heads,
+                crab_write::journal::commit_edits(
+                    storage,
+                    &layout,
+                    &current_snapshot,
+                    edits,
+                    head,
+                    packs,
+                    shards,
+                    &self.cancel,
                 )
                 .await?
             }

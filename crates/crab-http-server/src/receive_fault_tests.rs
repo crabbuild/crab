@@ -194,13 +194,9 @@ async fn receive_faults_rustfs() {
         repo.config.bucket = bucket.clone();
         repo.config.prefix = prefix.clone();
         repo.identity = RepositoryIdentity::new(format!("s3:{bucket}"), prefix, 1).unwrap();
-        crab_metadata::manifest_store::create_manifest(
-            &repo.store,
-            &repo.layout,
-            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .unwrap();
+        crab_write::initialize::initialize_repository(&repo.store, &repo.layout, "refs/heads/main")
+            .await
+            .unwrap();
         exercise(server, fault, &body, &oid).await;
     }
 }

@@ -730,10 +730,16 @@ mod tests {
         let (store, router) = fixture("receipt/commit");
         let plan_id = "1".repeat(64);
         let (transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
-        let committed =
-            commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
-                .await
-                .unwrap();
+        let committed = commit_ref_transaction_for_plan(
+            &store,
+            &router,
+            &transaction,
+            &heads,
+            &plan_id,
+            || false,
+        )
+        .await
+        .unwrap();
 
         let receipt = resolve_plan_receipt(&store, &router, &plan_id)
             .await
@@ -750,9 +756,10 @@ mod tests {
         let plan_id = "2".repeat(64);
         let ref_name = "refs/heads/main";
         let (first, heads) = transaction(&store, &router, ref_name, 'a').await;
-        let committed = commit_ref_transaction_for_plan(&store, &router, &first, &heads, &plan_id)
-            .await
-            .unwrap();
+        let committed =
+            commit_ref_transaction_for_plan(&store, &router, &first, &heads, &plan_id, || false)
+                .await
+                .unwrap();
         store
             .delete(&router.ref_journal_plan_receipt_path(&plan_id))
             .await
@@ -791,10 +798,16 @@ mod tests {
         let plan_id = "d".repeat(64);
         let (mut transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
         transaction.edits[0].visibility_evidence_hash = None;
-        let committed =
-            commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
-                .await
-                .unwrap();
+        let committed = commit_ref_transaction_for_plan(
+            &store,
+            &router,
+            &transaction,
+            &heads,
+            &plan_id,
+            || false,
+        )
+        .await
+        .unwrap();
         store
             .delete(&router.ref_journal_plan_receipt_path(&plan_id))
             .await
@@ -844,7 +857,7 @@ mod tests {
 
         let (mut retry, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
         retry.edits[0].visibility_evidence_hash = Some("b".repeat(64));
-        commit_ref_transaction_for_plan(&store, &router, &retry, &heads, &plan_id)
+        commit_ref_transaction_for_plan(&store, &router, &retry, &heads, &plan_id, || false)
             .await
             .unwrap();
         let receipt = resolve_plan_receipt(&store, &router, &plan_id)
@@ -871,7 +884,7 @@ mod tests {
             .await
             .unwrap();
 
-        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
+        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id, || false)
             .await
             .unwrap();
         store
@@ -894,9 +907,16 @@ mod tests {
         let committed_plan = "4".repeat(64);
         let other_plan = "5".repeat(64);
         let (transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
-        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &committed_plan)
-            .await
-            .unwrap();
+        commit_ref_transaction_for_plan(
+            &store,
+            &router,
+            &transaction,
+            &heads,
+            &committed_plan,
+            || false,
+        )
+        .await
+        .unwrap();
 
         assert!(
             resolve_plan_receipt(&store, &router, &other_plan)
@@ -912,7 +932,7 @@ mod tests {
         let target = StoreLayout::new(store.clone(), "receipt/target".to_owned());
         let plan_id = "6".repeat(64);
         let (transaction, heads) = transaction(&store, &source, "refs/heads/main", 'a').await;
-        commit_ref_transaction_for_plan(&store, &source, &transaction, &heads, &plan_id)
+        commit_ref_transaction_for_plan(&store, &source, &transaction, &heads, &plan_id, || false)
             .await
             .unwrap();
 
@@ -948,7 +968,7 @@ mod tests {
             .await
             .unwrap();
         let (transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
-        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id)
+        commit_ref_transaction_for_plan(&store, &router, &transaction, &heads, &plan_id, || false)
             .await
             .unwrap();
 
@@ -964,7 +984,7 @@ mod tests {
         let (store, router) = fixture("receipt/committed-retry");
         let plan_id = "7".repeat(64);
         let (committed, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
-        commit_ref_transaction_for_plan(&store, &router, &committed, &heads, &plan_id)
+        commit_ref_transaction_for_plan(&store, &router, &committed, &heads, &plan_id, || false)
             .await
             .unwrap();
         store

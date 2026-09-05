@@ -121,15 +121,6 @@ async fn pull_routes_require_membership_and_csrf_before_repository_access() {
 #[tokio::test]
 async fn pull_review_decisions_require_another_member_and_follow_the_exact_head() {
     let h = Harness::new(false).await;
-    let repo = &h.server.repositories[&("team".into(), "private".into())];
-    crab_metadata::manifest_store::create_manifest(
-        &repo.store,
-        &repo.layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
-
     let alice = h.login().await;
     let alice_session = h.json("/api/session", &alice).await;
     let alice_csrf = alice_session["csrf"].as_str().unwrap();

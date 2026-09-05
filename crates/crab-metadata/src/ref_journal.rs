@@ -212,9 +212,9 @@ pub async fn commit_ref_transaction(
     router: &StoreLayout<Store>,
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool + Sync,
 ) -> Result<RefJournalCommitResult> {
-    commit_ref_transaction_inner(store, router, transaction, expected_heads, None).await
+    commit_ref_transaction_inner(store, router, transaction, expected_heads, None, &cancelled).await
 }
 
 /// Commit one transaction with durable attribution to a mirror plan.
@@ -224,8 +224,17 @@ pub async fn commit_ref_transaction_for_plan(
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
     plan_id: &str,
+    cancelled: impl Fn() -> bool + Sync,
 ) -> Result<RefJournalCommitResult> {
-    commit_ref_transaction_inner(store, router, transaction, expected_heads, Some(plan_id)).await
+    commit_ref_transaction_inner(
+        store,
+        router,
+        transaction,
+        expected_heads,
+        Some(plan_id),
+        &cancelled,
+    )
+    .await
 }
 
 async fn commit_ref_transaction_inner(
@@ -234,6 +243,7 @@ async fn commit_ref_transaction_inner(
     transaction: &RefJournalTransaction,
     expected_heads: &[RefJournalHeadSnapshot],
     plan_id: Option<&str>,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<RefJournalCommitResult> {
     validate_transaction(transaction)?;
     validate_expected_heads(transaction, expected_heads)?;
@@ -1262,7 +1272,7 @@ mod tests {
             assert!(materialize(&store, &layout, &base).await.refs.is_empty());
 
             let (retry, heads) = transaction_for(&store, &layout, edits).await;
-            commit_ref_transaction_for_plan(&store, &layout, &retry, &heads, &plan_id)
+            commit_ref_transaction_for_plan(&store, &layout, &retry, &heads, &plan_id, || false)
                 .await
                 .unwrap();
             let snapshot = materialize(&store, &layout, &base).await;

@@ -12,15 +12,18 @@ use tokio_util::sync::CancellationToken;
 
 const TTL: Duration = Duration::from_secs(60);
 
-fn storage() -> (Store, StoreLayout<Store>) {
+async fn storage() -> (Store, StoreLayout<Store>) {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "generation-owner".to_owned());
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+        .await
+        .unwrap();
     (store, layout)
 }
 
 #[tokio::test]
 async fn superseded_sample_never_opens_the_catalog() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let mut captured = Manifest::default_for_repo("refs/heads/main");
     captured.generation = 1;
     captured.pack_index_hash = "b".repeat(64);
@@ -63,7 +66,7 @@ async fn superseded_sample_never_opens_the_catalog() {
 
 #[tokio::test]
 async fn failed_publication_closes_writer_and_releases_lease_before_retry() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let mut manifest = Manifest::default_for_repo("refs/heads/main");
     manifest.generation = 1;
     manifest.pack_index_hash = "b".repeat(64);
@@ -126,7 +129,7 @@ async fn failed_publication_closes_writer_and_releases_lease_before_retry() {
 
 #[tokio::test]
 async fn cancellation_while_waiting_cannot_release_another_catalog_writer() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     manifest_store::create_manifest(&store, &layout, &manifest)
         .await
@@ -171,7 +174,7 @@ async fn generation_advance_after_captured_read_is_reported_as_superseded() {
         atomic::{AtomicBool, Ordering},
         mpsc,
     };
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     let etag = manifest_store::create_manifest_with_etag(&store, &layout, &manifest)
         .await
@@ -238,7 +241,7 @@ async fn generation_advance_after_captured_read_is_reported_as_superseded() {
 
 #[tokio::test]
 async fn empty_generation_is_readable_without_visibility_or_local_git_state() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     manifest_store::create_manifest(&store, &layout, &manifest)
         .await
@@ -276,7 +279,7 @@ async fn empty_generation_is_readable_without_visibility_or_local_git_state() {
 
 #[tokio::test]
 async fn missing_visibility_never_reports_ready_or_rolls_back_a_committed_ref() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     manifest_store::create_manifest(&store, &layout, &manifest)
         .await
@@ -343,7 +346,7 @@ async fn missing_visibility_never_reports_ready_or_rolls_back_a_committed_ref() 
 
 #[tokio::test]
 async fn cancelled_readiness_does_not_open_a_catalog_or_change_metadata() {
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     manifest_store::create_manifest(&store, &layout, &manifest)
         .await
@@ -360,7 +363,7 @@ async fn cancelled_readiness_does_not_open_a_catalog_or_change_metadata() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_journal_during_catalog_admission_requires_another_readiness_pass() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let (store, layout) = storage();
+    let (store, layout) = storage().await;
     let manifest = Manifest::default_for_repo("refs/heads/main");
     manifest_store::create_manifest(&store, &layout, &manifest)
         .await
