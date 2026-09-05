@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine;
+use std::io::Read as _;
 use std::path::Path;
 use std::process::Output;
 
@@ -186,6 +187,36 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     );
     reader.close().unwrap();
     success(path, &["push", "--atomic", &url, branch, "refs/tags/v1"]).await;
+    let archive = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/archive?rev={first}"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(archive.status(), StatusCode::OK);
+    assert_eq!(
+        archive.headers()[reqwest::header::CONTENT_TYPE],
+        "application/zip"
+    );
+    assert_eq!(
+        archive.headers()[reqwest::header::CONTENT_DISPOSITION],
+        format!("attachment; filename=\"repo-{}.zip\"", &first[..7])
+    );
+    assert_eq!(archive.headers()["x-crab-commit"], first);
+    let archive = archive.bytes().await.unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
+    assert!(
+        archive
+            .by_name(&format!("repo-{}/", &first[..7]))
+            .unwrap()
+            .is_dir()
+    );
+    let mut readme = String::new();
+    archive
+        .by_name(&format!("repo-{}/README.md", &first[..7]))
+        .unwrap()
+        .read_to_string(&mut readme)
+        .unwrap();
+    assert_eq!(readme, "first content\n");
     std::fs::write(path.join("README.md"), "second content\n").unwrap();
     success(path, &["commit", "-am", "second commit"]).await;
     let second = success(path, &["rev-parse", "HEAD"]).await;

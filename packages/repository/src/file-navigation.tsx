@@ -88,6 +88,7 @@ export function FileNavigation({
   repo,
   refs,
   revision,
+  archiveRevision,
   rev,
   path,
   view,
@@ -97,6 +98,7 @@ export function FileNavigation({
   repo: Repository;
   refs: Refs;
   revision: string;
+  archiveRevision: string;
   rev: string;
   path: string;
   view: string;
@@ -126,6 +128,7 @@ export function FileNavigation({
       </button>
       <CloneMenu
         repo={repo}
+        revision={archiveRevision}
         compact
         icon={KebabHorizontalIcon}
         label="Repository actions"

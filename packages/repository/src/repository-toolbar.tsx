@@ -115,6 +115,7 @@ export function RepositoryToolbar({
   repo,
   refs,
   revision,
+  archiveRevision,
   view,
   path,
   kind,
@@ -125,6 +126,7 @@ export function RepositoryToolbar({
   repo: Repository;
   refs: Refs;
   revision: string;
+  archiveRevision: string;
   view: string;
   path?: string;
   kind?: string;
@@ -154,7 +156,9 @@ export function RepositoryToolbar({
           </Button>
         )}
         <Button onClick={onRefresh}>Refresh</Button>
-        {view === "code" && <CloneMenu repo={repo} />}
+        {view === "code" && (
+          <CloneMenu repo={repo} revision={archiveRevision} />
+        )}
       </div>
     </div>
   );

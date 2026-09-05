@@ -712,6 +712,7 @@ function RepositoryPage({
                           repo={repo}
                           refs={data}
                           revision={revisionLabel(data, revName ?? rev)}
+                          archiveRevision={rev}
                           view={view}
                           path={path || undefined}
                           kind={path ? kind : undefined}
@@ -734,6 +735,7 @@ function RepositoryPage({
                           repo={repo}
                           refs={data}
                           revision={revisionLabel(data, revName ?? rev)}
+                          archiveRevision={rev}
                           view={view}
                           onRefresh={refs.retry}
                           onCreateBranch={
@@ -841,6 +843,7 @@ function RepositoryPage({
                                 repo={repo}
                                 refs={data}
                                 revision={revisionLabel(data, revName ?? rev)}
+                                archiveRevision={rev}
                                 view={view}
                                 onRefresh={refs.retry}
                                 onCreateBranch={
@@ -855,6 +858,7 @@ function RepositoryPage({
                                 repo={repo}
                                 refs={data}
                                 revision={revisionLabel(data, revName ?? rev)}
+                                archiveRevision={rev}
                                 rev={branch?.name ?? rev}
                                 path={path}
                                 view={view}

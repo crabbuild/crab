@@ -109,7 +109,9 @@ Opening a file shows the tree sidebar; Browse files toggles it. Directories appe
 before files, with both groups naturally sorted by ascending filename in the tree
 and directory table. A directory click selects and expands it while its children
 load, and content loading keeps the tree's selection and expansion in place. The
-Code menu provides the Git URL. Request timing is expandable. File and directory
+Code menu provides the Git URL and a Download ZIP action pinned to the selected
+commit. ZIP files stream from bounded remote tree and blob reads without a clone,
+checkout or local Git object database. Request timing is expandable. File and directory
 History follows the exact first-parent path;
 repository-bound signed cursors resume at the next verified parent without
 replaying newer commits. Writers browsing a branch can create, edit, and delete
@@ -144,6 +146,12 @@ attachment. Parameters:
 - `base`: optional comparison base for changes, diffs and commit history. Changes
   and diffs default to the first parent, while commit history with a base returns
   the all-parent `rev − base` set. A root commit compares against an empty tree.
+
+`GET /api/repos/{owner}/{name}/archive?rev=<revision>` streams a ZIP of the
+selected commit. It uses a separate ten-minute transfer budget while retaining
+the repository's archive entry and uncompressed-byte limits, and caps encoded
+responses at 3 GiB. Disconnecting the response cancels the remote traversal and
+releases transfer capacity.
 
 Browser file commits use `POST`, `PATCH`, and `DELETE` on
 `/api/repos/{owner}/{name}/contents`. Every request names an existing
@@ -388,6 +396,10 @@ measurements without cache flushing, not throughput or production guarantees.
 The qualification client creates its own clone; the HTTP server reads the bucket
 from an empty working directory. HTTP responses end with flush and HTTP EOF;
 unlike the stdio helper, they must not send a response-end (`0002`) packet.
+The same RustFS repository began a pinned Kubernetes ZIP response in 106 ms and
+streamed 4.06 MB in five seconds before a deliberate disconnect. The disconnect
+cancelled the remote operation and left readiness healthy. A separate fresh-prefix
+push parsed the complete ZIP and matched its `README.md` bytes exactly.
 
 Git fetch can gzip buffered requests or send an empty authentication probe followed by
 a chunked request when a batch exceeds its HTTP buffer. Both forms are supported.

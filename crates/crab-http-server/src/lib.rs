@@ -2,6 +2,7 @@
 mod api;
 mod app;
 mod app_storage;
+mod archive;
 mod assets;
 mod assignees;
 mod auth;

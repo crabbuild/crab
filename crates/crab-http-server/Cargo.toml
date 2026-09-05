@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
@@ -38,6 +39,7 @@ tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
