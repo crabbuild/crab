@@ -93,16 +93,21 @@ relative file links stay inside the selected repository revision, and relative i
 with PNG, JPEG, GIF or WebP names load through a signature-checked inline endpoint.
 SVG, other local formats and external images remain links so repository content
 cannot become same-origin active content or make signed-in browsers contact third-party hosts.
+Markdown file views switch between highlighted source, rendered preview and blame;
+the preview uses the same repository-relative link and safe image rules as README rendering.
 Opening a file shows the tree sidebar; Browse files toggles it. Directories appear
-first within each page. A directory click selects and expands it while its children
+before files, with both groups naturally sorted by ascending filename in the tree
+and directory table. A directory click selects and expands it while its children
 load, and content loading keeps the tree's selection and expansion in place. The
 Code menu provides the Git URL. Request timing is expandable. File and directory
 History follows the exact first-parent path;
 repository-bound signed cursors resume at the next verified parent without
 replaying newer commits. Writers browsing a branch can create, edit, and delete
-regular files through reviewable commit forms. Historical commits and tags remain
-read-only; binary, symlink, and pointer-backed content cannot be edited in the
-browser. Light and dark themes support desktop and narrow screens. Crab/LFS pointer
+regular files through reviewable commit forms, or upload as many as 100 text or
+binary files in one atomic commit. Historical commits and tags remain read-only;
+binary, symlink, and pointer-backed content cannot be edited in the browser.
+The appearance menu marks and persists System, Light or Dark selection across
+desktop and narrow screens. Crab/LFS pointer
 downloads contain the pointer Git blob; artifact hydration is not yet part of
 the HTTP application. Go to file performs bounded fuzzy search across the full
 pinned repository tree without reading blob bodies; `T` opens and focuses it.
@@ -140,6 +145,14 @@ objects in process and sends the resulting pack through the same quarantine,
 graph validation, ref lock, visibility, and journal publication path used by
 native smart-HTTP pushes. Empty trees created by deletion are pruned. No server
 checkout or local Git object database is created.
+
+Browser uploads use `POST /api/repos/{owner}/{name}/uploads` with the same branch,
+exact-head, commit-message, authorization, CSRF and protected-branch contracts.
+The request carries 1–100 raw `path_hex` and base64-content pairs. Each file is
+limited to 900 KiB and the batch to 4 MiB. The server rejects duplicate or
+overlapping paths and existing entries before publishing one commit, so a failed
+file leaves the entire batch unpublished. Binary bytes survive unchanged and the
+resulting objects use the canonical native-push publication path.
 
 Browser branch creation uses `POST /api/repos/{owner}/{name}/branches` with a
 short `name` and the full SHA-1 `source_oid` currently shown in the browser. The
@@ -800,7 +813,7 @@ latency guarantee. An uncached Go-to-file search for `kubelet.go` traversed
 6,100 tree objects in 2.22 seconds, transferred 1.42 MB from RustFS, and returned
 the first 50 ranked paths without reading blob bodies. Keyboard selection opened
 `cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-nine Rust server
-tests, eight frontend navigation, model and Markdown tests, and twenty-one Chromium
+tests, nine frontend navigation, model and Markdown tests, and twenty-three Chromium
 tests passed. An authenticated branch integration creates a browser branch from
 an existing commit, reads the exact new ref through both the repository API and
 native `git ls-remote`, and rejects duplicate publication atomically. A signed-in
@@ -837,6 +850,16 @@ dark 390-pixel layouts without horizontal overflow. A fresh isolated RustFS
 qualification created and edited a nested file, rejected stale branch and blob
 state, deleted the file, pruned its empty directory, and verified every visible
 state through an independent protocol-v2 fetch.
+The file tree also uses a 32-pixel Add file menu for create and multi-file upload.
+Integration proof uploads text and binary blobs in one commit, fetches their exact
+bytes through native Git, and rejects an existing-path batch without advancing the
+branch. Browser regression covers the drag/file picker, binary-safe request,
+natural folders-first ordering, rendered Markdown preview and persisted theme menu.
+A live Kubernetes/RustFS run committed a Markdown file and six-byte binary in one
+upload request in 771 ms. The signed-in browser immediately showed the new commit,
+kept the selected branch while opening the file and rendered its Markdown preview;
+a separate blob read matched the binary byte for byte. This local shared-cache
+measurement is not a production latency guarantee.
 
 The Issues list was compared at 1,440 by 1,100 pixels with GitHub's current
 public Crab and Kubernetes issue views. Crab now follows the observed issue

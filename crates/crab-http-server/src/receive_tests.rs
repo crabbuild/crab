@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine;
 use std::path::Path;
 use std::process::Output;
 
@@ -447,6 +448,81 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
             "deleted browser path remained visible"
         );
     }
+
+    let binary = [0_u8, 255, 10, 0, 128, 1, 2];
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": fifth,
+                "files": [
+                    {
+                        "path_hex": "6173736574732f7261772e62696e",
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(binary)
+                    },
+                    {
+                        "path_hex": "646f63732f75706c6f61642e747874",
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode("uploaded without a checkout\n")
+                    }
+                ],
+                "message": "Upload browser files"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let uploaded: serde_json::Value =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let sixth = uploaded["commit"].as_str().unwrap().to_owned();
+    assert_eq!(uploaded["paths_hex"].as_array().unwrap().len(), 2);
+    success(
+        reader.path(),
+        &["-c", "protocol.version=2", "fetch", &url, branch],
+    )
+    .await;
+    let raw = git(reader.path(), &["show", "FETCH_HEAD:assets/raw.bin"]).await;
+    assert!(raw.status.success());
+    assert_eq!(raw.stdout, binary);
+    assert_eq!(
+        success(reader.path(), &["show", "FETCH_HEAD:docs/upload.txt"]).await,
+        "uploaded without a checkout"
+    );
+
+    let collision = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": format!("refs/heads/{branch}"),
+                "expected_head": sixth,
+                "files": [
+                    {"path_hex": "524541444d452e6d64", "content_base64": "Y29sbGlkZQ=="},
+                    {"path_hex": "61746f6d69632e747874", "content_base64": "bmV2ZXI="}
+                ],
+                "message": "Reject an atomic collision"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(collision.status(), StatusCode::CONFLICT);
+    let advertised = success(path, &["ls-remote", &url, branch]).await;
+    assert_eq!(advertised, format!("{sixth}\trefs/heads/{branch}"));
+    assert!(
+        !git(reader.path(), &["cat-file", "-e", "FETCH_HEAD:atomic.txt"])
+            .await
+            .status
+            .success()
+    );
     reader.close().unwrap();
 
     let repo = &server.repositories[&("team".into(), "repo".into())];
@@ -462,7 +538,7 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         .collect();
     assert_eq!(
         refs,
-        BTreeMap::from([(format!("refs/heads/{branch}"), fifth)])
+        BTreeMap::from([(format!("refs/heads/{branch}"), sixth)])
     );
     let listing = success(path, &["rev-list", "--objects", "HEAD"]).await;
     let mut expected = Vec::new();

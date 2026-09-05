@@ -12,6 +12,7 @@ import {
   type Repository,
   type SearchResults,
 } from "./api";
+import { compareFileItems } from "./entry-sort";
 
 type SearchState = {
   query: string;
@@ -68,6 +69,13 @@ export function RepositoryTree({
     icons: { set: "minimal", colored: false },
     renaming: false,
     dragAndDrop: false,
+    sort: (left, right) =>
+      compareFileItems(
+        left.basename,
+        left.isDirectory,
+        right.basename,
+        right.isDirectory,
+      ),
     // Pierre exposes one leading icon slot for directories. GitHub uses both a
     // disclosure chevron and a folder, so its supported CSS escape hatch adds it.
     unsafeCSS: `
