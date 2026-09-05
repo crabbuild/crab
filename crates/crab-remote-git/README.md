@@ -125,7 +125,9 @@ stable ordinals, parent closure, corrected generations, and the exact manifest
 generation/pack/digest tuple. A snapshot uses it only while each positional
 parent list exactly matches the corresponding raw commit; missing or corrupt
 acceleration falls back to raw parent order and can never hide a reachable
-commit.
+commit. First-parent path cursors carry the next verified raw parent, so later
+pages do not replay newer commits. A matching complete graph groups bounded raw
+commit and tree reads for range coalescing without becoming the history authority.
 
 Each operation emits one structured span with only its bounded operation kind,
 process-local correlation ID, outcome, and safe error category. Raw OIDs,

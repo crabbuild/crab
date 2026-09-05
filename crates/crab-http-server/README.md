@@ -94,9 +94,9 @@ SVG, other local formats and external images remain links so repository content
 cannot become same-origin active content or make signed-in browsers contact third-party hosts.
 Opening a file shows the tree sidebar; Browse files toggles it. Directories appear
 first within each page, and the Code menu provides the Git URL. Request timing
-is expandable. File and directory History follows the exact first-parent path
-with repository-bound signed pagination. Light and dark themes support desktop
-and narrow screens.
+is expandable. File and directory History follows the exact first-parent path;
+repository-bound signed cursors resume at the next verified parent without
+replaying newer commits. Light and dark themes support desktop and narrow screens.
 Crab/LFS pointer downloads contain the pointer Git blob; artifact hydration is
 not yet part of the HTTP application. Tree search covers loaded directories.
 

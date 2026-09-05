@@ -669,6 +669,36 @@ impl OperationContext {
         Ok(commit.as_ref().clone())
     }
 
+    pub(crate) async fn read_commits(&self, oids: &[gix_hash::ObjectId]) -> Result<Vec<Commit>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let objects = self.read_objects_uncharged(oids).await?;
+        let mut commits = Vec::new();
+        commits
+            .try_reserve_exact(objects.len())
+            .map_err(|source| Error::Allocation {
+                requested: objects.len().saturating_mul(std::mem::size_of::<Commit>()),
+                source,
+            })?;
+        for object in objects {
+            let source_bytes = object.data.len() as u64;
+            let commit = Arc::new(parse_commit(&object)?);
+            let key = crate::runtime::ObjectCacheKey::new(
+                &self.state.identity,
+                self.state.generation,
+                commit.oid,
+            );
+            self.state
+                .runtime
+                .insert_commit(key, Arc::clone(&commit), source_bytes)
+                .await;
+            commits.push(commit.as_ref().clone());
+        }
+        Ok(commits)
+    }
+
     pub(crate) async fn parse_tag_object(&self, object: &GitObject) -> Result<AnnotatedTag> {
         let key = crate::runtime::ObjectCacheKey::new(
             &self.state.identity,
@@ -719,6 +749,49 @@ impl OperationContext {
             .charge(BudgetDimension::Entries, comparisons)
             .await?;
         Ok(entry)
+    }
+
+    pub(crate) async fn read_tree_entries(
+        &self,
+        oids: &[gix_hash::ObjectId],
+        parent: &GitPath,
+        name: &[u8],
+    ) -> Result<Vec<Option<TreeEntry>>> {
+        check_cancelled(&self.cancellation)?;
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, oids.len() as u64)
+            .await?;
+        let objects = self.read_objects_uncharged(oids).await?;
+        let mut found = Vec::new();
+        found
+            .try_reserve_exact(objects.len())
+            .map_err(|source| Error::Allocation {
+                requested: objects
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<TreeEntry>>()),
+                source,
+            })?;
+        let mut comparisons = 0u64;
+        for object in objects {
+            let source_bytes = object.data.len() as u64;
+            let tree = Arc::new(parse_tree_raw(&object)?);
+            let key = crate::runtime::ObjectCacheKey::new(
+                &self.state.identity,
+                self.state.generation,
+                object.oid,
+            );
+            self.state
+                .runtime
+                .insert_tree(key, Arc::clone(&tree), source_bytes)
+                .await;
+            let (entry, entry_comparisons) = find_tree_entry(&tree, parent, name)?;
+            comparisons = comparisons.saturating_add(entry_comparisons);
+            found.push(entry);
+        }
+        self.budget
+            .charge(BudgetDimension::Entries, comparisons)
+            .await?;
+        Ok(found)
     }
 
     async fn read_raw_tree(&self, oid: gix_hash::ObjectId) -> Result<Arc<Vec<RawTreeEntry>>> {
