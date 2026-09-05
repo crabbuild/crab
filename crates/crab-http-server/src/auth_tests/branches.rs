@@ -19,6 +19,23 @@ async fn create_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (S
     (status, body)
 }
 
+async fn delete_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (StatusCode, Value) {
+    let response = h
+        .http
+        .delete(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    (status, body)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     let h = Harness::new(false).await;
@@ -155,6 +172,51 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     .await;
     assert_eq!(duplicate.0, StatusCode::CONFLICT);
     assert_eq!(duplicate.1["error"]["code"], "branch_exists");
+
+    let protected = delete_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"main","expected_oid":commit}),
+    )
+    .await;
+    assert_eq!(protected.0, StatusCode::FORBIDDEN);
+    assert_eq!(protected.1["error"]["code"], "protected_branch");
+    let deleted = delete_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"feature/browser","expected_oid":commit}),
+    )
+    .await;
+    assert_eq!(deleted.0, StatusCode::OK, "{}", deleted.1);
+    assert_eq!(deleted.1["branch"], "refs/heads/feature/browser");
+    assert_eq!(deleted.1["deleted_oid"], commit);
+    let refs = h.json("/api/repos/team/private/refs", &alice).await;
+    assert!(
+        !refs["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| { reference["name"] == "refs/heads/feature/browser" })
+    );
+    assert!(
+        crate::server::receive_tests::success(
+            source.path(),
+            &["ls-remote", git_url.as_str(), "refs/heads/feature/browser"]
+        )
+        .await
+        .is_empty()
+    );
+    let stale = delete_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"feature/browser","expected_oid":commit}),
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    assert_eq!(stale.1["error"]["code"], "branch_changed");
     h.close().await;
 }
 
@@ -177,6 +239,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     let incomplete = create_branch(&h, &alice, csrf, json!({})).await;
     assert_eq!(incomplete.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(incomplete.1["error"]["code"], "invalid_request");
+    let invalid_delete = delete_branch(
+        &h,
+        &alice,
+        csrf,
+        json!({"name":"refs/heads/other","expected_oid":&commit}),
+    )
+    .await;
+    assert_eq!(invalid_delete.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_delete.1["error"]["code"], "invalid_request");
     let rejected_csrf = h
         .http
         .post(format!("{}{ROOT}", h.origin))
@@ -200,6 +271,15 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(denied.0, StatusCode::FORBIDDEN);
     assert_eq!(denied.1["error"]["code"], "forbidden");
+    let denied_delete = delete_branch(
+        &h,
+        &bob,
+        bob_session["csrf"].as_str().unwrap(),
+        json!({"name":"other","expected_oid":&commit}),
+    )
+    .await;
+    assert_eq!(denied_delete.0, StatusCode::FORBIDDEN);
+    assert_eq!(denied_delete.1["error"]["code"], "forbidden");
 
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
@@ -213,5 +293,14 @@ async fn branch_creation_rejects_invalid_inputs_and_unauthorized_members() {
     .await;
     assert_eq!(hidden.0, StatusCode::NOT_FOUND);
     assert_eq!(hidden.1["error"]["code"], "repository_not_found");
+    let hidden_delete = delete_branch(
+        &h,
+        &outsider,
+        outsider_session["csrf"].as_str().unwrap(),
+        json!({"name":"other","expected_oid":&commit}),
+    )
+    .await;
+    assert_eq!(hidden_delete.0, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_delete.1["error"]["code"], "repository_not_found");
     h.close().await;
 }

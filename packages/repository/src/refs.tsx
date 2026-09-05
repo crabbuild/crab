@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { IconButton, Label, TextInput } from "@primer/react";
+import { Button, IconButton, Label, TextInput } from "@primer/react";
 import {
   CopyIcon,
   GitBranchIcon,
   GitCompareIcon,
   SearchIcon,
   TagIcon,
+  TrashIcon,
 } from "@primer/octicons-react";
 import { repoHref, type Ref, type Refs, type Repository } from "./api";
 import { Link, short } from "./ui";
@@ -26,6 +27,7 @@ function RefRow({
   protectedBranch,
   canCompare,
   base,
+  onDelete,
 }: {
   repo: Repository;
   ref: Ref;
@@ -33,8 +35,12 @@ function RefRow({
   protectedBranch: boolean;
   canCompare: boolean;
   base?: string;
+  onDelete?: () => Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string>();
   const name = refName(ref);
   return (
     <li>
@@ -66,20 +72,80 @@ function RefRow({
         {defaultBranch && <Label>default</Label>}
         {protectedBranch && <Label variant="accent">protected</Label>}
       </div>
-      {canCompare ? (
-        <Link
-          className="button-link ref-compare"
-          href={repoHref(repo, {
-            view: "pulls",
-            pull: "new",
-            base,
-            head: ref.name,
-          })}
-        >
-          <GitCompareIcon /> Compare
-        </Link>
-      ) : (
-        <span />
+      <div className="ref-actions">
+        {canCompare && (
+          <Link
+            className="button-link ref-compare"
+            href={repoHref(repo, {
+              view: "pulls",
+              pull: "new",
+              base,
+              head: ref.name,
+            })}
+          >
+            <GitCompareIcon /> Compare
+          </Link>
+        )}
+        {onDelete && (
+          <IconButton
+            icon={TrashIcon}
+            aria-label={`Delete ${name}`}
+            title={`Delete ${name}`}
+            size="small"
+            variant="danger"
+            onClick={() => {
+              setError(undefined);
+              setConfirming(true);
+            }}
+          />
+        )}
+      </div>
+      {confirming && (
+        <div className="ref-delete-confirm">
+          <div>
+            <strong>Delete {name}?</strong>
+            <span>This removes the branch ref. Its commits remain.</span>
+            {error && (
+              <span className="ref-delete-error" role="alert">
+                {error}
+              </span>
+            )}
+          </div>
+          <div>
+            <Button
+              size="small"
+              disabled={deleting}
+              onClick={() => {
+                setConfirming(false);
+                setError(undefined);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="small"
+              variant="danger"
+              disabled={deleting}
+              onClick={async () => {
+                if (!onDelete) return;
+                setDeleting(true);
+                setError(undefined);
+                try {
+                  await onDelete();
+                } catch (failure) {
+                  setError(
+                    failure instanceof Error
+                      ? failure.message
+                      : "The branch could not be deleted",
+                  );
+                  setDeleting(false);
+                }
+              }}
+            >
+              {deleting ? "Deleting…" : "Delete branch"}
+            </Button>
+          </div>
+        </div>
       )}
     </li>
   );
@@ -89,10 +155,12 @@ export function RefsPage({
   repo,
   refs,
   type,
+  onDeleteBranch,
 }: {
   repo: Repository;
   refs: Refs;
   type: "branches" | "tags";
+  onDeleteBranch?: (name: string, oid: string) => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -149,6 +217,7 @@ export function RefsPage({
           kind="branch"
           defaultName={refs.head?.name}
           protectedNames={protectedNames}
+          onDeleteBranch={onDeleteBranch}
         />
       )}
       <RefGroup
@@ -158,6 +227,7 @@ export function RefsPage({
         kind={type === "branches" ? "branch" : "tag"}
         defaultName={refs.head?.name}
         protectedNames={protectedNames}
+        onDeleteBranch={onDeleteBranch}
         empty={
           normalizedQuery
             ? `No ${type} match “${query.trim()}”.`
@@ -177,6 +247,7 @@ function RefGroup({
   kind,
   defaultName,
   protectedNames,
+  onDeleteBranch,
   empty,
 }: {
   title: string;
@@ -185,6 +256,7 @@ function RefGroup({
   kind: "branch" | "tag";
   defaultName?: string;
   protectedNames: Set<string>;
+  onDeleteBranch?: (name: string, oid: string) => Promise<void>;
   empty?: string;
 }) {
   return (
@@ -201,7 +273,7 @@ function RefGroup({
             <span>{kind === "branch" ? "Branch" : "Tag"}</span>
             <span>{kind === "branch" ? "Commit" : "Target"}</span>
             {kind === "branch" && <span>Status</span>}
-            {kind === "branch" && <span>Compare</span>}
+            {kind === "branch" && <span>Actions</span>}
           </div>
           <ol className="ref-list">
             {refs.map((ref) => (
@@ -218,6 +290,14 @@ function RefGroup({
                   ref.name !== defaultName
                 }
                 base={defaultName}
+                onDelete={
+                  kind === "branch" &&
+                  ref.name !== defaultName &&
+                  !protectedNames.has(ref.name) &&
+                  onDeleteBranch
+                    ? () => onDeleteBranch(ref.name, ref.oid)
+                    : undefined
+                }
               />
             ))}
           </ol>

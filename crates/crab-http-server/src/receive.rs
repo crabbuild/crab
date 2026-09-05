@@ -434,6 +434,27 @@ pub(crate) async fn create_branch(
     .await
 }
 
+pub(crate) async fn delete_branch(
+    server: Arc<Server>,
+    principal: Principal,
+    key: (String, String),
+    name: String,
+    old: gix_hash::ObjectId,
+) -> Result<()> {
+    publish_ref(
+        server,
+        principal,
+        key,
+        crab_git::receive_plan::RefUpdate {
+            name,
+            old: Some(old),
+            new: None,
+        },
+        publish::Publication::NativePush,
+    )
+    .await
+}
+
 async fn publish_ref(
     server: Arc<Server>,
     principal: Principal,

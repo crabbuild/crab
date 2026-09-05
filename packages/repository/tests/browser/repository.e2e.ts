@@ -1016,7 +1016,37 @@ test("revision picker filters branches and tags and restores keyboard focus", as
 test("branch and tag pages follow the GitHub refs hierarchy", async ({
   page,
 }) => {
+  let alphaDeleted = false;
+  let deleteAttempts = 0;
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route(
+    (url) => url.pathname === "/api/repos",
+    (route) =>
+      route.fulfill({
+        json: {
+          repositories: [
+            {
+              owner: "team",
+              name: "project",
+              description: "A repository for our team.",
+              access: "write",
+              protected_branches: [
+                {
+                  branch: "main",
+                  required_approvals: 1,
+                  required_checks: [],
+                },
+                {
+                  branch: "feature/docs",
+                  required_approvals: 1,
+                  required_checks: [],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+  );
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/refs",
     (route) =>
@@ -1027,7 +1057,9 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
           refs: [
             { name: "refs/heads/main", oid },
             { name: "refs/heads/feature/docs", oid: "c".repeat(40) },
-            { name: "refs/heads/alpha", oid: "b".repeat(40) },
+            ...(!alphaDeleted
+              ? [{ name: "refs/heads/alpha", oid: "b".repeat(40) }]
+              : []),
             {
               name: "refs/tags/v1.0",
               oid: "d".repeat(40),
@@ -1037,6 +1069,35 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
           generation: 1,
         },
       }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/branches",
+    (route) => {
+      expect(route.request().method()).toBe("DELETE");
+      expect(route.request().postDataJSON()).toEqual({
+        name: "alpha",
+        expected_oid: "b".repeat(40),
+      });
+      deleteAttempts += 1;
+      if (deleteAttempts === 1)
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "branch_changed",
+              message:
+                "The branch changed or was already deleted; reload before retrying",
+            },
+          },
+        });
+      alphaDeleted = true;
+      return route.fulfill({
+        json: {
+          branch: "refs/heads/alpha",
+          deleted_oid: "b".repeat(40),
+        },
+      });
+    },
   );
   await page.goto("/team/project?scenario=protected");
   await page.getByRole("link", { name: "3 branches", exact: true }).click();
@@ -1066,6 +1127,24 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
     "href",
     "/team/project?view=pulls&pull=new&base=refs%2Fheads%2Fmain&head=refs%2Fheads%2Falpha",
   );
+  await expect(
+    defaultGroup.getByRole("button", { name: /^Delete / }),
+  ).toHaveCount(0);
+  await expect(
+    branches.getByRole("button", { name: "Delete feature/docs" }),
+  ).toHaveCount(0);
+  await branches.getByRole("button", { name: "Delete alpha" }).click();
+  await expect(branches.getByText("Delete alpha?")).toBeVisible();
+  await branches.getByRole("button", { name: "Cancel" }).click();
+  await expect(branches.getByText("Delete alpha?")).toHaveCount(0);
+  await branches.getByRole("button", { name: "Delete alpha" }).click();
+  await branches.getByRole("button", { name: "Delete branch" }).click();
+  await expect(branches.getByRole("alert")).toHaveText(
+    "The branch changed or was already deleted; reload before retrying",
+  );
+  await branches.getByRole("button", { name: "Delete branch" }).click();
+  await expect(branches.getByRole("link", { name: "alpha" })).toHaveCount(0);
+  expect(deleteAttempts).toBe(2);
 
   await page.getByRole("textbox", { name: "Search branches" }).fill("DOCS");
   await expect(page.locator(".ref-name-cell > a")).toHaveText(["feature/docs"]);

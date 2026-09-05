@@ -2312,7 +2312,7 @@ main {
 .ref-table-header,
 .ref-list > li {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 100px minmax(140px, auto) 112px;
+  grid-template-columns: minmax(220px, 1fr) 100px minmax(140px, auto) 148px;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -2346,7 +2346,8 @@ main {
 }
 .ref-name-cell,
 .ref-labels,
-.ref-compare {
+.ref-compare,
+.ref-actions {
   display: flex;
   min-width: 0;
   align-items: center;
@@ -2372,6 +2373,30 @@ main {
 .ref-compare {
   justify-content: center;
   white-space: nowrap;
+}
+.ref-actions {
+  justify-content: flex-end;
+}
+.ref-delete-confirm {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.ref-delete-confirm > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ref-delete-confirm span {
+  color: var(--fgColor-muted);
+  font-size: 12px;
+}
+.ref-delete-confirm .ref-delete-error {
+  color: var(--fgColor-danger);
 }
 .ref-empty {
   min-height: 88px;
@@ -3159,5 +3184,13 @@ main {
   .ref-list .ref-commit,
   .ref-list .ref-labels {
     display: none;
+  }
+  .ref-delete-confirm {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .ref-delete-confirm > div:first-child {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

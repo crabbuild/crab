@@ -23,7 +23,9 @@ const MAX_BRANCH_BYTES: usize = 255;
 pub(crate) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
         "/api/repos/{owner}/{name}/branches",
-        post(create).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        post(create)
+            .delete(remove)
+            .layer(axum::extract::DefaultBodyLimit::max(2048)),
     )
 }
 
@@ -40,12 +42,31 @@ struct CreateOutput {
     commit: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteInput {
+    name: String,
+    expected_oid: String,
+}
+
+#[derive(Serialize)]
+struct DeleteOutput {
+    branch: String,
+    deleted_oid: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("{0}")]
     Input(&'static str),
-    #[error("Write access is required to create branches")]
+    #[error("Write access is required to manage branches")]
     Permission,
+    #[error("Protected branches cannot be changed in the browser")]
+    Protected,
+    #[error("The default branch cannot be deleted")]
+    DefaultBranch,
+    #[error("The branch changed or was already deleted")]
+    Changed,
     #[error("Repository request failed")]
     App(#[from] app::Error),
     #[error("Repository publication failed")]
@@ -75,12 +96,27 @@ impl IntoResponse for Error {
             Self::Body(_) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_request",
-                "Enter a branch name and source commit",
+                "Enter a branch name and commit ID",
             ),
             Self::Permission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to create branches",
+                "Write access is required to manage branches",
+            ),
+            Self::Protected => (
+                StatusCode::FORBIDDEN,
+                "protected_branch",
+                "Protected branches cannot be changed in the browser",
+            ),
+            Self::DefaultBranch => (
+                StatusCode::FORBIDDEN,
+                "default_branch",
+                "The default branch cannot be deleted",
+            ),
+            Self::Changed => (
+                StatusCode::CONFLICT,
+                "branch_changed",
+                "The branch changed or was already deleted; reload before retrying",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Forbidden) => (
                 StatusCode::FORBIDDEN,
@@ -90,7 +126,7 @@ impl IntoResponse for Error {
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Protected) => (
                 StatusCode::FORBIDDEN,
                 "protected_branch",
-                "This protected branch cannot be created in the browser",
+                "Protected branches cannot be changed in the browser",
             ),
             Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Busy) => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -184,6 +220,50 @@ async fn create(
             commit: source.to_string(),
         }),
     ))
+}
+
+async fn remove(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name)): Path<(String, String)>,
+    input: std::result::Result<Json<DeleteInput>, JsonRejection>,
+) -> Result<impl IntoResponse, Error> {
+    let Json(input) = input?;
+    let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    if !principal.can_write(&repository.config) {
+        return Err(Error::Permission);
+    }
+    let branch = branch_ref(&input.name).map_err(Error::Input)?;
+    let expected = ObjectId::from_hex(input.expected_oid.as_bytes())
+        .ok()
+        .filter(|oid| oid.kind() == gix_hash::Kind::Sha1 && !oid.is_null())
+        .ok_or(Error::Input("Expected tip must be a full SHA-1 commit ID"))?;
+    match receive::delete_branch(
+        Arc::clone(&server),
+        principal,
+        (owner, name),
+        branch.clone(),
+        expected,
+    )
+    .await
+    {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(DeleteOutput {
+                branch,
+                deleted_oid: expected.to_string(),
+            }),
+        )),
+        Err(ReceiveError::Protected) => Err(Error::Protected),
+        Err(ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Ref { .. })) => {
+            Err(Error::DefaultBranch)
+        }
+        Err(
+            ReceiveError::Graph(crab_git::receive_plan::ReceivePlanError::Stale { .. })
+            | ReceiveError::Write(crab_write::WriteError::RefChanged { .. }),
+        ) => Err(Error::Changed),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn branch_ref(name: &str) -> Result<String, &'static str> {
