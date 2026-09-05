@@ -165,6 +165,11 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert!(tag_only["head"].is_null());
     assert_eq!(tag_only["unborn_head"], "refs/heads/main");
+    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let (manifest, _) = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
+        .await
+        .unwrap();
+    assert!(manifest.commit_graph_hash.is_some());
     let reader = tempfile::tempdir().unwrap();
     success(
         reader.path(),

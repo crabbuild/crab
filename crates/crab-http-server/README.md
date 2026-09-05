@@ -199,10 +199,10 @@ complete fetch/JSON round trip. Cached reads are not cold-storage measurements.
 Ctrl-C cancels requests, drains publication jobs and shuts down the shared runtime.
 On Unix, `SIGTERM` follows the same drain path for containers and service managers.
 
-Deep blame reads use the generation-bound split commit graph. Run
-`crab metadb owner --once` from a configured repository after importing or
-publishing a generation whose commit graph is missing; the command rebuilds the
-derived graph directly from remote packs without a checkout.
+Deep blame reads use the generation-bound split commit graph. When a readable
+generation is missing that derived index, the server builds it from bounded,
+batched remote commit reads and attaches it before retrying the request. This
+does not download packs, create a checkout or require a separate CLI owner run.
 
 `GET /healthz` reports process liveness. `GET /readyz` opens every configured
 repository within one shared ten-second deadline and returns 503 with
@@ -220,9 +220,10 @@ When a read finds committed refs awaiting indexing, the server runs the shared
 read-readiness pass under the generation-owner lease and global/repository GC
 writer fences, then retries the read. Requests for one repository share that
 job; at most two repositories publish concurrently per server. A disconnected
-request leaves the job owned by the server. Its 60-second cooperative budget
-includes admission wait; cleanup can extend beyond that budget. This work is
-included in `Server-Timing`'s open duration, separately from the read budget.
+request leaves the job owned by the server. Its three-minute cooperative budget
+includes admission wait, catalog publication and commit-graph maintenance;
+cleanup can extend beyond that budget. This work is included in `Server-Timing`'s
+open duration, separately from the read budget.
 
 The service account therefore needs conditional writes and deletes for repository
 metadata, the locator database, visibility and journal/lock lifecycle, plus the
@@ -912,8 +913,8 @@ the 10,000-object limit. The 52-pixel commit strip still reports a local failure
 with retry and History controls if a path exceeds another configured limit,
 while the tree and verified file contents remain usable. This local measurement
 is not a production latency guarantee.
-After `crab metadb owner --once` rebuilt the same repository's graph directly
-from its six remote packs, a cold blame of that 39-line file traversed nearly
+After the generation owner rebuilt the same repository's graph directly from
+its six remote packs, a cold blame of that 39-line file traversed nearly
 59,000 first-parent commits and rendered 18 ranges in 45.8 seconds. It charged
 125,637 logical objects and 121,305 storage requests; the immutable warm result
 returned in 41 ms with eight storage requests. The unindexed reader reached only

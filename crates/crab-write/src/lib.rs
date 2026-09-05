@@ -20,6 +20,8 @@ pub enum WriteError {
     Storage(#[from] crab_storage::StorageError),
     #[error("publication metadata operation failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("remote Git publication read failed")]
+    RemoteGit(#[from] crab_remote_git::Error),
     #[error("Git pack evidence is invalid")]
     Git(#[from] crab_git::pack::PackError),
     #[error("publication file I/O failed")]

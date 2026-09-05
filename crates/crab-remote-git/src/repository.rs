@@ -595,6 +595,12 @@ impl RemoteGitRepository {
         self.state.generation
     }
 
+    /// Return whether this handle loaded a complete graph for its pinned generation.
+    #[must_use]
+    pub fn commit_graph_available(&self) -> bool {
+        self.state.commit_graph.is_some()
+    }
+
     pub(crate) fn git_validation_digest(&self) -> &str {
         &self.state.git_validation_digest
     }

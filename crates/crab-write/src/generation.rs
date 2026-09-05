@@ -1,5 +1,9 @@
 //! Lifecycle for generation-bound catalog publication.
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use crab_coordination::{
     CoordinationError, GIT_OBJECT_LOCATOR_RESOURCE, PushLock, PushLockAcquireContext,
@@ -11,6 +15,14 @@ use crab_metadata::{
     },
     manifest_store,
     manifests::{Manifest, PackManifestEntry},
+    split_commit_graph::{
+        CommitGraphInput, SplitCommitGraph, append_split_commit_graph, load_split_commit_graph,
+        upload_split_commit_graph,
+    },
+};
+use crab_remote_git::{
+    OperationContext, OperationKind, RemoteGitObject, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
@@ -18,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{Result, WriteError, catalog::publish_inventory};
+
+const COMMIT_GRAPH_BATCH_SIZE: usize = 512;
 
 /// Complete the read path for already committed refs using their verified visibility evidence.
 ///
@@ -71,6 +85,250 @@ pub async fn make_readable(
         });
     }
     Ok(Some(manifest))
+}
+
+/// Build and attach a complete commit graph for a still-current readable generation.
+///
+/// The caller owns generation-owner election and GC writer fences. Commit objects
+/// are read from the remote catalog without materializing packs or a checkout.
+/// Returns false when the captured generation was superseded before publication.
+pub async fn maintain_commit_graph(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    identity: &RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    check_cancelled(cancel)?;
+    if manifest.refs.is_empty() || manifest.commit_graph_hash.is_some() {
+        return Ok(true);
+    }
+    let base = load_previous_commit_graph(
+        store,
+        layout,
+        manifest,
+        options.object_limits().max_commit_graph_bytes,
+    )
+    .await?;
+    let roots = commit_graph_roots(manifest)?;
+    let repository = RemoteGitRepository::open(
+        store.clone(),
+        layout.clone(),
+        identity.clone(),
+        runtime,
+        options,
+        cancel,
+    )
+    .await?;
+    if repository.generation() != manifest.generation {
+        return Ok(false);
+    }
+    let operation = repository.operation(OperationKind::History, cancel).await?;
+    let additions = collect_commit_graph_inputs(&operation, base.as_ref(), &roots).await;
+    let additions = operation.finish(additions).await?;
+    if !repository.is_current(cancel).await? {
+        return Ok(false);
+    }
+    let write = append_split_commit_graph(
+        base,
+        manifest.generation,
+        manifest.pack_index_hash.clone(),
+        manifest.git_validation_digest.clone(),
+        &roots,
+        additions,
+    )?
+    .ok_or_else(|| {
+        WriteError::Internal("remote commit graph traversal was incomplete".to_owned())
+    })?;
+    upload_split_commit_graph(store, layout, &write).await?;
+    attach_commit_graph_if_current(store, layout, manifest, &write.descriptor_hash).await
+}
+
+async fn load_previous_commit_graph(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    maximum_bytes: u64,
+) -> Result<Option<SplitCommitGraph>> {
+    let Some(previous_generation) = manifest.generation.checked_sub(1) else {
+        return Ok(None);
+    };
+    let history =
+        manifest_store::list_manifest_history_for_generation(store, layout, previous_generation)
+            .await?;
+    let Some(base_manifest) = history
+        .iter()
+        .find(|entry| entry.manifest.commit_graph_hash.is_some())
+        .map(|entry| &entry.manifest)
+    else {
+        return Ok(None);
+    };
+    let hash = base_manifest.commit_graph_hash.as_deref().ok_or_else(|| {
+        WriteError::Internal("historical commit graph hash disappeared".to_owned())
+    })?;
+    let graph = load_split_commit_graph(store, layout, hash, maximum_bytes).await?;
+    let roots = commit_graph_roots(base_manifest)?;
+    if graph.descriptor.generation != base_manifest.generation
+        || graph.descriptor.pack_index_hash != base_manifest.pack_index_hash
+        || graph.descriptor.git_validation_digest != base_manifest.git_validation_digest
+        || roots.iter().any(|root| !graph.contains(root))
+    {
+        return Err(WriteError::CorruptObject {
+            path: layout.bulk_manifest_path("commit-graph", hash).to_string(),
+            reason: "historical commit graph does not match its committed Git state".to_owned(),
+        });
+    }
+    Ok(Some(graph))
+}
+
+fn commit_graph_roots(manifest: &Manifest) -> Result<Vec<[u8; 20]>> {
+    manifest
+        .refs
+        .iter()
+        .map(|(name, oid)| manifest.peeled_refs.get(name).unwrap_or(oid))
+        .map(|value| {
+            let oid = gix_hash::ObjectId::from_hex(value.as_bytes()).map_err(|source| {
+                WriteError::CorruptObject {
+                    path: "manifest".to_owned(),
+                    reason: format!("invalid commit graph root {value}: {source}"),
+                }
+            })?;
+            oid.as_bytes()
+                .try_into()
+                .map_err(|_| WriteError::CorruptObject {
+                    path: "manifest".to_owned(),
+                    reason: format!("commit graph root is not SHA-1: {value}"),
+                })
+        })
+        .collect()
+}
+
+async fn collect_commit_graph_inputs(
+    operation: &OperationContext,
+    base: Option<&SplitCommitGraph>,
+    roots: &[[u8; 20]],
+) -> std::result::Result<Vec<CommitGraphInput>, crab_remote_git::Error> {
+    let mut pending = VecDeque::new();
+    let mut queued = HashSet::new();
+    for root in roots {
+        if base.is_none_or(|graph| !graph.contains(root)) && queued.insert(*root) {
+            pending.push_back(*root);
+        }
+    }
+    let mut additions = Vec::new();
+    while !pending.is_empty() {
+        let mut requested = Vec::with_capacity(COMMIT_GRAPH_BATCH_SIZE);
+        while requested.len() < COMMIT_GRAPH_BATCH_SIZE {
+            let Some(oid) = pending.pop_front() else {
+                break;
+            };
+            if base.is_none_or(|graph| !graph.contains(&oid)) {
+                requested.push(gix_hash::ObjectId::from(oid));
+            }
+        }
+        if requested.is_empty() {
+            continue;
+        }
+        let objects = operation.read_objects(&requested).await?;
+        if objects.len() != requested.len() {
+            return Err(crab_remote_git::Error::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Commit,
+            });
+        }
+        for (expected, object) in requested.into_iter().zip(objects) {
+            if object.oid != expected {
+                return Err(crab_remote_git::Error::Corrupt {
+                    stage: crab_remote_git::CorruptionStage::Commit,
+                });
+            }
+            let input = commit_graph_input(&object)?;
+            for parent in &input.parents {
+                if base.is_none_or(|graph| !graph.contains(parent)) && queued.insert(*parent) {
+                    pending.push_back(*parent);
+                }
+            }
+            additions.push(input);
+        }
+    }
+    Ok(additions)
+}
+
+fn commit_graph_input(
+    object: &RemoteGitObject,
+) -> std::result::Result<CommitGraphInput, crab_remote_git::Error> {
+    if object.kind != gix_object::Kind::Commit {
+        return Err(crab_remote_git::Error::ObjectKind {
+            oid: object.oid,
+            expected: gix_object::Kind::Commit,
+            actual: object.kind,
+        });
+    }
+    let parsed = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
+        .map_err(|source| crab_remote_git::Error::CommitParse {
+            oid: object.oid,
+            source,
+        })?
+        .into_owned()
+        .map_err(|source| crab_remote_git::Error::CommitParse {
+            oid: object.oid,
+            source,
+        })?;
+    let parents = parsed.parents.into_vec();
+    Ok(CommitGraphInput {
+        oid: object
+            .oid
+            .as_bytes()
+            .try_into()
+            .map_err(|_| crab_remote_git::Error::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Commit,
+            })?,
+        tree_oid: parsed.tree.as_bytes().try_into().map_err(|_| {
+            crab_remote_git::Error::Corrupt {
+                stage: crab_remote_git::CorruptionStage::Commit,
+            }
+        })?,
+        commit_time: parsed.committer.time.seconds,
+        parents: parents
+            .iter()
+            .map(|parent| {
+                parent
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| crab_remote_git::Error::Corrupt {
+                        stage: crab_remote_git::CorruptionStage::Commit,
+                    })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    })
+}
+
+async fn attach_commit_graph_if_current(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    manifest: &Manifest,
+    hash: &str,
+) -> Result<bool> {
+    for attempt in 0..3 {
+        let (mut current, etag) = manifest_store::read_manifest(store, layout).await?;
+        if !same_generation(&current, manifest) {
+            return Ok(false);
+        }
+        if current.commit_graph_hash.is_some() {
+            return Ok(true);
+        }
+        current.commit_graph_hash = Some(hash.to_owned());
+        match manifest_store::write_manifest_cas(store, layout, &current, &etag).await {
+            Ok(_) => return Ok(true),
+            Err(crab_metadata::error::MetadataError::ManifestCasConflict { .. }) if attempt < 2 => {
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(WriteError::Internal(
+        "commit graph manifest CAS retries exhausted".to_owned(),
+    ))
 }
 
 /// Committed index identity shared by publication and generation maintenance.
