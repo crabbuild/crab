@@ -1013,6 +1013,79 @@ test("revision picker filters branches and tags and restores keyboard focus", as
   }
 });
 
+test("branch and tag pages follow the GitHub refs hierarchy", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/refs",
+    (route) =>
+      route.fulfill({
+        json: {
+          head: { name: "refs/heads/main", oid },
+          unborn_head: null,
+          refs: [
+            { name: "refs/heads/main", oid },
+            { name: "refs/heads/feature/docs", oid: "c".repeat(40) },
+            { name: "refs/heads/alpha", oid: "b".repeat(40) },
+            {
+              name: "refs/tags/v1.0",
+              oid: "d".repeat(40),
+              peeled: "e".repeat(40),
+            },
+          ],
+          generation: 1,
+        },
+      }),
+  );
+  await page.goto("/team/project?scenario=protected");
+  await page.getByRole("link", { name: "3 branches", exact: true }).click();
+  await expect(page).toHaveURL(/view=branches/);
+  await expect(
+    page.getByRole("link", { name: "Code", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(
+    page.getByRole("heading", { name: "Branches", level: 2 }),
+  ).toBeVisible();
+  const defaultGroup = page.getByRole("region", { name: "Default" });
+  await expect(defaultGroup).toContainText("main");
+  await expect(defaultGroup).toContainText("default");
+  await expect(defaultGroup).toContainText("protected");
+  const branches = page.getByRole("region", { name: "Branches" });
+  await expect(branches.locator(".ref-name-cell > a")).toHaveText([
+    "alpha",
+    "feature/docs",
+  ]);
+  await branches.getByRole("button", { name: "Copy alpha" }).click();
+  await expect(
+    branches.getByRole("button", { name: "Copied alpha" }),
+  ).toBeVisible();
+  await expect(
+    branches.getByRole("link", { name: "Compare", exact: true }).first(),
+  ).toHaveAttribute(
+    "href",
+    "/team/project?view=pulls&pull=new&base=refs%2Fheads%2Fmain&head=refs%2Fheads%2Falpha",
+  );
+
+  await page.getByRole("textbox", { name: "Search branches" }).fill("DOCS");
+  await expect(page.locator(".ref-name-cell > a")).toHaveText(["feature/docs"]);
+  await page
+    .getByRole("navigation", { name: "Repository refs" })
+    .getByRole("link", { name: "Tags", exact: true })
+    .click();
+  await expect(page).toHaveURL(/view=tags/);
+  await expect(page.getByRole("region", { name: "Tags" })).toContainText(
+    "v1.0",
+  );
+  await expect(page.locator(".ref-commit")).toHaveText("eeeeeee");
+
+  await selectTheme(page, "dark");
+  await page.setViewportSize({ width: 390, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+});
+
 test("revision picker creates a branch from the exact viewed commit", async ({
   page,
 }) => {

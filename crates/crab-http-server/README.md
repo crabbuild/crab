@@ -84,9 +84,14 @@ configured bucket.
 
 The browser provides repository selection and a searchable branch/tag picker
 with default-branch identification, keyboard navigation, and writer-only branch
-creation from the exact viewed commit, plus raw-byte path navigation, lazy Pierre
-Trees, paginated directories and repository/path-scoped first-parent history, highlighted files,
-exact Git blob downloads, commit changes, Pierre split/unified diffs and first-parent blame.
+creation from the exact viewed commit. Branch and tag counts open dedicated,
+searchable refs pages; the branch page separates the default branch, identifies
+exact protected branches, copies branch names, links immutable commit tips and
+opens a comparison against the default branch. The refs pages use the same
+GitHub-derived responsive hierarchy in light and dark themes. The browser also
+provides raw-byte path navigation, lazy Pierre Trees, paginated directories and
+repository/path-scoped first-parent history, highlighted files, exact Git blob
+downloads, commit changes, Pierre split/unified diffs and first-parent blame.
 The root view groups the selected commit and file table beside repository details.
 Markdown README files render beneath directory listings with GitHub-style typography;
 relative file links stay inside the selected repository revision, and relative images
@@ -901,6 +906,13 @@ Integration proof uploads text and binary blobs in one commit, fetches their exa
 bytes through native Git, and rejects an existing-path batch without advancing the
 branch. Browser regression covers the drag/file picker, binary-safe request,
 natural folders-first ordering, rendered Markdown preview and persisted theme menu.
+A browser regression also covers discovery from the branch count, natural branch
+ordering, default/protected labels, copy feedback, exact compare parameters,
+case-insensitive search, peeled tag targets and a dark 390-pixel layout.
+The rebuilt release server read the persisted Kubernetes repository from RustFS,
+separated its default branch from four qualification branches, exposed exact
+commit-tip and comparison links, and rendered the empty Tags state without
+horizontal overflow in the 1,280-pixel dark browser.
 A live Kubernetes/RustFS run committed a Markdown file and six-byte binary in one
 upload request in 771 ms. The signed-in browser immediately showed the new commit,
 kept the selected branch while opening the file and rendered its Markdown preview;
@@ -981,7 +993,7 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Surface | Required evidence | Status |
 | --- | --- | --- |
 | Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
-| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress |
+| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state and exact compare links now complement the existing picker and live repository reads |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
