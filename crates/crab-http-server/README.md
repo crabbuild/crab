@@ -87,7 +87,8 @@ with default-branch identification, keyboard navigation, and writer-only branch
 creation from the exact viewed commit. Branch and tag counts open dedicated,
 searchable refs pages; the branch page separates the default branch, identifies
 exact protected branches, copies branch names, links immutable commit tips and
-opens a comparison against the default branch. The refs pages use the same
+opens a comparison against the default branch. Writers can delete an unprotected,
+non-default branch after an inline confirmation. The refs pages use the same
 GitHub-derived responsive hierarchy in light and dark themes. The browser also
 provides raw-byte path navigation, lazy Pierre Trees, paginated directories and
 repository/path-scoped first-parent history, highlighted files, exact Git blob
@@ -182,6 +183,11 @@ return 409. Protected names, read-only members, non-members, and invalid CSRF
 requests are rejected. The ref passes through the same admission, ref lease,
 GC fences, graph and dependency validation, visibility evidence, and journal
 publication used by native smart-HTTP push; no objects or checkout are created.
+Browser branch deletion uses `DELETE` on the same endpoint with the short branch
+name and its exact `expected_oid`. The default branch and configured protected
+branches cannot be deleted. A changed or already deleted tip returns 409, and a
+successful deletion passes through the native ref lease, journal publication and
+cache invalidation path before the browser removes it from the refs page.
 
 The repository cache reopens the authoritative snapshot after two seconds,
 including journal commits that have not changed the manifest ETag. Git fetch
@@ -864,10 +870,11 @@ latency guarantee. An uncached Go-to-file search for `kubelet.go` traversed
 6,100 tree objects in 2.22 seconds, transferred 1.42 MB from RustFS, and returned
 the first 50 ranked paths without reading blob bodies. Keyboard selection opened
 `cmd/kubelet/kubelet.go` and loaded its exact contents. Forty-nine Rust server
-tests, nine frontend navigation, model and Markdown tests, and twenty-four Chromium
+tests, nine frontend navigation, model and Markdown tests, and twenty-five Chromium
 tests passed. An authenticated branch integration creates a browser branch from
 an existing commit, reads the exact new ref through both the repository API and
-native `git ls-remote`, and rejects duplicate publication atomically. A signed-in
+native `git ls-remote`, deletes it from the browser path, verifies its absence
+through both readers, and rejects stale deletion. A signed-in
 Kubernetes/RustFS browser run published an existing visible commit as a new branch
 in 49 ms of server handling and 422 ms from click to selected URL; the branch then
 appeared as the checked picker entry without reloading repository content. These
@@ -909,10 +916,16 @@ natural folders-first ordering, rendered Markdown preview and persisted theme me
 A browser regression also covers discovery from the branch count, natural branch
 ordering, default/protected labels, copy feedback, exact compare parameters,
 case-insensitive search, peeled tag targets and a dark 390-pixel layout.
+It also covers branch deletion confirmation, inline conflict recovery, immediate
+row removal, and the absence of deletion controls on default and protected refs.
 The rebuilt release server read the persisted Kubernetes repository from RustFS,
-separated its default branch from four qualification branches, exposed exact
+separated its default branch from three qualification branches, exposed exact
 commit-tip and comparison links, and rendered the empty Tags state without
-horizontal overflow in the 1,280-pixel dark browser.
+horizontal overflow in the 1,280-pixel dark browser. The signed-in refs page
+deleted an existing qualification branch in 820 ms from confirmation click to
+row removal; a fresh page read from RustFS still omitted that branch and kept the
+default branch without a delete control. This local shared-cache measurement is
+not a production latency guarantee.
 A live Kubernetes/RustFS run committed a Markdown file and six-byte binary in one
 upload request in 771 ms. The signed-in browser immediately showed the new commit,
 kept the selected branch while opening the file and rendered its Markdown preview;
@@ -993,11 +1006,11 @@ audit endpoint timed out; a fresh successful audit remains part of release proof
 | Surface | Required evidence | Status |
 | --- | --- | --- |
 | Single-server deployment | Built React assets and every application API served by one Rust binary; documented bucket setup, health checks, graceful shutdown, reproducible package/container | Complete: locked multi-stage image with digest-pinned inputs, non-root runtime, binary readiness probe and Linux CI build/runtime inspection |
-| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state and exact compare links now complement the existing picker and live repository reads |
+| Repository browsing | Repository selector, refs/tags, byte-preserving paths, paginated history, file views, blame, downloads, deep links, freshness and empty/error states against real repositories | In progress: searchable branch/tag pages, default/protected branch state, exact compare links and guarded branch deletion now complement the existing picker and live repository reads |
 | Diff and tree UI | Actual `@pierre/diffs` and `@pierre/trees` React integration; accurate additions/deletions/modes/binary handling; large-file/tree performance and keyboard navigation | In progress |
 | GitHub-quality design | Primer tokens, light/dark/system themes, accessible controls, responsive layouts, navigation and loading/error behavior verified in browser | In progress: current GitHub-referenced repository shell, file view and Issues list pass desktop light/dark and 390-pixel browser inspection; remaining workflows need the same audit |
 | Team identity and authorization | Real sign-in, sessions, organizations/repositories/membership and permissions; isolation, revocation, CSRF and unauthorized-access tests | In progress: OIDC, sessions and configured read/write grants and repository-scoped Git tokens; administration and provider revocation pending |
-| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation and exact protected branches have scoped proof; administration pending |
+| Git hosting | Authenticated smart HTTP fetch/push, branch and tag lifecycle, protected branches, metadata publication and Git CLI round-trip proof | In progress: authenticated fetch, large request encodings and native Git qualification pass; native atomic push, tag lifecycle, browser branch creation/deletion and exact protected branches have scoped proof; administration pending |
 | Collaboration | Persisted issues, pull requests, comments, reviews, labels, assignees, merge/conflict handling, activity and notifications | In progress: issues, pull requests, comments, commit-bound reviews, exact pull commit lists, repository labels and assignment, commit statuses, detailed check runs/logs, required checks, recoverable fast-forward merges and two-parent merge commits with canonical ref publication; remaining workflows pending |
 | Repository management | Create/import/archive repositories, settings, discoverability and search, audited administration | Pending |
 | Production operation | Atomic durable writes/concurrency, restart/recovery and backup/restore proof, observability, safe upgrades, deployment and operator documentation | Pending |

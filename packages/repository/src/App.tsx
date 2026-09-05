@@ -360,13 +360,24 @@ function RepositoryPage({
     view === "issues" || view === "labels" ? null : endpoint(repo, "refs"),
   );
   const [createdRefs, setCreatedRefs] = useState<Ref[]>([]);
+  const [deletedRefs, setDeletedRefs] = useState<string[]>([]);
+  useEffect(() => {
+    if (!refs.data) return;
+    setDeletedRefs((current) =>
+      current.filter((name) =>
+        refs.data?.refs.some((reference) => reference.name === name),
+      ),
+    );
+  }, [refs.data]);
   const visibleRefs = refs.data
     ? {
         ...refs.data,
         refs: [
           ...createdRefs,
           ...refs.data.refs.filter(
-            (ref) => !createdRefs.some((created) => created.name === ref.name),
+            (ref) =>
+              !deletedRefs.includes(ref.name) &&
+              !createdRefs.some((created) => created.name === ref.name),
           ),
         ],
       }
@@ -422,12 +433,16 @@ function RepositoryPage({
       window.dispatchEvent(new Event("crab-session-expired"));
     const body: unknown = await response.json();
     if (!response.ok) {
-      const failure = body as { error?: { message?: string } };
+      const failure = body as { error?: { code?: string; message?: string } };
+      if (failure.error?.code === "branch_changed") refs.retry();
       throw new Error(
         failure.error?.message ?? `Request failed (${response.status})`,
       );
     }
     const created = body as { branch: string; commit: string };
+    setDeletedRefs((current) =>
+      current.filter((ref) => ref !== created.branch),
+    );
     setCreatedRefs((current) => [
       { name: created.branch, oid: created.commit },
       ...current.filter((ref) => ref.name !== created.branch),
@@ -440,6 +455,35 @@ function RepositoryPage({
         kind: path ? kind : undefined,
       }),
     );
+  }
+  async function deleteBranch(name: string, expectedOid: string) {
+    const response = await fetch(endpoint(repo, "branches"), {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrf,
+      },
+      body: JSON.stringify({
+        name: name.replace(/^refs\/heads\//, ""),
+        expected_oid: expectedOid,
+      }),
+    });
+    if (response.status === 401)
+      window.dispatchEvent(new Event("crab-session-expired"));
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const failure = body as { error?: { message?: string } };
+      throw new Error(
+        failure.error?.message ?? `Request failed (${response.status})`,
+      );
+    }
+    const deleted = body as { branch: string };
+    setCreatedRefs((current) =>
+      current.filter((ref) => ref.name !== deleted.branch),
+    );
+    setDeletedRefs((current) => [...new Set([...current, deleted.branch])]);
+    refs.retry();
   }
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -590,6 +634,9 @@ function RepositoryPage({
                     repo={repo}
                     refs={data}
                     type={view === "branches" ? "branches" : "tags"}
+                    onDeleteBranch={
+                      repo.access === "write" ? deleteBranch : undefined
+                    }
                   />
                 </Suspense>
               ) : !data.refs.length ? (
