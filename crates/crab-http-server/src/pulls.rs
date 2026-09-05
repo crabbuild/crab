@@ -26,6 +26,7 @@ use crate::{
 };
 
 mod merge;
+mod merge_tree;
 mod reviews;
 mod storage;
 use storage::{NewPullRequest, PullComment, PullRequest, PullState};
@@ -129,6 +130,7 @@ async fn pull_view(
             "author": merge.author.name,
             "method": merge.method,
             "commit_oid": merge.commit_oid,
+            "message": merge.message,
             "created_at": merge.created_at,
         })),
         "merge_pending": pull.merge_pending.as_ref().map(|merge| json!({
@@ -138,6 +140,7 @@ async fn pull_view(
             "pull_version": merge.pull_version,
             "base_oid": merge.base_oid,
             "head_oid": merge.head_oid,
+            "message": merge.message,
             "created_at": merge.created_at,
         })),
     }))

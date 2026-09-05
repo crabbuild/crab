@@ -298,7 +298,7 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
+async fn pull_request_merge_methods_use_canonical_ref_publication() {
     let mut server = maintenance_tests::fixture().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -532,6 +532,7 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
     std::fs::write(path.join("CONFLICT.md"), "diverged\n").unwrap();
     receive_tests::success(path, &["add", "CONFLICT.md"]).await;
     receive_tests::success(path, &["commit", "-m", "diverged"]).await;
+    let conflict_head = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
     receive_tests::success(path, &["push", &git_url, "conflict"]).await;
     let second = json_request(
         &client,
@@ -540,27 +541,144 @@ async fn pull_request_fast_forward_merge_uses_canonical_ref_publication() {
         json!({
             "request_id":"00000000-0000-4000-8000-000000000032",
             "title":"Diverged change",
-            "body":"This cannot fast-forward.",
+            "body":"This needs a merge commit.",
             "base_ref":"refs/heads/main",
             "head_ref":"refs/heads/conflict"
         }),
     )
     .await;
     assert_eq!(second.0, StatusCode::CREATED);
-    let conflict = json_request(
+    let merge_commit = json_request(
         &client,
         reqwest::Method::POST,
         &format!("{root}/2/merge"),
         json!({
             "request_id":"00000000-0000-4000-8000-000000000033",
             "version":second.1["version"],
-            "method":"fast_forward",
+            "method":"merge_commit",
             "base_oid":second.1["base_oid"],
-            "head_oid":second.1["head_oid"]
+            "head_oid":second.1["head_oid"],
+            "message":"Merge the diverged change"
+        }),
+    )
+    .await;
+    assert_eq!(merge_commit.0, StatusCode::OK, "{}", merge_commit.1);
+    assert_eq!(merge_commit.1["merge"]["method"], "merge_commit");
+    assert_eq!(
+        merge_commit.1["merge"]["message"],
+        "Merge the diverged change"
+    );
+    let merge_oid = merge_commit.1["merge"]["commit_oid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(merge_oid, head);
+    assert_ne!(merge_oid, conflict_head);
+    receive_tests::success(path, &["fetch", "--force", &git_url, "main"]).await;
+    assert_eq!(
+        receive_tests::success(path, &["rev-parse", "FETCH_HEAD^1"]).await,
+        head
+    );
+    assert_eq!(
+        receive_tests::success(path, &["rev-parse", "FETCH_HEAD^2"]).await,
+        conflict_head
+    );
+    assert_eq!(
+        receive_tests::success(path, &["show", "-s", "--format=%s", "FETCH_HEAD"]).await,
+        "Merge the diverged change"
+    );
+    let merged_tree = receive_tests::success(path, &["ls-tree", "--name-only", "FETCH_HEAD"]).await;
+    assert!(merged_tree.lines().any(|name| name == "FEATURE.md"));
+    assert!(merged_tree.lines().any(|name| name == "CONFLICT.md"));
+
+    receive_tests::success(path, &["checkout", "-B", "head-conflict", &merge_oid]).await;
+    std::fs::write(path.join("README.md"), "changed by head\n").unwrap();
+    receive_tests::success(path, &["add", "README.md"]).await;
+    receive_tests::success(path, &["commit", "-m", "head conflict"]).await;
+    receive_tests::success(path, &["push", &git_url, "head-conflict"]).await;
+    let third = json_request(
+        &client,
+        reqwest::Method::POST,
+        &root,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000034",
+            "title":"Conflicting head change",
+            "body":"The base will change after this opens.",
+            "base_ref":"refs/heads/main",
+            "head_ref":"refs/heads/head-conflict"
+        }),
+    )
+    .await;
+    assert_eq!(third.0, StatusCode::CREATED);
+
+    receive_tests::success(path, &["checkout", "-B", "base-change", &merge_oid]).await;
+    std::fs::write(path.join("README.md"), "changed by base\n").unwrap();
+    receive_tests::success(path, &["add", "README.md"]).await;
+    receive_tests::success(path, &["commit", "-m", "base conflict"]).await;
+    let advanced_base = receive_tests::success(path, &["rev-parse", "HEAD"]).await;
+    receive_tests::success(path, &["push", &git_url, "base-change"]).await;
+    let fourth = json_request(
+        &client,
+        reqwest::Method::POST,
+        &root,
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000035",
+            "title":"Advance the base",
+            "body":"Publish the competing base change.",
+            "base_ref":"refs/heads/main",
+            "head_ref":"refs/heads/base-change"
+        }),
+    )
+    .await;
+    assert_eq!(fourth.0, StatusCode::CREATED);
+    assert_eq!(
+        json_request(
+            &client,
+            reqwest::Method::POST,
+            &format!("{root}/4/merge"),
+            json!({
+                "request_id":"00000000-0000-4000-8000-000000000036",
+                "version":fourth.1["version"],
+                "method":"fast_forward",
+                "base_oid":fourth.1["base_oid"],
+                "head_oid":fourth.1["head_oid"]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let third_current: Value = serde_json::from_slice(
+        &client
+            .get(format!("{root}/3"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(third_current["base_oid"], advanced_base);
+    let conflict = json_request(
+        &client,
+        reqwest::Method::POST,
+        &format!("{root}/3/merge"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000037",
+            "version":third_current["version"],
+            "method":"merge_commit",
+            "base_oid":third_current["base_oid"],
+            "head_oid":third_current["head_oid"],
+            "message":"This must conflict"
         }),
     )
     .await;
     assert_eq!(conflict.0, StatusCode::CONFLICT);
+    assert_eq!(
+        receive_tests::success(path, &["ls-remote", &git_url, "refs/heads/main"]).await,
+        format!("{advanced_base}\trefs/heads/main")
+    );
 
     source.close().unwrap();
     server.cancellation.cancel();

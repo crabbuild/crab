@@ -70,6 +70,7 @@ gix-glob = "0.26.0"
 gix-hash = "0.25.0"
 gix-ignore = "0.21.0"
 gix-index = "0.51.0"
+gix-merge = { version = "0.16.0", default-features = false, features = ["sha1"] }
 gix-lock = "23.0.0"
 gix-negotiate = "0.31.0"
 gix-object = "0.60.0"
