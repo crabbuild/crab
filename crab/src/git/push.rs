@@ -10855,10 +10855,34 @@ impl PushPipeline {
                 )
             })
             .collect();
-        let mut segment_candidates_by_file: Vec<(MerkleHash, Vec<(MerkleHash, u64)>)> = Vec::new();
-        let mut all_segment_candidates = Vec::new();
+        const SEGMENT_PAYLOAD_CHECK_BATCH: usize = 16_384;
+        let mut segment_candidates = Vec::with_capacity(SEGMENT_PAYLOAD_CHECK_BATCH);
+        let check_segment_candidates = |segment_candidates: &mut Vec<(
+            MerkleHash,
+            MerkleHash,
+            u64,
+        )>|
+         -> Result<()> {
+            if segment_candidates.is_empty() {
+                return Ok(());
+            }
+            let requested = segment_candidates
+                .iter()
+                .map(|(_, chunk_hash, size)| (*chunk_hash, *size))
+                .collect::<Vec<_>>();
+            let present = staging.segment_payloads_exist(&requested)?;
+            for (file_hash, chunk_hash, _) in segment_candidates.drain(..) {
+                if !present.contains(&chunk_hash) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    )));
+                }
+            }
+            Ok(())
+        };
         for (file_hash, _, _, chunks, _, remote_authority_hashes) in &needed_plans {
-            let mut segment_candidates = Vec::new();
             for chunk_hash in remote_authority_hashes {
                 if verified_placement.contains_key(chunk_hash)
                     || placement_map.contains_key(chunk_hash)
@@ -10879,25 +10903,13 @@ impl PushPipeline {
                         file_hash.hex()
                     ))
                 })?;
-                segment_candidates.push((*chunk_hash, size));
-            }
-            if !segment_candidates.is_empty() {
-                all_segment_candidates.extend(segment_candidates.iter().copied());
-                segment_candidates_by_file.push((*file_hash, segment_candidates));
-            }
-        }
-        let segment_payloads = staging.segment_payloads_exist(&all_segment_candidates)?;
-        for (file_hash, segment_candidates) in segment_candidates_by_file {
-            for (chunk_hash, _) in segment_candidates {
-                if !segment_payloads.contains(&chunk_hash) {
-                    return Err(CrabError::StagingCorrupt(format!(
-                        "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
-                        chunk_hash.hex(),
-                        file_hash.hex()
-                    )));
+                segment_candidates.push((*file_hash, *chunk_hash, size));
+                if segment_candidates.len() == SEGMENT_PAYLOAD_CHECK_BATCH {
+                    check_segment_candidates(&mut segment_candidates)?;
                 }
             }
         }
+        check_segment_candidates(&mut segment_candidates)?;
         for (_, _, _, chunks, _, _) in &needed_plans {
             for chunk_hash in chunks {
                 if placement_map.contains_key(chunk_hash)
