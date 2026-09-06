@@ -10771,8 +10771,12 @@ mod tests {
             idx.append_recording_remote_chunks(
                 "remote-batch",
                 &[ExistingChunkWrite {
+                    chunk_hash: authority.chunk_hash,
                     xorb_hash: test_hash(0xEB),
-                    ..authority
+                    chunk_index: authority.chunk_index,
+                    uncompressed_size: authority.uncompressed_size,
+                    placement_id: authority.placement_id,
+                    origin_proof_id: authority.origin_proof_id,
                 }],
             ),
             "changed within one add",
@@ -10804,7 +10808,11 @@ mod tests {
         let second_hash = test_hash(0xF7);
         let second_authority = ExistingChunkWrite {
             chunk_hash: second_hash,
-            ..first_authority
+            xorb_hash: first_authority.xorb_hash,
+            chunk_index: first_authority.chunk_index,
+            uncompressed_size: first_authority.uncompressed_size,
+            placement_id: first_authority.placement_id,
+            origin_proof_id: first_authority.origin_proof_id,
         };
         assert_staging_corrupt_contains(
             idx.append_recording_batch(
