@@ -150,6 +150,9 @@ async fn fixture(
     let inner = Arc::new(InMemory::new());
     let origin = Store::new(inner.clone());
     let layout = StoreLayout::new(origin.clone(), "commit-recovery".to_owned());
+    crate::layout_descriptor::ensure_canonical_layout(&origin, &layout)
+        .await
+        .unwrap();
     manifest_store::create_manifest(
         &origin,
         &layout,
@@ -198,6 +201,9 @@ async fn cancellation_before_marker_rolls_back_heads_but_after_marker_preserves_
         let inner = Arc::new(InMemory::new());
         let origin = Store::new(inner.clone());
         let layout = StoreLayout::new(origin.clone(), "cancellation".to_owned());
+        crate::layout_descriptor::ensure_canonical_layout(&origin, &layout)
+            .await
+            .unwrap();
         manifest_store::create_manifest(
             &origin,
             &layout,
