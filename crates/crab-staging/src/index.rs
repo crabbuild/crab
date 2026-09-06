@@ -6181,105 +6181,219 @@ impl Index {
                      )",
                     )
                 };
-            let insert_sql = format!(
-                "INSERT OR IGNORE INTO {table}
-             ({owner_column}, chunk_hash, xorb_hash, chunk_index,
-              uncompressed_size, placement_id, origin_proof_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-            );
-            let verify_sql = format!(
-                "SELECT xorb_hash = ?3
-                    AND chunk_index = ?4
-                    AND uncompressed_size = ?5
-                    AND placement_id = ?6
-                    AND origin_proof_id = ?7
-             FROM {table}
-             WHERE {owner_column} = ?1 AND chunk_hash = ?2"
-            );
+            let coverage_table = if recipe_is_indexed {
+                "recipe_occurrences"
+            } else {
+                "recipe_recording_terms"
+            };
             let mut coverage_statement = tx.prepare_cached(coverage_sql).map_err(|error| {
                 StagingError::Internal(format!(
                     "failed to prepare planned existing coverage: {error}"
                 ))
             })?;
-            let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
-                StagingError::Internal(format!(
-                    "failed to prepare planned existing insert: {error}"
-                ))
-            })?;
-            let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
-                StagingError::Internal(format!(
-                    "failed to prepare planned existing verification: {error}"
-                ))
-            })?;
-            for existing in existing_chunks {
-                if existing.placement_id == [0; 32] || existing.origin_proof_id == [0; 32] {
-                    return Err(StagingError::StagingCorrupt(
-                        "planned existing chunk has an empty placement or origin proof id"
-                            .to_owned(),
-                    ));
+            // Seven parameters per row keep 128-row inserts below SQLite's default limit.
+            const EXISTING_CHUNK_BATCH: usize = 128;
+            for batch in existing_chunks.chunks(EXISTING_CHUNK_BATCH) {
+                for existing in batch {
+                    if existing.placement_id == [0; 32] || existing.origin_proof_id == [0; 32] {
+                        return Err(StagingError::StagingCorrupt(
+                            "planned existing chunk has an empty placement or origin proof id"
+                                .to_owned(),
+                        ));
+                    }
                 }
-                let chunk_hash: &[u8] = &existing.chunk_hash;
-                let covers_recipe = coverage_statement
-                    .query_row(
-                        params![owner, chunk_hash, i64::from(existing.uncompressed_size)],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map_err(|error| {
+                let chunk_hashes = batch
+                    .iter()
+                    .map(|existing| existing.chunk_hash.as_slice())
+                    .collect::<Vec<_>>();
+                let placeholders = std::iter::repeat_n("?", batch.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let coverage_batch_sql = format!(
+                    "SELECT chunk_hash, chunk_size
+                     FROM {coverage_table}
+                     WHERE {owner_column} = ? AND chunk_hash IN ({placeholders})"
+                );
+                let mut coverage_batch_statement =
+                    tx.prepare_cached(&coverage_batch_sql).map_err(|error| {
                         StagingError::Internal(format!(
-                            "failed to validate planned existing recipe coverage: {error}"
+                            "failed to prepare planned existing coverage batch: {error}"
                         ))
                     })?;
-                if !covers_recipe {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "planned existing chunk {} does not cover file {}",
-                        crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex(),
-                        crab_xet::hash::MerkleHash::from(*file_hash).hex()
-                    )));
-                }
-                let inserted = insert_statement
-                    .execute(params![
-                        owner,
-                        chunk_hash,
-                        existing.xorb_hash.as_slice(),
-                        i64::from(existing.chunk_index),
-                        i64::from(existing.uncompressed_size),
-                        existing.placement_id.as_slice(),
-                        existing.origin_proof_id.as_slice(),
-                    ])
+                let mut coverage_params: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() + 1);
+                coverage_params.push(owner);
+                coverage_params.extend(chunk_hashes.iter().map(|hash| hash as &dyn ToSql));
+                let rows = coverage_batch_statement
+                    .query_map(params_from_iter(coverage_params), |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+                    })
                     .map_err(|error| {
                         StagingError::Internal(format!(
-                            "failed to store planned existing chunk: {error}"
+                            "failed to validate planned existing recipe coverage batch: {error}"
                         ))
                     })?;
-                if inserted == 0 {
-                    let matches: bool = verify_statement
-                        .query_row(
-                            params![
-                                owner,
-                                chunk_hash,
-                                existing.xorb_hash.as_slice(),
-                                i64::from(existing.chunk_index),
-                                i64::from(existing.uncompressed_size),
-                                existing.placement_id.as_slice(),
-                                existing.origin_proof_id.as_slice(),
-                            ],
-                            |row| row.get(0),
-                        )
-                        .map_err(|error| {
+                let mut covered = HashMap::<[u8; 32], Vec<i64>>::with_capacity(batch.len());
+                for row in rows {
+                    let (chunk_hash, size) = row.map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to read planned existing recipe coverage batch: {error}"
+                        ))
+                    })?;
+                    covered
+                        .entry(decode_hash_blob(
+                            "planned existing coverage chunk hash",
+                            chunk_hash,
+                        )?)
+                        .or_default()
+                        .push(size);
+                }
+                drop(coverage_batch_statement);
+                for existing in batch {
+                    let size = i64::from(existing.uncompressed_size);
+                    if !covered
+                        .get(&existing.chunk_hash)
+                        .is_some_and(|sizes| sizes.contains(&size))
+                    {
+                        return Err(StagingError::StagingCorrupt(format!(
+                            "planned existing chunk {} does not cover file {}",
+                            crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex(),
+                            crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                        )));
+                    }
+                }
+
+                let values_sql = std::iter::repeat_n("(?,?,?,?,?,?,?)", batch.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let insert_sql = format!(
+                    "INSERT OR IGNORE INTO {table}
+                     ({owner_column}, chunk_hash, xorb_hash, chunk_index,
+                      uncompressed_size, placement_id, origin_proof_id)
+                     VALUES {values_sql}"
+                );
+                let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare planned existing insert batch: {error}"
+                    ))
+                })?;
+                let xorb_hashes = batch
+                    .iter()
+                    .map(|existing| existing.xorb_hash.as_slice())
+                    .collect::<Vec<_>>();
+                let indices = batch
+                    .iter()
+                    .map(|existing| i64::from(existing.chunk_index))
+                    .collect::<Vec<_>>();
+                let sizes = batch
+                    .iter()
+                    .map(|existing| i64::from(existing.uncompressed_size))
+                    .collect::<Vec<_>>();
+                let placement_ids = batch
+                    .iter()
+                    .map(|existing| existing.placement_id.as_slice())
+                    .collect::<Vec<_>>();
+                let origin_proof_ids = batch
+                    .iter()
+                    .map(|existing| existing.origin_proof_id.as_slice())
+                    .collect::<Vec<_>>();
+                let mut insert_params: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 7);
+                for index in 0..batch.len() {
+                    insert_params.push(owner);
+                    insert_params.push(&chunk_hashes[index]);
+                    insert_params.push(&xorb_hashes[index]);
+                    insert_params.push(&indices[index]);
+                    insert_params.push(&sizes[index]);
+                    insert_params.push(&placement_ids[index]);
+                    insert_params.push(&origin_proof_ids[index]);
+                }
+                insert_statement
+                    .execute(params_from_iter(insert_params))
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to store planned existing chunk batch: {error}"
+                        ))
+                    })?;
+                drop(insert_statement);
+
+                let verify_sql = format!(
+                    "SELECT chunk_hash, xorb_hash, chunk_index, uncompressed_size,
+                            placement_id, origin_proof_id
+                     FROM {table}
+                     WHERE {owner_column} = ? AND chunk_hash IN ({placeholders})"
+                );
+                let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare planned existing verification batch: {error}"
+                    ))
+                })?;
+                let mut verify_params: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() + 1);
+                verify_params.push(owner);
+                verify_params.extend(chunk_hashes.iter().map(|hash| hash as &dyn ToSql));
+                let rows = verify_statement
+                    .query_map(params_from_iter(verify_params), |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, Vec<u8>>(4)?,
+                            row.get::<_, Vec<u8>>(5)?,
+                        ))
+                    })
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to verify planned existing chunk batch: {error}"
+                        ))
+                    })?;
+                let mut stored =
+                    HashMap::<[u8; 32], ([u8; 32], i64, i64, [u8; 32], [u8; 32])>::with_capacity(
+                        batch.len(),
+                    );
+                for row in rows {
+                    let (chunk_hash, xorb_hash, index, size, placement_id, origin_proof_id) =
+                        row.map_err(|error| {
                             StagingError::Internal(format!(
-                                "failed to verify planned existing chunk: {error}"
+                                "failed to read planned existing chunk batch: {error}"
                             ))
                         })?;
-                    if !matches {
+                    stored.insert(
+                        decode_hash_blob("planned existing chunk hash", chunk_hash)?,
+                        (
+                            decode_hash_blob("planned existing xorb hash", xorb_hash)?,
+                            index,
+                            size,
+                            decode_hash_blob("planned existing placement id", placement_id)?,
+                            decode_hash_blob("planned existing origin proof id", origin_proof_id)?,
+                        ),
+                    );
+                }
+                for (index, existing) in batch.iter().enumerate() {
+                    let Some((
+                        stored_xorb,
+                        stored_index,
+                        stored_size,
+                        stored_placement,
+                        stored_proof,
+                    )) = stored.get(&existing.chunk_hash)
+                    else {
+                        return Err(StagingError::Internal(
+                            "planned existing chunk row disappeared during verification".to_owned(),
+                        ));
+                    };
+                    if *stored_xorb != existing.xorb_hash
+                        || *stored_index != indices[index]
+                        || *stored_size != sizes[index]
+                        || *stored_placement != existing.placement_id
+                        || *stored_proof != existing.origin_proof_id
+                    {
                         return Err(StagingError::StagingCorrupt(format!(
                             "planned existing chunk {} has conflicting proof authority",
                             crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
                         )));
                     }
                 }
+                drop(verify_statement);
             }
-            drop(insert_statement);
-            drop(verify_statement);
 
             if recipe_is_indexed {
                 cleanup_needed = true;
