@@ -110,7 +110,9 @@ impl AddRemoteCandidateCache {
             .memory
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
-        let mut out = HashMap::with_capacity(hashes.len().min(MEMORY_CAPACITY));
+        // A cold lookup commonly returns no rows. Keep the all-miss path
+        // allocation-free; the map grows with actual cache hits.
+        let mut out = HashMap::new();
         for hash in hashes {
             if let Some(candidate) = memory.get(hash).copied() {
                 out.insert(*hash, candidate);
@@ -151,7 +153,9 @@ impl AddRemoteCandidateCache {
             .connection
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate database poisoned".into()))?;
-        let mut out = HashMap::with_capacity(hashes.len().min(MEMORY_CAPACITY));
+        // A cold persistent lookup commonly returns no rows. Keep the
+        // all-miss path allocation-free; the map grows with actual hits.
+        let mut out = HashMap::new();
         // The UNION repeats every hash list, so keep total bind variables below
         // SQLite's default 999-variable limit.
         for batch in hashes.chunks(PERSISTENT_UNION_LOOKUP_BATCH) {

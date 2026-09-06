@@ -4376,7 +4376,9 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         }
         drop(seen);
 
-        let mut candidates = HashMap::with_capacity(unique_chunks.len());
+        // Most first pushes are all misses; grow only when a positive candidate
+        // exists instead of reserving buckets for the whole repository.
+        let mut candidates = HashMap::new();
         let mut misses = Vec::with_capacity(unique_chunks.len());
         if let Some(cache) = &self.candidate_cache {
             match cache.memory_get_batch(&unique_chunks) {
