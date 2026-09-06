@@ -33355,7 +33355,8 @@ mod tests {
             },
         ));
         let chunk_store = guard.chunk_index().await.expect("chunk index store");
-        let required_chunks = HashSet::from([new_chunk, existing_chunk]);
+        let required_chunk_list = vec![new_chunk, existing_chunk];
+        let required_chunks = required_chunk_list.iter().copied().collect::<HashSet<_>>();
         let placement_snapshot = pipeline
             .verified_placement_snapshot_for(&required_chunks)
             .await;
@@ -33363,7 +33364,7 @@ mod tests {
         pipeline
             .warm_local_chunk_index(
                 chunk_store,
-                vec![required_chunks.to_vec()],
+                vec![required_chunk_list],
                 &placement_snapshot,
                 &[shard_hash],
             )
