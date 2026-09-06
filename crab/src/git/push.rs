@@ -3641,6 +3641,12 @@ impl PushRejectReason {
                 kind: kind.clone(),
                 detail: detail.clone(),
             },
+            error if is_uncertain_ref_journal_commit(error) => {
+                // The marker write may have reached storage, so replay must
+                // use the transaction identity and remote state rather than
+                // treating this as a permanent local I/O failure.
+                Self::NetworkTransient(error.to_string())
+            }
             CrabError::NetworkTransient(_) => Self::NetworkTransient(err.to_string()),
             CrabError::Throttled { retry_after } => Self::Throttled {
                 retry_after_secs: retry_after.map(|delay| {
@@ -3656,6 +3662,21 @@ impl PushRejectReason {
             _ => Self::Internal(err.to_string()),
         }
     }
+}
+
+fn is_uncertain_ref_journal_commit(error: &CrabError) -> bool {
+    let CrabError::Io(io_error) = error else {
+        return false;
+    };
+    io_error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>())
+        .is_some_and(|metadata| {
+            matches!(
+                metadata,
+                crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
+            )
+        })
 }
 
 impl fmt::Display for PushRejectReason {
@@ -36405,5 +36426,19 @@ mod tests {
                 retry_after_secs: Some(2)
             }
         ));
+    }
+
+    #[test]
+    fn from_error_retries_uncertain_ref_journal_commit() {
+        let metadata = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+            transaction_id: "a".repeat(64),
+            source: Box::new(crab_storage::StorageError::Throttled { retry_after: None }),
+            verification: None,
+        };
+        let error = CrabError::Io(std::io::Error::other(metadata));
+
+        let reason = PushRejectReason::from_error(&error);
+        assert_eq!(reason.protocol_tag(), "transient");
+        assert!(reason.is_retryable());
     }
 }

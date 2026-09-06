@@ -170,6 +170,18 @@ impl Store {
         }
     }
 
+    /// Returns a clone that uses `retry` for subsequent storage operations.
+    ///
+    /// The underlying object store and routing state remain shared. Callers
+    /// use this for operations whose outcome has a separate recovery protocol
+    /// and therefore must not inherit the broad transport retry budget.
+    #[must_use]
+    pub fn with_retry_policy(&self, retry: RetryPolicy) -> Self {
+        let mut store = self.clone();
+        store.retry = retry;
+        store
+    }
+
     /// Attaches a [`BucketIdentity`] so [`Store::bucket_identity`]
     /// returns a meaningful value for cross-scheme comparisons.
     ///

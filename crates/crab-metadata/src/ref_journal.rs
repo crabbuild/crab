@@ -16,6 +16,11 @@ const REF_JOURNAL_VERSION: u32 = 1;
 const MAX_REF_HEADS: usize = 1_000_000;
 const MAX_ACTIVE_TRANSACTIONS: usize = 1_000_000;
 const REF_JOURNAL_READ_CONCURRENCY: usize = 32;
+const REF_JOURNAL_MARKER_RETRY_POLICY: crab_storage::RetryPolicy = crab_storage::RetryPolicy {
+    max_attempts: 1,
+    base: std::time::Duration::ZERO,
+    cap: std::time::Duration::ZERO,
+};
 
 #[cfg(test)]
 #[path = "ref_journal/commit_tests.rs"]
@@ -296,16 +301,23 @@ async fn commit_ref_transaction_inner(
     };
     let marker_path = router.ref_journal_active_path(&transaction_id);
     let marker_body = Bytes::from(serialize(&marker)?);
+    // The marker is the visibility boundary. A failed write is resolved by
+    // exact readback below, so retrying it at the broad transport budget can
+    // stall commit recovery while the provider's outcome is still unknown.
+    let marker_store = store.with_retry_policy(REF_JOURNAL_MARKER_RETRY_POLICY);
     if cancelled() {
         rollback_prepared_heads(store, router, &prepared).await;
         return Err(MetadataError::RefJournalCancelled);
     }
     // After attempting the marker, cancellation cannot prove rejection. Finish
     // outcome recovery and promotion under the same rule as a lost write reply.
-    if let Err(source) = store.put_exact(&marker_path, marker_body.clone()).await {
+    if let Err(source) = marker_store
+        .put_exact(&marker_path, marker_body.clone())
+        .await
+    {
         // A lost write response is not a rejected transaction. Confirm only the
         // exact marker; never roll back prepared heads after attempting commit.
-        let verification = match store
+        let verification = match marker_store
             .get_with_etag_bounded(&marker_path, marker_body.len() as u64)
             .await
         {
