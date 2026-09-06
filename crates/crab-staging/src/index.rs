@@ -1928,7 +1928,7 @@ impl Index {
         }
 
         const POSITION_LOOKUP_BATCH: usize = 400;
-        let mut first = None;
+        let mut first: Option<i64> = None;
         for batch in chunk_indices.chunks(POSITION_LOOKUP_BATCH) {
             let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
