@@ -2931,27 +2931,44 @@ impl StagingArea {
         plan: &push_plan::FilePushPlan,
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<()> {
-        self.write_file_push_plan_bound_to_recipe(plan, recipe, None)
+        let pair = (plan, recipe);
+        self.write_file_push_plans_for_recipes(std::slice::from_ref(&pair))
             .await
     }
 
-    async fn write_file_push_plan_bound_to_recipe(
+    /// Persist several verified push plans in one SQLite transaction.
+    #[expect(
+        clippy::unused_async,
+        reason = "async signature matches the writable staging API"
+    )]
+    pub async fn write_file_push_plans_for_recipes(
         &self,
-        plan: &push_plan::FilePushPlan,
-        recipe: &crate::recipe::FileRecipe,
-        recording_batch_id: Option<&StagingBatchId>,
+        plans: &[(&push_plan::FilePushPlan, &crate::recipe::FileRecipe)],
     ) -> Result<()> {
-        let file_hash = validate_file_push_plan_matches_recipe(plan, recipe)?;
-        let existing_chunks = existing_chunk_index_records(plan)?;
-        let prepared_xorbs = prepared_xorb_index_records(plan)?;
-        let fh: [u8; 32] = file_hash.into();
-        let removed = lock_index(&self.index)?.insert_file_push_plan(index::FilePushPlanWrite {
-            file_hash: &fh,
-            recipe_hash: &recipe.hash(),
-            recording_batch_id: recording_batch_id.map(StagingBatchId::as_str),
-            existing_chunks: &existing_chunks,
-            prepared_xorbs: &prepared_xorbs,
-        })?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let mut file_hashes = Vec::with_capacity(plans.len());
+        let mut recipe_hashes = Vec::with_capacity(plans.len());
+        let mut existing_chunks = Vec::with_capacity(plans.len());
+        let mut prepared_xorbs = Vec::with_capacity(plans.len());
+        for (plan, recipe) in plans {
+            let file_hash = validate_file_push_plan_matches_recipe(plan, recipe)?;
+            file_hashes.push(<[u8; 32]>::from(file_hash));
+            recipe_hashes.push(recipe.hash());
+            existing_chunks.push(existing_chunk_index_records(plan)?);
+            prepared_xorbs.push(prepared_xorb_index_records(plan)?);
+        }
+        let writes = (0..plans.len())
+            .map(|index| index::FilePushPlanWrite {
+                file_hash: &file_hashes[index],
+                recipe_hash: &recipe_hashes[index],
+                recording_batch_id: None,
+                existing_chunks: &existing_chunks[index],
+                prepared_xorbs: &prepared_xorbs[index],
+            })
+            .collect::<Vec<_>>();
+        let removed = lock_index(&self.index)?.insert_file_push_plans(&writes)?;
         remove_prepared_payload_files(&self.root, &removed)?;
         Ok(())
     }

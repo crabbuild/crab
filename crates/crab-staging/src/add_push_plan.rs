@@ -177,6 +177,12 @@ struct FilePlanSummary {
     prepared_bytes: u64,
 }
 
+struct PreparedFilePlan {
+    plan: FilePushPlan,
+    recipe: crate::recipe::FileRecipe,
+    summary: FilePlanSummary,
+}
+
 async fn prepare_cached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
@@ -188,6 +194,7 @@ async fn prepare_cached_file_plans_with_progress(
     mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
 ) -> Result<AddPushPlanSummary> {
     let mut ref_offset = 0usize;
+    let mut prepared_plans = Vec::with_capacity(files.len());
     for file in files {
         check_cancelled(cancel)?;
         let next_offset = ref_offset.checked_add(file.chunks.len()).ok_or_else(|| {
@@ -196,7 +203,7 @@ async fn prepare_cached_file_plans_with_progress(
         let file_existing_refs = existing_refs.get(ref_offset..next_offset).ok_or_else(|| {
             StagingError::Internal("add push-plan remote lookup length changed".to_owned())
         })?;
-        let file_summary = prepare_one_file_plan_with_existing_refs(
+        let prepared = prepare_one_file_plan_with_existing_refs(
             staging,
             file,
             file_existing_refs,
@@ -206,15 +213,25 @@ async fn prepare_cached_file_plans_with_progress(
         )
         .await?;
         ref_offset = next_offset;
-        accumulate_file_summary(&mut summary, file_summary);
-        if let Some(callback) = on_progress.as_deref_mut() {
-            callback(&summary);
-        }
+        prepared_plans.push(prepared);
     }
     if ref_offset != existing_refs.len() {
         return Err(StagingError::Internal(
             "add push-plan remote lookup returned extra candidates".to_owned(),
         ));
+    }
+    let plan_pairs = prepared_plans
+        .iter()
+        .map(|prepared| (&prepared.plan, &prepared.recipe))
+        .collect::<Vec<_>>();
+    staging
+        .write_file_push_plans_for_recipes(&plan_pairs)
+        .await?;
+    for prepared in prepared_plans {
+        accumulate_file_summary(&mut summary, prepared.summary);
+        if let Some(callback) = on_progress.as_deref_mut() {
+            callback(&summary);
+        }
     }
 
     debug_file_summary(&summary);
@@ -336,17 +353,27 @@ async fn prepare_uncached_file_plans_with_progress(
         remote_lookup,
         ..AddPushPlanSummary::default()
     };
+    let recipes = file_plans
+        .iter()
+        .map(|file_plan| {
+            crate::recipe::FileRecipe::from_staged_chunks(
+                crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+                file_plan.file_hash,
+                file_plan.plan.file_size,
+                file_plan.chunks,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan_pairs = file_plans
+        .iter()
+        .zip(recipes.iter())
+        .map(|(file_plan, recipe)| (&file_plan.plan, recipe))
+        .collect::<Vec<_>>();
+    staging
+        .write_file_push_plans_for_recipes(&plan_pairs)
+        .await?;
     let mut summarized_prepared_xorbs = HashSet::new();
     for file_plan in &file_plans {
-        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
-            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
-            file_plan.file_hash,
-            file_plan.plan.file_size,
-            file_plan.chunks,
-        )?;
-        staging
-            .write_file_push_plan_for_recipe(&file_plan.plan, &recipe)
-            .await?;
         summary.files += 1;
         summary.chunks += file_plan.chunks.len() as u64;
         summary.existing_candidates += file_plan.plan.existing.len() as u64;
@@ -578,7 +605,7 @@ async fn prepare_one_file_plan(
     cancel: &CancellationToken,
 ) -> Result<FilePlanSummary> {
     let existing_refs = lookup_existing_candidates(file.chunks, remote_lookup).await?;
-    prepare_one_file_plan_with_existing_refs(
+    let prepared = prepare_one_file_plan_with_existing_refs(
         staging,
         file,
         &existing_refs,
@@ -586,7 +613,11 @@ async fn prepare_one_file_plan(
         prepared_cache,
         cancel,
     )
-    .await
+    .await?;
+    staging
+        .write_file_push_plan_for_recipe(&prepared.plan, &prepared.recipe)
+        .await?;
+    Ok(prepared.summary)
 }
 
 async fn prepare_one_file_plan_with_existing_refs(
@@ -596,7 +627,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     cancel: &CancellationToken,
-) -> Result<FilePlanSummary> {
+) -> Result<PreparedFilePlan> {
     if existing_refs.len() != file.chunks.len() {
         return Err(StagingError::Internal(format!(
             "add push-plan remote lookup returned {} candidates for {} requested chunks",
@@ -766,10 +797,11 @@ async fn prepare_one_file_plan_with_existing_refs(
         prepared_xorbs: plan.prepared_xorbs.len() as u64,
         prepared_bytes: plan.prepared_xorbs.iter().map(|xorb| xorb.bytes).sum(),
     };
-    staging
-        .write_file_push_plan_for_recipe(&plan, &recipe)
-        .await?;
-    Ok(file_summary)
+    Ok(PreparedFilePlan {
+        plan,
+        recipe,
+        summary: file_summary,
+    })
 }
 
 fn ranked_prepared_candidates(

@@ -239,6 +239,12 @@ There is no persisted per-file JSON plan or per-file payload copy. Runtime
 `FilePushPlan` values are derived from normalized recipe, remote, prepared, and
 segment rows for the push attempt.
 
+Multi-file push-plan preparation validates every file first, then persists all
+normalized authority rows in one SQLite transaction. This keeps the per-file
+coverage and identity checks while eliminating one transaction commit and
+global prepared-payload retirement sweep per file; a failed file still rolls
+back the entire batch.
+
 ## Progress and JSONL
 
 The text progress bar has four command phases:

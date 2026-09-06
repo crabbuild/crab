@@ -5847,157 +5847,155 @@ impl Index {
 
     /// Replace one recipe's normalized remote and prepared authority.
     pub fn insert_file_push_plan(&self, write: FilePushPlanWrite<'_>) -> Result<Vec<[u8; 32]>> {
-        let FilePushPlanWrite {
-            file_hash,
-            recipe_hash,
-            recording_batch_id,
-            existing_chunks,
-            prepared_xorbs,
-        } = write;
-        let fh: &[u8] = file_hash;
+        self.insert_file_push_plans(std::slice::from_ref(&write))
+    }
+
+    /// Replace several recipes' normalized remote and prepared authority atomically.
+    pub fn insert_file_push_plans(
+        &self,
+        writes: &[FilePushPlanWrite<'_>],
+    ) -> Result<Vec<[u8; 32]>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin file push plan tx: {e}"))
         })?;
-        let recipe_is_indexed: bool = tx
-            .query_row(
-                "SELECT EXISTS(
+        let mut cleanup_needed = false;
+        for write in writes {
+            let FilePushPlanWrite {
+                file_hash,
+                recipe_hash,
+                recording_batch_id,
+                existing_chunks,
+                prepared_xorbs,
+            } = *write;
+            let fh: &[u8] = file_hash;
+            let recipe_is_indexed: bool = tx
+                .query_row(
+                    "SELECT EXISTS(
                      SELECT 1 FROM file_recipes
                      WHERE recipe_hash = ?1 AND file_hash = ?2
                  )",
-                params![recipe_hash.as_slice(), fh],
-                |row| row.get(0),
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to resolve prepared recipe: {e}"))
-            })?;
-        if !recipe_is_indexed {
-            let Some(batch_id) = recording_batch_id else {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "cannot persist prepared authority before recipe {} is indexed",
-                    crab_xet::hash::MerkleHash::from(*recipe_hash).hex()
-                )));
-            };
-            let recording_is_open: bool = tx
-                .query_row(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM staging_batches
-                         WHERE batch_id = ?1 AND state = 'open'
-                     )",
-                    params![batch_id],
+                    params![recipe_hash.as_slice(), fh],
                     |row| row.get(0),
                 )
                 .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to resolve prepared recipe recording: {e}"
-                    ))
+                    StagingError::Internal(format!("failed to resolve prepared recipe: {e}"))
                 })?;
-            if !recording_is_open {
-                return Err(StagingError::NotFound {
-                    path: format!("open staging batch {batch_id}"),
-                });
+            if !recipe_is_indexed {
+                let Some(batch_id) = recording_batch_id else {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "cannot persist prepared authority before recipe {} is indexed",
+                        crab_xet::hash::MerkleHash::from(*recipe_hash).hex()
+                    )));
+                };
+                let recording_is_open: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(
+                         SELECT 1 FROM staging_batches
+                         WHERE batch_id = ?1 AND state = 'open'
+                     )",
+                        params![batch_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| {
+                        StagingError::Internal(format!(
+                            "failed to resolve prepared recipe recording: {e}"
+                        ))
+                    })?;
+                if !recording_is_open {
+                    return Err(StagingError::NotFound {
+                        path: format!("open staging batch {batch_id}"),
+                    });
+                }
             }
-        }
 
-        let recipe_owner = recipe_hash.as_slice();
-        let recording_owner = recording_batch_id.unwrap_or_default();
-        let (table, owner_column, owner, coverage_sql): (&str, &str, &dyn ToSql, &str) =
-            if recipe_is_indexed {
-                (
-                    "recipe_remote_chunks",
-                    "recipe_hash",
-                    &recipe_owner,
-                    "SELECT EXISTS(
+            let recipe_owner = recipe_hash.as_slice();
+            let recording_owner = recording_batch_id.unwrap_or_default();
+            let (table, owner_column, owner, coverage_sql): (&str, &str, &dyn ToSql, &str) =
+                if recipe_is_indexed {
+                    (
+                        "recipe_remote_chunks",
+                        "recipe_hash",
+                        &recipe_owner,
+                        "SELECT EXISTS(
                          SELECT 1 FROM recipe_occurrences
                          WHERE recipe_hash = ?1
                            AND chunk_hash = ?2
                            AND chunk_size = ?3
                      )",
-                )
-            } else {
-                (
-                    "recording_remote_chunks",
-                    "batch_id",
-                    &recording_owner,
-                    "SELECT EXISTS(
+                    )
+                } else {
+                    (
+                        "recording_remote_chunks",
+                        "batch_id",
+                        &recording_owner,
+                        "SELECT EXISTS(
                          SELECT 1 FROM recipe_recording_terms
                          WHERE batch_id = ?1
                            AND chunk_hash = ?2
                            AND chunk_size = ?3
                      )",
-                )
-            };
-        let insert_sql = format!(
-            "INSERT OR IGNORE INTO {table}
+                    )
+                };
+            let insert_sql = format!(
+                "INSERT OR IGNORE INTO {table}
              ({owner_column}, chunk_hash, xorb_hash, chunk_index,
               uncompressed_size, placement_id, origin_proof_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-        );
-        let verify_sql = format!(
-            "SELECT xorb_hash = ?3
+            );
+            let verify_sql = format!(
+                "SELECT xorb_hash = ?3
                     AND chunk_index = ?4
                     AND uncompressed_size = ?5
                     AND placement_id = ?6
                     AND origin_proof_id = ?7
              FROM {table}
              WHERE {owner_column} = ?1 AND chunk_hash = ?2"
-        );
-        let mut coverage_statement = tx.prepare_cached(coverage_sql).map_err(|error| {
-            StagingError::Internal(format!(
-                "failed to prepare planned existing coverage: {error}"
-            ))
-        })?;
-        let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
-            StagingError::Internal(format!(
-                "failed to prepare planned existing insert: {error}"
-            ))
-        })?;
-        let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
-            StagingError::Internal(format!(
-                "failed to prepare planned existing verification: {error}"
-            ))
-        })?;
-        for existing in existing_chunks {
-            if existing.placement_id == [0; 32] || existing.origin_proof_id == [0; 32] {
-                return Err(StagingError::StagingCorrupt(
-                    "planned existing chunk has an empty placement or origin proof id".to_owned(),
-                ));
-            }
-            let chunk_hash: &[u8] = &existing.chunk_hash;
-            let covers_recipe = coverage_statement
-                .query_row(
-                    params![owner, chunk_hash, i64::from(existing.uncompressed_size)],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(|error| {
-                    StagingError::Internal(format!(
-                        "failed to validate planned existing recipe coverage: {error}"
-                    ))
-                })?;
-            if !covers_recipe {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "planned existing chunk {} does not cover file {}",
-                    crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex(),
-                    crab_xet::hash::MerkleHash::from(*file_hash).hex()
-                )));
-            }
-            insert_statement
-                .execute(params![
-                    owner,
-                    chunk_hash,
-                    existing.xorb_hash.as_slice(),
-                    i64::from(existing.chunk_index),
-                    i64::from(existing.uncompressed_size),
-                    existing.placement_id.as_slice(),
-                    existing.origin_proof_id.as_slice(),
-                ])
-                .map_err(|error| {
-                    StagingError::Internal(format!(
-                        "failed to store planned existing chunk: {error}"
-                    ))
-                })?;
-            let matches: bool = verify_statement
-                .query_row(
-                    params![
+            );
+            let mut coverage_statement = tx.prepare_cached(coverage_sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare planned existing coverage: {error}"
+                ))
+            })?;
+            let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare planned existing insert: {error}"
+                ))
+            })?;
+            let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare planned existing verification: {error}"
+                ))
+            })?;
+            for existing in existing_chunks {
+                if existing.placement_id == [0; 32] || existing.origin_proof_id == [0; 32] {
+                    return Err(StagingError::StagingCorrupt(
+                        "planned existing chunk has an empty placement or origin proof id"
+                            .to_owned(),
+                    ));
+                }
+                let chunk_hash: &[u8] = &existing.chunk_hash;
+                let covers_recipe = coverage_statement
+                    .query_row(
+                        params![owner, chunk_hash, i64::from(existing.uncompressed_size)],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to validate planned existing recipe coverage: {error}"
+                        ))
+                    })?;
+                if !covers_recipe {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "planned existing chunk {} does not cover file {}",
+                        crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex(),
+                        crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                    )));
+                }
+                insert_statement
+                    .execute(params![
                         owner,
                         chunk_hash,
                         existing.xorb_hash.as_slice(),
@@ -6005,71 +6003,220 @@ impl Index {
                         i64::from(existing.uncompressed_size),
                         existing.placement_id.as_slice(),
                         existing.origin_proof_id.as_slice(),
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(|error| {
-                    StagingError::Internal(format!(
-                        "failed to verify planned existing chunk: {error}"
-                    ))
-                })?;
-            if !matches {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "planned existing chunk {} has conflicting proof authority",
-                    crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
-                )));
-            }
-        }
-        drop(coverage_statement);
-        drop(insert_statement);
-        drop(verify_statement);
-
-        let mut retired_payloads = Vec::new();
-        if recipe_is_indexed {
-            tx.execute(
-                "DELETE FROM prepared_leases WHERE recipe_hash = ?1",
-                params![recipe_hash.as_slice()],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to replace prepared leases: {e}"))
-            })?;
-            retired_payloads = {
-                let mut statement = tx
-                    .prepare_cached(
-                        "SELECT xorb_hash
-                         FROM prepared_payloads AS payload
-                         WHERE NOT EXISTS (
-                                   SELECT 1 FROM prepared_leases AS lease
-                                   WHERE lease.xorb_hash = payload.xorb_hash
-                               )
-                           AND NOT EXISTS (
-                                   SELECT 1 FROM preparation_payloads AS preparation
-                                   WHERE preparation.xorb_hash = payload.xorb_hash
-                               )
-                         ORDER BY xorb_hash",
+                    ])
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to store planned existing chunk: {error}"
+                        ))
+                    })?;
+                let matches: bool = verify_statement
+                    .query_row(
+                        params![
+                            owner,
+                            chunk_hash,
+                            existing.xorb_hash.as_slice(),
+                            i64::from(existing.chunk_index),
+                            i64::from(existing.uncompressed_size),
+                            existing.placement_id.as_slice(),
+                            existing.origin_proof_id.as_slice(),
+                        ],
+                        |row| row.get(0),
                     )
                     .map_err(|error| {
                         StagingError::Internal(format!(
-                            "failed to prepare replaced payload query: {error}"
+                            "failed to verify planned existing chunk: {error}"
                         ))
                     })?;
-                statement
-                    .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                    .map_err(|error| {
+                if !matches {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "planned existing chunk {} has conflicting proof authority",
+                        crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
+                    )));
+                }
+            }
+            drop(coverage_statement);
+            drop(insert_statement);
+            drop(verify_statement);
+
+            if recipe_is_indexed {
+                cleanup_needed = true;
+                tx.execute(
+                    "DELETE FROM prepared_leases WHERE recipe_hash = ?1",
+                    params![recipe_hash.as_slice()],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to replace prepared leases: {e}"))
+                })?;
+            }
+
+            for prepared in prepared_xorbs {
+                let xorb_hash: &[u8] = &prepared.xorb_hash;
+                let payload_hash: &[u8] = &prepared.payload_hash;
+                let bytes = sqlite_i64("prepared xorb bytes", prepared.bytes)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO prepared_payloads
+                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
+                    params![xorb_hash, payload_hash, bytes],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to store prepared payload: {e}"))
+                })?;
+                let payload_matches: bool = tx
+                    .query_row(
+                        "SELECT payload_hash = ?2 AND bytes = ?3
+                     FROM prepared_payloads WHERE xorb_hash = ?1",
+                        params![xorb_hash, payload_hash, bytes],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| {
+                        StagingError::Internal(format!("failed to verify prepared payload: {e}"))
+                    })?;
+                if !payload_matches {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "prepared xorb payload identity collision for {}",
+                        crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex()
+                    )));
+                }
+                let mut covers_recipe = false;
+                for placement in &prepared.placements {
+                    let chunk_hash: &[u8] = &placement.chunk_hash;
+                    if !covers_recipe {
+                        covers_recipe = if recipe_is_indexed {
+                            tx.query_row(
+                                "SELECT EXISTS(
+                                 SELECT 1 FROM recipe_occurrences
+                                 WHERE recipe_hash = ?1
+                                   AND chunk_hash = ?2
+                                   AND chunk_size = ?3
+                             )",
+                                params![
+                                    recipe_hash.as_slice(),
+                                    chunk_hash,
+                                    i64::from(placement.uncompressed_size)
+                                ],
+                                |row| row.get::<_, bool>(0),
+                            )
+                            .map_err(|error| {
+                                StagingError::Internal(format!(
+                                    "failed to validate prepared xorb recipe coverage: {error}"
+                                ))
+                            })?
+                        } else {
+                            tx.query_row(
+                                "SELECT EXISTS(
+                                 SELECT 1 FROM recipe_recording_terms
+                                 WHERE batch_id = ?1
+                                   AND chunk_hash = ?2
+                                   AND chunk_size = ?3
+                             )",
+                                params![
+                                    recording_batch_id,
+                                    chunk_hash,
+                                    i64::from(placement.uncompressed_size)
+                                ],
+                                |row| row.get::<_, bool>(0),
+                            )
+                            .map_err(|error| {
+                                StagingError::Internal(format!(
+                                    "failed to validate prepared xorb recipe coverage: {error}"
+                                ))
+                            })?
+                        };
+                    }
+                    tx.execute(
+                        "INSERT OR IGNORE INTO prepared_payload_chunks
+                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                     VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            xorb_hash,
+                            i64::from(placement.chunk_index),
+                            chunk_hash,
+                            i64::from(placement.uncompressed_size),
+                        ],
+                    )
+                    .map_err(|e| {
                         StagingError::Internal(format!(
-                            "failed to query replaced prepared payloads: {error}"
+                            "failed to store prepared payload chunk: {e}"
                         ))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|error| {
-                        StagingError::Internal(format!(
-                            "failed to collect replaced prepared payloads: {error}"
-                        ))
-                    })?
-                    .into_iter()
-                    .map(|hash| decode_hash_blob("replaced prepared payload", hash))
-                    .collect::<Result<Vec<_>>>()?
-            };
+                    })?;
+                    let stored: (Vec<u8>, i64, i64) = tx
+                        .query_row(
+                            "SELECT xorb_hash, chunk_index, uncompressed_size
+                         FROM prepared_payload_chunks WHERE chunk_hash = ?1",
+                            params![chunk_hash],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(|e| {
+                            StagingError::Internal(format!(
+                                "failed to verify canonical prepared chunk placement: {e}"
+                            ))
+                        })?;
+                    if stored.0.as_slice() != xorb_hash
+                        || stored.1 != i64::from(placement.chunk_index)
+                        || stored.2 != i64::from(placement.uncompressed_size)
+                    {
+                        return Err(StagingError::StagingCorrupt(format!(
+                            "prepared chunk {} already belongs to another canonical xorb",
+                            crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
+                        )));
+                    }
+                }
+                if !covers_recipe {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "prepared xorb {} does not cover file {}",
+                        crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex(),
+                        crab_xet::hash::MerkleHash::from(*file_hash).hex()
+                    )));
+                }
+                if recipe_is_indexed {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO prepared_leases (recipe_hash, xorb_hash)
+                     VALUES (?1, ?2)",
+                        params![recipe_hash.as_slice(), xorb_hash],
+                    )
+                    .map_err(|e| {
+                        StagingError::Internal(format!("failed to store prepared lease: {e}"))
+                    })?;
+                }
+            }
+        }
+        let removed_payloads = if cleanup_needed {
+            let mut statement = tx
+                .prepare_cached(
+                    "SELECT xorb_hash
+                     FROM prepared_payloads AS payload
+                     WHERE NOT EXISTS (
+                               SELECT 1 FROM prepared_leases AS lease
+                               WHERE lease.xorb_hash = payload.xorb_hash
+                           )
+                       AND NOT EXISTS (
+                               SELECT 1 FROM preparation_payloads AS preparation
+                               WHERE preparation.xorb_hash = payload.xorb_hash
+                           )
+                     ORDER BY xorb_hash",
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare replaced payload query: {error}"
+                    ))
+                })?;
+            let removed = statement
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to query replaced prepared payloads: {error}"
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to collect replaced prepared payloads: {error}"
+                    ))
+                })?
+                .into_iter()
+                .map(|hash| decode_hash_blob("replaced prepared payload", hash))
+                .collect::<Result<Vec<_>>>()?;
+            drop(statement);
             tx.execute(
                 "DELETE FROM prepared_payloads
                  WHERE NOT EXISTS (
@@ -6087,154 +6234,10 @@ impl Index {
                     "failed to retire replaced prepared payloads: {error}"
                 ))
             })?;
-        }
-
-        for prepared in prepared_xorbs {
-            let xorb_hash: &[u8] = &prepared.xorb_hash;
-            let payload_hash: &[u8] = &prepared.payload_hash;
-            let bytes = sqlite_i64("prepared xorb bytes", prepared.bytes)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO prepared_payloads
-                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
-                params![xorb_hash, payload_hash, bytes],
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to store prepared payload: {e}"))
-            })?;
-            let payload_matches: bool = tx
-                .query_row(
-                    "SELECT payload_hash = ?2 AND bytes = ?3
-                     FROM prepared_payloads WHERE xorb_hash = ?1",
-                    params![xorb_hash, payload_hash, bytes],
-                    |row| row.get(0),
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to verify prepared payload: {e}"))
-                })?;
-            if !payload_matches {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared xorb payload identity collision for {}",
-                    crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex()
-                )));
-            }
-            let mut covers_recipe = false;
-            for placement in &prepared.placements {
-                let chunk_hash: &[u8] = &placement.chunk_hash;
-                if !covers_recipe {
-                    covers_recipe = if recipe_is_indexed {
-                        tx.query_row(
-                            "SELECT EXISTS(
-                                 SELECT 1 FROM recipe_occurrences
-                                 WHERE recipe_hash = ?1
-                                   AND chunk_hash = ?2
-                                   AND chunk_size = ?3
-                             )",
-                            params![
-                                recipe_hash.as_slice(),
-                                chunk_hash,
-                                i64::from(placement.uncompressed_size)
-                            ],
-                            |row| row.get::<_, bool>(0),
-                        )
-                        .map_err(|error| {
-                            StagingError::Internal(format!(
-                                "failed to validate prepared xorb recipe coverage: {error}"
-                            ))
-                        })?
-                    } else {
-                        tx.query_row(
-                            "SELECT EXISTS(
-                                 SELECT 1 FROM recipe_recording_terms
-                                 WHERE batch_id = ?1
-                                   AND chunk_hash = ?2
-                                   AND chunk_size = ?3
-                             )",
-                            params![
-                                recording_batch_id,
-                                chunk_hash,
-                                i64::from(placement.uncompressed_size)
-                            ],
-                            |row| row.get::<_, bool>(0),
-                        )
-                        .map_err(|error| {
-                            StagingError::Internal(format!(
-                                "failed to validate prepared xorb recipe coverage: {error}"
-                            ))
-                        })?
-                    };
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO prepared_payload_chunks
-                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        xorb_hash,
-                        i64::from(placement.chunk_index),
-                        chunk_hash,
-                        i64::from(placement.uncompressed_size),
-                    ],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to store prepared payload chunk: {e}"))
-                })?;
-                let stored: (Vec<u8>, i64, i64) = tx
-                    .query_row(
-                        "SELECT xorb_hash, chunk_index, uncompressed_size
-                         FROM prepared_payload_chunks WHERE chunk_hash = ?1",
-                        params![chunk_hash],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .map_err(|e| {
-                        StagingError::Internal(format!(
-                            "failed to verify canonical prepared chunk placement: {e}"
-                        ))
-                    })?;
-                if stored.0.as_slice() != xorb_hash
-                    || stored.1 != i64::from(placement.chunk_index)
-                    || stored.2 != i64::from(placement.uncompressed_size)
-                {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "prepared chunk {} already belongs to another canonical xorb",
-                        crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
-                    )));
-                }
-            }
-            if !covers_recipe {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared xorb {} does not cover file {}",
-                    crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex(),
-                    crab_xet::hash::MerkleHash::from(*file_hash).hex()
-                )));
-            }
-            if recipe_is_indexed {
-                tx.execute(
-                    "INSERT OR IGNORE INTO prepared_leases (recipe_hash, xorb_hash)
-                     VALUES (?1, ?2)",
-                    params![recipe_hash.as_slice(), xorb_hash],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to store prepared lease: {e}"))
-                })?;
-            }
-        }
-
-        let mut removed_payloads = Vec::new();
-        for xorb_hash in retired_payloads {
-            let exists = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM prepared_payloads WHERE xorb_hash = ?1)",
-                    params![xorb_hash.as_slice()],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(|error| {
-                    StagingError::Internal(format!(
-                        "failed to verify replaced prepared payload: {error}"
-                    ))
-                })?;
-            if !exists {
-                removed_payloads.push(xorb_hash);
-            }
-        }
+            removed
+        } else {
+            Vec::new()
+        };
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit file push plan tx: {e}"))
         })?;
