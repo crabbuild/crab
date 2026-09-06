@@ -12202,6 +12202,7 @@ impl PushPipeline {
             debug!("step 8: no pointers, skipping shard build");
             return Ok(());
         }
+        let recipe_snapshot = self.cached_recipe_snapshot().await;
 
         // `chunk_placement` can contain immutable xorbs uploaded for a ref
         // that lost a non-atomic manifest-CAS race. Only chunks reachable
@@ -12213,7 +12214,7 @@ impl PushPipeline {
             if remote_only.contains(file_hash) {
                 continue;
             }
-            if let Some(recipe) = self.cached_recipe_for_file(file_hash).await? {
+            if let Some(recipe) = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)? {
                 self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
                     required_chunks.insert(chunk_hash);
                     Ok(())
@@ -12322,50 +12323,45 @@ impl PushPipeline {
                 );
                 continue;
             }
-            let recipe = self.cached_recipe_for_file(file_hash).await?;
+            let recipe = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)?;
 
-            let entries: Vec<FileDataSequenceEntry> = if recipe
-                .as_ref()
-                .is_none_or(|recipe| recipe.chunk_count() == 0)
-            {
-                if *size != 0 {
-                    return Err(CrabError::PointerMissingStaging {
-                        total: pointer_specs.len(),
-                        missing: 1,
-                        example_file_hash: file_hash.hex(),
-                        example_size: *size,
-                    });
+            let entries: Vec<FileDataSequenceEntry> = match recipe {
+                Some(recipe) if recipe.chunk_count() > 0 => {
+                    let terms = self.build_file_terms_for_recipe(
+                        file_hash,
+                        recipe,
+                        &mut merged_placement,
+                        &verified_existing,
+                        !verified_existing.is_empty(),
+                    )?;
+
+                    terms
+                        .into_iter()
+                        .map(|t| {
+                            FileDataSequenceEntry::new(
+                                t.xorb_hash,
+                                t.unpacked_bytes,
+                                t.chunk_start,
+                                t.chunk_end,
+                            )
+                        })
+                        .collect()
                 }
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 8: adding zero-byte file reconstruction entry"
-                );
-                Vec::new()
-            } else {
-                let recipe = recipe.as_ref().ok_or_else(|| {
-                    CrabError::Internal(
-                        "non-empty recipe disappeared during shard build".to_owned(),
-                    )
-                })?;
-                let terms = self.build_file_terms_for_recipe(
-                    file_hash,
-                    recipe,
-                    &mut merged_placement,
-                    &verified_existing,
-                    !verified_existing.is_empty(),
-                )?;
-
-                terms
-                    .into_iter()
-                    .map(|t| {
-                        FileDataSequenceEntry::new(
-                            t.xorb_hash,
-                            t.unpacked_bytes,
-                            t.chunk_start,
-                            t.chunk_end,
-                        )
-                    })
-                    .collect()
+                _ => {
+                    if *size != 0 {
+                        return Err(CrabError::PointerMissingStaging {
+                            total: pointer_specs.len(),
+                            missing: 1,
+                            example_file_hash: file_hash.hex(),
+                            example_size: *size,
+                        });
+                    }
+                    debug!(
+                        file_hash = %file_hash.hex(),
+                        "step 8: adding zero-byte file reconstruction entry"
+                    );
+                    Vec::new()
+                }
             };
             let mut dependency_hashes = entries
                 .iter()
