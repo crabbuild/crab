@@ -10,7 +10,6 @@ use crate::error::{Result, StagingError};
 use crate::push_plan::{
     ExistingChunkCandidate, FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb,
     PreparedXorbCache, PreparedXorbCandidate, PreparedXorbSource, materialize_prepared_xorb,
-    write_prepared_xorb,
 };
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder};
@@ -534,7 +533,8 @@ async fn record_uncached_prepared_xorb(
     result: crab_xet::xorb::builder::XorbResult,
 ) -> Result<()> {
     let bytes = result.bytes.len() as u64;
-    let payload_hash = blake3::hash(&result.bytes).to_hex().to_string();
+    let payload_hash_bytes = *blake3::hash(&result.bytes).as_bytes();
+    let payload_hash = blake3::Hash::from(payload_hash_bytes).to_hex().to_string();
     let placements: Vec<PlannedPlacement> = result
         .placements
         .iter()
@@ -554,7 +554,13 @@ async fn record_uncached_prepared_xorb(
             "prepared xorb has no owning add file".to_owned(),
         ));
     };
-    write_prepared_xorb(staging.root(), &result.hash, result.bytes).await?;
+    crate::push_plan::write_prepared_xorb_with_payload_hash(
+        staging.root(),
+        &result.hash,
+        result.bytes,
+        payload_hash_bytes,
+    )
+    .await?;
     file_plans[owner_idx].plan.prepared_xorbs.push(planned);
 
     if !linked_idxs.is_empty() {
@@ -918,13 +924,20 @@ async fn record_prepared_xorb(
     result: crab_xet::xorb::builder::XorbResult,
 ) -> Result<()> {
     let bytes = result.bytes.len() as u64;
-    let payload_hash = blake3::hash(&result.bytes).to_hex().to_string();
+    let payload_hash_bytes = *blake3::hash(&result.bytes).as_bytes();
+    let payload_hash = blake3::Hash::from(payload_hash_bytes).to_hex().to_string();
     let placements: Vec<PlannedPlacement> = result
         .placements
         .iter()
         .map(PlannedPlacement::from_placement)
         .collect();
-    write_prepared_xorb(staging.root(), &result.hash, result.bytes).await?;
+    crate::push_plan::write_prepared_xorb_with_payload_hash(
+        staging.root(),
+        &result.hash,
+        result.bytes,
+        payload_hash_bytes,
+    )
+    .await?;
     let planned = PlannedXorb {
         hash: result.hash.hex(),
         payload_hash,

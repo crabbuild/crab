@@ -650,13 +650,22 @@ pub(crate) fn new_push_plan_stats(options: PushPlanSummaryOptions) -> PushPlanSt
 }
 
 pub async fn write_prepared_xorb(root: &Path, xorb_hash: &MerkleHash, bytes: Bytes) -> Result<u64> {
+    let payload_hash = *blake3::hash(&bytes).as_bytes();
+    write_prepared_xorb_with_payload_hash(root, xorb_hash, bytes, payload_hash).await
+}
+
+pub(crate) async fn write_prepared_xorb_with_payload_hash(
+    root: &Path,
+    xorb_hash: &MerkleHash,
+    bytes: Bytes,
+    payload_hash: [u8; 32],
+) -> Result<u64> {
     let path = prepared_xorb_path(root, xorb_hash);
     let parent = path
         .parent()
         .ok_or_else(|| StagingError::Internal("prepared xorb path has no parent".to_owned()))?;
     tokio::fs::create_dir_all(parent).await?;
     validate_prepared_xorb_bytes_identity(&bytes, xorb_hash)?;
-    let payload_hash = *blake3::hash(&bytes).as_bytes();
     let byte_count = bytes.len() as u64;
     if prepared_xorb_file_matches_identity(&path, xorb_hash, &payload_hash, byte_count).await? {
         return Ok(byte_count);
