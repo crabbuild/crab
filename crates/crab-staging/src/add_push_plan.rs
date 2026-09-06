@@ -54,7 +54,7 @@ pub trait LocalXorbCandidateLookup: Send + Sync {
     async fn load_candidates(
         &self,
         prepared_cache: &mut PreparedXorbCache,
-        wanted_chunks: &HashSet<MerkleHash>,
+        wanted_chunks: &[(MerkleHash, u64)],
     ) -> Result<()>;
 }
 
@@ -98,17 +98,8 @@ pub async fn prepare_file_push_plans_with_progress(
         return Ok(AddPushPlanSummary::default());
     }
 
-    let (wanted_prepared_chunks, unique_file_chunks) = if files.len() > 1 {
-        let (wanted, unique) = collect_unique_file_chunks(files);
-        (wanted, Some(unique))
-    } else {
-        let wanted = files[0]
-            .chunks
-            .iter()
-            .map(|(chunk_hash, _)| *chunk_hash)
-            .collect();
-        (wanted, None)
-    };
+    let unique_file_chunks = (files.len() > 1).then(|| collect_unique_file_chunks(files));
+    let wanted_prepared_chunks = unique_file_chunks.as_deref().unwrap_or(files[0].chunks);
     let mut summary = AddPushPlanSummary {
         remote_lookup: remote_lookup.is_some(),
         ..AddPushPlanSummary::default()
@@ -116,11 +107,10 @@ pub async fn prepare_file_push_plans_with_progress(
     if let Some(callback) = on_progress.as_deref_mut() {
         callback(&summary);
     }
-    let mut prepared_cache =
-        staging.load_prepared_xorb_cache_for_chunks(&wanted_prepared_chunks)?;
+    let mut prepared_cache = staging.load_prepared_xorb_cache_for_chunks(wanted_prepared_chunks)?;
     if let Some(local_lookup) = local_lookup {
         local_lookup
-            .load_candidates(&mut prepared_cache, &wanted_prepared_chunks)
+            .load_candidates(&mut prepared_cache, wanted_prepared_chunks)
             .await?;
     }
     if files.len() > 1 {
@@ -346,9 +336,7 @@ struct UncachedFilePlan<'a> {
     plan: FilePushPlan,
 }
 
-fn collect_unique_file_chunks(
-    files: &[AddPlanFile<'_>],
-) -> (HashSet<MerkleHash>, Vec<(MerkleHash, u64)>) {
+fn collect_unique_file_chunks(files: &[AddPlanFile<'_>]) -> Vec<(MerkleHash, u64)> {
     let mut wanted = HashSet::new();
     let mut unique = Vec::new();
     for file in files {
@@ -358,7 +346,7 @@ fn collect_unique_file_chunks(
             }
         }
     }
-    (wanted, unique)
+    unique
 }
 
 fn index_existing_refs(
@@ -1346,7 +1334,7 @@ mod tests {
                 chunks: &second_chunks,
             },
         ];
-        let (_, unique) = collect_unique_file_chunks(&files);
+        let unique = collect_unique_file_chunks(&files);
         assert_eq!(unique.len(), 3);
         assert_eq!(
             unique
@@ -1779,13 +1767,9 @@ mod tests {
         let retired = staging.retire_file(&file_hash).expect("retire file");
         assert_eq!(retired.rows_deleted, 1);
 
-        let wanted_chunks = chunk_pairs
-            .iter()
-            .map(|(chunk_hash, _)| *chunk_hash)
-            .collect::<std::collections::HashSet<_>>();
         assert!(
             !staging
-                .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
+                .load_prepared_xorb_cache_for_chunks(&chunk_pairs)
                 .expect("load prepared cache after retire")
                 .is_empty()
         );

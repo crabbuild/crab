@@ -1207,12 +1207,15 @@ fn existing_chunk_index_records(plan: &push_plan::FilePushPlan) -> Result<Vec<Ex
 fn indexed_prepared_xorb_cache_for_chunks(
     root: &Path,
     index: &Mutex<Index>,
-    wanted_chunks: &HashSet<MerkleHash>,
+    wanted_chunks: &[(MerkleHash, u64)],
 ) -> Result<push_plan::PreparedXorbCache> {
     if wanted_chunks.is_empty() {
         return Ok(push_plan::PreparedXorbCache::default());
     }
-    let wanted: Vec<[u8; 32]> = wanted_chunks.iter().map(|chunk| (*chunk).into()).collect();
+    let wanted: Vec<[u8; 32]> = wanted_chunks
+        .iter()
+        .map(|(chunk, _)| (*chunk).into())
+        .collect();
     let stored = lock_index(index)?.prepared_xorbs_for_chunks(&wanted)?;
     let mut cache = push_plan::PreparedXorbCache::default();
 
@@ -3015,7 +3018,7 @@ impl StagingArea {
 
     pub(crate) fn load_prepared_xorb_cache_for_chunks(
         &self,
-        wanted_chunks: &HashSet<MerkleHash>,
+        wanted_chunks: &[(MerkleHash, u64)],
     ) -> Result<push_plan::PreparedXorbCache> {
         indexed_prepared_xorb_cache_for_chunks(&self.root, &self.index, wanted_chunks)
     }
@@ -5618,11 +5621,6 @@ mod tests {
             .iter()
             .map(|(hash, data)| (*hash, data.len() as u64))
             .collect();
-        let wanted_chunks = chunk_pairs
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect::<HashSet<_>>();
-
         let file_hash;
         {
             let staging = StagingArea::open(tmp.path().to_path_buf())
@@ -5647,7 +5645,7 @@ mod tests {
                 .expect("write file push plan");
             assert!(
                 !staging
-                    .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
+                    .load_prepared_xorb_cache_for_chunks(&chunk_pairs)
                     .expect("load prepared cache")
                     .is_empty()
             );
@@ -5661,7 +5659,7 @@ mod tests {
             .expect("reopen staging");
         assert!(
             !staging
-                .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
+                .load_prepared_xorb_cache_for_chunks(&chunk_pairs)
                 .expect("load recipe-bound prepared cache")
                 .is_empty(),
             "prepared xorb authority is independent of mutable segment rows"
