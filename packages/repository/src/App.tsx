@@ -116,6 +116,9 @@ export function App() {
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.style.colorScheme = resolved;
+    root.dataset.colorMode = resolved;
+    root.dataset.darkTheme = "dark";
+    root.dataset.lightTheme = "light";
     root.dataset.themeChanging = "";
     let settledFrame: number | undefined;
     const paintedFrame = requestAnimationFrame(() => {
