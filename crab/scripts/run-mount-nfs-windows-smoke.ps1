@@ -380,7 +380,11 @@ $CrabDir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $WorkspaceRoot = (Resolve-Path (Join-Path $CrabDir "..")).Path
 $RunRoot = Join-Path $ArtifactRoot $RunId
 $LogDir = Join-Path $RunRoot "logs"
-$TestHome = Join-Path $RunRoot "home"
+# Keep the profile and private cache outside RunRoot; artifact collection
+# scans RunRoot recursively.
+$PrivateRoot = Join-Path ([System.IO.Path]::GetTempPath()) "crab-nfs-windows-private-$RunId"
+$TestHome = Join-Path $PrivateRoot "home"
+$CacheRoot = Join-Path $PrivateRoot "crab-cache"
 $Source = Join-Path $RunRoot "source"
 $DebugDir = Join-Path $WorkspaceRoot "target\debug"
 $CrabExe = Join-Path $DebugDir "crab.exe"
@@ -415,10 +419,10 @@ $env:HOME = $TestHome
 $env:USERPROFILE = $TestHome
 $env:CARGO_HOME = $hostCargoHome
 $env:RUSTUP_HOME = $hostRustupHome
-$env:CRAB_CACHE_DIR = Join-Path $RunRoot "crab-cache"
+$env:CRAB_CACHE_DIR = $CacheRoot
 $env:GIT_TERMINAL_PROMPT = "0"
 $env:PATH = "$DebugDir;$env:PATH"
-New-Item -ItemType Directory -Force -Path $env:CRAB_CACHE_DIR | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir, $TestHome, $Source, $env:CRAB_CACHE_DIR | Out-Null
 
 try {
     Invoke-Native `
@@ -875,5 +879,11 @@ try {
     Write-Host "nfs_smoke_report=$ReportPath"
     Write-Host "windows_nfs_mount_smoke=ok"
 } finally {
-    Cleanup-Mount
+    try {
+        Cleanup-Mount
+    } finally {
+        if (Test-Path -LiteralPath $PrivateRoot) {
+            Remove-Item -LiteralPath $PrivateRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
