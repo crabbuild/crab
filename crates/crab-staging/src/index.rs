@@ -6163,7 +6163,6 @@ impl Index {
                     }
                 }
             }
-            drop(coverage_statement);
             drop(insert_statement);
             drop(verify_statement);
 
@@ -6206,47 +6205,16 @@ impl Index {
                 for placement in &prepared.placements {
                     let chunk_hash: &[u8] = &placement.chunk_hash;
                     if !covers_recipe {
-                        covers_recipe = if recipe_is_indexed {
-                            tx.query_row(
-                                "SELECT EXISTS(
-                                 SELECT 1 FROM recipe_occurrences
-                                 WHERE recipe_hash = ?1
-                                   AND chunk_hash = ?2
-                                   AND chunk_size = ?3
-                             )",
-                                params![
-                                    recipe_hash.as_slice(),
-                                    chunk_hash,
-                                    i64::from(placement.uncompressed_size)
-                                ],
+                        covers_recipe = coverage_statement
+                            .query_row(
+                                params![owner, chunk_hash, i64::from(placement.uncompressed_size)],
                                 |row| row.get::<_, bool>(0),
                             )
                             .map_err(|error| {
                                 StagingError::Internal(format!(
                                     "failed to validate prepared xorb recipe coverage: {error}"
                                 ))
-                            })?
-                        } else {
-                            tx.query_row(
-                                "SELECT EXISTS(
-                                 SELECT 1 FROM recipe_recording_terms
-                                 WHERE batch_id = ?1
-                                   AND chunk_hash = ?2
-                                   AND chunk_size = ?3
-                             )",
-                                params![
-                                    recording_batch_id,
-                                    chunk_hash,
-                                    i64::from(placement.uncompressed_size)
-                                ],
-                                |row| row.get::<_, bool>(0),
-                            )
-                            .map_err(|error| {
-                                StagingError::Internal(format!(
-                                    "failed to validate prepared xorb recipe coverage: {error}"
-                                ))
-                            })?
-                        };
+                            })?;
                     }
                     let inserted = chunk_insert
                         .execute(params![
@@ -6299,6 +6267,7 @@ impl Index {
                     })?;
                 }
             }
+            drop(coverage_statement);
         }
         drop(payload_insert);
         drop(payload_verify);
