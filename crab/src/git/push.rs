@@ -6796,7 +6796,7 @@ impl PushPipeline {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
         let mut chunk_index = 0usize;
         self.visit_recipe_chunks(recipe, |chunk_hash, _| {
-            if !placement.contains_key(&chunk_hash) {
+            if !placement.contains_key(&chunk_hash) && !verified_existing.is_empty() {
                 match verified_existing.get(&chunk_hash) {
                     Some(existing) => {
                         placement.insert(chunk_hash, existing.clone());
