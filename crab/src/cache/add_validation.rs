@@ -5,6 +5,7 @@
 //! and every filesystem stat field captured during verification. An exact
 //! token can resolve Git's racy-stat ambiguity; a miss must hash the file.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -75,6 +76,49 @@ impl AddValidationCache {
             .optional()
             .map(|row| row.is_some())
             .map_err(|error| database_error("query add validation cache", error))
+    }
+
+    pub(crate) fn contains_batch(
+        &self,
+        entries: &[(&[u8], &[u8; 32])],
+    ) -> Result<HashSet<Vec<u8>>> {
+        if entries.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let expected = entries.iter().copied().collect::<HashMap<_, _>>();
+        let mut hits = HashSet::new();
+        const LOOKUP_BATCH_SIZE: usize = 512;
+        for batch in entries.chunks(LOOKUP_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query =
+                format!("SELECT path, token FROM add_validations WHERE path IN ({placeholders})");
+            let mut statement = self.connection.prepare_cached(&query).map_err(|error| {
+                database_error("prepare add validation cache lookup batch", error)
+            })?;
+            let paths = batch.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+            let rows = statement
+                .query_map(params_from_iter(paths.iter().copied()), |row| {
+                    let path = row.get::<_, Vec<u8>>(0)?;
+                    let token = row.get::<_, Vec<u8>>(1)?;
+                    Ok((path, token))
+                })
+                .map_err(|error| {
+                    database_error("query add validation cache lookup batch", error)
+                })?;
+            for row in rows {
+                let (path, token) = row
+                    .map_err(|error| database_error("decode add validation cache lookup", error))?;
+                if expected
+                    .get(path.as_slice())
+                    .is_some_and(|expected_token| token.as_slice() == &expected_token[..])
+                {
+                    hits.insert(path);
+                }
+            }
+        }
+        Ok(hits)
     }
 
     pub(crate) fn upsert(&mut self, rows: &[(Vec<u8>, [u8; 32])]) -> Result<()> {
@@ -290,9 +334,27 @@ mod tests {
 
         cache.upsert(&rows).unwrap();
 
-        for (path, token) in rows {
-            assert!(cache.contains(&path, &token).unwrap());
-        }
+        let entries = rows
+            .iter()
+            .map(|(path, token)| (path.as_slice(), token))
+            .collect::<Vec<_>>();
+        let hits = cache.contains_batch(&entries).unwrap();
+        assert_eq!(hits.len(), rows.len());
+        assert!(rows.iter().all(|(path, _)| hits.contains(path)));
+    }
+
+    #[test]
+    fn cache_batch_lookup_requires_exact_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(ADD_VALIDATIONS_FILENAME);
+        let mut cache = AddValidationCache::open(&path).unwrap();
+        let literal_path = b"model.bin".to_vec();
+        let token = [7; 32];
+        let wrong_token = [8; 32];
+        cache.upsert(&[(literal_path.clone(), token)]).unwrap();
+
+        let entries = [(literal_path.as_slice(), &wrong_token)];
+        assert!(cache.contains_batch(&entries).unwrap().is_empty());
     }
 
     #[test]
