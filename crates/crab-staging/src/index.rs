@@ -3943,21 +3943,22 @@ impl Index {
         let mut statement = self.conn.prepare_cached(&query).map_err(|e| {
             StagingError::Internal(format!("failed to prepare published recipe query: {e}"))
         })?;
-        let mut query_params: Vec<&dyn ToSql> = Vec::with_capacity(file_hashes.len());
-        query_params.extend(file_hashes.iter().map(|hash| hash.as_slice() as &dyn ToSql));
         let rows = statement
-            .query_map(params_from_iter(query_params), |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                    row.get::<_, String>(7)?,
-                ))
-            })
+            .query_map(
+                params_from_iter(file_hashes.iter().map(|hash| hash.as_slice())),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
             .map_err(|e| StagingError::Internal(format!("failed to query published recipes: {e}")))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| {
