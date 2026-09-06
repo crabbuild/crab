@@ -15488,94 +15488,94 @@ impl PushPipeline {
         // that shard for the session-local ChunkIndex.
         let shard_entries = match self.precomputed_chunk_index_entries.lock().await.take() {
             Some(entries) => entries,
-            None => Arc::new({
-                let shard_results = self.shard_results.lock().await;
-                let placement_map = self.merged_placement.lock().await;
-                let file_shard_index = self.file_shard_index.lock().await;
-                let pointers = self.pointers.lock().await;
+            None => {
+                let recipe_snapshot = self.cached_recipe_snapshot().await;
+                Arc::new({
+                    let shard_results = self.shard_results.lock().await;
+                    let placement_map = self.merged_placement.lock().await;
+                    let file_shard_index = self.file_shard_index.lock().await;
+                    let pointers = self.pointers.lock().await;
 
-                if shard_results.is_empty() || placement_map.is_empty() {
-                    Vec::new()
-                } else {
-                    // Per-shard entry buckets. A `Vec<Vec<...>>` indexed by
-                    // shard index is cheaper than a HashMap for the small
-                    // shard counts in practice (usually 1, up to a handful).
-                    let mut per_shard: Vec<Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>> =
-                        vec![Vec::new(); shard_results.len()];
+                    if shard_results.is_empty() || placement_map.is_empty() {
+                        Vec::new()
+                    } else {
+                        // Per-shard entry buckets. A `Vec<Vec<...>>` indexed by
+                        // shard index is cheaper than a HashMap for the small
+                        // shard counts in practice (usually 1, up to a handful).
+                        let mut per_shard: Vec<Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>> =
+                            vec![Vec::new(); shard_results.len()];
 
-                    // Dedup pointers by file_hash to match `build_shard`'s
-                    // added_files guard. Without this, a file appearing at
-                    // multiple paths in the tree would produce duplicate
-                    // chunk entries across the per-shard buckets.
-                    let mut seen_files: HashSet<MerkleHash> = HashSet::new();
+                        // Dedup pointers by file_hash to match `build_shard`'s
+                        // added_files guard. Without this, a file appearing at
+                        // multiple paths in the tree would produce duplicate
+                        // chunk entries across the per-shard buckets.
+                        let mut seen_files: HashSet<MerkleHash> = HashSet::new();
 
-                    for ptr in pointers.iter() {
-                        let file_hash = MerkleHash::from(ptr.file_hash);
-                        if !seen_files.insert(file_hash) {
-                            continue;
-                        }
-                        let Some(&shard_idx) = file_shard_index.get(&file_hash) else {
-                            // Remote-only pointers (verified durable by step 2)
-                            // have no shard entry — skip them here; their
-                            // chunks are already durable elsewhere.
-                            continue;
-                        };
-                        if shard_idx >= per_shard.len() {
-                            // Defense in depth: log and skip rather than panic.
-                            warn!(
-                                file_hash = %file_hash.hex(),
-                                shard_idx,
-                                shards = shard_results.len(),
-                                "step 13: file_shard_index points past shard_results, skipping"
-                            );
-                            continue;
-                        }
-
-                        let recipe = {
-                            let cache = self.chunk_cache.lock().await;
-                            cache
-                                .get(&file_hash)
-                                .and_then(|cached| cached.recipe.clone())
-                        };
-                        let Some(recipe) = recipe else {
-                            continue;
-                        };
-
-                        if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                            let Some(p) = placement_map.get(&chunk_hash) else {
-                                // Invariant: build_shard guarantees every
-                                // chunk has a placement. Log and skip — the
-                                // push already succeeded at this point so we
-                                // are defensive about cleanup warnings.
-                                return Ok(());
+                        for ptr in pointers.iter() {
+                            let file_hash = MerkleHash::from(ptr.file_hash);
+                            if !seen_files.insert(file_hash) {
+                                continue;
+                            }
+                            let Some(&shard_idx) = file_shard_index.get(&file_hash) else {
+                                // Remote-only pointers (verified durable by step 2)
+                                // have no shard entry — skip them here; their
+                                // chunks are already durable elsewhere.
+                                continue;
                             };
-                            per_shard[shard_idx].push((
-                                chunk_hash,
-                                crab_xet::xorb::format::XorbRef {
-                                    xorb_hash: p.xorb_hash,
-                                    chunk_index: p.chunk_index,
-                                    uncompressed_size: p.uncompressed_size,
-                                },
-                            ));
-                            Ok(())
-                        }) {
-                            warn!(
-                                file_hash = %file_hash.hex(),
-                                error = %error,
-                                "step 13: failed to page recipe for local cache update"
-                            );
-                        }
-                    }
+                            if shard_idx >= per_shard.len() {
+                                // Defense in depth: log and skip rather than panic.
+                                warn!(
+                                    file_hash = %file_hash.hex(),
+                                    shard_idx,
+                                    shards = shard_results.len(),
+                                    "step 13: file_shard_index points past shard_results, skipping"
+                                );
+                                continue;
+                            }
 
-                    shard_results
-                        .iter()
-                        .zip(per_shard.into_iter())
-                        .map(|((_, shard_hash), entries)| (*shard_hash, entries))
-                        .collect()
-                }
-                // shard_results / placement_map / file_shard_index / pointers
-                // locks dropped here.
-            }),
+                            let recipe = recipe_snapshot.get(&file_hash).and_then(Option::as_ref);
+                            let Some(recipe) = recipe else {
+                                continue;
+                            };
+
+                            if let Err(error) =
+                                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                                    let Some(p) = placement_map.get(&chunk_hash) else {
+                                        // Invariant: build_shard guarantees every
+                                        // chunk has a placement. Log and skip — the
+                                        // push already succeeded at this point so we
+                                        // are defensive about cleanup warnings.
+                                        return Ok(());
+                                    };
+                                    per_shard[shard_idx].push((
+                                        chunk_hash,
+                                        crab_xet::xorb::format::XorbRef {
+                                            xorb_hash: p.xorb_hash,
+                                            chunk_index: p.chunk_index,
+                                            uncompressed_size: p.uncompressed_size,
+                                        },
+                                    ));
+                                    Ok(())
+                                })
+                            {
+                                warn!(
+                                    file_hash = %file_hash.hex(),
+                                    error = %error,
+                                    "step 13: failed to page recipe for local cache update"
+                                );
+                            }
+                        }
+
+                        shard_results
+                            .iter()
+                            .zip(per_shard.into_iter())
+                            .map(|((_, shard_hash), entries)| (*shard_hash, entries))
+                            .collect()
+                    }
+                    // shard_results / placement_map / file_shard_index / pointers
+                    // locks dropped here.
+                })
+            }
         };
 
         if !shard_entries.is_empty() {
