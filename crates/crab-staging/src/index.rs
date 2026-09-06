@@ -6874,7 +6874,7 @@ impl Index {
                     "failed to prepare recipe remote authority: {error}"
                 ))
             })?;
-        statement
+        let rows = statement
             .query_map(
                 params![recipe_hash.as_slice(), start_occurrence, end_occurrence],
                 |row| {
@@ -6890,38 +6890,37 @@ impl Index {
             )
             .map_err(|error| {
                 StagingError::Internal(format!("failed to query recipe remote authority: {error}"))
-            })?
-            .map(|row| {
-                let (
-                    chunk_hash,
-                    xorb_hash,
-                    chunk_index,
-                    uncompressed_size,
-                    placement_id,
-                    origin_proof_id,
-                ) = row.map_err(|error| {
-                    StagingError::Internal(format!(
-                        "failed to read recipe remote authority: {error}"
+            })?;
+        let mut out = Vec::with_capacity(crate::recipe::RECIPE_PAGE_ENTRIES);
+        for row in rows {
+            let (
+                chunk_hash,
+                xorb_hash,
+                chunk_index,
+                uncompressed_size,
+                placement_id,
+                origin_proof_id,
+            ) = row.map_err(|error| {
+                StagingError::Internal(format!("failed to read recipe remote authority: {error}"))
+            })?;
+            out.push(ExistingChunkWrite {
+                chunk_hash: decode_hash_blob("remote chunk hash", chunk_hash)?,
+                xorb_hash: decode_hash_blob("remote xorb hash", xorb_hash)?,
+                chunk_index: u32::try_from(chunk_index).map_err(|_| {
+                    StagingError::StagingCorrupt(format!(
+                        "remote chunk index is invalid: {chunk_index}"
                     ))
-                })?;
-                Ok(ExistingChunkWrite {
-                    chunk_hash: decode_hash_blob("remote chunk hash", chunk_hash)?,
-                    xorb_hash: decode_hash_blob("remote xorb hash", xorb_hash)?,
-                    chunk_index: u32::try_from(chunk_index).map_err(|_| {
-                        StagingError::StagingCorrupt(format!(
-                            "remote chunk index is invalid: {chunk_index}"
-                        ))
-                    })?,
-                    uncompressed_size: u32::try_from(uncompressed_size).map_err(|_| {
-                        StagingError::StagingCorrupt(format!(
-                            "remote chunk size is invalid: {uncompressed_size}"
-                        ))
-                    })?,
-                    placement_id: decode_hash_blob("remote placement id", placement_id)?,
-                    origin_proof_id: decode_hash_blob("remote origin proof id", origin_proof_id)?,
-                })
-            })
-            .collect()
+                })?,
+                uncompressed_size: u32::try_from(uncompressed_size).map_err(|_| {
+                    StagingError::StagingCorrupt(format!(
+                        "remote chunk size is invalid: {uncompressed_size}"
+                    ))
+                })?,
+                placement_id: decode_hash_blob("remote placement id", placement_id)?,
+                origin_proof_id: decode_hash_blob("remote origin proof id", origin_proof_id)?,
+            });
+        }
+        Ok(out)
     }
 
     pub fn recipe_remote_chunk_count(&self, recipe_hash: &[u8; 32]) -> Result<u64> {
