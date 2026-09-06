@@ -16,7 +16,6 @@ export async function expectNoAccessibilityViolations(page: Page) {
 }
 
 export async function selectDarkTheme(page: Page) {
-  await page.getByRole("button", { name: "Appearance", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: "Dark", exact: true }).click();
+  await page.locator('[aria-label="Dark"]').click();
   await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
 }

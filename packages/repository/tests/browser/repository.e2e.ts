@@ -15,12 +15,8 @@ const pathHex = (path: string) =>
   ).join("");
 
 async function selectTheme(page: Page, theme: "light" | "dark") {
-  await page.getByRole("button", { name: "Appearance", exact: true }).click();
   await page
-    .getByRole("menuitemradio", {
-      name: theme === "light" ? "Light" : "Dark",
-      exact: true,
-    })
+    .locator(`[aria-label="${theme === "light" ? "Light" : "Dark"}"]`)
     .click();
 }
 
@@ -943,9 +939,10 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await page.locator(".clone-menu summary").click();
   }
   await page.reload();
-  await expect(
-    page.getByRole("button", { name: "Appearance", exact: true }),
-  ).toContainText("Light");
+  await expect(page.locator('[aria-label="Light"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 test("issues follow the GitHub list hierarchy in both themes and on mobile", async ({

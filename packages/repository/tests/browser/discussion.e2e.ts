@@ -264,12 +264,8 @@ test("header controls remain reachable on narrow screens in both themes", async 
   await openDiscussion(page);
   const header = page.locator(".global-header");
   for (const theme of ["light", "dark"]) {
-    await header.getByRole("button", { name: "Appearance" }).click();
-    await page
-      .getByRole("menuitemradio", {
-        name: theme === "light" ? "Light" : "Dark",
-        exact: true,
-      })
+    await header
+      .locator(`[aria-label="${theme === "light" ? "Light" : "Dark"}"]`)
       .click();
     for (const width of [320, 390, 640, 900, 1280]) {
       await page.setViewportSize({ width, height: 900 });
