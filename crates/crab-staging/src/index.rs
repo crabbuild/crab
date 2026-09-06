@@ -2378,52 +2378,105 @@ impl Index {
                 path: format!("recording add preparation {preparation_id}/{owner_batch_id}"),
             });
         }
+        if payloads.is_empty() {
+            tx.commit().map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to commit empty prepared payload seal: {error}"
+                ))
+            })?;
+            return Ok(());
+        }
+
+        let mut payload_insert = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO prepared_payloads
+                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload insert: {error}"
+                ))
+            })?;
+        let mut payload_verify = tx
+            .prepare_cached(
+                "SELECT payload_hash = ?2 AND bytes = ?3
+                 FROM prepared_payloads WHERE xorb_hash = ?1",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload verification: {error}"
+                ))
+            })?;
+        let mut preparation_payload_insert = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO preparation_payloads (preparation_id, xorb_hash)
+                 VALUES (?1, ?2)",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare preparation payload retention: {error}"
+                ))
+            })?;
+        let mut claim_query = tx
+            .prepare_cached(
+                "SELECT preparation_id, owner_batch_id, uncompressed_size
+                 FROM prepared_chunk_claims WHERE chunk_hash = ?1",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to prepare payload claim lookup: {error}"))
+            })?;
+        let mut placement_insert = tx
+            .prepare_cached(
+                "INSERT INTO prepared_payload_chunks
+                 (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload placement insert: {error}"
+                ))
+            })?;
+        let mut claim_delete = tx
+            .prepare_cached("DELETE FROM prepared_chunk_claims WHERE chunk_hash = ?1")
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to prepare payload claim removal: {error}"))
+            })?;
 
         for payload in payloads {
             let xorb_hash = payload.xorb_hash.as_slice();
             let payload_hash = payload.payload_hash.as_slice();
             let bytes = sqlite_i64("prepared payload bytes", payload.bytes)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO prepared_payloads
-                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
-                params![xorb_hash, payload_hash, bytes],
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to register prepared payload: {error}"))
-            })?;
-            let matches: bool = tx
-                .query_row(
-                    "SELECT payload_hash = ?2 AND bytes = ?3
-                     FROM prepared_payloads WHERE xorb_hash = ?1",
-                    params![xorb_hash, payload_hash, bytes],
-                    |row| row.get(0),
-                )
+            let inserted = payload_insert
+                .execute(params![xorb_hash, payload_hash, bytes])
                 .map_err(|error| {
-                    StagingError::Internal(format!("failed to verify prepared payload: {error}"))
+                    StagingError::Internal(format!("failed to register prepared payload: {error}"))
                 })?;
-            if !matches {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "prepared payload identity collision for {}",
-                    crab_xet::hash::MerkleHash::from(payload.xorb_hash).hex()
-                )));
+            if inserted == 0 {
+                let matches: bool = payload_verify
+                    .query_row(params![xorb_hash, payload_hash, bytes], |row| row.get(0))
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to verify prepared payload: {error}"
+                        ))
+                    })?;
+                if !matches {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "prepared payload identity collision for {}",
+                        crab_xet::hash::MerkleHash::from(payload.xorb_hash).hex()
+                    )));
+                }
             }
-            tx.execute(
-                "INSERT OR IGNORE INTO preparation_payloads (preparation_id, xorb_hash)
-                 VALUES (?1, ?2)",
-                params![preparation_id, xorb_hash],
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to retain preparation payload: {error}"))
-            })?;
+            preparation_payload_insert
+                .execute(params![preparation_id, xorb_hash])
+                .map_err(|error| {
+                    StagingError::Internal(format!("failed to retain preparation payload: {error}"))
+                })?;
 
             for placement in &payload.placements {
-                let claim: Option<(String, String, i64)> = tx
-                    .query_row(
-                        "SELECT preparation_id, owner_batch_id, uncompressed_size
-                         FROM prepared_chunk_claims WHERE chunk_hash = ?1",
-                        params![placement.chunk_hash.as_slice()],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
+                let claim: Option<(String, String, i64)> = claim_query
+                    .query_row(params![placement.chunk_hash.as_slice()], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
                     .optional()
                     .map_err(|error| {
                         StagingError::Internal(format!("failed to inspect payload claim: {error}"))
@@ -2443,32 +2496,32 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
                     )));
                 }
-                tx.execute(
-                    "INSERT INTO prepared_payload_chunks
-                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
+                placement_insert
+                    .execute(params![
                         xorb_hash,
                         i64::from(placement.chunk_index),
                         placement.chunk_hash.as_slice(),
                         i64::from(placement.uncompressed_size),
-                    ],
-                )
-                .map_err(|error| {
-                    StagingError::StagingCorrupt(format!(
-                        "failed to install canonical prepared placement for {}: {error}",
-                        crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
-                    ))
-                })?;
-                tx.execute(
-                    "DELETE FROM prepared_chunk_claims WHERE chunk_hash = ?1",
-                    params![placement.chunk_hash.as_slice()],
-                )
-                .map_err(|error| {
-                    StagingError::Internal(format!("failed to resolve prepared claim: {error}"))
-                })?;
+                    ])
+                    .map_err(|error| {
+                        StagingError::StagingCorrupt(format!(
+                            "failed to install canonical prepared placement for {}: {error}",
+                            crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
+                        ))
+                    })?;
+                claim_delete
+                    .execute(params![placement.chunk_hash.as_slice()])
+                    .map_err(|error| {
+                        StagingError::Internal(format!("failed to resolve prepared claim: {error}"))
+                    })?;
             }
         }
+        drop(payload_insert);
+        drop(payload_verify);
+        drop(preparation_payload_insert);
+        drop(claim_query);
+        drop(placement_insert);
+        drop(claim_delete);
         tx.commit().map_err(|error| {
             StagingError::Internal(format!("failed to commit prepared payload seal: {error}"))
         })?;
