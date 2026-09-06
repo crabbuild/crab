@@ -7281,7 +7281,13 @@ impl Index {
                 }
             }
         }
-        let xorb_hashes = rows.iter().map(|(_, hash, _, _)| *hash).collect::<Vec<_>>();
+        let mut xorb_hashes = Vec::new();
+        let mut unique_xorbs = HashSet::new();
+        for (_, xorb_hash, _, _) in &rows {
+            if unique_xorbs.insert(*xorb_hash) {
+                xorb_hashes.push(*xorb_hash);
+            }
+        }
         let placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         let mut out: HashMap<[u8; 32], Vec<StoredPreparedXorb>> = HashMap::new();
         for (recipe_hash, xorb_hash, payload_hash, bytes) in rows {
